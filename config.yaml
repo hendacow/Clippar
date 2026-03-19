@@ -1,0 +1,70 @@
+# ══════════════════════════════════════════════════════════
+# Golf Shot Detector — Configuration
+# ══════════════════════════════════════════════════════════
+
+# ── Paths ──────────────────────────────────────────────────
+clips_dir:        "inputs"                       # folder containing .mp4 / .mov input clips
+output_dir:       "outputs/clips"               # where shot clips are saved
+pose_model_path:  "models/yolov8n-pose.pt"
+ball_model_path:  "models/golfballyolov8n.pt"
+
+# ── Merge output ────────────────────────────────────────────
+shots_dir:             "outputs/clips"          # folder of shot clips to merge
+merged_output:         "outputs/merged/merged.mov"
+include_no_detection:  true
+
+# ── Ball detection ─────────────────────────────────────────
+ball_confidence:  0.15   # YOLO confidence threshold for ball detection
+audio_peak_rel_threshold:       0.4
+audio_peak_min_separation_sec:  0.75
+audio_impact_window_sec:        0.75
+audio_transient_min_score:      0.65
+audio_wind_reject_max_duration: 0.12
+
+# ── Address / Setup phase ──────────────────────────────────
+setup_frames:     20     # consecutive frames required to confirm address
+setup_ankle_max:  50.0   # max ankle displacement (px) to count as feet-stable
+setup_ball_max:   4.0    # max ball displacement (px) to count as ball-still
+
+# ── Spine lean ─────────────────────────────────────────────
+spine_lean_min:   15.0   # minimum spine lean angle (degrees) for valid address
+spine_lean_max:   60.0   # maximum spine lean angle (degrees) for valid address
+
+# ── Swing detection ────────────────────────────────────────
+swing_window:     25     # rolling keypoint history length (frames)
+
+wrist_swing_threshold:    50.0   # wrist displacement (px) → full swing
+wrist_putt_threshold:     10.0   # wrist displacement (px) → putt
+wrist_speed_swing_threshold: 13.0   # max per-frame wrist step (px) → full swing
+shoulder_swing_threshold:  8.0   # shoulder angle change (°) for swing confirm
+hip_swing_threshold:       5.0   # hip angle change (°) for swing confirm
+
+# ── Full-swing vision fallback ─────────────────────────────
+vision_fallback_enabled:          true
+vision_wrist_confirm_threshold:   65.0
+vision_torso_confirm_threshold:   12.0
+vision_followthrough_frames:      6
+vision_setup_min_frames:          20
+vision_setup_confidence_min:      0.75
+vision_posture_break_grace_sec:   3.0
+
+# ── Ball movement ──────────────────────────────────────────
+ball_move_threshold:  8.0    # px displacement to confirm ball moved
+putt_ball_move_threshold:  4.5  # lower threshold for confirming small putt rolls
+putt_confirm_frames:  2        # consecutive putt-move frames needed to confirm
+ball_wait_frames:   360      # max frames to wait for ball to move after swing
+
+# ── Ball tracking ──────────────────────────────────────────
+max_disappear_frames:  15    # frames to hold last known ball position
+
+# ── Smoothing ──────────────────────────────────────────────
+ema_alpha:  0.5   # EMA alpha for skeleton smoother (0 = more smoothing)
+
+# ── Clip saving ────────────────────────────────────────────
+pre_roll_sec:   2.0   # seconds before shot event to include in saved clip
+post_roll_sec:  3.0   # seconds after shot event to include in saved clip
+
+# ── Output options ─────────────────────────────────────────
+display:        false    # show live preview window (set false for headless)
+save_annotated: true   # save a separate annotated video alongside shot clips
+verbose:        true    # print detailed state-machine logs

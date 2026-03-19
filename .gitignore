@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+.venv/
+
+inputs/
+inputs copy/
+outputs/
+tmp_validation_force/
+tmp_validation_run/
+validation_runs/
