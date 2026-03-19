@@ -96,16 +96,16 @@ def load_config(config_path="config.yaml"):
         vision_setup_min_frames=20,
         vision_setup_confidence_min=0.75,
         vision_posture_break_grace_sec=3.0,
-        ball_move_threshold=6.0,
+        ball_move_threshold=8.0,
         putt_ball_move_threshold=4.5,
         putt_confirm_frames=2,
         ball_wait_frames=360,
         max_disappear_frames=15,
         ema_alpha=0.5,
-        pre_roll_sec=1.0,
+        pre_roll_sec=2.0,
         post_roll_sec=3.0,
-        display=True,
-        save_annotated=False,
+        display=False,
+        save_annotated=True,
         verbose=True,
     )
     config_path = Path(config_path)
@@ -301,8 +301,8 @@ class ShotStateMachine:
         wrist_speed_swing_threshold=13.0,
         shoulder_swing_threshold=8.0, hip_swing_threshold=5.0,
         hip_putt_max=4.0, min_keypoint_conf=0.25,
-        ball_move_threshold=6.0, putt_ball_move_threshold=4.5,
-        putt_confirm_frames=2, ball_wait_frames=180,
+        ball_move_threshold=8.0, putt_ball_move_threshold=4.5,
+        putt_confirm_frames=2, ball_wait_frames=360,
         max_disappear_frames=15,
         verbose=True,
     ):
@@ -578,12 +578,25 @@ class ShotStateMachine:
                 return "PUTT", scores
             if wrist_speed < self.wrist_speed_swing_threshold:
                 return None, scores
+            if (hip >= self.hip_swing_threshold
+                    or shoulder >= self.shoulder_swing_threshold
+                    or elbow >= self.wrist_swing_threshold * 0.70):
+                return "SWING", scores
             return "PUTT", scores
         if wrist >= self.wrist_putt_threshold:
+            if (hip <= self.hip_putt_max
+                    and shoulder <= self.shoulder_swing_threshold * 0.90
+                    and elbow < self.wrist_swing_threshold * 0.55):
+                return "PUTT", scores
             if full_swing_like and wrist >= self.wrist_swing_threshold * 0.80:
                 return "SWING", scores
             if hip <= putt_hip_cap and shoulder <= self.shoulder_swing_threshold and elbow <= putt_elbow_cap:
                 return "PUTT", scores
+            if (wrist_speed >= self.wrist_speed_swing_threshold
+                    and (hip >= self.hip_swing_threshold
+                         or shoulder >= self.shoulder_swing_threshold
+                         or elbow >= self.wrist_swing_threshold * 0.70)):
+                return "SWING", scores
         return None, scores
 
     def _is_ball_still(self, ball_pos, prev_ball):
@@ -608,8 +621,8 @@ class ShotStateMachine:
             departure = _dist(prev_ball, ref_ball)
 
         moved_enough = departure >= self.putt_ball_move_threshold
-        max_step = max(self.ball_move_threshold * 1.35, self.putt_ball_move_threshold * 5.0)
-        if moved_enough and (ball_pos is None or step <= max_step):
+        stepped_enough = step >= max(1.0, self.putt_ball_move_threshold * 0.25)
+        if moved_enough and (stepped_enough or ball_pos is None):
             self.putt_move_frames += 1
             self.putt_max_departure = max(self.putt_max_departure, departure)
         elif departure < self.putt_ball_move_threshold * 0.70:
@@ -1637,10 +1650,10 @@ def process_clip(
     wrist_swing_threshold=50.0, wrist_putt_threshold=10.0,
     wrist_speed_swing_threshold=13.0,
     shoulder_swing_threshold=8.0, hip_swing_threshold=5.0,
-    ball_move_threshold=6.0, putt_ball_move_threshold=4.5,
-    putt_confirm_frames=2, ball_wait_frames=180,
+    ball_move_threshold=8.0, putt_ball_move_threshold=4.5,
+    putt_confirm_frames=2, ball_wait_frames=360,
     max_disappear_frames=15, ema_alpha=0.5,
-    pre_roll_sec=1.0, post_roll_sec=5.0,
+    pre_roll_sec=2.0, post_roll_sec=3.0,
     clips_dir=None,
     audio_min_strength="weak",
     audio_overlay_sec=1.5,
@@ -1654,7 +1667,7 @@ def process_clip(
     vision_setup_min_frames=20,
     vision_setup_confidence_min=0.75,
     vision_posture_break_grace_sec=3.0,
-    display=True, save_annotated=False, verbose=True,
+    display=False, save_annotated=True, verbose=True,
 ):
     cap = cv2.VideoCapture(str(clip_path))
     if not cap.isOpened():
