@@ -24,6 +24,7 @@ audio_wind_reject_max_duration: 0.12
 # ── Address / Setup phase ──────────────────────────────────
 setup_frames:     20     # consecutive frames required to confirm address
 setup_ankle_max:  50.0   # max ankle displacement (px) to count as feet-stable
+feet_gap_max_px:  50.0   # max left/right ankle horizontal gap (px) for a valid stance
 setup_ball_max:   4.0    # max ball displacement (px) to count as ball-still
 
 # ── Spine lean ─────────────────────────────────────────────
@@ -52,6 +53,8 @@ vision_posture_break_grace_sec:   3.0
 ball_move_threshold:  8.0    # px displacement to confirm ball moved
 putt_ball_move_threshold:  4.5  # lower threshold for confirming small putt rolls
 putt_confirm_frames:  2        # consecutive putt-move frames needed to confirm
+save_putts:  false            # if false, putt-sized motions do not save shot clips
+max_shots_per_clip:  1        # save at most one shot clip per input video
 ball_wait_frames:   360      # max frames to wait for ball to move after swing
 
 # ── Ball tracking ──────────────────────────────────────────

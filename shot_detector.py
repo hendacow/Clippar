@@ -80,6 +80,7 @@ def load_config(config_path="config.yaml"):
         ball_confidence=0.15,
         setup_frames=20,
         setup_ankle_max=50.0,
+        feet_gap_max_px=50.0,
         setup_ball_max=4.0,
         spine_lean_min=15.0,
         spine_lean_max=60.0,
@@ -99,6 +100,8 @@ def load_config(config_path="config.yaml"):
         ball_move_threshold=8.0,
         putt_ball_move_threshold=4.5,
         putt_confirm_frames=2,
+        save_putts=False,
+        max_shots_per_clip=1,
         ball_wait_frames=360,
         max_disappear_frames=15,
         ema_alpha=0.5,
@@ -295,6 +298,7 @@ class ShotStateMachine:
     def __init__(
         self, fps,
         setup_frames=20, setup_ankle_max=50.0, setup_ball_max=4.0,
+        feet_gap_max_px=50.0,
         spine_lean_min=15.0, spine_lean_max=60.0,
         swing_window=25,
         wrist_swing_threshold=50.0, wrist_putt_threshold=10.0,
@@ -302,13 +306,14 @@ class ShotStateMachine:
         shoulder_swing_threshold=8.0, hip_swing_threshold=5.0,
         hip_putt_max=4.0, min_keypoint_conf=0.25,
         ball_move_threshold=8.0, putt_ball_move_threshold=4.5,
-        putt_confirm_frames=2, ball_wait_frames=360,
+        putt_confirm_frames=2, save_putts=False, max_shots_per_clip=1, ball_wait_frames=360,
         max_disappear_frames=15,
         verbose=True,
     ):
         self.fps                      = fps
         self.setup_frames             = setup_frames
         self.setup_ankle_max          = setup_ankle_max
+        self.feet_gap_max_px          = feet_gap_max_px
         self.setup_ball_max           = setup_ball_max
         self.spine_lean_min           = spine_lean_min
         self.spine_lean_max           = spine_lean_max
@@ -323,6 +328,8 @@ class ShotStateMachine:
         self.ball_move_threshold      = ball_move_threshold
         self.putt_ball_move_threshold = max(1.0, float(putt_ball_move_threshold))
         self.putt_confirm_frames      = max(1, int(putt_confirm_frames))
+        self.save_putts               = bool(save_putts)
+        self.max_shots_per_clip       = max(1, int(max_shots_per_clip))
         self.ball_wait_frames         = ball_wait_frames
         self.max_disappear_frames     = max_disappear_frames
         self.verbose                  = verbose
@@ -342,6 +349,7 @@ class ShotStateMachine:
         self.swing_scores        = {}
         self.last_spine_angle    = 0.0
         self.feet_stable         = False
+        self.last_ankle_gap      = None
         self.spine_in_range      = False
         self.rejection_reason    = ""
         self._swing_timed_out    = False
@@ -398,12 +406,31 @@ class ShotStateMachine:
 
         return self.state
 
+    def _enter_swing_state(self, frame_idx, swing_type, ball_pos, prev_ball):
+        self.state               = self.SWING
+        self.shot_type           = swing_type
+        self.ball_wait_countdown = self.ball_wait_frames
+        self.swing_entry_frame   = frame_idx
+        self.low_motion_frames   = 0
+        reference_ball = ball_pos if ball_pos is not None else prev_ball
+        if reference_ball is None:
+            reference_ball = self.last_known_ball_pos
+        self.putt_reference_ball_pos = reference_ball
+        self.putt_move_frames = 0
+        self.putt_max_departure = 0.0
+        self.kp_history.clear()
+
     def _update_idle(self, frame_idx, ball_pos, prev_ball):
         ball_still        = self._is_ball_still(ball_pos, self.last_ball_pos)
         in_address, angle = self._check_address()
         self.last_spine_angle = angle
-        _, scores = self._score_swing()
+        swing_type, scores = self._score_swing()
         self.swing_scores = scores
+
+        strong_wrist_now = scores.get("wrist_motion", 0.0) >= self.wrist_swing_threshold
+        if strong_wrist_now:
+            self._enter_swing_state(frame_idx, "SWING", ball_pos, prev_ball)
+            return
 
         if ball_still and in_address:
             self.setup_frame_count += 1
@@ -435,18 +462,7 @@ class ShotStateMachine:
                   f"addr:{in_address}")
 
         if swing_type is not None:
-            self.state               = self.SWING
-            self.shot_type           = swing_type
-            self.ball_wait_countdown = self.ball_wait_frames
-            self.swing_entry_frame   = frame_idx
-            self.low_motion_frames   = 0
-            reference_ball = ball_pos if ball_pos is not None else prev_ball
-            if reference_ball is None:
-                reference_ball = self.last_known_ball_pos
-            self.putt_reference_ball_pos = reference_ball
-            self.putt_move_frames = 0
-            self.putt_max_departure = 0.0
-            self.kp_history.clear()
+            self._enter_swing_state(frame_idx, swing_type, ball_pos, prev_ball)
             return
 
         if ball_pos is not None and prev_ball is not None:
@@ -464,6 +480,8 @@ class ShotStateMachine:
                 self.state = self.IDLE
 
     def _update_swing(self, frame_idx, ball_pos, prev_ball):
+        _, angle = self._check_address()
+        self.last_spine_angle = angle
         self.ball_wait_countdown -= 1
 
         if self.verbose and self.ball_wait_countdown % 15 == 0:
@@ -472,14 +490,15 @@ class ShotStateMachine:
                   f"ball:{ball_pos}  prev:{prev_ball}")
 
         if self.shot_type == "PUTT":
-            confirmed, dist = self._check_putt_ball_confirmation(ball_pos, prev_ball)
-            if confirmed:
-                print(f"    [SM f{frame_idx}] ★ PUTT BALL MOVED {dist:.1f}px → SHOT CONFIRMED")
-                self.state           = self.BALL_MOVED
-                self.shot_detected   = True
-                self.shot_frame_idx  = frame_idx
-                self._ball_confirmed = True
-                return
+            if self.save_putts:
+                confirmed, dist = self._check_putt_ball_confirmation(ball_pos, prev_ball)
+                if confirmed:
+                    print(f"    [SM f{frame_idx}] ★ PUTT BALL MOVED {dist:.1f}px → SHOT CONFIRMED")
+                    self.state           = self.BALL_MOVED
+                    self.shot_detected   = True
+                    self.shot_frame_idx  = frame_idx
+                    self._ball_confirmed = True
+                    return
         elif ball_pos is not None and prev_ball is not None:
             dist = _dist(ball_pos, prev_ball)
             if dist >= self.ball_move_threshold:
@@ -493,6 +512,9 @@ class ShotStateMachine:
         _, live_scores = self._score_swing()
         self.swing_scores = live_scores
         if live_scores:
+            if (self.shot_type == "PUTT"
+                    and live_scores.get("wrist_motion", 0.0) >= self.wrist_swing_threshold):
+                self.shot_type = "SWING"
             low_motion = (
                 live_scores.get("wrist_motion", 0.0) < self.wrist_putt_threshold * 1.2
                 and live_scores.get("wrist_speed", 0.0) < self.wrist_speed_swing_threshold * 0.75
@@ -516,11 +538,21 @@ class ShotStateMachine:
         spine_angle         = self._compute_spine_lean()
         self.last_spine_angle = spine_angle
         self.spine_in_range = self.spine_lean_min <= spine_angle <= self.spine_lean_max
+        ankle_gap = self._current_ankle_gap()
+        self.last_ankle_gap = ankle_gap
         ankle_motion        = self._kp_max_displacement_in(
                                   [KP_LEFT_ANKLE, KP_RIGHT_ANKLE],
                                   list(self.kp_history)[-6:])
         self.feet_stable    = ankle_motion < self.setup_ankle_max
         return self.feet_stable and self.spine_in_range, spine_angle
+
+    def _current_ankle_gap(self):
+        if not self.kp_history:
+            return None
+        frame = self.kp_history[-1]
+        if KP_LEFT_ANKLE in frame and KP_RIGHT_ANKLE in frame:
+            return float(abs(frame[KP_LEFT_ANKLE][0] - frame[KP_RIGHT_ANKLE][0]))
+        return None
 
     def _compute_spine_lean(self):
         if not self.kp_history:
@@ -890,7 +922,7 @@ def draw_sidebar(frame, sm, ball_pos, ball_conf, frame_idx, total_frames,
     put(f"Spine:{sm.last_spine_angle:.1f} "
         f"({sm.spine_lean_min:.0f}-{sm.spine_lean_max:.0f})", spinec)
     put(f"Feet: {'OK' if sm.feet_stable else 'NO'} "
-        f"(max {sm.setup_ankle_max:.0f}px)", feetc)
+        f"(move<{sm.setup_ankle_max:.0f}px)", feetc)
     if setup_info:
         span_col = (0, 220, 220) if setup_info.get("active") else (140, 140, 140)
         put(f"Span:{setup_info.get('frames', 0)}f  "
@@ -908,7 +940,11 @@ def draw_sidebar(frame, sm, ball_pos, ball_conf, frame_idx, total_frames,
 
     if vision_info and vision_info.get("enabled"):
         divider("VISION")
-        current_col = (0, 255, 100) if vision_info.get("current_score", 0.0) >= 1.0 else (180, 180, 180)
+        current_col = (
+            (0, 255, 100)
+            if vision_info.get("current_score", 0.0) >= vision_info.get("threshold", 0.0)
+            else (180, 180, 180)
+        )
         put(f"Now:{vision_info.get('current_score', 0.0):.2f}", current_col)
         put(f"Best:{vision_info.get('best_score', 0.0):.2f}")
         put(f"Thr:{vision_info.get('threshold', 0.0):.2f}")
@@ -1406,6 +1442,28 @@ def _compute_vision_score(scores, wrist_threshold, torso_threshold):
     )
 
 
+def _swing_support_stats(metric, wrist_threshold, torso_threshold):
+    wrist_speed = metric.get("wrist_speed", 0.0)
+    elbow_motion = metric.get("elbow_motion", 0.0)
+    torso_motion = max(
+        metric.get("shoulder_change", 0.0),
+        metric.get("hip_change", 0.0),
+    )
+
+    wrist_speed_floor = max(8.0, wrist_threshold * 0.20)
+    elbow_floor = max(12.0, wrist_threshold * 0.30)
+    torso_floor = max(5.0, torso_threshold * 0.55)
+
+    support_count = int(wrist_speed >= wrist_speed_floor)
+    support_count += int(elbow_motion >= elbow_floor)
+    support_count += int(torso_motion >= torso_floor)
+
+    support_score = min(2.0, wrist_speed / max(wrist_speed_floor, 1e-6))
+    support_score += min(2.0, elbow_motion / max(elbow_floor, 1e-6))
+    support_score += min(2.0, torso_motion / max(torso_floor, 1e-6))
+    return support_count, support_score
+
+
 def _evaluate_vision_candidate(
     swing_ctx,
     wrist_threshold,
@@ -1428,43 +1486,142 @@ def _evaluate_vision_candidate(
     ):
         setup_span = None
 
-    for idx, metric in enumerate(metrics):
-        vision_score = metric.get("vision_score", metric.get("arm_swing_score", 0.0))
-        if vision_score < 1.0:
+    enriched = []
+    for metric in metrics:
+        support_count, support_score = _swing_support_stats(
+            metric,
+            wrist_threshold,
+            torso_threshold,
+        )
+        enriched_metric = metric.copy()
+        enriched_metric["support_count"] = support_count
+        enriched_metric["support_score"] = support_score
+        enriched.append(enriched_metric)
+
+    clusters = []
+    current_cluster = []
+    gap_tolerance = 1
+    inactive_gap = 0
+
+    for metric in enriched:
+        wrist_motion = metric.get("wrist_motion", 0.0)
+        active = (
+            wrist_motion >= wrist_threshold * 0.65
+            or (
+                wrist_motion >= wrist_threshold * 0.50
+                and metric.get("support_count", 0) >= 1
+            )
+        )
+        if active:
+            if inactive_gap > gap_tolerance and current_cluster:
+                clusters.append(current_cluster)
+                current_cluster = []
+            current_cluster.append(metric)
+            inactive_gap = 0
+        elif current_cluster:
+            inactive_gap += 1
+
+    if current_cluster:
+        clusters.append(current_cluster)
+
+    candidates = []
+    setup_end_frame = setup_span.get("end_frame") if setup_span else None
+
+    for cluster in clusters:
+        peak_metric = max(
+            cluster,
+            key=lambda item: (
+                item.get("wrist_motion", 0.0),
+                item.get("support_score", 0.0),
+                -item["frame_idx"],
+            ),
+        )
+        if peak_metric.get("wrist_motion", 0.0) < wrist_threshold:
             continue
-        arm_ready = (
-            metric.get("wrist_motion", 0.0) >= wrist_threshold * 0.55
-            or metric.get("elbow_motion", 0.0) >= wrist_threshold * 0.48
-        )
-        torso_ready = (
-            metric.get("shoulder_change", 0.0) >= torso_threshold * 0.55
-            or metric.get("hip_change", 0.0) >= torso_threshold * 0.40
-        )
-        if not arm_ready or not torso_ready:
+        if peak_metric.get("support_count", 0) < 1:
             continue
 
-        follow = metrics[idx + 1: idx + 1 + followthrough_frames]
-        min_follow = max(2, min(followthrough_frames, 4))
-        if len(follow) < min_follow:
-            continue
+        peak_idx = next(
+            idx for idx, item in enumerate(enriched)
+            if item["frame_idx"] == peak_metric["frame_idx"]
+        )
+        follow = enriched[peak_idx + 1: peak_idx + 1 + followthrough_frames]
         follow_support = sum(
             1 for item in follow
-            if item.get("vision_score", item.get("arm_swing_score", 0.0)) >= 0.60
-            or item.get("wrist_speed", 0.0) >= max(8.0, wrist_threshold * 0.12)
+            if item.get("wrist_motion", 0.0) >= wrist_threshold * 0.45
+            or item.get("support_count", 0) >= 1
+            or item.get("vision_score", item.get("arm_swing_score", 0.0)) >= 0.60
         )
-        if follow_support < max(2, int(math.ceil(min_follow * 0.5))):
-            continue
 
-        score = vision_score + (0.04 * follow_support) + (0.10 if setup_span else 0.0)
-        return {
-            "impact_frame": metric["frame_idx"],
-            "score": score,
-            "threshold": 1.0,
+        peak_wrist = peak_metric.get("wrist_motion", 0.0)
+        anchor_threshold = max(wrist_threshold, peak_wrist * 0.85)
+        anchor_metric = next(
+            (
+                item for item in cluster
+                if item.get("wrist_motion", 0.0) >= anchor_threshold
+                and item.get("support_count", 0) >= 1
+            ),
+            None,
+        )
+        if anchor_metric is None:
+            relaxed_threshold = max(wrist_threshold, peak_wrist * 0.78)
+            anchor_metric = next(
+                (
+                    item for item in cluster
+                    if item.get("wrist_motion", 0.0) >= relaxed_threshold
+                    and item.get("support_count", 0) >= 1
+                ),
+                peak_metric,
+            )
+
+        setup_bonus = 0.0
+        if setup_span:
+            gap_from_setup = max(0, cluster[0]["frame_idx"] - setup_end_frame)
+            setup_bonus = max(0.0, 0.12 - (0.01 * min(gap_from_setup, 12)))
+
+        cluster_score = peak_wrist / max(wrist_threshold, 1e-6)
+        cluster_score += 0.18 * peak_metric.get("support_score", 0.0)
+        cluster_score += 0.05 * follow_support
+        cluster_score += setup_bonus
+
+        candidates.append({
+            "impact_frame": anchor_metric["frame_idx"],
+            "score": cluster_score,
+            "wrist_motion": anchor_metric.get("wrist_motion", 0.0),
+            "peak_wrist_motion": peak_wrist,
+            "threshold": wrist_threshold,
             "followthrough_count": follow_support,
             "setup_span": setup_span,
-            "candidate_end_frame": follow[-1]["frame_idx"],
-        }
-    return None
+            "candidate_end_frame": cluster[-1]["frame_idx"],
+            "cluster_start_frame": cluster[0]["frame_idx"],
+            "peak_frame": peak_metric["frame_idx"],
+        })
+
+    if not candidates:
+        return None
+
+    candidate_pool = candidates
+    if setup_end_frame is not None:
+        setup_window_frames = max(18, followthrough_frames * 5)
+        setup_aligned = [
+            candidate for candidate in candidates
+            if candidate["cluster_start_frame"] <= setup_end_frame + setup_window_frames
+        ]
+        if setup_aligned:
+            candidate_pool = setup_aligned
+
+    best_score = max(candidate["score"] for candidate in candidate_pool)
+    tied_candidates = [
+        candidate for candidate in candidate_pool
+        if candidate["score"] >= best_score * 0.93
+    ]
+    tied_candidates.sort(
+        key=lambda candidate: (
+            candidate["impact_frame"],
+            -candidate["score"],
+        )
+    )
+    return tied_candidates[0]
 
 
 def _find_posture_break_frame(frame_records, impact_frame, min_break_frames=4):
@@ -1528,6 +1685,30 @@ def _resolve_shot_window(
     if end_sec <= start_sec + 0.1:
         return fallback_start, fallback_end, "event"
     return start_sec, end_sec, "setup"
+
+
+def _select_primary_shot(resolved_shots):
+    if not resolved_shots:
+        return []
+
+    best_score = max(shot.get("selection_score", 0.0) for shot in resolved_shots)
+    tied = [
+        shot for shot in resolved_shots
+        if shot.get("selection_score", 0.0) >= best_score * 0.93
+    ]
+    tied.sort(
+        key=lambda shot: (
+            shot.get("selection_anchor_frame")
+            if shot.get("selection_anchor_frame") is not None
+            else shot.get("vision_anchor_frame")
+            if shot.get("vision_anchor_frame") is not None
+            else shot.get("impact_frame")
+            if shot.get("impact_frame") is not None
+            else 10 ** 9,
+            -shot.get("selection_score", 0.0),
+        )
+    )
+    return tied[:1]
 
 
 def _mux_audio(video_path, silent_video_path, output_path, start_sec, end_sec):
@@ -1644,14 +1825,14 @@ def copy_clip_with_audio(src_path, output_path):
 def process_clip(
     clip_path, pose_model, ball_model, output_dir, clip_index,
     ball_confidence=0.15,
-    setup_frames=20, setup_ankle_max=50.0, setup_ball_max=4.0,
+    setup_frames=20, setup_ankle_max=50.0, feet_gap_max_px=50.0, setup_ball_max=4.0,
     spine_lean_min=15.0, spine_lean_max=60.0,
     swing_window=25,
     wrist_swing_threshold=50.0, wrist_putt_threshold=10.0,
     wrist_speed_swing_threshold=13.0,
     shoulder_swing_threshold=8.0, hip_swing_threshold=5.0,
     ball_move_threshold=8.0, putt_ball_move_threshold=4.5,
-    putt_confirm_frames=2, ball_wait_frames=360,
+    putt_confirm_frames=2, save_putts=False, max_shots_per_clip=1, ball_wait_frames=360,
     max_disappear_frames=15, ema_alpha=0.5,
     pre_roll_sec=2.0, post_roll_sec=3.0,
     clips_dir=None,
@@ -1688,6 +1869,7 @@ def process_clip(
     sm = ShotStateMachine(
         fps=fps,
         setup_frames=setup_frames, setup_ankle_max=setup_ankle_max,
+        feet_gap_max_px=feet_gap_max_px,
         setup_ball_max=setup_ball_max,
         spine_lean_min=spine_lean_min, spine_lean_max=spine_lean_max,
         swing_window=swing_window,
@@ -1699,6 +1881,8 @@ def process_clip(
         ball_move_threshold=ball_move_threshold,
         putt_ball_move_threshold=putt_ball_move_threshold,
         putt_confirm_frames=putt_confirm_frames,
+        save_putts=save_putts,
+        max_shots_per_clip=max_shots_per_clip,
         ball_wait_frames=ball_wait_frames,
         max_disappear_frames=max_disappear_frames,
         verbose=verbose,
@@ -1749,7 +1933,7 @@ def process_clip(
                 swing_ctx.get("confirmed_candidate")
                 or _evaluate_vision_candidate(
                     swing_ctx,
-                    vision_wrist_confirm_threshold,
+                    wrist_swing_threshold,
                     vision_torso_confirm_threshold,
                     vision_followthrough_frames,
                     vision_setup_min_frames,
@@ -1784,13 +1968,16 @@ def process_clip(
                         "impact_frame": impact_frame,
                         "vision_anchor_frame": impact_frame,
                         "setup_span": vision_candidate.get("setup_span"),
+                        "selection_score": vision_candidate.get("score", 0.0),
+                        "selection_anchor_frame": impact_frame,
                     })
                     print(f"\n  ★ SWING detected at {format_time(impact_frame / fps)}  "
                           f"[{confirm_tag}]  "
                           f"(vision score {vision_candidate['score']:.2f}; {reason})")
                     saved_timeout_shot = True
 
-        if not saved_timeout_shot and shot_type != "SWING" and audio.enabled and not motion_faded:
+        if (not saved_timeout_shot and shot_type != "SWING" and save_putts
+                and audio.enabled and not motion_faded):
             audio_hit, audio_info = audio.check_window(swing_entry_frame, frame_no, fps)
             if audio_hit:
                 hold_audio_info(frame_no, audio_info)
@@ -1804,6 +1991,8 @@ def process_clip(
                     "impact_frame": impact_frame,
                     "vision_anchor_frame": None,
                     "setup_span": swing_ctx.get("setup_span") if swing_ctx else None,
+                    "selection_score": 0.0,
+                    "selection_anchor_frame": impact_frame,
                 })
                 print(f"\n  ★ {shot_type} detected at {format_time(audio_info['clip_time_sec'])}  "
                       f"[audio]  "
@@ -1859,6 +2048,8 @@ def process_clip(
         prev_state = sm.state
         new_state = sm.update(frame_idx, kp, cf, ball_pos)
         resolved_ball = sm.last_known_ball_pos if ball_pos is None else ball_pos
+        if active_swing and sm.shot_type and active_swing.get("shot_type") != sm.shot_type:
+            active_swing["shot_type"] = sm.shot_type
         current_scores = sm.swing_scores or {}
         current_arm_score = _compute_arm_swing_score(
             current_scores,
@@ -1910,6 +2101,34 @@ def process_clip(
                 "best_raw_candidate": None,
                 "confirmed_candidate": None,
             }
+            if active_swing.get("shot_type") == "SWING":
+                entry_metric = {
+                    "frame_idx": frame_idx,
+                    "wrist_motion": current_scores.get("wrist_motion", 0.0),
+                    "shoulder_change": current_scores.get("shoulder_change", 0.0),
+                    "hip_change": current_scores.get("hip_change", 0.0),
+                    "elbow_motion": current_scores.get("elbow_motion", 0.0),
+                    "wrist_speed": current_scores.get("wrist_speed", 0.0),
+                    "feet_stable": sm.feet_stable,
+                    "ankle_gap_px": sm.last_ankle_gap,
+                    "spine_in_range": sm.spine_in_range,
+                }
+                if vision_fallback_enabled:
+                    entry_metric["arm_swing_score"] = _compute_vision_score(
+                        current_scores,
+                        wrist_swing_threshold,
+                        vision_torso_confirm_threshold,
+                    )
+                else:
+                    entry_metric["arm_swing_score"] = 0.0
+                entry_metric["vision_score"] = entry_metric["arm_swing_score"]
+                active_swing["metrics"].append(entry_metric)
+                if entry_metric["wrist_motion"] >= wrist_swing_threshold:
+                    active_swing["best_raw_candidate"] = {
+                        "frame_idx": frame_idx,
+                        "vision_score": entry_metric["wrist_motion"],
+                        "threshold": wrist_swing_threshold,
+                    }
 
         current_vision_score = 0.0
         if active_swing and prev_state == ShotStateMachine.SWING:
@@ -1924,6 +2143,7 @@ def process_clip(
                 "elbow_motion": live_scores.get("elbow_motion", 0.0),
                 "wrist_speed": live_scores.get("wrist_speed", 0.0),
                 "feet_stable": sm.feet_stable,
+                "ankle_gap_px": sm.last_ankle_gap,
                 "spine_in_range": sm.spine_in_range,
             }
             if vision_fallback_enabled and active_swing.get("shot_type") == "SWING":
@@ -1939,20 +2159,22 @@ def process_clip(
             active_swing["metrics"].append(metric)
 
             if (active_swing.get("shot_type") == "SWING"
-                    and active_swing.get("best_raw_candidate") is None
-                    and metric["vision_score"] >= 1.0):
-                active_swing["best_raw_candidate"] = {
-                    "frame_idx": frame_idx,
-                    "vision_score": metric["vision_score"],
-                    "threshold": 1.0,
-                }
+                    and metric["wrist_motion"] >= wrist_swing_threshold):
+                raw_candidate = active_swing.get("best_raw_candidate")
+                raw_score = metric["wrist_motion"]
+                if (raw_candidate is None
+                        or raw_score > raw_candidate.get("vision_score", 0.0) * 1.07):
+                    active_swing["best_raw_candidate"] = {
+                        "frame_idx": frame_idx,
+                        "vision_score": raw_score,
+                        "threshold": wrist_swing_threshold,
+                    }
 
             if (vision_fallback_enabled
-                    and active_swing.get("shot_type") == "SWING"
-                    and active_swing.get("confirmed_candidate") is None):
+                    and active_swing.get("shot_type") == "SWING"):
                 active_swing["confirmed_candidate"] = _evaluate_vision_candidate(
                     active_swing,
-                    vision_wrist_confirm_threshold,
+                    wrist_swing_threshold,
                     vision_torso_confirm_threshold,
                     vision_followthrough_frames,
                     vision_setup_min_frames,
@@ -1991,6 +2213,8 @@ def process_clip(
             shot_type = sm.shot_type or (active_swing.get("shot_type") if active_swing else None) or "SHOT"
             ball_conf_shot = bool(getattr(sm, "_ball_confirmed", False))
             audio_info = None
+            confirmed_candidate = None
+            raw_candidate = None
 
             if shot_type == "SWING" and ball_conf_shot and audio.enabled and active_swing:
                 audio_hit, confirm_audio = audio.check_window(
@@ -2034,6 +2258,13 @@ def process_clip(
                 "impact_frame": frame_idx,
                 "vision_anchor_frame": vision_anchor_frame,
                 "setup_span": active_swing.get("setup_span") if active_swing else None,
+                "selection_score": (
+                    confirmed_candidate.get("score", 0.0)
+                    if confirmed_candidate else
+                    raw_candidate.get("vision_score", 0.0) / max(wrist_swing_threshold, 1e-6)
+                    if raw_candidate else 0.0
+                ),
+                "selection_anchor_frame": vision_anchor_frame,
             })
             print(f"\n  ★ {shot_type} detected at {format_time(frame_idx / fps)}  "
                   f"[{confirm_tag}]")
@@ -2072,7 +2303,7 @@ def process_clip(
             if confirmed_candidate:
                 candidate_frame = confirmed_candidate["impact_frame"]
                 candidate_end_frame = confirmed_candidate.get("candidate_end_frame", candidate_frame)
-                best_score = confirmed_candidate.get("score", 0.0)
+                best_score = confirmed_candidate.get("wrist_motion", confirmed_candidate.get("score", 0.0))
             elif raw_candidate:
                 candidate_frame = raw_candidate["frame_idx"]
                 candidate_end_frame = raw_candidate["frame_idx"]
@@ -2080,9 +2311,9 @@ def process_clip(
             vision_debug = {
                 "enabled": bool(vision_fallback_enabled and active_swing
                                 and active_swing.get("shot_type") == "SWING"),
-                "current_score": current_vision_score,
+                "current_score": current_scores.get("wrist_motion", 0.0),
                 "best_score": best_score,
-                "threshold": 1.0,
+                "threshold": wrist_swing_threshold,
                 "candidate_frame": candidate_frame,
                 "in_window": bool(candidate_frame is not None
                                   and candidate_end_frame is not None
@@ -2148,8 +2379,13 @@ def process_clip(
         resolved["trim_source"] = trim_source
         resolved_shots.append(resolved)
 
-    # ── Merge overlapping shots then save ──
-    merged = merge_shots(resolved_shots)
+    # ── Limit to a single saved clip when requested, otherwise merge overlaps ──
+    if max_shots_per_clip == 1:
+        merged = _select_primary_shot(resolved_shots)
+    else:
+        merged = merge_shots(resolved_shots)
+        if max_shots_per_clip > 0:
+            merged = merged[:max_shots_per_clip]
     shot_idx = 0
     for shot in merged:
         shot_idx += 1
@@ -2226,6 +2462,7 @@ def detect_shots(cfg):
             ball_confidence=cfg["ball_confidence"],
             setup_frames=cfg["setup_frames"],
             setup_ankle_max=cfg["setup_ankle_max"],
+            feet_gap_max_px=cfg["feet_gap_max_px"],
             setup_ball_max=cfg["setup_ball_max"],
             spine_lean_min=cfg["spine_lean_min"],
             spine_lean_max=cfg["spine_lean_max"],
@@ -2238,6 +2475,8 @@ def detect_shots(cfg):
             ball_move_threshold=cfg["ball_move_threshold"],
             putt_ball_move_threshold=cfg["putt_ball_move_threshold"],
             putt_confirm_frames=cfg["putt_confirm_frames"],
+            save_putts=cfg["save_putts"],
+            max_shots_per_clip=cfg["max_shots_per_clip"],
             ball_wait_frames=cfg["ball_wait_frames"],
             max_disappear_frames=cfg["max_disappear_frames"],
             ema_alpha=cfg["ema_alpha"],

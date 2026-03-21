@@ -10,3 +10,6 @@ outputs/
 tmp_validation_force/
 tmp_validation_run/
 validation_runs/
+.history/
+alex_inputs/
+alex_outputs/
