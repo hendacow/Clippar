@@ -363,6 +363,19 @@ class ShotStateMachine:
         self.putt_reference_ball_pos = None
         self.putt_move_frames        = 0
         self.putt_max_departure      = 0.0
+        self.last_ball_move_dist     = None
+        self.scene_putt_score        = 0.0
+        self.scene_putt_peak         = 0.0
+        self.scene_green_ratio       = 0.0
+        self.scene_pose_height_ratio = None
+        self.scene_texture_laplacian = 0.0
+        self.putt_scene_score_min    = 0.72
+        self.putt_scene_green_ratio_min = 0.60
+        self.putt_scene_pose_height_max = 0.23
+        self.putt_shoulder_relaxed_max = 28.0
+        self.putt_hip_relaxed_max      = 12.0
+        self.putt_wrist_speed_relaxed_max = 40.0
+        self.putt_elbow_relaxed_max    = 140.0
 
     def update(self, frame_idx, keypoints, confidences, ball_pos):
         self.shot_detected    = False
@@ -420,6 +433,40 @@ class ShotStateMachine:
         self.putt_max_departure = 0.0
         self.kp_history.clear()
 
+    def _scene_prefers_putt(self):
+        scene_score = self._scene_putt_score_effective()
+        return scene_score >= self.putt_scene_score_min
+
+    def _scene_putt_score_effective(self):
+        return max(self.scene_putt_score, self.scene_putt_peak * 0.97)
+
+    def _scene_strong_putt_like(self):
+        scene_score = self._scene_putt_score_effective()
+        pose_height = self.scene_pose_height_ratio
+        if scene_score < 0.90:
+            return False
+        if self.scene_green_ratio < 0.63:
+            return False
+        if pose_height is not None and pose_height > 0.24:
+            return False
+        return True
+
+    def _is_clear_full_swing(self, scores):
+        if not scores:
+            return False
+        wrist_speed = scores.get("wrist_speed", 0.0)
+        shoulder = scores.get("shoulder_change", 0.0)
+        hip = scores.get("hip_change", 0.0)
+        elbow = scores.get("elbow_motion", 0.0)
+        return (
+            wrist_speed >= self.wrist_speed_swing_threshold * 1.25
+            and (
+                shoulder >= self.shoulder_swing_threshold * 1.60
+                or hip >= self.hip_swing_threshold * 2.0
+                or elbow >= self.wrist_swing_threshold * 1.10
+            )
+        )
+
     def _update_idle(self, frame_idx, ball_pos, prev_ball):
         ball_still        = self._is_ball_still(ball_pos, self.last_ball_pos)
         in_address, angle = self._check_address()
@@ -429,7 +476,14 @@ class ShotStateMachine:
 
         strong_wrist_now = scores.get("wrist_motion", 0.0) >= self.wrist_swing_threshold
         if strong_wrist_now:
-            self._enter_swing_state(frame_idx, "SWING", ball_pos, prev_ball)
+            if swing_type == "PUTT" or (
+                self._scene_strong_putt_like()
+                and not self._is_clear_full_swing(scores)
+            ):
+                self._enter_swing_state(frame_idx, "PUTT", ball_pos, prev_ball)
+                return
+            if swing_type == "SWING" or not self._scene_prefers_putt():
+                self._enter_swing_state(frame_idx, "SWING", ball_pos, prev_ball)
             return
 
         if ball_still and in_address:
@@ -498,6 +552,7 @@ class ShotStateMachine:
                     self.shot_detected   = True
                     self.shot_frame_idx  = frame_idx
                     self._ball_confirmed = True
+                    self.last_ball_move_dist = dist
                     return
         elif ball_pos is not None and prev_ball is not None:
             dist = _dist(ball_pos, prev_ball)
@@ -507,13 +562,17 @@ class ShotStateMachine:
                 self.shot_detected   = True
                 self.shot_frame_idx  = frame_idx
                 self._ball_confirmed = True
+                self.last_ball_move_dist = dist
                 return
 
         _, live_scores = self._score_swing()
         self.swing_scores = live_scores
         if live_scores:
             if (self.shot_type == "PUTT"
-                    and live_scores.get("wrist_motion", 0.0) >= self.wrist_swing_threshold):
+                    and live_scores.get("wrist_motion", 0.0) >= self.wrist_swing_threshold
+                    and not self._scene_strong_putt_like()
+                    and not self._scene_prefers_putt()
+                    and self._is_clear_full_swing(live_scores)):
                 self.shot_type = "SWING"
             low_motion = (
                 live_scores.get("wrist_motion", 0.0) < self.wrist_putt_threshold * 1.2
@@ -583,6 +642,11 @@ class ShotStateMachine:
         shoulder = scores["shoulder_change"]
         hip      = scores["hip_change"]
         elbow    = scores["elbow_motion"]
+        scene_putt_like = self._scene_prefers_putt()
+        strong_scene_putt_like = self._scene_strong_putt_like()
+        scores["scene_putt_score"] = self._scene_putt_score_effective()
+        scores["scene_green_ratio"] = self.scene_green_ratio
+        scores["scene_pose_height_ratio"] = self.scene_pose_height_ratio
         putt_hip_cap = max(self.hip_putt_max + 2.0, self.hip_putt_max * 1.5)
         putt_shoulder_cap = self.shoulder_swing_threshold * 0.80
         putt_elbow_cap = self.wrist_swing_threshold * 0.70
@@ -601,6 +665,18 @@ class ShotStateMachine:
             and shoulder <= putt_shoulder_cap
             and elbow <= putt_elbow_cap
         )
+        relaxed_scene_putt_like = (
+            scene_putt_like
+            and shoulder <= self.putt_shoulder_relaxed_max
+            and hip <= self.putt_hip_relaxed_max
+            and wrist_speed <= self.putt_wrist_speed_relaxed_max
+            and elbow <= self.putt_elbow_relaxed_max
+            and not self._is_clear_full_swing(scores)
+        )
+        if strong_scene_putt_like and wrist >= self.wrist_putt_threshold and not self._is_clear_full_swing(scores):
+            return "PUTT", scores
+        if relaxed_scene_putt_like and wrist >= self.wrist_putt_threshold:
+            return "PUTT", scores
         if putt_like:
             return "PUTT", scores
         if wrist >= self.wrist_swing_threshold:
@@ -767,6 +843,7 @@ class ShotStateMachine:
         self.putt_reference_ball_pos = None
         self.putt_move_frames        = 0
         self.putt_max_departure      = 0.0
+        self.last_ball_move_dist     = None
 
     def start_cooldown(self):
         self.cooldown_remaining = self.post_shot_cooldown_frames
@@ -932,9 +1009,14 @@ def draw_sidebar(frame, sm, ball_pos, ball_conf, frame_idx, total_frames,
     if sm.swing_scores:
         for k, v in sm.swing_scores.items():
             short = k.replace("_motion","").replace("_change","")[:9]
-            vc    = (0, 200, 100) if v >= sm.wrist_putt_threshold and "wrist" in k \
-                    else (200, 200, 200)
-            put(f"{short:<9}: {v:5.1f}", vc)
+            numeric = isinstance(v, (int, float, np.floating)) and v is not None
+            vc = (200, 200, 200)
+            if numeric and "wrist" in k and float(v) >= sm.wrist_putt_threshold:
+                vc = (0, 200, 100)
+            if numeric:
+                put(f"{short:<9}: {float(v):5.1f}", vc)
+            else:
+                put(f"{short:<9}: {'n/a':>5}", (140, 140, 140))
     else:
         put("(waiting...)", (100, 100, 100))
 
@@ -1068,6 +1150,372 @@ def _ball_is_plausible_full_swing(ball_pos, keypoints, confidences, min_conf=0.2
 
     return (abs(ball_pos[0] - stance_mid_x) <= max_dx
             and min_y <= ball_pos[1] <= max_y)
+
+
+def _estimate_putt_scene(frame, keypoints, confidences, min_conf=0.25):
+    h, w = frame.shape[:2]
+    y0 = int(h * 0.35)
+    region = frame[y0:, :]
+    hsv = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+    hch, sch, vch = cv2.split(hsv)
+    green_mask = (
+        (hch >= 25) & (hch <= 95)
+        & (sch >= 20)
+        & (vch >= 35)
+    )
+    green_ratio = float(np.mean(green_mask))
+    gray = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    lap_var = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    pose_height_ratio = None
+    if keypoints is not None and confidences is not None:
+        valid = []
+        for idx in range(min(len(confidences), len(keypoints))):
+            if confidences[idx] >= min_conf:
+                valid.append(keypoints[idx])
+        if valid:
+            valid = np.asarray(valid, dtype=float)
+            pose_height_ratio = float(
+                (np.max(valid[:, 1]) - np.min(valid[:, 1])) / max(float(h), 1.0)
+            )
+
+    score = 0.0
+    if green_ratio >= 0.60:
+        score += 0.55
+    elif green_ratio >= 0.54:
+        score += 0.35
+
+    if pose_height_ratio is None:
+        score += 0.35
+    elif pose_height_ratio <= 0.18:
+        score += 0.40
+    elif pose_height_ratio <= 0.23:
+        score += 0.30
+    elif pose_height_ratio <= 0.27:
+        score += 0.15
+
+    if lap_var <= 900.0:
+        score += 0.15
+    elif lap_var <= 1800.0:
+        score += 0.07
+
+    return {
+        "score": min(1.0, score),
+        "green_ratio": green_ratio,
+        "pose_height_ratio": pose_height_ratio,
+        "laplacian_var": lap_var,
+    }
+
+
+def _swing_context_looks_like_putt(swing_ctx, ball_move_dist=None):
+    if not swing_ctx:
+        return False
+    metrics = swing_ctx.get("metrics", [])
+    if not metrics:
+        return False
+
+    def _percentile(metric_name, pct):
+        values = [metric.get(metric_name, 0.0) for metric in metrics]
+        if not values:
+            return 0.0
+        return float(np.percentile(values, pct))
+
+    scene_peak = max(metric.get("scene_putt_score", 0.0) for metric in metrics)
+    pose_heights = [
+        metric.get("scene_pose_height_ratio")
+        for metric in metrics
+        if metric.get("scene_pose_height_ratio") is not None
+    ]
+    pose_height = min(pose_heights) if pose_heights else None
+    max_shoulder = max(metric.get("shoulder_change", 0.0) for metric in metrics)
+    max_hip = max(metric.get("hip_change", 0.0) for metric in metrics)
+    max_wrist_motion = max(metric.get("wrist_motion", 0.0) for metric in metrics)
+    max_wrist_speed = max(metric.get("wrist_speed", 0.0) for metric in metrics)
+    max_elbow = max(metric.get("elbow_motion", 0.0) for metric in metrics)
+    p90_shoulder = _percentile("shoulder_change", 90)
+    p90_hip = _percentile("hip_change", 90)
+    p90_wrist_speed = _percentile("wrist_speed", 90)
+    p75_wrist_motion = _percentile("wrist_motion", 75)
+    p75_wrist_speed = _percentile("wrist_speed", 75)
+    p75_shoulder = _percentile("shoulder_change", 75)
+    p75_hip = _percentile("hip_change", 75)
+    scene_green_peak = max(metric.get("scene_green_ratio", 0.0) for metric in metrics)
+
+    trail = swing_ctx.get("ball_trail") or []
+    setup_span = swing_ctx.get("setup_span") or {}
+    rolling_putt_like = _ball_trail_looks_like_putt_roll(trail)
+    recent_metrics = metrics[-8:]
+    valid_spine_angles = [
+        metric.get("spine_angle")
+        for metric in recent_metrics
+        if metric.get("spine_angle") is not None and metric.get("spine_angle") > 0.0
+    ]
+    stable_green_spine_frames = 0
+    if valid_spine_angles:
+        spine_median = float(np.median(valid_spine_angles))
+        for angle in reversed(valid_spine_angles):
+            if angle < 15.0 or angle > 60.0 or abs(angle - spine_median) > 10.0:
+                break
+            stable_green_spine_frames += 1
+
+    strong_full_swing_burst = (
+        max_wrist_motion >= 110.0
+        and max_wrist_speed >= 25.0
+        and (
+            max_elbow >= 70.0
+            or max_shoulder >= 40.0
+            or max_hip >= 25.0
+        )
+    )
+    if strong_full_swing_burst:
+        return False
+    if any(_live_scores_look_like_full_swing(metric) for metric in recent_metrics):
+        return False
+    if rolling_putt_like and scene_green_peak >= 0.60:
+        if (
+            pose_height is None
+            or pose_height <= 0.24
+            or scene_peak >= 0.55
+        ):
+            return True
+    if (rolling_putt_like
+            and (
+                scene_peak >= 0.82
+                or (
+                    scene_green_peak >= 0.72
+                    and pose_height is not None
+                    and pose_height <= 0.22
+                )
+                or (
+                    max_wrist_motion <= 75.0
+                    and max_wrist_speed <= 28.0
+                    and max_elbow <= 50.0
+                    and max_shoulder <= 22.0
+                    and max_hip <= 12.0
+                )
+            )):
+        return True
+
+    far_green_putt_like = (
+        scene_green_peak >= 0.55
+        and scene_peak >= 0.60
+        and pose_height is not None
+        and pose_height <= 0.18
+        and stable_green_spine_frames < 6
+        and max_wrist_motion <= 120.0
+        and max_wrist_speed <= 48.0
+        and max_elbow <= 110.0
+        and max_shoulder <= 42.0
+        and max_hip <= 22.0
+    )
+    if far_green_putt_like:
+        return True
+    weak_setup = (
+        setup_span.get("frame_count", 0) < 10
+        or setup_span.get("avg_confidence", setup_span.get("confidence", 0.0)) < 0.60
+    )
+    far_no_setup_putt_like = (
+        scene_green_peak >= 0.60
+        and scene_peak >= 0.72
+        and pose_height is not None
+        and pose_height <= 0.18
+        and weak_setup
+        and p75_wrist_motion <= 95.0
+        and p75_wrist_speed <= 45.0
+        and p90_shoulder <= 48.0
+        and p90_hip <= 28.0
+        and max_elbow <= 120.0
+    )
+    if far_no_setup_putt_like:
+        return True
+    if scene_peak < 0.72:
+        if not (rolling_putt_like and scene_green_peak >= 0.66):
+            return False
+    if pose_height is not None and pose_height > 0.27:
+        return False
+    if (rolling_putt_like
+            and scene_green_peak >= 0.66
+            and p75_wrist_motion <= 65.0
+            and p75_wrist_speed <= 28.0
+            and p75_shoulder <= 18.0
+            and p75_hip <= 10.0):
+        return True
+    if (ball_move_dist is not None
+            and ball_move_dist <= 40.0
+            and scene_green_peak >= 0.68
+            and p75_wrist_motion <= 80.0
+            and p75_wrist_speed <= 38.0
+            and p75_shoulder <= 22.0
+            and p75_hip <= 12.0):
+        return True
+    strong_scene_putt_like = scene_peak >= 0.90 and (pose_height is None or pose_height <= 0.24)
+    if strong_scene_putt_like:
+        if p90_shoulder <= 42.0 and p90_hip <= 20.0:
+            return True
+        if (ball_move_dist is None
+                and p90_shoulder <= 55.0
+                and p90_hip <= 25.0
+                and p90_wrist_speed <= 75.0):
+            return True
+        if ball_move_dist is not None and ball_move_dist <= 250.0:
+            return True
+    if ball_move_dist is not None and ball_move_dist <= 90.0:
+        return True
+    if max_shoulder > 36.0 or max_hip > 14.0:
+        return False
+    if max_wrist_speed > 60.0 and max_elbow > 180.0 and p90_wrist_speed > 45.0:
+        return False
+    return True
+
+
+def _live_scores_look_like_putt(scores, scene_green_ratio, scene_putt_score, ball_move_dist=None):
+    if ball_move_dist is None or ball_move_dist > 160.0:
+        return False
+    if not scores:
+        return (
+            scene_green_ratio >= 0.72
+            and scene_putt_score >= 0.60
+        )
+    wrist_motion = scores.get("wrist_motion", 0.0)
+    wrist_speed = scores.get("wrist_speed", 0.0)
+    shoulder = scores.get("shoulder_change", 0.0)
+    hip = scores.get("hip_change", 0.0)
+    elbow = scores.get("elbow_motion", 0.0)
+    if scene_green_ratio < 0.62:
+        return False
+    if scene_putt_score < 0.45:
+        return False
+    if ball_move_dist <= 70.0:
+        wrist_cap = 25.0
+        speed_cap = 15.0
+        shoulder_cap = 12.0
+        hip_cap = 8.0
+        elbow_cap = 20.0
+    else:
+        wrist_cap = 35.0
+        speed_cap = 22.0
+        shoulder_cap = 16.0
+        hip_cap = 10.0
+        elbow_cap = 30.0
+    return (
+        wrist_motion <= wrist_cap
+        and wrist_speed <= speed_cap
+        and shoulder <= shoulder_cap
+        and hip <= hip_cap
+        and elbow <= elbow_cap
+    )
+
+
+def _live_scores_look_like_full_swing(scores):
+    if not scores:
+        return False
+    wrist_motion = scores.get("wrist_motion", 0.0)
+    wrist_speed = scores.get("wrist_speed", 0.0)
+    shoulder = scores.get("shoulder_change", 0.0)
+    hip = scores.get("hip_change", 0.0)
+    elbow = scores.get("elbow_motion", 0.0)
+    torso = max(shoulder, hip)
+    return (
+        wrist_motion >= 80.0
+        and (
+            (wrist_speed >= 25.0 and torso >= 15.0)
+            or elbow >= 70.0
+            or torso >= 28.0
+        )
+    )
+
+
+def _ball_trail_looks_like_putt_roll(ball_trail):
+    if not ball_trail:
+        return False
+    pts = [pt for pt in ball_trail if pt is not None]
+    if len(pts) < 4:
+        return False
+
+    steps = [_dist(pts[i - 1], pts[i]) for i in range(1, len(pts))]
+    if not steps:
+        return False
+
+    longest_run = 0
+    current_run = 0
+    rolling_steps = []
+    total_path = 0.0
+    for step in steps:
+        if 0.5 <= step <= 45.0:
+            current_run += 1
+            longest_run = max(longest_run, current_run)
+            rolling_steps.append(step)
+            total_path += step
+        else:
+            current_run = 0
+
+    if len(rolling_steps) < 3:
+        return False
+    median_step = float(np.median(rolling_steps))
+    p90_step = float(np.percentile(rolling_steps, 90))
+    return (
+        longest_run >= 3
+        and total_path >= 10.0
+        and median_step <= 20.0
+        and p90_step <= 38.0
+    )
+
+
+def _find_supportive_anchor_metric(swing_ctx, wrist_threshold, torso_threshold, recent_frames=18):
+    if not swing_ctx:
+        return None
+    metrics = swing_ctx.get("metrics", [])
+    if not metrics:
+        return None
+
+    best = None
+    for metric in metrics[-max(6, recent_frames):]:
+        spine_angle = metric.get("spine_angle")
+        if spine_angle is not None and spine_angle > 60.0:
+            continue
+
+        support_count, support_score = _swing_support_stats(
+            metric,
+            wrist_threshold,
+            torso_threshold,
+        )
+        if support_count < 2:
+            continue
+
+        wrist_motion = metric.get("wrist_motion", 0.0)
+        elbow_motion = metric.get("elbow_motion", 0.0)
+        torso_motion = max(
+            metric.get("shoulder_change", 0.0),
+            metric.get("hip_change", 0.0),
+        )
+        if not (
+            wrist_motion >= wrist_threshold * 0.55
+            or elbow_motion >= max(35.0, wrist_threshold * 0.65)
+            or torso_motion >= max(28.0, torso_threshold * 2.5)
+        ):
+            continue
+
+        score = wrist_motion / max(wrist_threshold, 1e-6)
+        score += 0.22 * support_score
+        score += 0.18 * (torso_motion / max(torso_threshold, 1e-6))
+        if elbow_motion >= max(35.0, wrist_threshold * 0.65):
+            score += 0.35
+        if metric.get("spine_in_range", False):
+            score += 0.15
+
+        candidate = {
+            "frame_idx": metric["frame_idx"],
+            "score": score,
+        }
+        if (best is None
+                or candidate["score"] > best["score"]
+                or (
+                    abs(candidate["score"] - best["score"]) <= 0.10
+                    and candidate["frame_idx"] > best["frame_idx"]
+                )):
+            best = candidate
+    return best
+
 
 def _select_ball_candidate(candidates, keypoints, confidences, previous_ball=None):
     if not candidates:
@@ -1471,6 +1919,7 @@ def _evaluate_vision_candidate(
     followthrough_frames,
     setup_min_frames,
     setup_confidence_min,
+    fps,
 ):
     if not swing_ctx or swing_ctx.get("shot_type") != "SWING":
         return None
@@ -1554,35 +2003,179 @@ def _evaluate_vision_candidate(
         )
 
         peak_wrist = peak_metric.get("wrist_motion", 0.0)
-        anchor_threshold = max(wrist_threshold, peak_wrist * 0.85)
+        peak_frame = peak_metric["frame_idx"]
+        lead_frames = max(3, int(round(0.75 * max(fps, 1.0))))
+        anchor_threshold = max(wrist_threshold, peak_wrist * 0.90)
         anchor_metric = next(
             (
                 item for item in cluster
+                if item["frame_idx"] >= peak_frame - lead_frames
+                and item["frame_idx"] <= peak_frame
                 if item.get("wrist_motion", 0.0) >= anchor_threshold
                 and item.get("support_count", 0) >= 1
             ),
             None,
         )
         if anchor_metric is None:
-            relaxed_threshold = max(wrist_threshold, peak_wrist * 0.78)
+            relaxed_threshold = max(wrist_threshold, peak_wrist * 0.84)
             anchor_metric = next(
                 (
                     item for item in cluster
+                    if item["frame_idx"] >= peak_frame - max(4, int(round(1.0 * max(fps, 1.0))))
+                    and item["frame_idx"] <= peak_frame
                     if item.get("wrist_motion", 0.0) >= relaxed_threshold
                     and item.get("support_count", 0) >= 1
                 ),
                 peak_metric,
             )
 
+        anchor_spine = anchor_metric.get("spine_angle")
+        if anchor_spine is not None and anchor_spine > 60.0:
+            continue
+
+        cluster_anchor_idx = next(
+            idx for idx, item in enumerate(cluster)
+            if item["frame_idx"] == anchor_metric["frame_idx"]
+        )
+        anchor_global_idx = next(
+            idx for idx, item in enumerate(enriched)
+            if item["frame_idx"] == anchor_metric["frame_idx"]
+        )
+        pre_anchor_window = cluster[max(0, cluster_anchor_idx - 8): cluster_anchor_idx + 1]
+        spine_angles = [
+            item.get("spine_angle")
+            for item in pre_anchor_window
+            if item.get("spine_angle") is not None and item.get("spine_angle") > 0.0
+        ]
+        spine_instability = 0.0
+        stable_fraction = 1.0
+        spine_median = anchor_spine if anchor_spine is not None else 0.0
+        if len(spine_angles) >= 4:
+            spine_median = float(np.median(spine_angles))
+            deviations = [abs(angle - spine_median) for angle in spine_angles]
+            spine_instability = max(deviations)
+            stable_fraction = sum(dev <= 10.0 for dev in deviations) / len(deviations)
+            if spine_median < 15.0 or spine_median > 60.0:
+                continue
+            if stable_fraction < 0.75 or spine_instability > 12.0:
+                continue
+
+        green_spine_run = 0
+        if spine_median and spine_median > 0.0:
+            for item in reversed(cluster[:cluster_anchor_idx + 1]):
+                angle = item.get("spine_angle")
+                if angle is None or angle <= 0.0 or angle > 60.0:
+                    break
+                if angle < 15.0:
+                    break
+                if abs(angle - spine_median) > 10.0:
+                    break
+                green_spine_run += 1
+
+        stable_pre_anchor_run = 0
+        if spine_median and spine_median > 0.0:
+            for item in reversed(enriched[:anchor_global_idx + 1]):
+                angle = item.get("spine_angle")
+                if angle is None or angle <= 0.0 or angle > 60.0:
+                    break
+                if angle < 15.0:
+                    break
+                if abs(angle - spine_median) > 10.0:
+                    break
+                stable_pre_anchor_run += 1
+
+        post_anchor_frames = max(followthrough_frames, int(round(2.0 * max(fps, 1.0))))
+        immediate_post_frames = max(4, int(round(1.0 * max(fps, 1.0))))
+        post_anchor_window = enriched[anchor_global_idx + 1: anchor_global_idx + 1 + post_anchor_frames]
+        immediate_post_window = enriched[anchor_global_idx + 1: anchor_global_idx + 1 + immediate_post_frames]
+        post_spine_angles = [
+            item.get("spine_angle")
+            for item in post_anchor_window
+            if item.get("spine_angle") is not None and item.get("spine_angle") > 0.0
+        ]
+        immediate_post_angles = [
+            item.get("spine_angle")
+            for item in immediate_post_window
+            if item.get("spine_angle") is not None and item.get("spine_angle") > 0.0
+        ]
+        post_anchor_break = False
+        immediate_post_break = False
+        post_anchor_break_count = 0
+        post_anchor_stable_fraction = 1.0
+        if post_spine_angles:
+            post_anchor_break_count = sum(angle > 60.0 for angle in post_spine_angles)
+            post_deviations = [abs(angle - spine_median) for angle in post_spine_angles]
+            post_anchor_stable_fraction = (
+                sum(dev <= 10.0 for dev in post_deviations) / len(post_deviations)
+            )
+            post_anchor_break = post_anchor_break_count > 0
+        if immediate_post_angles:
+            immediate_post_break = any(angle > 60.0 for angle in immediate_post_angles)
+
+        anchor_spine_valid = anchor_spine is not None and 15.0 <= anchor_spine <= 60.0
+        fallback_spine_ok = anchor_spine is None or anchor_spine <= 60.0
+        posture_backed = (
+            anchor_spine_valid
+            and stable_pre_anchor_run >= max(6, int(round(0.75 * max(fps, 1.0))))
+            and green_spine_run >= max(4, int(round(0.40 * max(fps, 1.0))))
+            and stable_fraction >= 0.75
+        )
+        setup_aligned = False
         setup_bonus = 0.0
+        setup_gap_frames = None
+        setup_gap_penalty = 0.0
         if setup_span:
             gap_from_setup = max(0, cluster[0]["frame_idx"] - setup_end_frame)
-            setup_bonus = max(0.0, 0.12 - (0.01 * min(gap_from_setup, 12)))
+            setup_gap_frames = max(0, anchor_metric["frame_idx"] - setup_end_frame)
+            setup_bonus = max(0.0, 0.42 - (0.02 * min(gap_from_setup, 16)))
+            setup_aligned = gap_from_setup <= max(18, followthrough_frames * 4)
+            gap_sec = setup_gap_frames / max(fps, 1.0)
+            if gap_sec > 2.0:
+                setup_gap_penalty = min(4.5, 0.28 * ((gap_sec - 2.0) ** 2))
+        if posture_backed:
+            setup_aligned = True
+            setup_bonus = max(setup_bonus, 0.30)
+            setup_gap_penalty *= 0.15
+        spine_penalty = 0.0 if anchor_metric.get("spine_in_range", False) else 0.55
+        if immediate_post_break:
+            post_break_penalty = 0.75 if posture_backed else 5.0
+        elif post_anchor_break:
+            post_break_penalty = 0.35 if posture_backed else 2.0
+        else:
+            post_break_penalty = 0.0
+        setup_support_score = (
+            (1.55 if setup_aligned else 0.0)
+            + min(2.10, 0.12 * stable_pre_anchor_run)
+            + min(1.10, 0.07 * green_spine_run)
+            + (0.55 if anchor_spine_valid else 0.0)
+            + (0.35 if stable_fraction >= 0.85 else 0.0)
+        )
 
         cluster_score = peak_wrist / max(wrist_threshold, 1e-6)
         cluster_score += 0.18 * peak_metric.get("support_score", 0.0)
         cluster_score += 0.05 * follow_support
         cluster_score += setup_bonus
+        cluster_score += setup_support_score
+        cluster_score -= setup_gap_penalty
+        cluster_score -= spine_penalty
+        cluster_score -= post_break_penalty
+        if spine_instability > 0.0:
+            cluster_score -= 0.03 * spine_instability
+        cluster_score += 0.45 * stable_fraction
+        cluster_score += 0.05 * post_anchor_stable_fraction
+
+        if setup_aligned and anchor_spine_valid and stable_pre_anchor_run >= 8 and stable_fraction >= 0.85 and not immediate_post_break:
+            validation_tier = 0
+        elif setup_aligned and anchor_spine_valid and stable_pre_anchor_run >= 5 and stable_fraction >= 0.75 and not immediate_post_break:
+            validation_tier = 1
+        elif posture_backed and anchor_spine_valid and stable_pre_anchor_run >= 8 and stable_fraction >= 0.75:
+            validation_tier = 2
+        elif anchor_spine_valid and stable_pre_anchor_run >= 5 and stable_fraction >= 0.75 and not immediate_post_break:
+            validation_tier = 2
+        elif fallback_spine_ok and not immediate_post_break and not post_anchor_break:
+            validation_tier = 3
+        else:
+            validation_tier = 4
 
         candidates.append({
             "impact_frame": anchor_metric["frame_idx"],
@@ -1595,30 +2188,62 @@ def _evaluate_vision_candidate(
             "candidate_end_frame": cluster[-1]["frame_idx"],
             "cluster_start_frame": cluster[0]["frame_idx"],
             "peak_frame": peak_metric["frame_idx"],
+            "setup_aligned": setup_aligned,
+            "setup_gap_frames": setup_gap_frames,
+            "setup_gap_penalty": setup_gap_penalty,
+            "spine_instability": spine_instability,
+            "spine_stable_fraction": stable_fraction,
+            "anchor_spine_angle": anchor_spine,
+            "posture_backed": posture_backed,
+            "green_spine_run": green_spine_run,
+            "stable_pre_anchor_run": stable_pre_anchor_run,
+            "immediate_post_break": immediate_post_break,
+            "post_anchor_break": post_anchor_break,
+            "post_anchor_break_count": post_anchor_break_count,
+            "post_anchor_stable_fraction": post_anchor_stable_fraction,
+            "setup_support_score": setup_support_score,
+            "validation_tier": validation_tier,
         })
 
     if not candidates:
         return None
 
-    candidate_pool = candidates
-    if setup_end_frame is not None:
-        setup_window_frames = max(18, followthrough_frames * 5)
-        setup_aligned = [
+    best_score = max(candidate["score"] for candidate in candidates)
+    tier_margins = {
+        0: 0.60,
+        1: 0.72,
+        2: 0.88,
+        3: 0.94,
+        4: 1.00,
+    }
+    candidate_pool = None
+    for tier in (0, 1, 2, 3, 4):
+        tier_candidates = [c for c in candidates if c.get("validation_tier", 3) == tier]
+        if not tier_candidates:
+            continue
+        tier_best_score = max(c["score"] for c in tier_candidates)
+        if tier_best_score >= best_score * tier_margins[tier]:
+            candidate_pool = tier_candidates
+            break
+    if candidate_pool is None:
+        candidate_pool = [
             candidate for candidate in candidates
-            if candidate["cluster_start_frame"] <= setup_end_frame + setup_window_frames
+            if candidate["score"] >= best_score * 0.75
         ]
-        if setup_aligned:
-            candidate_pool = setup_aligned
 
-    best_score = max(candidate["score"] for candidate in candidate_pool)
-    tied_candidates = [
-        candidate for candidate in candidate_pool
-        if candidate["score"] >= best_score * 0.93
-    ]
+    tied_candidates = list(candidate_pool)
     tied_candidates.sort(
         key=lambda candidate: (
-            candidate["impact_frame"],
+            candidate.get("validation_tier", 3),
+            0 if candidate.get("setup_aligned") else 1,
+            0 if not candidate.get("immediate_post_break") else 1,
+            0 if not candidate.get("post_anchor_break") else 1,
+            -candidate.get("setup_support_score", 0.0),
+            -candidate.get("stable_pre_anchor_run", 0),
+            -candidate.get("green_spine_run", 0),
+            -candidate.get("spine_stable_fraction", 0.0),
             -candidate["score"],
+            candidate["impact_frame"],
         )
     )
     return tied_candidates[0]
@@ -1687,25 +2312,355 @@ def _resolve_shot_window(
     return start_sec, end_sec, "setup"
 
 
+def _revalidate_pending_shot(shot, frame_records, fps):
+    resolved = shot.copy()
+    if resolved.get("shot_type") != "SWING":
+        return resolved
+
+    anchor_frame = (
+        resolved.get("selection_anchor_frame")
+        if resolved.get("selection_anchor_frame") is not None
+        else resolved.get("vision_anchor_frame")
+        if resolved.get("vision_anchor_frame") is not None
+        else resolved.get("impact_frame")
+    )
+    if anchor_frame is None or anchor_frame <= 0 or anchor_frame >= len(frame_records):
+        return resolved
+
+    def _angle_at(idx):
+        if idx <= 0 or idx >= len(frame_records):
+            return None
+        record = frame_records[idx]
+        if not record:
+            return None
+        angle = record.get("spine_angle")
+        return angle if angle is not None and angle > 0.0 else None
+
+    def _setup_aligned(setup_span, anchor_idx):
+        if not setup_span:
+            return False
+        end_frame = setup_span.get("end_frame")
+        if end_frame is None:
+            return False
+        return (
+            setup_span.get("frame_count", 0) >= 10
+            and setup_span.get("avg_confidence", setup_span.get("confidence", 0.0)) >= 0.60
+            and anchor_idx <= end_frame + max(18, int(round(1.25 * max(fps, 1.0))))
+        )
+
+    pre_window_frames = max(8, int(round(1.25 * max(fps, 1.0))))
+    post_window_frames = max(10, int(round(2.0 * max(fps, 1.0))))
+    immediate_post_frames = max(4, int(round(1.0 * max(fps, 1.0))))
+
+    anchor_angle = _angle_at(anchor_frame)
+    pre_angles = [
+        angle for angle in (
+            _angle_at(idx) for idx in range(max(1, anchor_frame - pre_window_frames), anchor_frame + 1)
+        )
+        if angle is not None
+    ]
+    in_range_pre = [angle for angle in pre_angles if 15.0 <= angle <= 60.0]
+    if in_range_pre:
+        spine_median = float(np.median(in_range_pre))
+    elif anchor_angle is not None:
+        spine_median = float(anchor_angle)
+    elif pre_angles:
+        spine_median = float(np.median(pre_angles))
+    else:
+        spine_median = 0.0
+
+    stable_fraction = 0.0
+    spine_instability = 99.0
+    if pre_angles:
+        deviations = [abs(angle - spine_median) for angle in pre_angles]
+        stable_fraction = sum(dev <= 10.0 for dev in deviations) / len(deviations)
+        spine_instability = max(deviations)
+
+    green_spine_run = 0
+    stable_pre_anchor_run = 0
+    if spine_median > 0.0:
+        for idx in range(anchor_frame, 0, -1):
+            angle = _angle_at(idx)
+            if angle is None or angle > 60.0 or angle < 15.0 or abs(angle - spine_median) > 10.0:
+                break
+            green_spine_run += 1
+        for idx in range(anchor_frame, 0, -1):
+            angle = _angle_at(idx)
+            if angle is None or angle > 60.0 or angle < 15.0 or abs(angle - spine_median) > 10.0:
+                break
+            stable_pre_anchor_run += 1
+
+    post_angles = [
+        angle for angle in (
+            _angle_at(idx) for idx in range(anchor_frame + 1, min(len(frame_records), anchor_frame + 1 + post_window_frames))
+        )
+        if angle is not None
+    ]
+    immediate_post_angles = [
+        angle for angle in (
+            _angle_at(idx) for idx in range(anchor_frame + 1, min(len(frame_records), anchor_frame + 1 + immediate_post_frames))
+        )
+        if angle is not None
+    ]
+    post_anchor_break_count = 0
+    post_anchor_stable_fraction = 1.0
+    post_anchor_break = False
+    immediate_post_break = False
+    trailing_frames_available = max(0, len(frame_records) - anchor_frame - 1)
+    if post_angles:
+        post_anchor_break_count = sum(angle > 60.0 for angle in post_angles)
+        post_deviations = [abs(angle - spine_median) for angle in post_angles]
+        post_anchor_stable_fraction = sum(dev <= 10.0 for dev in post_deviations) / len(post_deviations)
+        post_anchor_break = post_anchor_break_count > 0
+    if immediate_post_angles:
+        immediate_post_break = any(angle > 60.0 for angle in immediate_post_angles)
+    incomplete_trailing_context = trailing_frames_available < max(6, int(round(1.0 * max(fps, 1.0))))
+
+    anchor_spine_valid = anchor_angle is not None and 15.0 <= anchor_angle <= 60.0
+    fallback_spine_ok = anchor_angle is None or anchor_angle <= 60.0
+    posture_backed = (
+        anchor_spine_valid
+        and stable_pre_anchor_run >= max(6, int(round(0.75 * max(fps, 1.0))))
+        and green_spine_run >= max(4, int(round(0.40 * max(fps, 1.0))))
+        and stable_fraction >= 0.75
+    )
+    computed_setup_aligned = _setup_aligned(resolved.get("setup_span"), anchor_frame)
+    setup_aligned = bool(resolved.get("setup_aligned")) or computed_setup_aligned or posture_backed
+    setup_gap_frames = None
+    setup_gap_penalty = 0.0
+    setup_span = resolved.get("setup_span") or {}
+    setup_end_frame = setup_span.get("end_frame")
+    if setup_end_frame is not None:
+        setup_gap_frames = max(0, anchor_frame - setup_end_frame)
+        gap_sec = setup_gap_frames / max(fps, 1.0)
+        if gap_sec > 2.0:
+            setup_gap_penalty = min(4.5, 0.28 * ((gap_sec - 2.0) ** 2))
+    if posture_backed:
+        setup_gap_penalty *= 0.15
+
+    if setup_aligned and anchor_spine_valid and stable_pre_anchor_run >= 8 and stable_fraction >= 0.85 and not immediate_post_break:
+        validation_tier = 0
+    elif setup_aligned and anchor_spine_valid and stable_pre_anchor_run >= 5 and stable_fraction >= 0.75 and not immediate_post_break:
+        validation_tier = 1
+    elif posture_backed and anchor_spine_valid and stable_pre_anchor_run >= 8 and stable_fraction >= 0.75:
+        validation_tier = 2
+    elif anchor_spine_valid and stable_pre_anchor_run >= 5 and stable_fraction >= 0.75 and not immediate_post_break:
+        validation_tier = 2
+    elif fallback_spine_ok and stable_fraction >= 0.50 and not immediate_post_break and not post_anchor_break:
+        validation_tier = 3
+    else:
+        validation_tier = 4
+
+    selection_score = float(resolved.get("selection_score", 0.0) or 0.0)
+    selection_score += min(1.35, 0.07 * stable_pre_anchor_run)
+    selection_score += min(0.75, 0.04 * green_spine_run)
+    selection_score += 0.45 * stable_fraction
+    selection_score -= setup_gap_penalty
+    if setup_aligned and stable_pre_anchor_run >= 12:
+        selection_score += 1.10
+    elif setup_aligned and stable_pre_anchor_run >= 6:
+        selection_score += 0.75
+    elif setup_aligned and stable_pre_anchor_run >= 4:
+        selection_score += 0.40
+    if anchor_angle is not None and anchor_angle > 60.0:
+        selection_score = min(selection_score, 0.01)
+    elif anchor_angle is not None and anchor_angle < 15.0 and not setup_aligned:
+        selection_score = min(selection_score, 0.08)
+    elif immediate_post_break:
+        selection_score = min(selection_score, 0.35 if posture_backed else 0.02)
+    elif post_anchor_break:
+        selection_score = min(selection_score, 0.45 if posture_backed else 0.06)
+    elif incomplete_trailing_context and resolved.get("confirm_tag") in {"vision", "audio"}:
+        selection_score = min(selection_score, 0.18)
+
+    if resolved.get("weak_ball_only_anchor"):
+        selection_score = min(selection_score, 0.05)
+        validation_tier = 4
+        setup_aligned = False
+        green_spine_run = 0
+        stable_pre_anchor_run = 0
+        post_anchor_break = True
+
+    resolved["selection_score"] = selection_score
+    if incomplete_trailing_context and resolved.get("confirm_tag") in {"vision", "audio"}:
+        validation_tier = max(validation_tier, 4)
+    resolved["anchor_validation_tier"] = validation_tier
+    resolved["setup_aligned"] = setup_aligned
+    resolved["setup_gap_frames"] = setup_gap_frames
+    resolved["setup_gap_penalty"] = setup_gap_penalty
+    resolved["posture_backed"] = posture_backed
+    resolved["green_spine_run"] = green_spine_run
+    resolved["stable_pre_anchor_run"] = stable_pre_anchor_run
+    resolved["anchor_spine_angle"] = anchor_angle
+    resolved["spine_stable_fraction"] = stable_fraction
+    resolved["post_anchor_break"] = post_anchor_break
+    resolved["post_anchor_break_count"] = post_anchor_break_count
+    resolved["post_anchor_stable_fraction"] = post_anchor_stable_fraction
+    resolved["immediate_post_break"] = immediate_post_break
+    resolved["incomplete_trailing_context"] = incomplete_trailing_context
+    return resolved
+
+
 def _select_primary_shot(resolved_shots):
     if not resolved_shots:
         return []
 
-    best_score = max(shot.get("selection_score", 0.0) for shot in resolved_shots)
-    tied = [
-        shot for shot in resolved_shots
-        if shot.get("selection_score", 0.0) >= best_score * 0.93
-    ]
-    tied.sort(
-        key=lambda shot: (
+    def anchor_frame(shot):
+        return (
             shot.get("selection_anchor_frame")
             if shot.get("selection_anchor_frame") is not None
             else shot.get("vision_anchor_frame")
             if shot.get("vision_anchor_frame") is not None
             else shot.get("impact_frame")
             if shot.get("impact_frame") is not None
-            else 10 ** 9,
+            else 10 ** 9
+        )
+
+    def confirm_priority(shot):
+        return {
+            "ball+audio": 5,
+            "ball": 4,
+            "vision+audio": 3,
+            "vision": 2,
+            "audio": 1,
+        }.get(shot.get("confirm_tag"), 0)
+
+    def has_valid_setup(shot):
+        if shot.get("setup_aligned") is not None:
+            return bool(shot.get("setup_aligned"))
+        if shot.get("posture_backed") is not None:
+            return bool(shot.get("posture_backed"))
+        setup = shot.get("setup_span") or {}
+        anchor_frame = (
+            shot.get("selection_anchor_frame")
+            if shot.get("selection_anchor_frame") is not None
+            else shot.get("vision_anchor_frame")
+            if shot.get("vision_anchor_frame") is not None
+            else shot.get("impact_frame")
+        )
+        end_frame = setup.get("end_frame")
+        close_to_setup = (
+            anchor_frame is not None
+            and end_frame is not None
+            and anchor_frame <= end_frame + 24
+        )
+        return (
+            setup.get("frame_count", 0) >= 10
+            and setup.get("avg_confidence", setup.get("confidence", 0.0)) >= 0.60
+            and close_to_setup
+        )
+
+    def shot_validation_tier(shot):
+        return int(shot.get("anchor_validation_tier", 3))
+
+    candidate_pool = list(resolved_shots)
+    best_overall_score = max((shot.get("selection_score", 0.0) for shot in candidate_pool), default=0.0)
+    preferred_setup_pool = [
+        shot for shot in candidate_pool
+        if has_valid_setup(shot)
+        and shot_validation_tier(shot) <= 2
+        and not shot.get("immediate_post_break", False)
+    ]
+    if preferred_setup_pool:
+        best_setup_score = max(shot.get("selection_score", 0.0) for shot in preferred_setup_pool)
+        if best_setup_score >= best_overall_score * 0.55:
+            candidate_pool = preferred_setup_pool
+    valid_posture_pool = [
+        shot for shot in candidate_pool
+        if not shot.get("immediate_post_break", False)
+        and not shot.get("weak_ball_only_anchor", False)
+    ]
+    if valid_posture_pool:
+        candidate_pool = valid_posture_pool
+    highest_priority = max((confirm_priority(shot) for shot in candidate_pool), default=0)
+    if highest_priority >= 3:
+        strict_top_priority_pool = [
+            shot for shot in candidate_pool
+            if confirm_priority(shot) == highest_priority
+            and shot_validation_tier(shot) <= 2
+            and shot.get("selection_score", 0.0) >= 0.10
+        ]
+        if strict_top_priority_pool:
+            candidate_pool = strict_top_priority_pool
+        top_priority_pool = [
+            shot for shot in candidate_pool
+            if confirm_priority(shot) == highest_priority
+            and shot.get("selection_score", 0.0) >= 0.15
+        ]
+        if top_priority_pool:
+            candidate_pool = top_priority_pool
+    preferred_audio = [
+        shot for shot in candidate_pool
+        if confirm_priority(shot) >= 3
+        and shot_validation_tier(shot) <= 2
+        and not shot.get("post_anchor_break", False)
+    ]
+    if preferred_audio:
+        candidate_pool = preferred_audio
+    audio_backed = [
+        shot for shot in candidate_pool
+        if confirm_priority(shot) >= 3
+        and not shot.get("post_anchor_break", False)
+    ]
+    if audio_backed:
+        filtered_pool = [
+            shot for shot in candidate_pool
+            if not (
+                shot.get("confirm_tag") in {"vision", "audio"}
+                and shot.get("incomplete_trailing_context", False)
+            )
+        ]
+        if filtered_pool:
+            candidate_pool = filtered_pool
+    best_score = max(shot.get("selection_score", 0.0) for shot in candidate_pool)
+    setup_backed = [
+        shot for shot in candidate_pool
+        if has_valid_setup(shot)
+        and shot_validation_tier(shot) <= 3
+        and not shot.get("immediate_post_break", False)
+    ]
+    if setup_backed:
+        best_setup_score = max(shot.get("selection_score", 0.0) for shot in setup_backed)
+        if best_setup_score >= best_score * 0.70:
+            candidate_pool = setup_backed
+            best_score = best_setup_score
+
+    tier_margins = {
+        0: 0.45,
+        1: 0.58,
+        2: 0.88,
+        3: 0.94,
+        4: 1.00,
+    }
+    for tier in (0, 1, 2, 3, 4):
+        tier_candidates = [shot for shot in candidate_pool if shot_validation_tier(shot) == tier]
+        if not tier_candidates:
+            continue
+        tier_best_score = max(shot.get("selection_score", 0.0) for shot in tier_candidates)
+        if tier_best_score >= best_score * tier_margins[tier]:
+            candidate_pool = tier_candidates
+            best_score = tier_best_score
+            break
+
+    best_score = max(shot.get("selection_score", 0.0) for shot in candidate_pool)
+    tied = [
+        shot for shot in candidate_pool
+        if shot.get("selection_score", 0.0) >= best_score * 0.75
+    ]
+    tied.sort(
+        key=lambda shot: (
+            shot_validation_tier(shot),
+            0 if has_valid_setup(shot) else 1,
+            0 if not shot.get("immediate_post_break", False) else 1,
+            0 if not shot.get("post_anchor_break", False) else 1,
+            shot.get("setup_gap_frames", 10 ** 6) if shot.get("setup_gap_frames") is not None else 10 ** 6,
+            -(1.25 if has_valid_setup(shot) else 0.0),
+            -shot.get("stable_pre_anchor_run", 0),
+            -shot.get("green_spine_run", 0),
+            -shot.get("spine_stable_fraction", 0.0),
+            -confirm_priority(shot),
             -shot.get("selection_score", 0.0),
+            anchor_frame(shot),
         )
     )
     return tied[:1]
@@ -1927,20 +2882,101 @@ def process_clip(
         saved_timeout_shot = False
         motion_faded = reason == "motion-faded"
         min_motion_fade_vision_score = 1.35
+        effective_shot_type = shot_type
+        vision_swing_ctx = swing_ctx
 
-        if (vision_fallback_enabled and shot_type == "SWING" and swing_ctx):
+        if (
+            shot_type != "SWING"
+            and swing_ctx
+            and not save_putts
+            and audio.enabled
+            and not _swing_context_looks_like_putt(
+                swing_ctx,
+                ball_move_dist=getattr(sm, "last_ball_move_dist", None),
+            )
+        ):
+            metrics = swing_ctx.get("metrics", [])
+            max_wrist = max((metric.get("wrist_motion", 0.0) for metric in metrics), default=0.0)
+            max_speed = max((metric.get("wrist_speed", 0.0) for metric in metrics), default=0.0)
+            max_elbow = max((metric.get("elbow_motion", 0.0) for metric in metrics), default=0.0)
+            max_shoulder = max((metric.get("shoulder_change", 0.0) for metric in metrics), default=0.0)
+            max_hip = max((metric.get("hip_change", 0.0) for metric in metrics), default=0.0)
+            audio_hit, reclass_audio = audio.check_window(swing_entry_frame, frame_no, fps)
+            strong_reclass_burst = (
+                max_wrist >= wrist_swing_threshold * 0.95
+                and (
+                    max_speed >= wrist_speed_swing_threshold * 0.70
+                    or max_elbow >= wrist_swing_threshold * 0.65
+                    or max_shoulder >= shoulder_swing_threshold * 1.35
+                    or max_hip >= hip_swing_threshold * 1.60
+                )
+            )
+            if audio_hit and strong_reclass_burst:
+                effective_shot_type = "SWING"
+                if swing_ctx:
+                    vision_swing_ctx = swing_ctx.copy()
+                    vision_swing_ctx["shot_type"] = "SWING"
+                hold_audio_info(frame_no, reclass_audio)
+                print(
+                    f"    [Promote f{frame_no}] Reclassified {shot_type} window as SWING "
+                    f"(audio + burst support)"
+                )
+
+        if (vision_fallback_enabled and effective_shot_type == "SWING" and vision_swing_ctx):
+            if not save_putts and motion_faded:
+                metrics = vision_swing_ctx.get("metrics", [])
+                scene_peak = max((metric.get("scene_putt_score", 0.0) for metric in metrics), default=0.0)
+                pose_heights = [
+                    metric.get("scene_pose_height_ratio")
+                    for metric in metrics
+                    if metric.get("scene_pose_height_ratio") is not None
+                ]
+                pose_height = min(pose_heights) if pose_heights else None
+                if scene_peak >= 0.90 and (pose_height is None or pose_height <= 0.24):
+                    print(f"    [PuttVeto f{frame_no}] Strong putt-like scene on faded vision fallback — leaving clip unchanged")
+                    return False
+            if not save_putts and _swing_context_looks_like_putt(
+                vision_swing_ctx,
+                ball_move_dist=getattr(sm, "last_ball_move_dist", None),
+            ):
+                print(f"    [PuttVeto f{frame_no}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
+                return False
+            metrics = vision_swing_ctx.get("metrics", [])
+            scene_peak = max((metric.get("scene_putt_score", 0.0) for metric in metrics), default=0.0)
+            pose_heights = [
+                metric.get("scene_pose_height_ratio")
+                for metric in metrics
+                if metric.get("scene_pose_height_ratio") is not None
+            ]
+            pose_height = min(pose_heights) if pose_heights else None
+            setup_span = vision_swing_ctx.get("setup_span") or {}
             vision_candidate = (
-                swing_ctx.get("confirmed_candidate")
+                vision_swing_ctx.get("confirmed_candidate")
                 or _evaluate_vision_candidate(
-                    swing_ctx,
+                    vision_swing_ctx,
                     wrist_swing_threshold,
                     vision_torso_confirm_threshold,
                     vision_followthrough_frames,
                     vision_setup_min_frames,
                     vision_setup_confidence_min,
+                    fps,
                 )
             )
             if vision_candidate:
+                weak_far_green_scene = (
+                    not save_putts
+                    and scene_peak >= 0.72
+                    and pose_height is not None
+                    and pose_height <= 0.18
+                    and (
+                        setup_span.get("frame_count", 0) < 10
+                        or setup_span.get("avg_confidence", setup_span.get("confidence", 0.0)) < 0.60
+                    )
+                    and vision_candidate.get("validation_tier", 3) >= 3
+                )
+                if weak_far_green_scene:
+                    print(f"    [PuttVeto f{frame_no}] Far weak-setup green scene on vision fallback — leaving clip unchanged")
+                    return False
                 audio_info = None
                 if audio.enabled:
                     audio_start = max(
@@ -1957,19 +2993,45 @@ def process_clip(
                 if (not motion_faded
                         or audio_info
                         or vision_candidate["score"] >= min_motion_fade_vision_score):
+                    provisional_ball_only = (
+                        vision_swing_ctx.get("ball_confirm_frame") is not None
+                        and audio_info is None
+                    )
+                    weak_ball_only_anchor = (
+                        provisional_ball_only
+                        and (
+                            motion_faded
+                            or vision_candidate.get("validation_tier", 3) >= 3
+                            or not vision_candidate.get("setup_aligned")
+                            or vision_candidate.get("stable_pre_anchor_run", 0) < 4
+                        )
+                    )
                     confirm_tag = "vision+audio" if audio_info else "vision"
+                    if vision_swing_ctx.get("ball_confirm_frame") is not None:
+                        confirm_tag = "ball+audio" if audio_info else "ball"
                     impact_frame = vision_candidate["impact_frame"]
+                    selection_score = vision_candidate.get("score", 0.0)
+                    if weak_ball_only_anchor:
+                        selection_score = min(selection_score, 0.05)
                     pending_shots.append({
                         "shot_type": "SWING",
                         "confirm_tag": confirm_tag,
                         "trail": list(sm.ball_trail),
                         "merged": False,
                         "event_sec": impact_frame / fps,
-                        "impact_frame": impact_frame,
-                        "vision_anchor_frame": impact_frame,
-                        "setup_span": vision_candidate.get("setup_span"),
-                        "selection_score": vision_candidate.get("score", 0.0),
-                        "selection_anchor_frame": impact_frame,
+            "impact_frame": impact_frame,
+            "vision_anchor_frame": impact_frame,
+            "setup_span": vision_candidate.get("setup_span"),
+            "selection_score": selection_score,
+            "selection_anchor_frame": impact_frame,
+            "weak_ball_only_anchor": weak_ball_only_anchor,
+            "anchor_validation_tier": vision_candidate.get("validation_tier", 3),
+            "setup_aligned": vision_candidate.get("setup_aligned"),
+            "green_spine_run": vision_candidate.get("green_spine_run", 0),
+                        "stable_pre_anchor_run": vision_candidate.get("stable_pre_anchor_run", 0),
+                        "anchor_spine_angle": vision_candidate.get("anchor_spine_angle"),
+                        "spine_stable_fraction": vision_candidate.get("spine_stable_fraction", 0.0),
+                        "post_anchor_break": vision_candidate.get("post_anchor_break", False),
                     })
                     print(f"\n  ★ SWING detected at {format_time(impact_frame / fps)}  "
                           f"[{confirm_tag}]  "
@@ -1993,6 +3055,7 @@ def process_clip(
                     "setup_span": swing_ctx.get("setup_span") if swing_ctx else None,
                     "selection_score": 0.0,
                     "selection_anchor_frame": impact_frame,
+                    "weak_ball_only_anchor": False,
                 })
                 print(f"\n  ★ {shot_type} detected at {format_time(audio_info['clip_time_sec'])}  "
                       f"[audio]  "
@@ -2024,6 +3087,12 @@ def process_clip(
             raw_kp = pose_res[0].keypoints[0].xy[0].cpu().numpy()
             raw_cf = pose_res[0].keypoints[0].conf[0].cpu().numpy()
         kp, cf = smoother.update(raw_kp, raw_cf)
+        scene_info = _estimate_putt_scene(frame, kp, cf, min_conf=0.25)
+        sm.scene_putt_score = scene_info["score"]
+        sm.scene_putt_peak = max(sm.scene_putt_peak * 0.995, scene_info["score"])
+        sm.scene_green_ratio = scene_info["green_ratio"]
+        sm.scene_pose_height_ratio = scene_info["pose_height_ratio"]
+        sm.scene_texture_laplacian = scene_info["laplacian_var"]
 
         # ── Ball ──
         ball_res  = ball_model.predict(
@@ -2066,6 +3135,7 @@ def process_clip(
             "frame_idx": frame_idx,
             "feet_stable": sm.feet_stable,
             "spine_in_range": sm.spine_in_range,
+            "spine_angle": sm.last_spine_angle,
             "setup_confidence": setup_confidence,
             "posture_ok": posture_ok,
             "state": new_state,
@@ -2100,6 +3170,8 @@ def process_clip(
                 "metrics": [],
                 "best_raw_candidate": None,
                 "confirmed_candidate": None,
+                "ball_confirm_frame": None,
+                "ball_confirm_dist": None,
             }
             if active_swing.get("shot_type") == "SWING":
                 entry_metric = {
@@ -2112,6 +3184,7 @@ def process_clip(
                     "feet_stable": sm.feet_stable,
                     "ankle_gap_px": sm.last_ankle_gap,
                     "spine_in_range": sm.spine_in_range,
+                    "spine_angle": sm.last_spine_angle,
                 }
                 if vision_fallback_enabled:
                     entry_metric["arm_swing_score"] = _compute_vision_score(
@@ -2122,7 +3195,11 @@ def process_clip(
                 else:
                     entry_metric["arm_swing_score"] = 0.0
                 entry_metric["vision_score"] = entry_metric["arm_swing_score"]
+                entry_metric["scene_putt_score"] = sm.scene_putt_score
+                entry_metric["scene_green_ratio"] = sm.scene_green_ratio
+                entry_metric["scene_pose_height_ratio"] = sm.scene_pose_height_ratio
                 active_swing["metrics"].append(entry_metric)
+                active_swing["ball_trail"] = list(sm.ball_trail)
                 if entry_metric["wrist_motion"] >= wrist_swing_threshold:
                     active_swing["best_raw_candidate"] = {
                         "frame_idx": frame_idx,
@@ -2145,6 +3222,7 @@ def process_clip(
                 "feet_stable": sm.feet_stable,
                 "ankle_gap_px": sm.last_ankle_gap,
                 "spine_in_range": sm.spine_in_range,
+                "spine_angle": sm.last_spine_angle,
             }
             if vision_fallback_enabled and active_swing.get("shot_type") == "SWING":
                 metric["arm_swing_score"] = _compute_vision_score(
@@ -2155,8 +3233,12 @@ def process_clip(
             else:
                 metric["arm_swing_score"] = 0.0
             metric["vision_score"] = metric["arm_swing_score"]
+            metric["scene_putt_score"] = sm.scene_putt_score
+            metric["scene_green_ratio"] = sm.scene_green_ratio
+            metric["scene_pose_height_ratio"] = sm.scene_pose_height_ratio
             current_vision_score = metric["arm_swing_score"]
             active_swing["metrics"].append(metric)
+            active_swing["ball_trail"] = list(sm.ball_trail)
 
             if (active_swing.get("shot_type") == "SWING"
                     and metric["wrist_motion"] >= wrist_swing_threshold):
@@ -2179,6 +3261,7 @@ def process_clip(
                     vision_followthrough_frames,
                     vision_setup_min_frames,
                     vision_setup_confidence_min,
+                    fps,
                 )
 
         # ── Resolve timeout / fade fallbacks in priority order ──
@@ -2215,6 +3298,38 @@ def process_clip(
             audio_info = None
             confirmed_candidate = None
             raw_candidate = None
+            last_ball_move_dist = getattr(sm, "last_ball_move_dist", None)
+
+            if (shot_type == "SWING"
+                    and not save_putts
+                    and _live_scores_look_like_putt(
+                        sm.swing_scores or {},
+                        sm.scene_green_ratio,
+                        sm.scene_putt_score,
+                        ball_move_dist=last_ball_move_dist,
+                    )):
+                print(f"    [PuttVeto f{frame_idx}] Live motion + rolling ball looked like PUTT — leaving clip unchanged")
+                sm._audio_confirmed = False
+                sm._audio_info = None
+                sm._ball_confirmed = False
+                sm.start_cooldown()
+                active_swing = None
+                continue
+
+            if (shot_type == "SWING"
+                    and active_swing
+                    and not save_putts
+                    and _swing_context_looks_like_putt(
+                        active_swing,
+                        ball_move_dist=last_ball_move_dist,
+                    )):
+                print(f"    [PuttVeto f{frame_idx}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
+                sm._audio_confirmed = False
+                sm._audio_info = None
+                sm._ball_confirmed = False
+                sm.start_cooldown()
+                active_swing = None
+                continue
 
             if shot_type == "SWING" and ball_conf_shot and audio.enabled and active_swing:
                 audio_hit, confirm_audio = audio.check_window(
@@ -2239,6 +3354,19 @@ def process_clip(
                     vision_anchor_frame = confirmed_candidate["impact_frame"]
                 elif raw_candidate:
                     vision_anchor_frame = raw_candidate["frame_idx"]
+                else:
+                    supportive_anchor = _find_supportive_anchor_metric(
+                        active_swing,
+                        wrist_swing_threshold,
+                        vision_torso_confirm_threshold,
+                    )
+                    if supportive_anchor:
+                        raw_candidate = {
+                            "frame_idx": supportive_anchor["frame_idx"],
+                            "vision_score": supportive_anchor["score"],
+                            "threshold": wrist_swing_threshold,
+                        }
+                        vision_anchor_frame = supportive_anchor["frame_idx"]
                 if vision_anchor_frame is None:
                     print(f"    [Vision f{frame_idx}] Ignored {shot_type.lower()} without a valid swing anchor")
                     sm._audio_confirmed = False
@@ -2248,7 +3376,79 @@ def process_clip(
                     active_swing = None
                     continue
 
+            provisional_ball_only = (
+                shot_type == "SWING"
+                and ball_conf_shot
+                and audio_info is None
+                and active_swing is not None
+            )
+            weak_ball_only_anchor = (
+                provisional_ball_only
+                and (
+                    confirmed_candidate is None
+                    or confirmed_candidate.get("validation_tier", 3) >= 3
+                    or confirmed_candidate.get("stable_pre_anchor_run", 0) < 4
+                )
+            )
+            if provisional_ball_only and active_swing:
+                active_swing["ball_confirm_frame"] = frame_idx
+                active_swing["ball_confirm_dist"] = last_ball_move_dist
+                print(
+                    f"    [BallHold f{frame_idx}] Provisional ball-only anchor "
+                    f"(tier={confirmed_candidate.get('validation_tier', 3) if confirmed_candidate else 'raw'}) "
+                    f"— continuing swing window"
+                )
+                sm.state = ShotStateMachine.SWING
+                sm.shot_detected = False
+                sm.shot_frame_idx = None
+                sm._ball_confirmed = False
+                sm._audio_confirmed = False
+                sm._audio_info = None
+                sm.last_ball_move_dist = None
+                continue
+
             confirm_tag = "ball+audio" if (ball_conf_shot and audio_info) else "ball"
+            selection_score = (
+                confirmed_candidate.get("score", 0.0)
+                if confirmed_candidate else
+                raw_candidate.get("vision_score", 0.0) / max(wrist_swing_threshold, 1e-6)
+                if raw_candidate else 0.0
+            )
+            anchor_validation_tier = (
+                confirmed_candidate.get("validation_tier", 3)
+                if confirmed_candidate else 3
+            )
+            setup_aligned = (
+                confirmed_candidate.get("setup_aligned")
+                if confirmed_candidate else None
+            )
+            green_spine_run = (
+                confirmed_candidate.get("green_spine_run", 0)
+                if confirmed_candidate else 0
+            )
+            stable_pre_anchor_run = (
+                confirmed_candidate.get("stable_pre_anchor_run", 0)
+                if confirmed_candidate else 0
+            )
+            anchor_spine_angle = (
+                confirmed_candidate.get("anchor_spine_angle")
+                if confirmed_candidate else None
+            )
+            spine_stable_fraction = (
+                confirmed_candidate.get("spine_stable_fraction", 0.0)
+                if confirmed_candidate else 0.0
+            )
+            post_anchor_break = (
+                confirmed_candidate.get("post_anchor_break", False)
+                if confirmed_candidate else False
+            )
+            if weak_ball_only_anchor:
+                selection_score = min(selection_score, 0.05)
+                anchor_validation_tier = 4
+                setup_aligned = False
+                green_spine_run = 0
+                stable_pre_anchor_run = 0
+                post_anchor_break = True
             pending_shots.append({
                 "shot_type": shot_type,
                 "confirm_tag": confirm_tag,
@@ -2258,13 +3458,16 @@ def process_clip(
                 "impact_frame": frame_idx,
                 "vision_anchor_frame": vision_anchor_frame,
                 "setup_span": active_swing.get("setup_span") if active_swing else None,
-                "selection_score": (
-                    confirmed_candidate.get("score", 0.0)
-                    if confirmed_candidate else
-                    raw_candidate.get("vision_score", 0.0) / max(wrist_swing_threshold, 1e-6)
-                    if raw_candidate else 0.0
-                ),
+                "selection_score": selection_score,
                 "selection_anchor_frame": vision_anchor_frame,
+                "weak_ball_only_anchor": weak_ball_only_anchor,
+                "anchor_validation_tier": anchor_validation_tier,
+                "setup_aligned": setup_aligned,
+                "green_spine_run": green_spine_run,
+                "stable_pre_anchor_run": stable_pre_anchor_run,
+                "anchor_spine_angle": anchor_spine_angle,
+                "spine_stable_fraction": spine_stable_fraction,
+                "post_anchor_break": post_anchor_break,
             })
             print(f"\n  ★ {shot_type} detected at {format_time(frame_idx / fps)}  "
                   f"[{confirm_tag}]")
@@ -2362,8 +3565,9 @@ def process_clip(
 
     resolved_shots = []
     for shot in pending_shots:
+        revalidated_shot = _revalidate_pending_shot(shot, frame_records, fps)
         start_sec, end_sec, trim_source = _resolve_shot_window(
-            shot,
+            revalidated_shot,
             frame_records,
             total_frames,
             fps,
@@ -2373,11 +3577,28 @@ def process_clip(
             vision_setup_confidence_min,
             vision_posture_break_grace_sec,
         )
-        resolved = shot.copy()
+        resolved = revalidated_shot.copy()
         resolved["start_sec"] = start_sec
         resolved["end_sec"] = end_sec
         resolved["trim_source"] = trim_source
         resolved_shots.append(resolved)
+
+    if verbose and resolved_shots:
+        print("    [ResolvedShots]")
+        for idx, shot in enumerate(resolved_shots, start=1):
+            print(
+                "      "
+                f"{idx}. tag={shot.get('confirm_tag')} "
+                f"anchor={shot.get('selection_anchor_frame') or shot.get('vision_anchor_frame') or shot.get('impact_frame')} "
+                f"score={shot.get('selection_score', 0.0):.2f} "
+                f"tier={shot.get('anchor_validation_tier', 3)} "
+                f"setup={bool(shot.get('setup_aligned'))} "
+                f"gap={shot.get('setup_gap_frames')} "
+                f"pre={shot.get('stable_pre_anchor_run', 0)} "
+                f"green={shot.get('green_spine_run', 0)} "
+                f"post_break={shot.get('post_anchor_break', False)} "
+                f"imm_break={shot.get('immediate_post_break', False)}"
+            )
 
     # ── Limit to a single saved clip when requested, otherwise merge overlaps ──
     if max_shots_per_clip == 1:
