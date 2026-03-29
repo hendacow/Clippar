@@ -403,20 +403,20 @@
     .hero { padding: 100px 20px 60px; }
     .phone-showcase { 
       display: flex;
-      flex-direction: column;
-      gap: 16px; 
+      flex-direction: row;
+      flex-wrap: nowrap;
+      gap: 8px; 
       justify-content: center;
-      align-items: center;
+      align-items: flex-end;
       width: 100%;
-      padding: 0 16px;
+      padding: 0 8px;
     }
     .phone-frame { 
-      width: 200px !important; 
-      margin: 0 auto;
+      width: 100px !important; 
+      flex-shrink: 1;
     }
     .phone-frame.featured { 
-      width: 220px !important; 
-      order: -1; /* Put featured first on mobile */
+      width: 120px !important; 
     }
     .form-card { padding: 24px 20px; }
     .steps { grid-template-columns: 1fr; gap: 2px; }
