@@ -202,9 +202,77 @@
     bottom: 0;
     z-index: 1;
   }
-  /* Transitioning states - go behind center */
-  .phone-frame.transitioning-under {
-    z-index: 2;
+  /* Animation: right → left (flows under center) */
+  @keyframes rightToLeft {
+    0% {
+      left: calc(50% + 120px);
+      bottom: 0;
+      width: 180px;
+      z-index: 1;
+    }
+    30% {
+      left: calc(50% - 30px);
+      bottom: -30px;
+      width: 160px;
+      z-index: 0;
+    }
+    70% {
+      left: calc(50% - 200px);
+      bottom: -30px;
+      width: 160px;
+      z-index: 0;
+    }
+    100% {
+      left: calc(50% - 300px);
+      bottom: 0;
+      width: 180px;
+      z-index: 1;
+    }
+  }
+  /* Animation: left → center (rises up) */
+  @keyframes leftToCenter {
+    0% {
+      left: calc(50% - 300px);
+      bottom: 0;
+      width: 180px;
+      z-index: 1;
+    }
+    50% {
+      z-index: 2;
+    }
+    100% {
+      left: calc(50% - 110px);
+      bottom: 40px;
+      width: 220px;
+      z-index: 3;
+    }
+  }
+  /* Animation: center → right (slides down) */
+  @keyframes centerToRight {
+    0% {
+      left: calc(50% - 110px);
+      bottom: 40px;
+      width: 220px;
+      z-index: 3;
+    }
+    50% {
+      z-index: 2;
+    }
+    100% {
+      left: calc(50% + 120px);
+      bottom: 0;
+      width: 180px;
+      z-index: 1;
+    }
+  }
+  .phone-frame.anim-right-to-left {
+    animation: rightToLeft 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+  .phone-frame.anim-left-to-center {
+    animation: leftToCenter 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  }
+  .phone-frame.anim-center-to-right {
+    animation: centerToRight 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
   }
   .phone-frame video {
     width: 100%; display: block;
@@ -1059,37 +1127,59 @@
     // Track which phone is in which position
     // positions[i] = position of phone i (0=left, 1=center, 2=right)
     let positions = [0, 1, 2];
+    let isAnimating = false;
+    
+    function clearAnimations() {
+      phones.forEach(phone => {
+        phone.classList.remove('anim-right-to-left', 'anim-left-to-center', 'anim-center-to-right');
+      });
+    }
     
     function updatePositions() {
       const posClasses = ['pos-left', 'pos-center', 'pos-right'];
       
       phones.forEach((phone, i) => {
-        const oldPos = [...phone.classList].find(c => c.startsWith('pos-'));
-        const newPos = positions[i];
-        
-        // Phone going from right to left needs to go "under" the center
-        if (oldPos === 'pos-right' && newPos === 0) {
-          phone.classList.add('transitioning-under');
-          setTimeout(() => phone.classList.remove('transitioning-under'), 1000);
-        }
-        
-        // Remove old position classes
         phone.classList.remove('pos-left', 'pos-center', 'pos-right');
-        
-        // Add new position class
-        phone.classList.add(posClasses[newPos]);
+        phone.classList.add(posClasses[positions[i]]);
       });
     }
     
     function rotateClockwise() {
-      // Clockwise: left→center, center→right, right→left
+      if (isAnimating) return;
+      isAnimating = true;
+      
+      // Clear any lingering animation classes
+      clearAnimations();
+      
+      // Apply appropriate animation to each phone based on current position
+      phones.forEach((phone, i) => {
+        const currentPos = positions[i];
+        
+        if (currentPos === 2) {
+          // right → left (flows under center)
+          phone.classList.add('anim-right-to-left');
+        } else if (currentPos === 0) {
+          // left → center (rises up)
+          phone.classList.add('anim-left-to-center');
+        } else if (currentPos === 1) {
+          // center → right (slides down)
+          phone.classList.add('anim-center-to-right');
+        }
+      });
+      
+      // Update position tracking
       positions = positions.map(pos => {
         if (pos === 0) return 1; // left → center
         if (pos === 1) return 2; // center → right
         return 0; // right → left
       });
       
-      updatePositions();
+      // After animation completes, set final position classes and clear animations
+      setTimeout(() => {
+        clearAnimations();
+        updatePositions();
+        isAnimating = false;
+      }, 1200);
     }
     
     // Start rotation every 5 seconds
