@@ -43,73 +43,53 @@
 
   /* ── Spotlight Glow Effect ── */
   [data-glow] {
-    --glow-hue: calc(var(--glow-base, 100) + (var(--mouse-xp, 0.5) * var(--glow-spread, 60)));
-    --glow-size: 200px;
-    --glow-border: 2px;
+    --glow-x: 50%;
+    --glow-y: 50%;
+    --glow-opacity: 0;
     position: relative;
-    background-image: radial-gradient(
-      var(--glow-size) var(--glow-size) at
-      calc(var(--mouse-x, 50%) * 1px)
-      calc(var(--mouse-y, 50%) * 1px),
-      hsl(var(--glow-hue) 80% 60% / 0.15),
-      transparent
-    );
-    background-attachment: fixed;
-  }
-  [data-glow]::before,
-  [data-glow]::after {
-    content: "";
-    position: absolute;
-    inset: calc(var(--glow-border) * -1);
-    border: var(--glow-border) solid transparent;
-    border-radius: inherit;
-    pointer-events: none;
-    background-attachment: fixed;
-    background-size: 100% 100%;
-    background-repeat: no-repeat;
-    mask: linear-gradient(transparent, transparent), linear-gradient(white, white);
-    mask-clip: padding-box, border-box;
-    mask-composite: intersect;
-    -webkit-mask: linear-gradient(transparent, transparent), linear-gradient(white, white);
-    -webkit-mask-clip: padding-box, border-box;
-    -webkit-mask-composite: source-in;
+    overflow: hidden;
   }
   [data-glow]::before {
-    background-image: radial-gradient(
-      calc(var(--glow-size) * 0.75) calc(var(--glow-size) * 0.75) at
-      calc(var(--mouse-x, 50%) * 1px)
-      calc(var(--mouse-y, 50%) * 1px),
-      hsl(var(--glow-hue) 90% 55% / 0.9),
-      transparent 100%
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    pointer-events: none;
+    background: radial-gradient(
+      300px circle at var(--glow-x) var(--glow-y),
+      rgba(168, 230, 61, 0.4),
+      transparent 60%
     );
-    filter: brightness(1.5);
+    opacity: var(--glow-opacity);
+    transition: opacity 0.3s;
+    z-index: 1;
   }
   [data-glow]::after {
-    background-image: radial-gradient(
-      calc(var(--glow-size) * 0.4) calc(var(--glow-size) * 0.4) at
-      calc(var(--mouse-x, 50%) * 1px)
-      calc(var(--mouse-y, 50%) * 1px),
-      hsl(0 0% 100% / 0.8),
-      transparent 100%
-    );
-  }
-  /* Outer glow layer */
-  [data-glow] > .glow-outer {
+    content: "";
     position: absolute;
     inset: 0;
     border-radius: inherit;
     pointer-events: none;
-    opacity: 0.6;
-    filter: blur(20px);
-    background-image: radial-gradient(
-      calc(var(--glow-size) * 0.6) calc(var(--glow-size) * 0.6) at
-      calc(var(--mouse-x, 50%) * 1px)
-      calc(var(--mouse-y, 50%) * 1px),
-      hsl(var(--glow-hue) 80% 50% / 0.4),
-      transparent
-    );
-    background-attachment: fixed;
+    border: 2px solid transparent;
+    background: radial-gradient(
+      200px circle at var(--glow-x) var(--glow-y),
+      rgba(168, 230, 61, 0.8),
+      transparent 50%
+    ) border-box;
+    -webkit-mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#fff 0 0) padding-box, linear-gradient(#fff 0 0);
+    mask-composite: exclude;
+    opacity: var(--glow-opacity);
+    transition: opacity 0.3s;
+    z-index: 2;
   }
+  /* Ensure card content stays above glow */
+  [data-glow] > *:not(.glow-outer) {
+    position: relative;
+    z-index: 3;
+  }
+  .glow-outer { display: none; }
 
   /* ── Nav ── */
   nav {
@@ -1039,14 +1019,18 @@
   (function() {
     const glowElements = document.querySelectorAll('[data-glow]');
     
-    document.addEventListener('pointermove', (e) => {
-      const { clientX: x, clientY: y } = e;
-      const xp = x / window.innerWidth;
+    glowElements.forEach(el => {
+      el.addEventListener('mousemove', (e) => {
+        const rect = el.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        el.style.setProperty('--glow-x', `${x}px`);
+        el.style.setProperty('--glow-y', `${y}px`);
+        el.style.setProperty('--glow-opacity', '1');
+      });
       
-      glowElements.forEach(el => {
-        el.style.setProperty('--mouse-x', x);
-        el.style.setProperty('--mouse-y', y);
-        el.style.setProperty('--mouse-xp', xp.toFixed(3));
+      el.addEventListener('mouseleave', () => {
+        el.style.setProperty('--glow-opacity', '0');
       });
     });
   })();
