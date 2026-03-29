@@ -81,7 +81,8 @@ def ffmpeg_available():
 
 
 def probe_clip(path):
-    """Return (width, height, fps, duration_sec) for a clip via ffprobe."""
+    """Return (width, height, fps, duration_sec) for a clip via ffprobe.
+    Accounts for rotation metadata so portrait videos report correct dimensions."""
     cmd = [
         "ffprobe", "-v", "error",
         "-select_streams", "v:0",
@@ -101,9 +102,28 @@ def probe_clip(path):
         num, den = parts[2].split("/")
         fps = round(float(num) / float(den), 3)
         dur = float(parts[3]) if parts[3] else 0.0
-        return w, h, fps, dur
     except Exception:
         return None
+
+    # Check for rotation metadata (iPhone portrait videos store as 1920x1080 + rotation=-90)
+    rot_cmd = [
+        "ffprobe", "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream_side_data=rotation",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    rot_result = subprocess.run(rot_cmd, capture_output=True, text=True)
+    rot_str = rot_result.stdout.strip()
+    if rot_str:
+        try:
+            rotation = abs(int(float(rot_str)))
+            if rotation in (90, 270):
+                w, h = h, w
+        except (ValueError, TypeError):
+            pass
+
+    return w, h, fps, dur
 
 
 def format_time(s):

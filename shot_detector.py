@@ -15,12 +15,23 @@ Changes:
 """
 
 import csv, cv2, numpy as np, math, time, collections, subprocess, shutil, tempfile, os
+import multiprocessing
+import torch
 from pathlib import Path
 
 import librosa
 from scipy import signal
 import yaml
 from ultralytics import YOLO
+
+
+def _detect_device():
+    """Pick the best available accelerator: MPS (Apple Silicon) > CUDA > CPU."""
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return "mps"
+    if torch.cuda.is_available():
+        return "cuda"
+    return "cpu"
 
 # ── Keypoint indices (COCO 17) ──────────────────────────────────
 KP_LEFT_SHOULDER  = 5;  KP_RIGHT_SHOULDER = 6
@@ -110,6 +121,10 @@ def load_config(config_path="config.yaml"):
         display=False,
         save_annotated=True,
         verbose=True,
+        fast_mode=False,
+        device="auto",
+        inference_imgsz=640,
+        parallel_workers=0,
     )
     config_path = Path(config_path)
     if not config_path.exists():
@@ -2804,6 +2819,7 @@ def process_clip(
     vision_setup_confidence_min=0.75,
     vision_posture_break_grace_sec=3.0,
     display=False, save_annotated=True, verbose=True,
+    device="cpu", inference_imgsz=640,
 ):
     cap = cv2.VideoCapture(str(clip_path))
     if not cap.isOpened():
@@ -2868,6 +2884,7 @@ def process_clip(
     active_setup_span = None
     active_swing = None
     frame_idx = 0
+    prev_state = ShotStateMachine.IDLE
     fps_timer = time.time()
     fps_display = 0.0
     last_audio_info = None
@@ -3080,13 +3097,16 @@ def process_clip(
 
         # ── Pose ──
         pose_res = pose_model.predict(
-            source=frame, conf=0.4, verbose=False, device="cpu")
+            source=frame, conf=0.4, verbose=False,
+            device=device)
         raw_kp = raw_cf = None
         if (pose_res[0].keypoints is not None
                 and len(pose_res[0].keypoints) > 0):
             raw_kp = pose_res[0].keypoints[0].xy[0].cpu().numpy()
             raw_cf = pose_res[0].keypoints[0].conf[0].cpu().numpy()
         kp, cf = smoother.update(raw_kp, raw_cf)
+
+        # ── Putt scene ──
         scene_info = _estimate_putt_scene(frame, kp, cf, min_conf=0.25)
         sm.scene_putt_score = scene_info["score"]
         sm.scene_putt_peak = max(sm.scene_putt_peak * 0.995, scene_info["score"])
@@ -3094,24 +3114,26 @@ def process_clip(
         sm.scene_pose_height_ratio = scene_info["pose_height_ratio"]
         sm.scene_texture_laplacian = scene_info["laplacian_var"]
 
-        # ── Ball ──
-        ball_res  = ball_model.predict(
-            source=frame, conf=ball_confidence, verbose=False, device="cpu")
+        # ── Ball (always run at native resolution for small-object accuracy) ──
         ball_pos  = None
         ball_conf = None
         ball_candidates = []
-        if ball_res[0].boxes:
-            boxes = ball_res[0].boxes.xyxy.cpu().numpy()
-            confs = ball_res[0].boxes.conf.cpu().numpy()
-            for box, conf in zip(boxes, confs):
-                center = get_center(np.asarray(box, dtype=int))
-                ball_candidates.append((float(conf), center))
-            ball_conf, ball_pos = _select_ball_candidate(
-                ball_candidates,
-                kp,
-                cf,
-                previous_ball=sm.last_known_ball_pos,
-            )
+        if True:
+            ball_res = ball_model.predict(
+                source=frame, conf=ball_confidence, verbose=False,
+                device=device)
+            if ball_res[0].boxes:
+                boxes = ball_res[0].boxes.xyxy.cpu().numpy()
+                confs = ball_res[0].boxes.conf.cpu().numpy()
+                for box, conf in zip(boxes, confs):
+                    center = get_center(np.asarray(box, dtype=int))
+                    ball_candidates.append((float(conf), center))
+                ball_conf, ball_pos = _select_ball_candidate(
+                    ball_candidates,
+                    kp,
+                    cf,
+                    previous_ball=sm.last_known_ball_pos,
+                )
 
         # ── State machine ──
         prev_state = sm.state
@@ -3477,6 +3499,21 @@ def process_clip(
             sm.start_cooldown()
             active_swing = None
 
+        # ── Early exit after high-confidence shot ──
+        if (max_shots_per_clip == 1
+                and len(pending_shots) >= 1
+                and sm.state == ShotStateMachine.IDLE):
+            best_tag = pending_shots[-1].get("confirm_tag", "")
+            # Only early-exit for strongest confirmation — weaker tags may be
+            # superseded by a better detection later in the clip
+            if best_tag == "ball+audio":
+                last_event_sec = pending_shots[-1].get("event_sec", 0)
+                current_sec = frame_idx / fps
+                if current_sec >= last_event_sec + post_roll_sec + 0.5:
+                    if verbose:
+                        print(f"    [EarlyExit f{frame_idx}] {best_tag} confirmed + post-roll complete — skipping remaining frames")
+                    break
+
         # ── Draw ──
         resolved = resolved_ball
         if display or save_annotated:
@@ -3638,8 +3675,83 @@ def process_clip(
     return len(merged)
 
 
+def _build_clip_kwargs(cfg, clips_dir, output_dir):
+    """Build the keyword arguments dict for process_clip from config."""
+    return dict(
+        ball_confidence=cfg["ball_confidence"],
+        setup_frames=cfg["setup_frames"],
+        setup_ankle_max=cfg["setup_ankle_max"],
+        feet_gap_max_px=cfg["feet_gap_max_px"],
+        setup_ball_max=cfg["setup_ball_max"],
+        spine_lean_min=cfg["spine_lean_min"],
+        spine_lean_max=cfg["spine_lean_max"],
+        swing_window=cfg["swing_window"],
+        wrist_swing_threshold=cfg["wrist_swing_threshold"],
+        wrist_putt_threshold=cfg["wrist_putt_threshold"],
+        wrist_speed_swing_threshold=cfg["wrist_speed_swing_threshold"],
+        shoulder_swing_threshold=cfg["shoulder_swing_threshold"],
+        hip_swing_threshold=cfg["hip_swing_threshold"],
+        ball_move_threshold=cfg["ball_move_threshold"],
+        putt_ball_move_threshold=cfg["putt_ball_move_threshold"],
+        putt_confirm_frames=cfg["putt_confirm_frames"],
+        save_putts=cfg["save_putts"],
+        max_shots_per_clip=cfg["max_shots_per_clip"],
+        ball_wait_frames=cfg["ball_wait_frames"],
+        max_disappear_frames=cfg["max_disappear_frames"],
+        ema_alpha=cfg["ema_alpha"],
+        pre_roll_sec=cfg["pre_roll_sec"],
+        post_roll_sec=cfg["post_roll_sec"],
+        clips_dir=clips_dir,
+        audio_min_strength=cfg["audio_min_strength"],
+        audio_overlay_sec=cfg["audio_overlay_sec"],
+        audio_impact_window_sec=cfg["audio_impact_window_sec"],
+        audio_transient_min_score=cfg["audio_transient_min_score"],
+        audio_wind_reject_max_duration=cfg["audio_wind_reject_max_duration"],
+        vision_fallback_enabled=cfg["vision_fallback_enabled"],
+        vision_wrist_confirm_threshold=cfg["vision_wrist_confirm_threshold"],
+        vision_torso_confirm_threshold=cfg["vision_torso_confirm_threshold"],
+        vision_followthrough_frames=cfg["vision_followthrough_frames"],
+        vision_setup_min_frames=cfg["vision_setup_min_frames"],
+        vision_setup_confidence_min=cfg["vision_setup_confidence_min"],
+        vision_posture_break_grace_sec=cfg["vision_posture_break_grace_sec"],
+        display=cfg["display"],
+        save_annotated=cfg["save_annotated"],
+        verbose=cfg["verbose"],
+        device=cfg["device"],
+        inference_imgsz=cfg["inference_imgsz"],
+    )
+
+
+def _process_clip_worker(args):
+    """Worker for parallel clip processing — loads models per-process."""
+    clip_path, clip_index, output_dir, cfg_kwargs, pose_model_path, ball_model_path = args
+    pose_model = YOLO(pose_model_path)
+    ball_model = YOLO(ball_model_path)
+    shots = process_clip(
+        clip_path=clip_path,
+        pose_model=pose_model,
+        ball_model=ball_model,
+        output_dir=output_dir,
+        clip_index=clip_index,
+        **cfg_kwargs,
+    )
+    return (Path(clip_path).name, shots)
+
+
 def detect_shots(cfg):
     """Run detection over all clips using a config dict."""
+    # ── fast_mode overrides ──
+    if cfg.get("fast_mode"):
+        cfg["save_annotated"] = False
+        cfg["verbose"] = False
+        cfg["display"] = False
+
+    # ── Resolve device ──
+    dev = cfg.get("device", "auto")
+    if dev == "auto":
+        cfg["device"] = _detect_device()
+    print(f"[ShotDetector] Inference device: {cfg['device']}")
+
     clips_dir  = Path(cfg["clips_dir"])
     output_dir = Path(cfg["output_dir"])
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -3671,57 +3783,37 @@ def detect_shots(cfg):
         print(f"ERROR: Ball model not found: {cfg['ball_model_path']}")
         return
 
-    pose_model    = YOLO(cfg["pose_model_path"])
-    ball_model    = YOLO(cfg["ball_model_path"])
     overall_start = time.time()
     total_shots, shot_counts = 0, {}
 
-    for i, clip_path in enumerate(clips, start=1):
-        shots = process_clip(
-            clip_path=clip_path, pose_model=pose_model,
-            ball_model=ball_model, output_dir=output_dir, clip_index=i,
-            ball_confidence=cfg["ball_confidence"],
-            setup_frames=cfg["setup_frames"],
-            setup_ankle_max=cfg["setup_ankle_max"],
-            feet_gap_max_px=cfg["feet_gap_max_px"],
-            setup_ball_max=cfg["setup_ball_max"],
-            spine_lean_min=cfg["spine_lean_min"],
-            spine_lean_max=cfg["spine_lean_max"],
-            swing_window=cfg["swing_window"],
-            wrist_swing_threshold=cfg["wrist_swing_threshold"],
-            wrist_putt_threshold=cfg["wrist_putt_threshold"],
-            wrist_speed_swing_threshold=cfg["wrist_speed_swing_threshold"],
-            shoulder_swing_threshold=cfg["shoulder_swing_threshold"],
-            hip_swing_threshold=cfg["hip_swing_threshold"],
-            ball_move_threshold=cfg["ball_move_threshold"],
-            putt_ball_move_threshold=cfg["putt_ball_move_threshold"],
-            putt_confirm_frames=cfg["putt_confirm_frames"],
-            save_putts=cfg["save_putts"],
-            max_shots_per_clip=cfg["max_shots_per_clip"],
-            ball_wait_frames=cfg["ball_wait_frames"],
-            max_disappear_frames=cfg["max_disappear_frames"],
-            ema_alpha=cfg["ema_alpha"],
-            pre_roll_sec=cfg["pre_roll_sec"],
-            post_roll_sec=cfg["post_roll_sec"],
-            clips_dir=clips_dir,
-            audio_min_strength=cfg["audio_min_strength"],
-            audio_overlay_sec=cfg["audio_overlay_sec"],
-            audio_impact_window_sec=cfg["audio_impact_window_sec"],
-            audio_transient_min_score=cfg["audio_transient_min_score"],
-            audio_wind_reject_max_duration=cfg["audio_wind_reject_max_duration"],
-            vision_fallback_enabled=cfg["vision_fallback_enabled"],
-            vision_wrist_confirm_threshold=cfg["vision_wrist_confirm_threshold"],
-            vision_torso_confirm_threshold=cfg["vision_torso_confirm_threshold"],
-            vision_followthrough_frames=cfg["vision_followthrough_frames"],
-            vision_setup_min_frames=cfg["vision_setup_min_frames"],
-            vision_setup_confidence_min=cfg["vision_setup_confidence_min"],
-            vision_posture_break_grace_sec=cfg["vision_posture_break_grace_sec"],
-            display=cfg["display"],
-            save_annotated=cfg["save_annotated"],
-            verbose=cfg["verbose"],
-        )
-        total_shots += shots
-        shot_counts[clip_path.name] = shots
+    clip_kwargs = _build_clip_kwargs(cfg, clips_dir, output_dir)
+    parallel_workers = cfg.get("parallel_workers", 0)
+
+    if parallel_workers >= 2:
+        # ── Parallel processing ──
+        print(f"[ShotDetector] Parallel mode: {parallel_workers} workers")
+        worker_args = [
+            (clip_path, i, output_dir, clip_kwargs,
+             cfg["pose_model_path"], cfg["ball_model_path"])
+            for i, clip_path in enumerate(clips, start=1)
+        ]
+        with multiprocessing.Pool(processes=parallel_workers) as pool:
+            results = pool.map(_process_clip_worker, worker_args)
+        for name, shots in results:
+            total_shots += shots
+            shot_counts[name] = shots
+    else:
+        # ── Sequential processing (default) ──
+        pose_model = YOLO(cfg["pose_model_path"])
+        ball_model = YOLO(cfg["ball_model_path"])
+        for i, clip_path in enumerate(clips, start=1):
+            shots = process_clip(
+                clip_path=clip_path, pose_model=pose_model,
+                ball_model=ball_model, output_dir=output_dir, clip_index=i,
+                **clip_kwargs,
+            )
+            total_shots += shots
+            shot_counts[clip_path.name] = shots
 
     if cfg["display"]:
         cv2.destroyAllWindows()

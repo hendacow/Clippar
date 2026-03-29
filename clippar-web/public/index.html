@@ -1,0 +1,786 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clippar — Every Shot. Remembered.</title>
+<meta name="description" content="Clippar automatically clips every golf shot from your round footage. One click, one reel, every memory.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #07100a;
+    --bg2: #0d1a10;
+    --bg3: #111f14;
+    --green: #a8e63d;
+    --green-dim: #6fa828;
+    --white: #f0f4ee;
+    --muted: #7a9178;
+    --border: rgba(168,230,61,0.15);
+    --card: rgba(255,255,255,0.03);
+    --font-display: 'Bebas Neue', sans-serif;
+    --font-body: 'DM Sans', sans-serif;
+    --font-mono: 'DM Mono', monospace;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--white);
+    font-family: var(--font-body);
+    font-size: 16px;
+    line-height: 1.6;
+    overflow-x: hidden;
+  }
+  /* ── Noise grain ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.035'/%3E%3C/svg%3E");
+    pointer-events: none; z-index: 999; opacity: 0.4;
+  }
+
+  /* ── Nav ── */
+  nav {
+    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 20px 48px;
+    background: linear-gradient(to bottom, rgba(7,16,10,0.97), transparent);
+    backdrop-filter: blur(8px);
+  }
+  .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
+  .logo-sub {
+    font-family: var(--font-mono); font-size: 9px; color: var(--muted);
+    letter-spacing: 0.15em; text-transform: uppercase; margin-left: 12px;
+  }
+  .nav-tag {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    letter-spacing: 0.12em; text-transform: uppercase;
+    border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    padding: 120px 24px 60px; text-align: center;
+    position: relative; overflow: hidden;
+  }
+  .hero::after {
+    content: ''; position: absolute;
+    width: 800px; height: 800px;
+    background: radial-gradient(circle, rgba(168,230,61,0.06) 0%, transparent 70%);
+    top: 40%; left: 50%; transform: translate(-50%, -50%);
+    pointer-events: none;
+  }
+  .hero-eyebrow {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--green); margin-bottom: 24px;
+    opacity: 0; animation: fadeUp 0.8s ease forwards 0.2s;
+  }
+  h1 {
+    font-family: var(--font-display);
+    font-size: clamp(64px, 12vw, 140px);
+    line-height: 0.92; letter-spacing: 0.02em; color: var(--white);
+    margin-bottom: 8px;
+    opacity: 0; animation: fadeUp 0.9s ease forwards 0.35s;
+  }
+  h1 span { color: var(--green); display: block; }
+  .hero-sub {
+    font-size: 18px; color: var(--muted); font-weight: 300;
+    max-width: 520px; margin: 28px auto 0; line-height: 1.7;
+    opacity: 0; animation: fadeUp 0.9s ease forwards 0.5s;
+  }
+  .hero-sub strong { color: var(--white); font-weight: 400; }
+
+  /* ── Phone showcase ── */
+  .phone-showcase {
+    display: flex; gap: 16px; justify-content: center; align-items: flex-end;
+    margin: 48px auto 0; max-width: 900px;
+    opacity: 0; animation: fadeUp 1s ease forwards 0.6s;
+    position: relative; z-index: 2;
+  }
+  .phone-frame {
+    width: 180px; border-radius: 20px;
+    border: 2px solid rgba(168,230,61,0.2);
+    overflow: hidden; position: relative;
+    background: #0a0a0a;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(168,230,61,0.05);
+    transition: transform 0.4s ease, box-shadow 0.4s ease;
+  }
+  .phone-frame:hover {
+    transform: translateY(-8px) scale(1.02);
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 60px rgba(168,230,61,0.1);
+  }
+  .phone-frame.featured {
+    width: 220px; border-color: var(--green);
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 60px rgba(168,230,61,0.15);
+  }
+  .phone-frame video {
+    width: 100%; display: block;
+    aspect-ratio: 9/16; object-fit: cover;
+  }
+  .phone-label {
+    position: absolute; bottom: 0; left: 0; right: 0;
+    background: linear-gradient(transparent, rgba(0,0,0,0.85));
+    padding: 24px 12px 12px;
+  }
+  .phone-label .tag {
+    font-family: var(--font-mono); font-size: 8px;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--green); display: block; margin-bottom: 3px;
+  }
+  .phone-label .desc { font-size: 11px; color: var(--white); font-weight: 400; line-height: 1.3; }
+  .detection-badge {
+    position: absolute; top: 8px; right: 8px;
+    background: rgba(168,230,61,0.15); border: 1px solid rgba(168,230,61,0.3);
+    border-radius: 6px; padding: 3px 8px;
+    font-family: var(--font-mono); font-size: 8px;
+    color: var(--green); letter-spacing: 0.1em;
+    backdrop-filter: blur(8px);
+  }
+
+  /* ── Form ── */
+  .form-wrap {
+    width: 100%; max-width: 520px; margin: 56px auto 0;
+    opacity: 0; animation: fadeUp 0.9s ease forwards 0.75s;
+  }
+  .form-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; padding: 36px;
+    backdrop-filter: blur(12px);
+  }
+  .form-card h2 {
+    font-family: var(--font-display); font-size: 26px;
+    letter-spacing: 0.06em; color: var(--white); margin-bottom: 6px;
+  }
+  .form-card > p { font-size: 13px; color: var(--muted); margin-bottom: 28px; line-height: 1.5; }
+  .form-group { margin-bottom: 16px; }
+  .form-group label {
+    display: block; font-family: var(--font-mono);
+    font-size: 10px; letter-spacing: 0.15em; text-transform: uppercase;
+    color: var(--muted); margin-bottom: 8px;
+  }
+  .form-group input, .form-group select {
+    width: 100%; background: rgba(255,255,255,0.04);
+    border: 1px solid rgba(255,255,255,0.1); border-radius: 8px;
+    padding: 12px 16px; color: var(--white);
+    font-family: var(--font-body); font-size: 15px; outline: none;
+    transition: border-color 0.2s, background 0.2s; -webkit-appearance: none;
+  }
+  .form-group select { cursor: pointer; }
+  .form-group select option { background: #111f14; color: var(--white); }
+  .form-group input::placeholder { color: rgba(255,255,255,0.2); }
+  .form-group input:focus, .form-group select:focus {
+    border-color: var(--green); background: rgba(168,230,61,0.04);
+  }
+  .btn-submit {
+    width: 100%; background: var(--green); color: #07100a; border: none;
+    border-radius: 8px; padding: 15px 24px;
+    font-family: var(--font-display); font-size: 20px; letter-spacing: 0.08em;
+    cursor: pointer; transition: background 0.2s, transform 0.1s; margin-top: 4px;
+  }
+  .btn-submit:hover { background: #c0f04f; }
+  .btn-submit:active { transform: scale(0.99); }
+  .btn-submit:disabled { opacity: 0.6; cursor: not-allowed; }
+  .form-note { text-align: center; font-size: 11px; color: var(--muted); margin-top: 14px; }
+  .count-badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: rgba(168,230,61,0.08); border: 1px solid var(--border);
+    border-radius: 20px; padding: 6px 14px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--green);
+    margin: 32px auto 0;
+    opacity: 0; animation: fadeUp 0.9s ease forwards 0.9s;
+  }
+  .dot-pulse {
+    width: 6px; height: 6px; background: var(--green); border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  .form-error {
+    background: rgba(255,80,50,0.1); border: 1px solid rgba(255,80,50,0.3);
+    border-radius: 8px; padding: 10px 14px; margin-bottom: 16px;
+    font-size: 13px; color: #ff6b6b; display: none;
+  }
+
+  /* ── Divider ── */
+  .section-divider {
+    height: 1px; max-width: 1000px; margin: 0 auto;
+    background: linear-gradient(90deg, transparent, var(--border), transparent);
+  }
+
+  /* ── How it works ── */
+  .section { padding: 100px 24px; max-width: 1000px; margin: 0 auto; }
+  .section-label {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--green); margin-bottom: 16px;
+  }
+  .section-title {
+    font-family: var(--font-display);
+    font-size: clamp(42px, 7vw, 72px);
+    line-height: 0.95; letter-spacing: 0.02em; margin-bottom: 60px;
+  }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+  .step {
+    background: var(--card); border: 1px solid var(--border);
+    padding: 36px 28px; position: relative; transition: background 0.3s;
+  }
+  .step:first-child { border-radius: 14px 0 0 14px; }
+  .step:last-child { border-radius: 0 14px 14px 0; }
+  .step:hover { background: rgba(168,230,61,0.04); }
+  .step-num {
+    font-family: var(--font-display); font-size: 64px;
+    color: rgba(168,230,61,0.12); line-height: 1; margin-bottom: 16px;
+  }
+  .step h3 {
+    font-family: var(--font-display); font-size: 26px;
+    letter-spacing: 0.04em; color: var(--white); margin-bottom: 10px;
+  }
+  .step p { font-size: 14px; color: var(--muted); line-height: 1.65; }
+
+  /* ── Demo section ── */
+  .demo-section { padding: 80px 24px; max-width: 1100px; margin: 0 auto; }
+  .demo-header { text-align: center; margin-bottom: 60px; }
+  .demo-header h2 {
+    font-family: var(--font-display);
+    font-size: clamp(42px, 7vw, 72px);
+    line-height: 0.95; letter-spacing: 0.02em; margin-top: 16px;
+  }
+  .demo-flow {
+    display: grid; grid-template-columns: 1fr auto 1fr; gap: 24px;
+    align-items: center; max-width: 900px; margin: 0 auto;
+  }
+  .demo-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 16px; overflow: hidden;
+  }
+  .demo-card-header {
+    padding: 16px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 10px;
+  }
+  .demo-card-header .dot { width: 8px; height: 8px; border-radius: 50%; }
+  .demo-card-header .dot.red { background: #ff5f57; }
+  .demo-card-header .dot.yellow { background: #febc2e; }
+  .demo-card-header .dot.green { background: #28c840; }
+  .demo-card-header span {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    letter-spacing: 0.08em; margin-left: 8px;
+  }
+  .demo-card-body { padding: 20px; }
+  .demo-card-body .file-list { list-style: none; }
+  .demo-card-body .file-list li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; border-radius: 6px;
+    font-family: var(--font-mono); font-size: 12px; color: var(--muted);
+    transition: background 0.2s;
+  }
+  .demo-card-body .file-list li:hover { background: rgba(255,255,255,0.03); }
+  .demo-card-body .file-list li .file-icon { width: 14px; height: 14px; flex-shrink: 0; }
+  .demo-card-body .file-list li .file-size { margin-left: auto; font-size: 10px; opacity: 0.5; }
+  .demo-arrow { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .demo-arrow svg { color: var(--green); animation: arrowPulse 2s ease-in-out infinite; }
+  .output-thumb {
+    width: 100%; border-radius: 8px; overflow: hidden; border: 1px solid var(--border);
+  }
+  .output-thumb video { width: 100%; display: block; }
+  .output-tag {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: rgba(168,230,61,0.1); border: 1px solid rgba(168,230,61,0.2);
+    border-radius: 4px; padding: 2px 8px; margin-top: 8px;
+    font-family: var(--font-mono); font-size: 9px; color: var(--green); letter-spacing: 0.1em;
+  }
+
+  /* ── Gallery ── */
+  .gallery-section { padding: 60px 24px 100px; max-width: 1100px; margin: 0 auto; }
+  .gallery-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 40px; }
+  .gallery-item {
+    border-radius: 12px; overflow: hidden;
+    border: 1px solid var(--border); position: relative;
+    background: #0a0a0a; transition: transform 0.3s, border-color 0.3s;
+  }
+  .gallery-item:hover { transform: translateY(-4px); border-color: rgba(168,230,61,0.4); }
+  .gallery-item video, .gallery-item img {
+    width: 100%; display: block; aspect-ratio: 9/16; object-fit: cover;
+  }
+  .gallery-item .overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(transparent 50%, rgba(0,0,0,0.8));
+    display: flex; flex-direction: column; justify-content: flex-end; padding: 12px;
+  }
+  .gallery-item .overlay .shot-tag {
+    font-family: var(--font-mono); font-size: 9px; color: var(--green);
+    letter-spacing: 0.12em; text-transform: uppercase;
+  }
+  .gallery-item .overlay .shot-desc { font-size: 12px; color: var(--white); margin-top: 2px; }
+
+  /* ── Library ── */
+  .library-section {
+    padding: 80px 24px 100px; max-width: 1000px; margin: 0 auto;
+    display: grid; grid-template-columns: 1fr 1fr; gap: 64px; align-items: center;
+  }
+  .library-visual { position: relative; height: 320px; }
+  .folder-stack { position: absolute; bottom: 0; left: 0; right: 0; }
+  .folder {
+    height: 54px; border-radius: 8px; border: 1px solid var(--border);
+    margin-bottom: 8px; display: flex; align-items: center;
+    padding: 0 18px; gap: 12px; font-size: 13px;
+    transition: transform 0.3s, background 0.3s; cursor: default;
+  }
+  .folder:hover { transform: translateX(6px); background: rgba(168,230,61,0.06); }
+  .folder-icon { width: 20px; height: 20px; border-radius: 3px; flex-shrink: 0; }
+  .folder.birdies { background: rgba(168,230,61,0.06); border-color: rgba(168,230,61,0.25); }
+  .folder.birdies .folder-icon { background: var(--green); }
+  .folder.birdies .folder-label { color: var(--green); }
+  .folder.best { background: rgba(255,255,255,0.03); }
+  .folder.best .folder-icon { background: rgba(255,255,255,0.2); }
+  .folder.worst { background: rgba(255,255,255,0.02); }
+  .folder.worst .folder-icon { background: rgba(255,80,50,0.3); }
+  .folder.recent { background: rgba(255,255,255,0.02); }
+  .folder.recent .folder-icon { background: rgba(100,150,255,0.3); }
+  .folder-label { color: var(--white); font-weight: 400; }
+  .folder-count { margin-left: auto; font-family: var(--font-mono); font-size: 11px; color: var(--muted); }
+  .library-text .section-label { margin-bottom: 12px; }
+  .library-text h2 {
+    font-family: var(--font-display);
+    font-size: clamp(36px, 5vw, 56px);
+    line-height: 0.96; letter-spacing: 0.02em; margin-bottom: 20px;
+  }
+  .library-text p { font-size: 15px; color: var(--muted); line-height: 1.7; margin-bottom: 14px; }
+
+  /* ── Tech strip ── */
+  .tech-strip {
+    padding: 40px 24px; max-width: 1000px; margin: 0 auto;
+    display: flex; justify-content: center; gap: 32px; flex-wrap: wrap;
+  }
+  .tech-pill {
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.03); border: 1px solid var(--border);
+    border-radius: 20px; padding: 8px 16px;
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.06em;
+  }
+  .tech-pill .tech-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+
+  /* ── Footer ── */
+  footer {
+    border-top: 1px solid var(--border); padding: 36px 48px;
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  footer .logo { font-size: 22px; }
+  footer p { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
+
+  /* ── Success ── */
+  .success-state { display: none; text-align: center; padding: 20px 0; }
+  .success-state .tick {
+    width: 52px; height: 52px; background: rgba(168,230,61,0.12);
+    border: 1px solid var(--green); border-radius: 50%;
+    display: flex; align-items: center; justify-content: center; margin: 0 auto 20px;
+  }
+  .success-state h3 {
+    font-family: var(--font-display); font-size: 32px;
+    letter-spacing: 0.04em; color: var(--green); margin-bottom: 8px;
+  }
+  .success-state p { font-size: 14px; color: var(--muted); line-height: 1.6; margin: 0; }
+
+  /* ── Animations ── */
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(24px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.5; transform: scale(0.85); }
+  }
+  @keyframes arrowPulse {
+    0%, 100% { transform: translateX(0); opacity: 1; }
+    50%       { transform: translateX(6px); opacity: 0.6; }
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 768px) {
+    nav { padding: 16px 20px; }
+    .hero { padding: 100px 20px 60px; }
+    .phone-showcase { flex-wrap: wrap; gap: 10px; }
+    .phone-frame { width: 140px !important; }
+    .phone-frame.featured { width: 170px !important; }
+    .form-card { padding: 24px 20px; }
+    .steps { grid-template-columns: 1fr; gap: 2px; }
+    .step:first-child { border-radius: 14px 14px 0 0; }
+    .step:last-child { border-radius: 0 0 14px 14px; }
+    .demo-flow { grid-template-columns: 1fr; }
+    .demo-arrow { transform: rotate(90deg); }
+    .gallery-grid { grid-template-columns: repeat(2, 1fr); }
+    .library-section { grid-template-columns: 1fr; gap: 40px; }
+    .library-visual { height: 240px; }
+    footer { flex-direction: column; gap: 12px; text-align: center; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div style="display:flex;align-items:baseline;">
+    <div class="logo">CLIPPAR</div>
+    <span class="logo-sub">Golf Video AI</span>
+  </div>
+  <div class="nav-tag">Early access — Brisbane, AU</div>
+</nav>
+
+<!-- ═══ HERO ═══ -->
+<section class="hero">
+  <div class="hero-eyebrow">Golf video, reimagined</div>
+  <h1>Every shot.<br><span>Remembered.</span></h1>
+  <p class="hero-sub">
+    Click once. Play your round. Walk off with a <strong>cinematic highlight reel</strong> of every shot — automatically trimmed, tagged, and ready to share.
+  </p>
+
+  <!-- Phone showcase with real footage -->
+  <div class="phone-showcase">
+    <div class="phone-frame">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">AI Detection</span>
+        <span class="desc">Pose + skeleton tracking</span>
+      </div>
+      <div class="detection-badge">POSE</div>
+    </div>
+    <div class="phone-frame featured">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_clean.mp4" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">Output</span>
+        <span class="desc">Clean trimmed shot</span>
+      </div>
+      <div class="detection-badge">BALL + AUDIO</div>
+    </div>
+    <div class="phone-frame">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_raw.mp4" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">Multi-detect</span>
+        <span class="desc">Vision + audio fusion</span>
+      </div>
+      <div class="detection-badge">VISION</div>
+    </div>
+  </div>
+
+  <!-- Waitlist form -->
+  <div class="form-wrap" id="waitlist-form-section">
+    <div class="form-card">
+      <h2>Join the waitlist</h2>
+      <p>Get early access and founding member pricing. Brisbane &amp; QLD golfers first.</p>
+      <div class="form-error" id="form-error"></div>
+      <form id="waitlist-form">
+        <div class="form-group">
+          <label>Your name</label>
+          <input type="text" id="f-name" placeholder="Tiger" required autocomplete="name">
+        </div>
+        <div class="form-group">
+          <label>Email address</label>
+          <input type="email" id="f-email" placeholder="you@gmail.com" required autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label>How often do you play?</label>
+          <select id="f-frequency" required>
+            <option value="" disabled selected>Select frequency</option>
+            <option value="weekly">Every week</option>
+            <option value="fortnightly">Fortnightly</option>
+            <option value="monthly">Once a month</option>
+            <option value="occasional">Occasional</option>
+          </select>
+        </div>
+        <button class="btn-submit" type="submit" id="btn-submit">SECURE MY SPOT</button>
+      </form>
+      <div class="success-state" id="success">
+        <div class="tick">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#a8e63d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20 6L9 17l-5-5"/>
+          </svg>
+        </div>
+        <h3>You're on the list.</h3>
+        <p>We'll be in touch soon with early access details.</p>
+      </div>
+      <p class="form-note">No spam. Unsubscribe anytime. Founding member pricing locked in for early signups.</p>
+    </div>
+  </div>
+
+  <div class="count-badge">
+    <div class="dot-pulse"></div>
+    <span>Waitlist open — Brisbane & QLD golfers first</span>
+  </div>
+</section>
+
+<!-- ═══ HOW IT WORKS ═══ -->
+<div class="section-divider"></div>
+<section class="section">
+  <div class="section-label">How it works</div>
+  <div class="section-title">Three clicks.<br>A round of memories.</div>
+  <div class="steps">
+    <div class="step">
+      <div class="step-num">01</div>
+      <h3>Clip on. Press go.</h3>
+      <p>Mount your phone on the included holder. The Bluetooth clicker sits on your belt loop. Press once before each shot — that's all you ever do.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">02</div>
+      <h3>Play your round.</h3>
+      <p>Forget the phone exists. Clippar's AI pipeline detects every shot from your raw footage — using pose estimation, ball flight tracking, and audio impact detection.</p>
+    </div>
+    <div class="step">
+      <div class="step-num">03</div>
+      <h3>Walk off with a reel.</h3>
+      <p>Every shot, trimmed and tagged. Add your score and Clippar assembles a PGA-style highlight video — music, overlays, ready to share.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ DETECTION DEMO ═══ -->
+<div class="section-divider"></div>
+<section class="demo-section">
+  <div class="demo-header">
+    <div class="section-label">See it in action</div>
+    <h2>Raw footage in.<br>Clean shots out.</h2>
+  </div>
+  <div class="demo-flow">
+    <div class="demo-card">
+      <div class="demo-card-header">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+        <span>raw_footage/</span>
+      </div>
+      <div class="demo-card-body">
+        <ul class="file-list">
+          <li>
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            IMG_3661.mov <span class="file-size">42 min</span>
+          </li>
+          <li>
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            IMG_3662.mov <span class="file-size">38 min</span>
+          </li>
+          <li>
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+            IMG_3663.mov <span class="file-size">35 min</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="demo-arrow">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M5 12h14M12 5l7 7-7 7"/>
+      </svg>
+    </div>
+
+    <div class="demo-card" style="border-color:rgba(168,230,61,0.3);">
+      <div class="demo-card-header">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+        <span style="color:var(--green)">clippar_output/</span>
+      </div>
+      <div class="demo-card-body">
+        <div class="output-thumb" style="margin-bottom:12px;">
+          <video autoplay loop muted playsinline>
+            <source src="/landing_assets/demo_reel.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <span class="output-tag">swing01_ball+audio</span>
+          <span class="output-tag">swing02_ball+audio</span>
+          <span class="output-tag">swing03_audio</span>
+          <span class="output-tag">putt01_vision</span>
+        </div>
+        <ul class="file-list" style="margin-top:12px;">
+          <li style="color:var(--green);">
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            14 shots detected <span class="file-size">~5s each</span>
+          </li>
+          <li style="color:var(--green);">
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            highlight_reel.mp4 <span class="file-size">2:30</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ SHOT GALLERY ═══ -->
+<div class="section-divider"></div>
+<section class="gallery-section">
+  <div style="text-align:center;">
+    <div class="section-label">Your shots</div>
+    <h2 style="font-family:var(--font-display);font-size:clamp(36px,5vw,56px);line-height:0.96;letter-spacing:0.02em;">Every shot. Every angle.<br>Every detection method.</h2>
+  </div>
+  <div class="gallery-grid">
+    <div class="gallery-item">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
+      </video>
+      <div class="overlay">
+        <span class="shot-tag">Pose Detection</span>
+        <span class="shot-desc">Skeleton + keypoints</span>
+      </div>
+    </div>
+    <div class="gallery-item">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_clean.mp4" type="video/mp4">
+      </video>
+      <div class="overlay">
+        <span class="shot-tag">Ball + Audio</span>
+        <span class="shot-desc">Impact confirmed</span>
+      </div>
+    </div>
+    <div class="gallery-item">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
+      </video>
+      <div class="overlay">
+        <span class="shot-tag">Vision + Audio</span>
+        <span class="shot-desc">Multi-method fusion</span>
+      </div>
+    </div>
+    <div class="gallery-item">
+      <video autoplay loop muted playsinline>
+        <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
+      </video>
+      <div class="overlay">
+        <span class="shot-tag">Debug Overlay</span>
+        <span class="shot-desc">State machine viz</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ═══ TECH STRIP ═══ -->
+<div class="tech-strip">
+  <div class="tech-pill"><div class="tech-dot"></div>YOLOv8 Pose</div>
+  <div class="tech-pill"><div class="tech-dot"></div>Ball Tracking</div>
+  <div class="tech-pill"><div class="tech-dot"></div>Audio Impact</div>
+  <div class="tech-pill"><div class="tech-dot"></div>17 Keypoints</div>
+  <div class="tech-pill"><div class="tech-dot"></div>1200Hz+ Filter</div>
+</div>
+
+<!-- ═══ LIBRARY ═══ -->
+<div class="section-divider"></div>
+<section class="library-section">
+  <div class="library-visual">
+    <div class="folder-stack">
+      <div class="folder birdies">
+        <div class="folder-icon"></div>
+        <span class="folder-label">Birdies &amp; eagles</span>
+        <span class="folder-count">14 shots</span>
+      </div>
+      <div class="folder best">
+        <div class="folder-icon"></div>
+        <span class="folder-label">Best rounds</span>
+        <span class="folder-count">8 rounds</span>
+      </div>
+      <div class="folder worst">
+        <div class="folder-icon"></div>
+        <span class="folder-label">The disasters</span>
+        <span class="folder-count">23 shots</span>
+      </div>
+      <div class="folder recent">
+        <div class="folder-icon"></div>
+        <span class="folder-label">Last 30 days</span>
+        <span class="folder-count">6 rounds</span>
+      </div>
+    </div>
+  </div>
+  <div class="library-text">
+    <div class="section-label">Your golf library</div>
+    <h2>Every round.<br>Forever.</h2>
+    <p>Clippar builds a permanent library of your game. Filter by your best scores, your worst holes, your birdies folder, or any date. Your whole golfing history, in one place.</p>
+    <p>Six months from now you'll scroll back and actually see where your game was at. Not just a number on a scorecard — the actual shots.</p>
+  </div>
+</section>
+
+<!-- ═══ CTA REPEAT ═══ -->
+<div class="section-divider"></div>
+<section style="padding:80px 24px;text-align:center;">
+  <div class="section-label">Ready?</div>
+  <h2 style="font-family:var(--font-display);font-size:clamp(42px,7vw,72px);line-height:0.95;letter-spacing:0.02em;margin-bottom:24px;">
+    Stop losing your<br><span style="color:var(--green);">best shots.</span>
+  </h2>
+  <p style="font-size:16px;color:var(--muted);max-width:440px;margin:0 auto 28px;line-height:1.7;">
+    Join the waitlist. Get founding member pricing.<br>Brisbane and QLD golfers get early access.
+  </p>
+  <a href="#waitlist-form-section" style="display:inline-block;background:var(--green);color:#07100a;font-family:var(--font-display);font-size:20px;letter-spacing:0.08em;padding:15px 40px;border-radius:8px;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.background='#c0f04f'" onmouseout="this.style.background='#a8e63d'">
+    SECURE MY SPOT
+  </a>
+</section>
+
+<footer>
+  <div class="logo">CLIPPAR</div>
+  <p>&copy; 2025 Clippar &middot; Brisbane, Australia &middot; hello@clippar.io</p>
+</footer>
+
+<script>
+  // ── Form submission → POST JSON to /api/submit ──
+  document.getElementById('waitlist-form').addEventListener('submit', async function(e) {
+    e.preventDefault();
+
+    const btn = document.getElementById('btn-submit');
+    const errorDiv = document.getElementById('form-error');
+    errorDiv.style.display = 'none';
+
+    const name = document.getElementById('f-name').value.trim();
+    const email = document.getElementById('f-email').value.trim();
+    const frequency = document.getElementById('f-frequency').value;
+
+    if (!name || !email) {
+      errorDiv.textContent = 'Name and email are required.';
+      errorDiv.style.display = 'block';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'SUBMITTING...';
+
+    try {
+      const res = await fetch('/api/submit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name, email, frequency})
+      });
+      const result = await res.json();
+
+      if (result.ok) {
+        document.getElementById('waitlist-form').style.display = 'none';
+        document.getElementById('success').style.display = 'block';
+      } else {
+        errorDiv.textContent = result.error || 'Something went wrong. Please try again.';
+        errorDiv.style.display = 'block';
+        btn.disabled = false;
+        btn.textContent = 'SECURE MY SPOT';
+      }
+    } catch (err) {
+      errorDiv.textContent = 'Network error. Please try again.';
+      errorDiv.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'SECURE MY SPOT';
+    }
+  });
+
+  // ── Scroll animations ──
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        entry.target.style.opacity = '1';
+        entry.target.style.transform = 'translateY(0)';
+      }
+    });
+  }, { threshold: 0.1 });
+
+  document.querySelectorAll('.step, .folder, .demo-card, .gallery-item, .tech-pill').forEach(el => {
+    el.style.opacity = '0';
+    el.style.transform = 'translateY(20px)';
+    el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
+    observer.observe(el);
+  });
+</script>
+</body>
+</html>

@@ -71,3 +71,9 @@ post_roll_sec:  3.0   # seconds after shot event to include in saved clip
 display:        false    # show live preview window (set false for headless)
 save_annotated: true   # save a separate annotated video alongside shot clips
 verbose:        true    # print detailed state-machine logs
+
+# ── Performance ───────────────────────────────────────────
+fast_mode:        false  # when true: disables annotated output + verbose for max speed
+device:           "auto" # inference device: "auto" (MPS>CUDA>CPU), "mps", "cuda", "cpu"
+inference_imgsz:  640    # YOLO inference resolution (lower = faster, 640 is good balance)
+parallel_workers: 0      # 0 = sequential, 2+ = parallel clip processing (use 2-4)

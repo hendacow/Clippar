@@ -1,3 +1,4 @@
+# ── Core ML pipeline ──
 ultralytics>=8.0.0
 torch>=2.0.0
 torchvision>=0.15.0
@@ -7,3 +8,17 @@ librosa>=0.10.0
 scipy>=1.10.0
 pyyaml>=6.0
 scikit-learn>=1.3.0
+
+# ── Web app (concierge MVP) ──
+flask>=3.0.0
+gunicorn>=21.2.0
+python-dotenv>=1.0.0
+gdown>=5.0.0
+google-api-python-client>=2.100.0
+google-auth>=2.23.0
+
+# ── Database (Neon Postgres) ──
+psycopg2-binary>=2.9.0
+
+# ── File storage (Cloudflare R2) ──
+boto3>=1.28.0

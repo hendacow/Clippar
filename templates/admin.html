@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Clippar Admin Dashboard</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0a; color: #e0e0e0; font-family: 'DM Sans', sans-serif; padding: 24px; }
+
+  .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 32px; }
+  h1 { font-family: 'Bebas Neue', sans-serif; font-size: 2.2rem; color: #a8e63d; }
+  .header a { color: #888; text-decoration: none; font-size: 0.9rem; }
+
+  .filters { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+  .filters a { padding: 6px 14px; border-radius: 20px; border: 1px solid #333;
+               color: #aaa; text-decoration: none; font-size: 0.85rem; }
+  .filters a.active, .filters a:hover { border-color: #a8e63d; color: #a8e63d; }
+
+  .job-card { background: #141414; border: 1px solid #222; border-radius: 12px;
+              padding: 20px; margin-bottom: 16px; }
+  .job-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .job-id { font-family: monospace; color: #666; font-size: 0.85rem; }
+  .job-name { font-size: 1.1rem; font-weight: 600; }
+  .job-email { color: #888; font-size: 0.9rem; }
+  .job-meta { display: flex; gap: 16px; margin: 8px 0; font-size: 0.85rem; color: #888; }
+
+  .badge { display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 0.75rem;
+           font-weight: 600; text-transform: uppercase; }
+  .badge-pending { background: #333; color: #aaa; }
+  .badge-downloading, .badge-processing { background: #1a3a1a; color: #6ddf6d; }
+  .badge-ready_for_review { background: #3a3a1a; color: #e6d63d; }
+  .badge-approved, .badge-delivered { background: #1a3a1a; color: #a8e63d; }
+  .badge-rejected { background: #3a1a1a; color: #ff6b6b; }
+  .badge-download_failed, .badge-processing_failed, .badge-upload_failed,
+  .badge-uploading { background: #3a1a1a; color: #ff6b6b; }
+
+  .error-msg { background: #1a0a0a; border: 1px solid #3a1a1a; border-radius: 8px;
+               padding: 8px 12px; margin: 8px 0; font-size: 0.85rem; color: #ff6b6b; }
+
+  .preview-section { margin: 12px 0; }
+  .preview-section video { width: 100%; max-width: 640px; border-radius: 8px; background: #000; }
+
+  .actions { display: flex; gap: 8px; margin-top: 12px; align-items: flex-start; flex-wrap: wrap; }
+  .actions form { display: flex; gap: 8px; align-items: center; }
+  .actions textarea { width: 300px; height: 40px; padding: 8px; border: 1px solid #333;
+                      border-radius: 8px; background: #1a1a1a; color: #e0e0e0; font-size: 0.85rem;
+                      resize: vertical; }
+  .btn { padding: 8px 16px; border: none; border-radius: 8px; font-weight: 600;
+         font-size: 0.85rem; cursor: pointer; }
+  .btn-approve { background: #a8e63d; color: #0a0a0a; }
+  .btn-approve:hover { background: #b8f04d; }
+  .btn-reject { background: #333; color: #ff6b6b; }
+  .btn-reject:hover { background: #3a1a1a; }
+
+  .drive-link a { color: #a8e63d; word-break: break-all; }
+  .empty { text-align: center; padding: 60px; color: #555; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Clippar Dashboard</h1>
+  <a href="/admin/logout">Log out</a>
+</div>
+
+<div class="filters">
+  <a href="/admin" class="{% if not status_filter %}active{% endif %}">All</a>
+  <a href="/admin?status=pending" class="{% if status_filter == 'pending' %}active{% endif %}">Pending</a>
+  <a href="/admin?status=ready_for_review" class="{% if status_filter == 'ready_for_review' %}active{% endif %}">Ready for Review</a>
+  <a href="/admin?status=upload_failed" class="{% if status_filter == 'upload_failed' %}active{% endif %}">Upload Failed</a>
+  <a href="/admin?status=delivered" class="{% if status_filter == 'delivered' %}active{% endif %}">Delivered</a>
+  <a href="/admin?status=processing_failed" class="{% if status_filter == 'processing_failed' %}active{% endif %}">Failed</a>
+</div>
+
+{% if jobs %}
+  {% for job in jobs %}
+  <div class="job-card">
+    <div class="job-header">
+      <div>
+        <span class="job-name">{{ job.name }}</span>
+        <span class="job-email"> — {{ job.email }}</span>
+      </div>
+      <span class="badge badge-{{ job.status }}">{{ job.status | replace('_', ' ') }}</span>
+    </div>
+
+    <div class="job-meta">
+      <span class="job-id">{{ job.id }}</span>
+      {% if job.frequency %}<span>Plays: {{ job.frequency }}</span>{% endif %}
+      {% if job.clip_count %}<span>{{ job.clip_count }} clip(s)</span>{% endif %}
+      <span>{{ job.created_at[:16] | replace('T', ' ') }}</span>
+    </div>
+
+    {% if job.drive_link %}
+    <div class="drive-link" style="font-size:0.85rem; margin: 4px 0;">
+      Source: <a href="{{ job.drive_link }}" target="_blank">{{ job.drive_link[:60] }}...</a>
+    </div>
+    {% endif %}
+
+    {% if job.error_message %}
+    <div class="error-msg">{{ job.error_message }}</div>
+    {% endif %}
+
+    {% if job.admin_note %}
+    <div style="font-size:0.85rem; color:#888; margin:4px 0;">Note: {{ job.admin_note }}</div>
+    {% endif %}
+
+    {% if job.result_drive_link %}
+    <div class="drive-link" style="font-size:0.85rem; margin: 4px 0;">
+      Result: <a href="{{ job.result_drive_link }}" target="_blank">{{ job.result_drive_link[:60] }}...</a>
+    </div>
+    {% endif %}
+
+    {% if job.status in ('ready_for_review', 'upload_failed', 'approved', 'delivered') %}
+    <div class="preview-section">
+      <video controls preload="metadata">
+        <source src="/admin/preview/{{ job.id }}" type="video/mp4">
+        Your browser does not support video.
+      </video>
+    </div>
+    {% endif %}
+
+    {% if job.status in ('ready_for_review', 'upload_failed') %}
+    <div class="actions">
+      <form method="POST" action="/admin/approve/{{ job.id }}">
+        <textarea name="admin_note" placeholder="Admin note (optional)"></textarea>
+        <button class="btn btn-approve" type="submit">{% if job.status == 'upload_failed' %}Retry Upload & Send{% else %}Approve & Send{% endif %}</button>
+      </form>
+      <form method="POST" action="/admin/reject/{{ job.id }}">
+        <textarea name="admin_note" placeholder="Rejection reason"></textarea>
+        <button class="btn btn-reject" type="submit">Reject</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% endfor %}
+{% else %}
+  <div class="empty">No jobs{% if status_filter %} with status "{{ status_filter }}"{% endif %}.</div>
+{% endif %}
+
+</body>
+</html>

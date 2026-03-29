@@ -3,13 +3,30 @@ __pycache__/
 *.pyc
 
 .venv/
+.env
+service_account.json
+oauth_credentials.json
+drive_token.json
+clippar.db
+jobs/
 
 inputs/
 inputs copy/
+inputs random/
 outputs/
+outputs random/
 tmp_validation_force/
 tmp_validation_run/
 validation_runs/
 .history/
+.agents/
+.claude/
 alex_inputs/
 alex_outputs/
+
+# Logs
+clippar.log
+clippar_error.log
+
+# Generated logos (keep in repo if you want, remove this line)
+# clippar_logo_*.png

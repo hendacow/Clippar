@@ -1,0 +1,24 @@
+.venv/
+.git/
+.history/
+.claude/
+__pycache__/
+*.pyc
+clippar.db
+clippar.log
+clippar_error.log
+jobs/
+inputs/
+outputs/
+inputs random/
+outputs random/
+validation_runs/
+tmp_validation_*/
+.env
+service_account.json
+oauth_credentials.json
+drive_token.json
+clippar-web/
+clippar-landing.html
+extract_demo_clips.sh
+start_clippar.sh
