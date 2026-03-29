@@ -6,6 +6,7 @@ Stores in Neon Postgres and syncs to Mailchimp.
 import json
 import os
 
+from http.server import BaseHTTPRequestHandler
 import psycopg2
 import requests
 
@@ -37,52 +38,59 @@ def _add_to_mailchimp(email, name, frequency):
         pass  # Postgres is source of truth; Mailchimp sync is best-effort
 
 
-def handler(request):
-    if request.method == "OPTIONS":
-        return {
-            "statusCode": 200,
-            "headers": {
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Allow-Methods": "POST, OPTIONS",
-                "Access-Control-Allow-Headers": "Content-Type",
-            },
-        }
+class handler(BaseHTTPRequestHandler):
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
-    if request.method != "POST":
-        return {"statusCode": 405, "body": json.dumps({"ok": False, "error": "Method not allowed"})}
+    def do_POST(self):
+        content_length = int(self.headers.get("Content-Length", 0))
+        body_bytes = self.rfile.read(content_length)
+        
+        try:
+            body = json.loads(body_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, TypeError):
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
 
-    try:
-        body = json.loads(request.body)
-    except (json.JSONDecodeError, TypeError):
-        return {"statusCode": 400, "body": json.dumps({"ok": False, "error": "Invalid JSON"})}
+        name = (body.get("name") or "").strip()
+        email = (body.get("email") or "").strip()
+        frequency = (body.get("frequency") or "").strip()
 
-    name = (body.get("name") or "").strip()
-    email = (body.get("email") or "").strip()
-    frequency = (body.get("frequency") or "").strip()
+        if not name or not email:
+            self._send_json(400, {"ok": False, "error": "Name and email are required."})
+            return
 
-    if not name or not email:
-        return {"statusCode": 400, "body": json.dumps({"ok": False, "error": "Name and email are required."})}
+        try:
+            conn = _get_db_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """INSERT INTO waitlist (name, email, frequency)
+                           VALUES (%s, %s, %s)
+                           ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, frequency = EXCLUDED.frequency""",
+                        (name, email, frequency),
+                    )
+                conn.commit()
+            except Exception as e:
+                conn.rollback()
+                self._send_json(500, {"ok": False, "error": "Database error"})
+                return
+            finally:
+                conn.close()
+        except Exception as e:
+            self._send_json(500, {"ok": False, "error": "Database connection failed"})
+            return
 
-    conn = _get_db_conn()
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """INSERT INTO waitlist (name, email, frequency)
-                   VALUES (%s, %s, %s)
-                   ON CONFLICT (email) DO UPDATE SET name = EXCLUDED.name, frequency = EXCLUDED.frequency""",
-                (name, email, frequency),
-            )
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        return {"statusCode": 500, "body": json.dumps({"ok": False, "error": "Database error"})}
-    finally:
-        conn.close()
+        _add_to_mailchimp(email, name, frequency)
+        self._send_json(200, {"ok": True})
 
-    _add_to_mailchimp(email, name, frequency)
-
-    return {
-        "statusCode": 200,
-        "headers": {"Content-Type": "application/json"},
-        "body": json.dumps({"ok": True}),
-    }
+    def _send_json(self, status, data):
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(json.dumps(data).encode("utf-8"))
