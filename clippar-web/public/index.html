@@ -400,9 +400,22 @@
   @media (max-width: 768px) {
     nav { padding: 16px 20px; }
     .hero { padding: 100px 20px 60px; }
-    .phone-showcase { flex-wrap: wrap; gap: 10px; }
-    .phone-frame { width: 140px !important; }
-    .phone-frame.featured { width: 170px !important; }
+    .phone-showcase { 
+      flex-wrap: wrap; 
+      gap: 10px; 
+      justify-content: center;
+      align-items: center;
+      width: 100%;
+      padding: 0 16px;
+    }
+    .phone-frame { 
+      width: 140px !important; 
+      margin: 0 auto;
+    }
+    .phone-frame.featured { 
+      width: 170px !important; 
+      order: -1; /* Put featured first on mobile */
+    }
     .form-card { padding: 24px 20px; }
     .steps { grid-template-columns: 1fr; gap: 2px; }
     .step:first-child { border-radius: 14px 14px 0 0; }
@@ -421,9 +434,8 @@
 <nav>
   <div style="display:flex;align-items:baseline;">
     <div class="logo">CLIPPAR</div>
-    <span class="logo-sub">Golf Video AI</span>
   </div>
-  <div class="nav-tag">Early access — Brisbane, AU</div>
+  <div></div>
 </nav>
 
 <!-- ═══ HERO ═══ -->
@@ -431,7 +443,7 @@
   <div class="hero-eyebrow">Golf video, reimagined</div>
   <h1>Every shot.<br><span>Remembered.</span></h1>
   <p class="hero-sub">
-    Click once. Play your round. Walk off with a <strong>cinematic highlight reel</strong> of every shot — automatically trimmed, tagged, and ready to share.
+    Tap before each shot. Tap after. Our AI clips, trims, and assembles your <strong>cinematic highlight reel</strong> — automatically tagged and ready to share.
   </p>
 
   <!-- Phone showcase with real footage -->
@@ -472,7 +484,7 @@
   <div class="form-wrap" id="waitlist-form-section">
     <div class="form-card">
       <h2>Join the waitlist</h2>
-      <p>Get early access and founding member pricing. Brisbane &amp; QLD golfers first.</p>
+      <p>Get founding member pricing and be first to know when we launch.</p>
       <div class="form-error" id="form-error"></div>
       <form id="waitlist-form">
         <div class="form-group">
@@ -510,7 +522,7 @@
 
   <div class="count-badge">
     <div class="dot-pulse"></div>
-    <span>Waitlist open — Brisbane & QLD golfers first</span>
+    <span>Waitlist open — spots filling fast</span>
   </div>
 </section>
 
@@ -518,22 +530,22 @@
 <div class="section-divider"></div>
 <section class="section">
   <div class="section-label">How it works</div>
-  <div class="section-title">Three clicks.<br>A round of memories.</div>
+  <div class="section-title">Tap. Swing. Tap.<br>That's it.</div>
   <div class="steps">
     <div class="step">
       <div class="step-num">01</div>
-      <h3>Clip on. Press go.</h3>
-      <p>Mount your phone on the included holder. The Bluetooth clicker sits on your belt loop. Press once before each shot — that's all you ever do.</p>
+      <h3>Tap before your shot.</h3>
+      <p>Mount your phone on the tripod. Press the Bluetooth clicker on your belt before you walk up to the ball. Recording starts.</p>
     </div>
     <div class="step">
       <div class="step-num">02</div>
-      <h3>Play your round.</h3>
-      <p>Forget the phone exists. Clippar's AI pipeline detects every shot from your raw footage — using pose estimation, ball flight tracking, and audio impact detection.</p>
+      <h3>Hit. Then tap again.</h3>
+      <p>Take your shot. Press the clicker again when you're done. Repeat for every shot on the course — the clips upload automatically.</p>
     </div>
     <div class="step">
       <div class="step-num">03</div>
-      <h3>Walk off with a reel.</h3>
-      <p>Every shot, trimmed and tagged. Add your score and Clippar assembles a PGA-style highlight video — music, overlays, ready to share.</p>
+      <h3>AI does the rest.</h3>
+      <p>Our detection pipeline trims each clip to the perfect moment — pose, ball flight, impact. Walk off with a highlight reel, ready to share.</p>
     </div>
   </div>
 </section>
@@ -706,7 +718,7 @@
     Stop losing your<br><span style="color:var(--green);">best shots.</span>
   </h2>
   <p style="font-size:16px;color:var(--muted);max-width:440px;margin:0 auto 28px;line-height:1.7;">
-    Join the waitlist. Get founding member pricing.<br>Brisbane and QLD golfers get early access.
+    Join the waitlist. Get founding member pricing.<br>Be the first to know when we launch.
   </p>
   <a href="#waitlist-form-section" style="display:inline-block;background:var(--green);color:#07100a;font-family:var(--font-display);font-size:20px;letter-spacing:0.08em;padding:15px 40px;border-radius:8px;text-decoration:none;transition:background 0.2s;" onmouseover="this.style.background='#c0f04f'" onmouseout="this.style.background='#a8e63d'">
     SECURE MY SPOT
@@ -715,7 +727,7 @@
 
 <footer>
   <div class="logo">CLIPPAR</div>
-  <p>&copy; 2025 Clippar &middot; Brisbane, Australia &middot; hello@clippar.io</p>
+  <p>&copy; 2025 Clippar &middot; hello@clippar.io</p>
 </footer>
 
 <script>
