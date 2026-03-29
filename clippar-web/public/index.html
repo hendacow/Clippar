@@ -296,10 +296,12 @@
     border-radius: 20px;
     background: var(--card);
     border: 1px solid var(--border);
+    touch-action: pan-y pinch-zoom;
   }
   .steps-track {
     display: flex;
     transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+    touch-action: pan-x;
   }
   .step {
     flex: 0 0 100%;
@@ -773,7 +775,7 @@
         <div class="step-content">
           <div class="step-num">01</div>
           <h3>Click.</h3>
-          <p><strong style="color:var(--green)">Clip your phone</strong> onto your buggy or bag. Tighten it, angle it how you like. Press the <strong style="color:#fff">Bluetooth clicker</strong> on your belt before you walk up to the ball.</p>
+          <p><strong style="color:var(--green)">Click your phone mount</strong> onto your buggy or bag. Place your phone in the holder. <strong style="color:#fff">Tighten it, angle it</strong> how you like.</p>
         </div>
         <div class="step-video-container">
           <video class="step-video" muted playsinline>
@@ -787,7 +789,7 @@
         <div class="step-content">
           <div class="step-num">02</div>
           <h3>Swing.</h3>
-          <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically. <strong style="color:#fff">Click when you're done.</strong></p>
+          <p>Press the <strong style="color:var(--green)">Bluetooth clicker</strong> on your belt before you walk up to the ball. Take your shot and <strong style="color:#fff">pose for the camera.</strong> Your swing is captured automatically. Press the clicker when you're done.</p>
         </div>
         <div class="step-video-container">
           <video class="step-video" muted playsinline>
@@ -801,7 +803,7 @@
         <div class="step-content">
           <div class="step-num">03</div>
           <h3>Clip.</h3>
-          <p>Our AI <strong style="color:var(--green)">trims each clip</strong> to the perfect moment—pose, ball flight, impact. Walk off with a <strong style="color:#fff">5-minute highlight reel</strong> of your round, ready to share.</p>
+          <p>Our AI <strong style="color:var(--green)">trims each clip</strong> to the perfect moment—using your pose, ball flight, impact. Walk off with a <strong style="color:#fff">5-minute highlight reel</strong> of your ENTIRE round, ready to share.</p>
           <div class="step-note">↑ Example of detection system</div>
         </div>
         <div class="step-video-container">
@@ -1207,25 +1209,44 @@
       nextSlide();
     });
     
-    // Touch/swipe support
+    // Touch/swipe support - listen on carousel container for better touch area
     let touchStartX = 0;
-    let touchEndX = 0;
+    let touchStartY = 0;
+    let isSwiping = false;
     
-    track.addEventListener('touchstart', e => {
-      touchStartX = e.changedTouches[0].screenX;
+    const carousel = document.querySelector('.steps-carousel');
+    
+    carousel.addEventListener('touchstart', e => {
+      touchStartX = e.touches[0].clientX;
+      touchStartY = e.touches[0].clientY;
+      isSwiping = false;
     }, { passive: true });
     
-    track.addEventListener('touchend', e => {
-      touchEndX = e.changedTouches[0].screenX;
+    carousel.addEventListener('touchmove', e => {
+      if (!touchStartX) return;
+      const diffX = Math.abs(e.touches[0].clientX - touchStartX);
+      const diffY = Math.abs(e.touches[0].clientY - touchStartY);
+      // If horizontal movement is greater than vertical, we're swiping
+      if (diffX > diffY && diffX > 10) {
+        isSwiping = true;
+      }
+    }, { passive: true });
+    
+    carousel.addEventListener('touchend', e => {
+      const touchEndX = e.changedTouches[0].clientX;
       const diff = touchStartX - touchEndX;
       
-      if (Math.abs(diff) > 50) {
+      // Only trigger if it was a horizontal swipe with enough distance
+      if (isSwiping && Math.abs(diff) > 50) {
         if (diff > 0) {
           nextSlide();
         } else {
           prevSlide();
         }
       }
+      touchStartX = 0;
+      touchStartY = 0;
+      isSwiping = false;
     }, { passive: true });
     
     // Start/stop video when section comes into view
