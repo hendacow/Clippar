@@ -41,6 +41,14 @@
     pointer-events: none; z-index: 999; opacity: 0.4;
   }
 
+  /* ── Status bar cover (iOS safe area) ── */
+  .status-bar-cover {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    height: env(safe-area-inset-top, 0px);
+    background: rgb(7,16,10);
+    z-index: 101;
+  }
   /* ── Nav ── */
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 100;
@@ -48,7 +56,6 @@
     padding: 20px 48px;
     padding-top: calc(20px + env(safe-area-inset-top, 0px));
     background: rgb(7,16,10);
-    box-shadow: 0 -100px 0 0 rgb(7,16,10);
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
@@ -432,6 +439,8 @@
 </style>
 </head>
 <body>
+
+<div class="status-bar-cover"></div>
 
 <nav>
   <div style="display:flex;align-items:baseline;">
