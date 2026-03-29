@@ -708,7 +708,7 @@
           <p><strong style="color:var(--green)">Clip your phone</strong> onto your buggy or bag. Tighten it, angle it how you like. Press the <strong style="color:#fff">Bluetooth clicker</strong> on your belt before you walk up to the ball.</p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" autoplay muted loop playsinline>
+          <video class="step-video" muted playsinline>
             <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
           </video>
         </div>
@@ -722,7 +722,7 @@
           <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically. <strong style="color:#fff">Click when you're done.</strong></p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" autoplay muted loop playsinline>
+          <video class="step-video" muted playsinline>
             <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
           </video>
         </div>
@@ -737,7 +737,7 @@
           <div class="step-note">↑ Example of detection system</div>
         </div>
         <div class="step-video-container">
-          <video class="step-video" autoplay muted loop playsinline>
+          <video class="step-video" muted playsinline>
             <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
           </video>
         </div>
@@ -1019,12 +1019,36 @@
     const nextBtn = document.getElementById('next-btn');
     const progressBar = document.getElementById('carousel-progress');
     const section = document.getElementById('how-it-works');
+    const videos = document.querySelectorAll('.step-video');
     
     let currentIndex = 0;
-    let autoplayInterval = null;
     let isInView = false;
     const totalSlides = 3;
-    const autoplayDelay = 3000; // 3 seconds
+    
+    function stopAllVideos() {
+      videos.forEach(v => {
+        v.pause();
+        v.currentTime = 0;
+      });
+    }
+    
+    function playCurrentVideo() {
+      const video = videos[currentIndex];
+      video.currentTime = 0;
+      video.play().catch(() => {});
+    }
+    
+    function updateProgressBar() {
+      const video = videos[currentIndex];
+      if (video.duration && isFinite(video.duration)) {
+        const durationMs = video.duration * 1000;
+        progressBar.style.transition = 'none';
+        progressBar.style.width = '0%';
+        progressBar.offsetHeight; // Force reflow
+        progressBar.style.transition = `width ${durationMs}ms linear`;
+        progressBar.style.width = '100%';
+      }
+    }
     
     function goToSlide(index) {
       currentIndex = index;
@@ -1035,15 +1059,11 @@
         dot.classList.toggle('active', i === index);
       });
       
-      // Reset and start progress bar
-      progressBar.style.transition = 'none';
-      progressBar.style.width = '0%';
-      
-      // Force reflow
-      progressBar.offsetHeight;
-      
-      progressBar.style.transition = `width ${autoplayDelay}ms linear`;
-      progressBar.style.width = '100%';
+      // Stop all videos, play current one
+      stopAllVideos();
+      if (isInView) {
+        playCurrentVideo();
+      }
     }
     
     function nextSlide() {
@@ -1054,37 +1074,43 @@
       goToSlide((currentIndex - 1 + totalSlides) % totalSlides);
     }
     
-    function startAutoplay() {
-      if (autoplayInterval) clearInterval(autoplayInterval);
-      autoplayInterval = setInterval(nextSlide, autoplayDelay);
-    }
-    
-    function stopAutoplay() {
-      if (autoplayInterval) {
-        clearInterval(autoplayInterval);
-        autoplayInterval = null;
-      }
-      progressBar.style.transition = 'none';
-      progressBar.style.width = '0%';
-    }
+    // Listen for video ended events - auto-advance to next slide
+    videos.forEach((video, i) => {
+      video.addEventListener('ended', () => {
+        if (isInView && i === currentIndex) {
+          nextSlide();
+        }
+      });
+      
+      // Update progress bar once video metadata is loaded
+      video.addEventListener('loadedmetadata', () => {
+        if (i === currentIndex && isInView) {
+          updateProgressBar();
+        }
+      });
+      
+      // Update progress bar on play
+      video.addEventListener('play', () => {
+        if (i === currentIndex) {
+          updateProgressBar();
+        }
+      });
+    });
     
     // Dot click handlers
     dots.forEach((dot, i) => {
       dot.addEventListener('click', () => {
         goToSlide(i);
-        if (isInView) startAutoplay();
       });
     });
     
     // Arrow click handlers
     prevBtn.addEventListener('click', () => {
       prevSlide();
-      if (isInView) startAutoplay();
     });
     
     nextBtn.addEventListener('click', () => {
       nextSlide();
-      if (isInView) startAutoplay();
     });
     
     // Touch/swipe support
@@ -1105,20 +1131,20 @@
         } else {
           prevSlide();
         }
-        if (isInView) startAutoplay();
       }
     }, { passive: true });
     
-    // Start autoplay when section comes into view
+    // Start/stop video when section comes into view
     const carouselObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
         if (entry.isIntersecting) {
           isInView = true;
-          goToSlide(currentIndex); // Reset progress
-          startAutoplay();
+          playCurrentVideo();
         } else {
           isInView = false;
-          stopAutoplay();
+          stopAllVideos();
+          progressBar.style.transition = 'none';
+          progressBar.style.width = '0%';
         }
       });
     }, { threshold: 0.3 });
