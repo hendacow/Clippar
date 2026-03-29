@@ -44,9 +44,9 @@
   /* ── Nav ── */
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 20px 48px 25px;
-    padding-top: calc(20px + env(safe-area-inset-top, 0px));
+    display: flex; align-items: center; justify-content: center;
+    padding: 14px 48px;
+    padding-top: calc(14px + env(safe-area-inset-top, 0px));
     background: var(--bg);
     /* Force GPU compositing to fix iOS Safari paint issues */
     transform: translateZ(0);
@@ -59,7 +59,7 @@
   nav::before {
     content: '';
     position: absolute;
-    top: -100px; left: -10px; right: -10px; bottom: -50px;
+    top: -100px; left: -10px; right: -10px; bottom: 0;
     background: var(--bg);
     z-index: -1;
   }
@@ -71,13 +71,10 @@
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
-    font-family: var(--font-mono); font-size: 9px; color: var(--muted);
-    letter-spacing: 0.15em; text-transform: uppercase; margin-left: 12px;
+    display: none;
   }
   .nav-tag {
-    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
-    letter-spacing: 0.12em; text-transform: uppercase;
-    border: 1px solid var(--border); padding: 6px 14px; border-radius: 20px;
+    display: none;
   }
 
   /* ── Hero ── */
@@ -230,8 +227,8 @@
     background: linear-gradient(90deg, transparent, var(--border), transparent);
   }
 
-  /* ── How it works ── */
-  .section { padding: 100px 24px; max-width: 1000px; margin: 0 auto; }
+  /* ── How it works - Carousel ── */
+  .section { padding: 100px 24px; max-width: 1200px; margin: 0 auto; }
   .section-label {
     font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.2em;
     text-transform: uppercase; color: var(--green); margin-bottom: 16px;
@@ -239,104 +236,166 @@
   .section-title {
     font-family: var(--font-display);
     font-size: clamp(42px, 7vw, 72px);
-    line-height: 0.95; letter-spacing: 0.02em; margin-bottom: 60px;
+    line-height: 0.95; letter-spacing: 0.02em; margin-bottom: 40px;
   }
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+  
+  /* Carousel container */
+  .steps-carousel {
+    position: relative;
+    overflow: hidden;
+    border-radius: 20px;
+    background: var(--card);
+    border: 1px solid var(--border);
+  }
+  .steps-track {
+    display: flex;
+    transition: transform 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
   .step {
-    background: var(--card); border: 1px solid var(--border);
-    padding: 0; position: relative; transition: all 0.4s ease;
-    border-radius: 16px; overflow: hidden;
-    display: flex; flex-direction: column;
+    flex: 0 0 100%;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    min-height: 500px;
   }
-  .step:hover { 
-    background: rgba(168,230,61,0.04); 
-    border-color: rgba(168,230,61,0.3);
-    transform: translateY(-4px);
-    box-shadow: 0 20px 40px -15px rgba(168,230,61,0.15);
+  .step-content {
+    padding: 48px 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
   }
+  .step-num {
+    font-family: var(--font-display); font-size: 100px;
+    color: rgba(168,230,61,0.1); line-height: 1; margin-bottom: 8px;
+  }
+  .step h3 {
+    font-family: var(--font-display); font-size: 42px;
+    letter-spacing: 0.04em; color: var(--white); margin-bottom: 16px;
+  }
+  .step p { font-size: 16px; color: var(--muted); line-height: 1.7; max-width: 400px; }
+  .step-note {
+    font-family: var(--font-mono); font-size: 10px;
+    color: rgba(168,230,61,0.6); letter-spacing: 0.1em;
+    text-transform: uppercase; margin-top: 20px;
+    padding-top: 16px; border-top: 1px solid var(--border);
+  }
+  
   .step-video-container {
     position: relative;
-    width: 100%;
-    aspect-ratio: 9/16;
-    max-height: 320px;
-    overflow: hidden;
     background: var(--bg2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    overflow: hidden;
   }
   .step-video {
     width: 100%;
     height: 100%;
     object-fit: cover;
   }
-  .step-content {
-    padding: 24px 22px 28px;
-    flex: 1;
+  
+  /* Carousel dots */
+  .carousel-dots {
     display: flex;
-    flex-direction: column;
+    justify-content: center;
+    gap: 10px;
+    padding: 20px;
+    background: var(--bg2);
   }
-  .step-num {
-    font-family: var(--font-display); font-size: 48px;
-    color: rgba(168,230,61,0.15); line-height: 1; margin-bottom: 12px;
+  .carousel-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--border);
+    border: none;
+    cursor: pointer;
+    transition: all 0.3s;
+    padding: 0;
   }
-  .step h3 {
-    font-family: var(--font-display); font-size: 24px;
-    letter-spacing: 0.04em; color: var(--white); margin-bottom: 10px;
+  .carousel-dot.active {
+    background: var(--green);
+    transform: scale(1.2);
   }
-  .step p { font-size: 13px; color: var(--muted); line-height: 1.65; flex: 1; }
-  .step-note {
-    font-family: var(--font-mono); font-size: 10px;
-    color: rgba(168,230,61,0.5); letter-spacing: 0.1em;
-    text-transform: uppercase; margin-top: 12px;
-    padding-top: 12px; border-top: 1px solid var(--border);
-  }
-  
-  /* Spotlight glow effect */
-  .step::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: radial-gradient(
-      600px circle at var(--mouse-x, 50%) var(--mouse-y, 50%),
-      rgba(168,230,61,0.06),
-      transparent 40%
-    );
-    opacity: 0;
-    transition: opacity 0.3s;
-    pointer-events: none;
-    z-index: 1;
-  }
-  .step:hover::before {
-    opacity: 1;
-  }
-  .step::after {
-    content: '';
-    position: absolute;
-    inset: -1px;
-    border-radius: 17px;
-    background: linear-gradient(
-      135deg,
-      rgba(168,230,61,0.3) 0%,
-      transparent 50%,
-      rgba(168,230,61,0.1) 100%
-    );
-    opacity: 0;
-    transition: opacity 0.4s;
-    pointer-events: none;
-    z-index: -1;
-  }
-  .step:hover::after {
-    opacity: 1;
+  .carousel-dot:hover {
+    background: rgba(168,230,61,0.5);
   }
   
-  /* Mobile steps - vertical stack */
+  /* Carousel arrows */
+  .carousel-arrows {
+    position: absolute;
+    top: 50%;
+    left: 0;
+    right: 0;
+    transform: translateY(-50%);
+    display: flex;
+    justify-content: space-between;
+    padding: 0 16px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .carousel-arrow {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: rgba(7,16,10,0.8);
+    border: 1px solid var(--border);
+    color: var(--green);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: all 0.3s;
+  }
+  .carousel-arrow:hover {
+    background: rgba(168,230,61,0.15);
+    border-color: var(--green);
+  }
+  .carousel-arrow svg {
+    width: 20px;
+    height: 20px;
+  }
+  
+  /* Progress bar */
+  .carousel-progress {
+    height: 3px;
+    background: var(--border);
+  }
+  .carousel-progress-bar {
+    height: 100%;
+    background: var(--green);
+    width: 0%;
+    transition: width 3s linear;
+  }
+  .carousel-progress-bar.paused {
+    transition: none;
+  }
+  
+  /* Mobile carousel */
   @media (max-width: 768px) {
-    .steps { 
-      grid-template-columns: 1fr; 
-      gap: 20px;
-      max-width: 400px;
-      margin: 0 auto;
+    .step {
+      grid-template-columns: 1fr;
+      min-height: auto;
+    }
+    .step-content {
+      padding: 32px 24px;
+      order: 2;
     }
     .step-video-container {
-      max-height: 280px;
+      order: 1;
+      aspect-ratio: 9/16;
+      max-height: 400px;
+    }
+    .step-num {
+      font-size: 64px;
+    }
+    .step h3 {
+      font-size: 32px;
+    }
+    .step p {
+      font-size: 14px;
+    }
+    .carousel-arrows {
+      display: none;
     }
   }
 
@@ -631,46 +690,79 @@
 
 <!-- ═══ HOW IT WORKS ═══ -->
 <div class="section-divider"></div>
-<section class="section">
+<section class="section" id="how-it-works">
   <div class="section-label">How it works</div>
   <div class="section-title">Click. Swing. Clip.</div>
-  <div class="steps">
-    <div class="step">
-      <div class="step-video-container">
-        <video class="step-video" autoplay muted loop playsinline>
-          <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
-        </video>
+  
+  <div class="steps-carousel">
+    <div class="carousel-progress">
+      <div class="carousel-progress-bar" id="carousel-progress"></div>
+    </div>
+    
+    <div class="steps-track" id="steps-track">
+      <!-- Step 1: Click -->
+      <div class="step">
+        <div class="step-content">
+          <div class="step-num">01</div>
+          <h3>Click.</h3>
+          <p><strong style="color:var(--green)">Clip your phone</strong> onto your buggy or bag. Tighten it, angle it how you like. Press the <strong style="color:#fff">Bluetooth clicker</strong> on your belt before you walk up to the ball.</p>
+        </div>
+        <div class="step-video-container">
+          <video class="step-video" autoplay muted loop playsinline>
+            <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
+          </video>
+        </div>
       </div>
-      <div class="step-content">
-        <div class="step-num">01</div>
-        <h3>Click.</h3>
-        <p><strong style="color:var(--green)">Clip your phone</strong> onto your buggy or bag. Tighten it, angle it how you like. Press the <strong style="color:#fff">Bluetooth clicker</strong> on your belt before you walk up to the ball.</p>
+      
+      <!-- Step 2: Swing -->
+      <div class="step">
+        <div class="step-content">
+          <div class="step-num">02</div>
+          <h3>Swing.</h3>
+          <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically. <strong style="color:#fff">Click when you're done.</strong></p>
+        </div>
+        <div class="step-video-container">
+          <video class="step-video" autoplay muted loop playsinline>
+            <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
+          </video>
+        </div>
+      </div>
+      
+      <!-- Step 3: Clip -->
+      <div class="step">
+        <div class="step-content">
+          <div class="step-num">03</div>
+          <h3>Clip.</h3>
+          <p>Our AI <strong style="color:var(--green)">trims each clip</strong> to the perfect moment—pose, ball flight, impact. Walk off with a <strong style="color:#fff">5-minute highlight reel</strong> of your round, ready to share.</p>
+          <div class="step-note">↑ Example of detection system</div>
+        </div>
+        <div class="step-video-container">
+          <video class="step-video" autoplay muted loop playsinline>
+            <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
+          </video>
+        </div>
       </div>
     </div>
-    <div class="step">
-      <div class="step-video-container">
-        <video class="step-video" autoplay muted loop playsinline>
-          <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
-        </video>
-      </div>
-      <div class="step-content">
-        <div class="step-num">02</div>
-        <h3>Swing.</h3>
-        <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically. <strong style="color:#fff">Click when you're done.</strong></p>
-      </div>
+    
+    <!-- Navigation arrows -->
+    <div class="carousel-arrows">
+      <button class="carousel-arrow" id="prev-btn" aria-label="Previous step">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M15 18l-6-6 6-6"/>
+        </svg>
+      </button>
+      <button class="carousel-arrow" id="next-btn" aria-label="Next step">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M9 18l6-6-6-6"/>
+        </svg>
+      </button>
     </div>
-    <div class="step">
-      <div class="step-video-container">
-        <video class="step-video" autoplay muted loop playsinline>
-          <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
-        </video>
-      </div>
-      <div class="step-content">
-        <div class="step-num">03</div>
-        <h3>Clip.</h3>
-        <p>Our AI <strong style="color:var(--green)">trims each clip</strong> to the perfect moment—pose, ball flight, impact. Walk off with a <strong style="color:#fff">5-minute highlight reel</strong> of your round, ready to share.</p>
-        <div class="step-note">↑ Example of detection system</div>
-      </div>
+    
+    <!-- Dot indicators -->
+    <div class="carousel-dots">
+      <button class="carousel-dot active" data-index="0" aria-label="Step 1"></button>
+      <button class="carousel-dot" data-index="1" aria-label="Step 2"></button>
+      <button class="carousel-dot" data-index="2" aria-label="Step 3"></button>
     </div>
   </div>
 </section>
@@ -912,23 +1004,127 @@
     });
   }, { threshold: 0.1 });
 
-  document.querySelectorAll('.step, .folder, .demo-card, .gallery-item, .tech-pill').forEach(el => {
+  document.querySelectorAll('.folder, .demo-card, .gallery-item, .tech-pill').forEach(el => {
     el.style.opacity = '0';
     el.style.transform = 'translateY(20px)';
     el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
     observer.observe(el);
   });
 
-  // ── Spotlight glow tracking ──
-  document.querySelectorAll('.step').forEach(step => {
-    step.addEventListener('mousemove', e => {
-      const rect = step.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      const y = e.clientY - rect.top;
-      step.style.setProperty('--mouse-x', x + 'px');
-      step.style.setProperty('--mouse-y', y + 'px');
+  // ── Steps Carousel ──
+  (function() {
+    const track = document.getElementById('steps-track');
+    const dots = document.querySelectorAll('.carousel-dot');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const progressBar = document.getElementById('carousel-progress');
+    const section = document.getElementById('how-it-works');
+    
+    let currentIndex = 0;
+    let autoplayInterval = null;
+    let isInView = false;
+    const totalSlides = 3;
+    const autoplayDelay = 3000; // 3 seconds
+    
+    function goToSlide(index) {
+      currentIndex = index;
+      track.style.transform = `translateX(-${index * 100}%)`;
+      
+      // Update dots
+      dots.forEach((dot, i) => {
+        dot.classList.toggle('active', i === index);
+      });
+      
+      // Reset and start progress bar
+      progressBar.style.transition = 'none';
+      progressBar.style.width = '0%';
+      
+      // Force reflow
+      progressBar.offsetHeight;
+      
+      progressBar.style.transition = `width ${autoplayDelay}ms linear`;
+      progressBar.style.width = '100%';
+    }
+    
+    function nextSlide() {
+      goToSlide((currentIndex + 1) % totalSlides);
+    }
+    
+    function prevSlide() {
+      goToSlide((currentIndex - 1 + totalSlides) % totalSlides);
+    }
+    
+    function startAutoplay() {
+      if (autoplayInterval) clearInterval(autoplayInterval);
+      autoplayInterval = setInterval(nextSlide, autoplayDelay);
+    }
+    
+    function stopAutoplay() {
+      if (autoplayInterval) {
+        clearInterval(autoplayInterval);
+        autoplayInterval = null;
+      }
+      progressBar.style.transition = 'none';
+      progressBar.style.width = '0%';
+    }
+    
+    // Dot click handlers
+    dots.forEach((dot, i) => {
+      dot.addEventListener('click', () => {
+        goToSlide(i);
+        if (isInView) startAutoplay();
+      });
     });
-  });
+    
+    // Arrow click handlers
+    prevBtn.addEventListener('click', () => {
+      prevSlide();
+      if (isInView) startAutoplay();
+    });
+    
+    nextBtn.addEventListener('click', () => {
+      nextSlide();
+      if (isInView) startAutoplay();
+    });
+    
+    // Touch/swipe support
+    let touchStartX = 0;
+    let touchEndX = 0;
+    
+    track.addEventListener('touchstart', e => {
+      touchStartX = e.changedTouches[0].screenX;
+    }, { passive: true });
+    
+    track.addEventListener('touchend', e => {
+      touchEndX = e.changedTouches[0].screenX;
+      const diff = touchStartX - touchEndX;
+      
+      if (Math.abs(diff) > 50) {
+        if (diff > 0) {
+          nextSlide();
+        } else {
+          prevSlide();
+        }
+        if (isInView) startAutoplay();
+      }
+    }, { passive: true });
+    
+    // Start autoplay when section comes into view
+    const carouselObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          isInView = true;
+          goToSlide(currentIndex); // Reset progress
+          startAutoplay();
+        } else {
+          isInView = false;
+          stopAutoplay();
+        }
+      });
+    }, { threshold: 0.3 });
+    
+    carouselObserver.observe(section);
+  })();
 </script>
 </main>
 </body>
