@@ -174,7 +174,7 @@
     overflow: hidden; position: relative;
     background: #0a0a0a;
     box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(168,230,61,0.05);
-    transition: transform 0.4s ease, box-shadow 0.4s ease;
+    transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
   }
   .phone-frame:hover {
     transform: translateY(-8px) scale(1.02);
@@ -184,6 +184,10 @@
     width: 220px; border-color: var(--green);
     box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 60px rgba(168,230,61,0.15);
   }
+  /* Rotating carousel positions */
+  .phone-frame.pos-left { order: 1; }
+  .phone-frame.pos-center { order: 2; }
+  .phone-frame.pos-right { order: 3; }
   .phone-frame video {
     width: 100%; display: block;
     aspect-ratio: 9/16; object-fit: cover;
@@ -677,9 +681,9 @@
     Tap before each shot. Tap after. Our AI clips, trims, and assembles your <strong>cinematic highlight reel</strong> — automatically tagged and ready to share.
   </p>
 
-  <!-- Phone showcase with real footage -->
-  <div class="phone-showcase">
-    <div class="phone-frame">
+  <!-- Phone showcase with real footage - rotating carousel -->
+  <div class="phone-showcase" id="phone-carousel">
+    <div class="phone-frame pos-left" id="phone-1">
       <video autoplay loop muted playsinline>
         <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
       </video>
@@ -689,7 +693,7 @@
       </div>
       <div class="detection-badge">POSE</div>
     </div>
-    <div class="phone-frame featured">
+    <div class="phone-frame pos-center featured" id="phone-2">
       <video autoplay loop muted playsinline>
         <source src="/landing_assets/demo_clean.mp4" type="video/mp4">
       </video>
@@ -699,7 +703,7 @@
       </div>
       <div class="detection-badge">BALL + AUDIO</div>
     </div>
-    <div class="phone-frame">
+    <div class="phone-frame pos-right" id="phone-3">
       <video autoplay loop muted playsinline>
         <source src="/landing_assets/demo_raw.mp4" type="video/mp4">
       </video>
@@ -1026,6 +1030,52 @@
 </footer>
 
 <script>
+  // ── Phone Carousel - Rotating every 5 seconds ──
+  (function() {
+    const phones = [
+      document.getElementById('phone-1'),
+      document.getElementById('phone-2'),
+      document.getElementById('phone-3')
+    ];
+    
+    // Position order: left=0, center=1, right=2
+    // Current positions: phone-1 is left, phone-2 is center, phone-3 is right
+    let positions = [0, 1, 2]; // Index = phone number, value = position (0=left, 1=center, 2=right)
+    
+    function updatePositions() {
+      const posClasses = ['pos-left', 'pos-center', 'pos-right'];
+      
+      phones.forEach((phone, i) => {
+        // Remove all position classes
+        phone.classList.remove('pos-left', 'pos-center', 'pos-right', 'featured');
+        
+        // Add new position class
+        const pos = positions[i];
+        phone.classList.add(posClasses[pos]);
+        
+        // Featured (center) gets special styling
+        if (pos === 1) {
+          phone.classList.add('featured');
+        }
+      });
+    }
+    
+    function rotateClockwise() {
+      // Clockwise rotation: center→right, right→left, left→center
+      // So position values: 1→2, 2→0, 0→1
+      positions = positions.map(pos => {
+        if (pos === 0) return 1; // left → center
+        if (pos === 1) return 2; // center → right
+        return 0; // right → left
+      });
+      
+      updatePositions();
+    }
+    
+    // Start rotation after 5 seconds, repeat every 5 seconds
+    setInterval(rotateClockwise, 5000);
+  })();
+
   // ── Spotlight Glow Effect - Mouse Tracking ──
   (function() {
     const glowElements = document.querySelectorAll('[data-glow]');
