@@ -713,31 +713,86 @@
   @media (max-width: 768px) {
     nav { padding: 16px 20px; }
     .hero { padding: 100px 20px 60px; }
-    /* Mobile: show only center phone, no carousel animation */
+    /* Mobile: scaled-down pyramid with full carousel animations */
     .phone-showcase { 
       position: relative;
-      height: 320px;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      margin: 32px auto 0;
+      height: 220px;
+      margin: 24px auto 0;
     }
-    .phone-frame { 
-      position: relative !important;
-      left: auto !important;
-      bottom: auto !important;
-      width: 180px !important;
-      display: none; /* Hide all by default */
-      animation: none !important;
+    .phone-frame.pos-left {
+      width: 100px !important;
+      left: calc(50% - 160px) !important;
+      bottom: 0 !important;
     }
     .phone-frame.pos-center {
-      display: block !important; /* Show only center phone */
-      width: 200px !important;
+      width: 130px !important;
+      left: calc(50% - 65px) !important;
+      bottom: 25px !important;
     }
-    .phone-frame.anim-right-to-left,
-    .phone-frame.anim-left-to-center,
+    .phone-frame.pos-right {
+      width: 100px !important;
+      left: calc(50% + 60px) !important;
+      bottom: 0 !important;
+    }
+    /* Mobile keyframes - scaled down positions */
+    @keyframes rightToLeftMobile {
+      0% {
+        left: calc(50% + 60px);
+        bottom: 0;
+        width: 100px;
+        z-index: 0;
+      }
+      50% {
+        left: calc(50% - 50px);
+        bottom: -10px;
+        width: 95px;
+        z-index: 0;
+      }
+      100% {
+        left: calc(50% - 160px);
+        bottom: 0;
+        width: 100px;
+        z-index: 1;
+      }
+    }
+    @keyframes leftToCenterMobile {
+      0% {
+        left: calc(50% - 160px);
+        bottom: 0;
+        width: 100px;
+        z-index: 1;
+      }
+      50% { z-index: 2; }
+      100% {
+        left: calc(50% - 65px);
+        bottom: 25px;
+        width: 130px;
+        z-index: 3;
+      }
+    }
+    @keyframes centerToRightMobile {
+      0% {
+        left: calc(50% - 65px);
+        bottom: 25px;
+        width: 130px;
+        z-index: 3;
+      }
+      50% { z-index: 2; }
+      100% {
+        left: calc(50% + 60px);
+        bottom: 0;
+        width: 100px;
+        z-index: 1;
+      }
+    }
+    .phone-frame.anim-right-to-left {
+      animation: rightToLeftMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+    }
+    .phone-frame.anim-left-to-center {
+      animation: leftToCenterMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+    }
     .phone-frame.anim-center-to-right {
-      animation: none !important;
+      animation: centerToRightMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
     }
     .form-card { padding: 24px 20px; }
     .steps { grid-template-columns: 1fr; gap: 2px; }
