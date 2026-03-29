@@ -163,31 +163,49 @@
 
   /* ── Phone showcase ── */
   .phone-showcase {
-    display: flex; gap: 16px; justify-content: center; align-items: flex-end;
-    margin: 48px auto 0; max-width: 900px;
-    opacity: 0; animation: fadeUp 1s ease forwards 0.6s;
     position: relative; z-index: 2;
+    margin: 48px auto 0; 
+    max-width: 900px;
+    height: 420px; /* Fixed height for absolute positioning */
+    opacity: 0; animation: fadeUp 1s ease forwards 0.6s;
   }
   .phone-frame {
-    width: 180px; border-radius: 20px;
+    position: absolute;
+    border-radius: 20px;
     border: 2px solid rgba(168,230,61,0.2);
-    overflow: hidden; position: relative;
+    overflow: hidden;
     background: #0a0a0a;
     box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 40px rgba(168,230,61,0.05);
-    transition: all 0.8s cubic-bezier(0.4, 0, 0.2, 1);
+    transition: all 1s cubic-bezier(0.4, 0, 0.2, 1);
   }
   .phone-frame:hover {
-    transform: translateY(-8px) scale(1.02);
     box-shadow: 0 30px 80px rgba(0,0,0,0.6), 0 0 60px rgba(168,230,61,0.1);
   }
-  .phone-frame.featured {
-    width: 220px; border-color: var(--green);
+  /* Position states for flowing animation */
+  .phone-frame.pos-left {
+    width: 180px;
+    left: calc(50% - 300px);
+    bottom: 0;
+    z-index: 1;
+  }
+  .phone-frame.pos-center {
+    width: 220px;
+    left: calc(50% - 110px);
+    bottom: 40px;
+    z-index: 3;
+    border-color: var(--green);
     box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 60px rgba(168,230,61,0.15);
   }
-  /* Rotating carousel positions */
-  .phone-frame.pos-left { order: 1; }
-  .phone-frame.pos-center { order: 2; }
-  .phone-frame.pos-right { order: 3; }
+  .phone-frame.pos-right {
+    width: 180px;
+    left: calc(50% + 120px);
+    bottom: 0;
+    z-index: 1;
+  }
+  /* Transitioning states - go behind center */
+  .phone-frame.transitioning-under {
+    z-index: 2;
+  }
   .phone-frame video {
     width: 100%; display: block;
     aspect-ratio: 9/16; object-fit: cover;
@@ -1030,7 +1048,7 @@
 </footer>
 
 <script>
-  // ── Phone Carousel - Rotating every 5 seconds ──
+  // ── Phone Carousel - Flowing rotation every 5 seconds ──
   (function() {
     const phones = [
       document.getElementById('phone-1'),
@@ -1038,31 +1056,33 @@
       document.getElementById('phone-3')
     ];
     
-    // Position order: left=0, center=1, right=2
-    // Current positions: phone-1 is left, phone-2 is center, phone-3 is right
-    let positions = [0, 1, 2]; // Index = phone number, value = position (0=left, 1=center, 2=right)
+    // Track which phone is in which position
+    // positions[i] = position of phone i (0=left, 1=center, 2=right)
+    let positions = [0, 1, 2];
     
     function updatePositions() {
       const posClasses = ['pos-left', 'pos-center', 'pos-right'];
       
       phones.forEach((phone, i) => {
-        // Remove all position classes
-        phone.classList.remove('pos-left', 'pos-center', 'pos-right', 'featured');
+        const oldPos = [...phone.classList].find(c => c.startsWith('pos-'));
+        const newPos = positions[i];
+        
+        // Phone going from right to left needs to go "under" the center
+        if (oldPos === 'pos-right' && newPos === 0) {
+          phone.classList.add('transitioning-under');
+          setTimeout(() => phone.classList.remove('transitioning-under'), 1000);
+        }
+        
+        // Remove old position classes
+        phone.classList.remove('pos-left', 'pos-center', 'pos-right');
         
         // Add new position class
-        const pos = positions[i];
-        phone.classList.add(posClasses[pos]);
-        
-        // Featured (center) gets special styling
-        if (pos === 1) {
-          phone.classList.add('featured');
-        }
+        phone.classList.add(posClasses[newPos]);
       });
     }
     
     function rotateClockwise() {
-      // Clockwise rotation: center→right, right→left, left→center
-      // So position values: 1→2, 2→0, 0→1
+      // Clockwise: left→center, center→right, right→left
       positions = positions.map(pos => {
         if (pos === 0) return 1; // left → center
         if (pos === 1) return 2; // center → right
@@ -1072,7 +1092,7 @@
       updatePositions();
     }
     
-    // Start rotation after 5 seconds, repeat every 5 seconds
+    // Start rotation every 5 seconds
     setInterval(rotateClockwise, 5000);
   })();
 
