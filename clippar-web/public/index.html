@@ -45,24 +45,29 @@
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 20px 48px;
+    padding: 20px 48px 25px;
     padding-top: calc(20px + env(safe-area-inset-top, 0px));
     background: var(--bg);
+    /* Force GPU compositing to fix iOS Safari paint issues */
+    transform: translateZ(0);
+    -webkit-transform: translateZ(0);
+    will-change: transform;
+    /* Ensure proper stacking */
+    isolation: isolate;
   }
   /* Solid backdrop that extends above viewport to cover iOS status bar bleed */
-  nav::after {
+  nav::before {
     content: '';
     position: absolute;
-    top: -200px; left: 0; right: 0; bottom: 0;
+    top: -100px; left: -10px; right: -10px; bottom: -50px;
     background: var(--bg);
     z-index: -1;
   }
   
-  /* Main content wrapper - clips text from rendering above 80px */
+  /* Main content wrapper - prevent content from painting above nav */
   main {
     position: relative;
-    clip-path: inset(0 0 0 0);
-    -webkit-clip-path: inset(0 0 0 0);
+    z-index: 1;
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
