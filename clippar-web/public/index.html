@@ -41,22 +41,23 @@
     pointer-events: none; z-index: 999; opacity: 0.4;
   }
 
+  /* ── Status bar cover (iOS Safari text bleed fix) ── */
+  .status-bar-cover {
+    position: fixed;
+    top: -100px; left: 0; right: 0;
+    height: 100px;
+    background: var(--bg);
+    z-index: 1001;
+    pointer-events: none;
+  }
+  
   /* ── Nav ── */
   nav {
-    position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+    position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
     display: flex; align-items: center; justify-content: space-between;
     padding: 20px 48px;
     padding-top: calc(20px + env(safe-area-inset-top, 0px));
-    background: rgb(7,16,10);
-  }
-  /* Extend nav background above viewport to cover iOS status bar area */
-  nav::before {
-    content: '';
-    position: absolute;
-    top: -100px; left: 0; right: 0;
-    height: calc(100% + 100px);
-    background: inherit;
-    z-index: -1;
+    background: var(--bg);
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
@@ -440,6 +441,9 @@
 </style>
 </head>
 <body>
+
+<!-- iOS Safari status bar cover - prevents text bleeding above navbar -->
+<div class="status-bar-cover" aria-hidden="true"></div>
 
 <nav>
   <div style="display:flex;align-items:baseline;">
