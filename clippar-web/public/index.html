@@ -202,24 +202,18 @@
     bottom: 0;
     z-index: 1;
   }
-  /* Animation: right → left (flows under center) */
+  /* Animation: right → left (smooth arc under center) */
   @keyframes rightToLeft {
     0% {
       left: calc(50% + 120px);
       bottom: 0;
       width: 180px;
-      z-index: 1;
-    }
-    30% {
-      left: calc(50% - 30px);
-      bottom: -30px;
-      width: 160px;
       z-index: 0;
     }
-    70% {
-      left: calc(50% - 200px);
-      bottom: -30px;
-      width: 160px;
+    50% {
+      left: calc(50% - 90px);
+      bottom: -20px;
+      width: 170px;
       z-index: 0;
     }
     100% {
@@ -719,22 +713,31 @@
   @media (max-width: 768px) {
     nav { padding: 16px 20px; }
     .hero { padding: 100px 20px 60px; }
+    /* Mobile: show only center phone, no carousel animation */
     .phone-showcase { 
+      position: relative;
+      height: 320px;
       display: flex;
-      flex-direction: row;
-      flex-wrap: nowrap;
-      gap: 8px; 
       justify-content: center;
-      align-items: flex-end;
-      width: 100%;
-      padding: 0 8px;
+      align-items: center;
+      margin: 32px auto 0;
     }
     .phone-frame { 
-      width: 100px !important; 
-      flex-shrink: 1;
+      position: relative !important;
+      left: auto !important;
+      bottom: auto !important;
+      width: 180px !important;
+      display: none; /* Hide all by default */
+      animation: none !important;
     }
-    .phone-frame.featured { 
-      width: 120px !important; 
+    .phone-frame.pos-center {
+      display: block !important; /* Show only center phone */
+      width: 200px !important;
+    }
+    .phone-frame.anim-right-to-left,
+    .phone-frame.anim-left-to-center,
+    .phone-frame.anim-center-to-right {
+      animation: none !important;
     }
     .form-card { padding: 24px 20px; }
     .steps { grid-template-columns: 1fr; gap: 2px; }
