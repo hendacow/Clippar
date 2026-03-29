@@ -716,23 +716,24 @@
     /* Mobile: scaled-down pyramid with full carousel animations */
     .phone-showcase { 
       position: relative;
-      height: 220px;
-      margin: 24px auto 0;
+      height: 240px;
+      margin: 40px auto 0;
     }
+    /* Initial position states - lower specificity than animations */
     .phone-frame.pos-left {
-      width: 100px !important;
-      left: calc(50% - 160px) !important;
-      bottom: 0 !important;
+      width: 100px;
+      left: calc(50% - 160px);
+      bottom: 0;
     }
     .phone-frame.pos-center {
-      width: 130px !important;
-      left: calc(50% - 65px) !important;
-      bottom: 25px !important;
+      width: 130px;
+      left: calc(50% - 65px);
+      bottom: 25px;
     }
     .phone-frame.pos-right {
-      width: 100px !important;
-      left: calc(50% + 60px) !important;
-      bottom: 0 !important;
+      width: 100px;
+      left: calc(50% + 60px);
+      bottom: 0;
     }
     /* Mobile keyframes - scaled down positions */
     @keyframes rightToLeftMobile {
@@ -785,14 +786,15 @@
         z-index: 1;
       }
     }
+    /* Animation classes - these override base positions */
     .phone-frame.anim-right-to-left {
-      animation: rightToLeftMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+      animation: rightToLeftMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
     }
     .phone-frame.anim-left-to-center {
-      animation: leftToCenterMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+      animation: leftToCenterMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
     }
     .phone-frame.anim-center-to-right {
-      animation: centerToRightMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards !important;
+      animation: centerToRightMobile 1.2s cubic-bezier(0.4, 0, 0.2, 1) forwards;
     }
     .form-card { padding: 24px 20px; }
     .steps { grid-template-columns: 1fr; gap: 2px; }
