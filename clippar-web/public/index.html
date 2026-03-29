@@ -41,16 +41,6 @@
     pointer-events: none; z-index: 999; opacity: 0.4;
   }
 
-  /* ── Status bar cover (iOS Safari text bleed fix) ── */
-  .status-bar-cover {
-    position: fixed;
-    top: -100px; left: 0; right: 0;
-    height: 100px;
-    background: var(--bg);
-    z-index: 1001;
-    pointer-events: none;
-  }
-  
   /* ── Nav ── */
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
@@ -58,6 +48,21 @@
     padding: 20px 48px;
     padding-top: calc(20px + env(safe-area-inset-top, 0px));
     background: var(--bg);
+  }
+  /* Solid backdrop that extends above viewport to cover iOS status bar bleed */
+  nav::after {
+    content: '';
+    position: absolute;
+    top: -200px; left: 0; right: 0; bottom: 0;
+    background: var(--bg);
+    z-index: -1;
+  }
+  
+  /* Main content wrapper - clips text from rendering above 80px */
+  main {
+    position: relative;
+    clip-path: inset(0 0 0 0);
+    -webkit-clip-path: inset(0 0 0 0);
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
@@ -442,9 +447,6 @@
 </head>
 <body>
 
-<!-- iOS Safari status bar cover - prevents text bleeding above navbar -->
-<div class="status-bar-cover" aria-hidden="true"></div>
-
 <nav>
   <div style="display:flex;align-items:baseline;">
     <div class="logo">CLIPPAR</div>
@@ -452,6 +454,7 @@
   <div></div>
 </nav>
 
+<main>
 <!-- ═══ HERO ═══ -->
 <section class="hero">
   <div class="hero-eyebrow">Golf video, reimagined</div>
@@ -808,5 +811,6 @@
     observer.observe(el);
   });
 </script>
+</main>
 </body>
 </html>
