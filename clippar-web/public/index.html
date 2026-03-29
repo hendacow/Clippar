@@ -241,23 +241,104 @@
     font-size: clamp(42px, 7vw, 72px);
     line-height: 0.95; letter-spacing: 0.02em; margin-bottom: 60px;
   }
-  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 2px; }
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
   .step {
     background: var(--card); border: 1px solid var(--border);
-    padding: 36px 28px; position: relative; transition: background 0.3s;
+    padding: 0; position: relative; transition: all 0.4s ease;
+    border-radius: 16px; overflow: hidden;
+    display: flex; flex-direction: column;
   }
-  .step:first-child { border-radius: 14px 0 0 14px; }
-  .step:last-child { border-radius: 0 14px 14px 0; }
-  .step:hover { background: rgba(168,230,61,0.04); }
+  .step:hover { 
+    background: rgba(168,230,61,0.04); 
+    border-color: rgba(168,230,61,0.3);
+    transform: translateY(-4px);
+    box-shadow: 0 20px 40px -15px rgba(168,230,61,0.15);
+  }
+  .step-video-container {
+    position: relative;
+    width: 100%;
+    aspect-ratio: 9/16;
+    max-height: 320px;
+    overflow: hidden;
+    background: var(--bg2);
+  }
+  .step-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+  .step-content {
+    padding: 24px 22px 28px;
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+  }
   .step-num {
-    font-family: var(--font-display); font-size: 64px;
-    color: rgba(168,230,61,0.12); line-height: 1; margin-bottom: 16px;
+    font-family: var(--font-display); font-size: 48px;
+    color: rgba(168,230,61,0.15); line-height: 1; margin-bottom: 12px;
   }
   .step h3 {
-    font-family: var(--font-display); font-size: 26px;
+    font-family: var(--font-display); font-size: 24px;
     letter-spacing: 0.04em; color: var(--white); margin-bottom: 10px;
   }
-  .step p { font-size: 14px; color: var(--muted); line-height: 1.65; }
+  .step p { font-size: 13px; color: var(--muted); line-height: 1.65; flex: 1; }
+  .step-note {
+    font-family: var(--font-mono); font-size: 10px;
+    color: rgba(168,230,61,0.5); letter-spacing: 0.1em;
+    text-transform: uppercase; margin-top: 12px;
+    padding-top: 12px; border-top: 1px solid var(--border);
+  }
+  
+  /* Spotlight glow effect */
+  .step::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(
+      600px circle at var(--mouse-x, 50%) var(--mouse-y, 50%),
+      rgba(168,230,61,0.06),
+      transparent 40%
+    );
+    opacity: 0;
+    transition: opacity 0.3s;
+    pointer-events: none;
+    z-index: 1;
+  }
+  .step:hover::before {
+    opacity: 1;
+  }
+  .step::after {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 17px;
+    background: linear-gradient(
+      135deg,
+      rgba(168,230,61,0.3) 0%,
+      transparent 50%,
+      rgba(168,230,61,0.1) 100%
+    );
+    opacity: 0;
+    transition: opacity 0.4s;
+    pointer-events: none;
+    z-index: -1;
+  }
+  .step:hover::after {
+    opacity: 1;
+  }
+  
+  /* Mobile steps - vertical stack */
+  @media (max-width: 768px) {
+    .steps { 
+      grid-template-columns: 1fr; 
+      gap: 20px;
+      max-width: 400px;
+      margin: 0 auto;
+    }
+    .step-video-container {
+      max-height: 280px;
+    }
+  }
 
   /* ── Demo section ── */
   .demo-section { padding: 80px 24px; max-width: 1100px; margin: 0 auto; }
@@ -555,19 +636,41 @@
   <div class="section-title">Click. Swing. Clip.</div>
   <div class="steps">
     <div class="step">
-      <div class="step-num">01</div>
-      <h3>Click before your shot.</h3>
-      <p>Press the <strong style="color:var(--green)">Bluetooth clicker</strong> on your belt before you walk up to the ball. <strong style="color:#fff">Recording starts.</strong></p>
+      <div class="step-video-container">
+        <video class="step-video" autoplay muted loop playsinline>
+          <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="step-content">
+        <div class="step-num">01</div>
+        <h3>Click.</h3>
+        <p><strong style="color:var(--green)">Clip your phone</strong> onto your buggy or bag. Tighten it, angle it how you like. Press the <strong style="color:#fff">Bluetooth clicker</strong> on your belt before you walk up to the ball.</p>
+      </div>
     </div>
     <div class="step">
-      <div class="step-num">02</div>
-      <h3>Swing.</h3>
-      <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically.</p>
+      <div class="step-video-container">
+        <video class="step-video" autoplay muted loop playsinline>
+          <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="step-content">
+        <div class="step-num">02</div>
+        <h3>Swing.</h3>
+        <p>Take your shot and <strong style="color:var(--green)">pose for the camera.</strong> Your swing is captured automatically. <strong style="color:#fff">Click when you're done.</strong></p>
+      </div>
     </div>
     <div class="step">
-      <div class="step-num">03</div>
-      <h3>Clip your highlights.</h3>
-      <p><strong style="color:#fff">Click the Bluetooth clicker again</strong> to stop video. Our detection pipeline trims each clip to the perfect moment. <strong style="color:var(--green)">Walk off with a highlight reel, ready to share.</strong></p>
+      <div class="step-video-container">
+        <video class="step-video" autoplay muted loop playsinline>
+          <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
+        </video>
+      </div>
+      <div class="step-content">
+        <div class="step-num">03</div>
+        <h3>Clip.</h3>
+        <p>Our AI <strong style="color:var(--green)">trims each clip</strong> to the perfect moment—pose, ball flight, impact. Walk off with a <strong style="color:#fff">5-minute highlight reel</strong> of your round, ready to share.</p>
+        <div class="step-note">↑ Example of detection system</div>
+      </div>
     </div>
   </div>
 </section>
@@ -814,6 +917,17 @@
     el.style.transform = 'translateY(20px)';
     el.style.transition = 'opacity 0.6s ease, transform 0.6s ease';
     observer.observe(el);
+  });
+
+  // ── Spotlight glow tracking ──
+  document.querySelectorAll('.step').forEach(step => {
+    step.addEventListener('mousemove', e => {
+      const rect = step.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      step.style.setProperty('--mouse-x', x + 'px');
+      step.style.setProperty('--mouse-y', y + 'px');
+    });
   });
 </script>
 </main>
