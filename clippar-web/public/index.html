@@ -46,8 +46,9 @@
     position: fixed; top: 0; left: 0; right: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between;
     padding: 20px 48px;
-    background: linear-gradient(to bottom, rgba(7,16,10,0.97), transparent);
-    backdrop-filter: blur(8px);
+    background: rgba(7,16,10,0.95);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
   }
   .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
   .logo-sub {
@@ -401,19 +402,20 @@
     nav { padding: 16px 20px; }
     .hero { padding: 100px 20px 60px; }
     .phone-showcase { 
-      flex-wrap: wrap; 
-      gap: 10px; 
+      display: flex;
+      flex-direction: column;
+      gap: 16px; 
       justify-content: center;
       align-items: center;
       width: 100%;
       padding: 0 16px;
     }
     .phone-frame { 
-      width: 140px !important; 
+      width: 200px !important; 
       margin: 0 auto;
     }
     .phone-frame.featured { 
-      width: 170px !important; 
+      width: 220px !important; 
       order: -1; /* Put featured first on mobile */
     }
     .form-card { padding: 24px 20px; }
@@ -530,21 +532,21 @@
 <div class="section-divider"></div>
 <section class="section">
   <div class="section-label">How it works</div>
-  <div class="section-title">Tap. Swing. Tap.<br>That's it.</div>
+  <div class="section-title">Click. Swing. Clip.</div>
   <div class="steps">
     <div class="step">
       <div class="step-num">01</div>
-      <h3>Tap before your shot.</h3>
-      <p>Mount your phone on the tripod. Press the Bluetooth clicker on your belt before you walk up to the ball. Recording starts.</p>
+      <h3>Click before your shot.</h3>
+      <p>Mount your phone on the phone mount. Press the Bluetooth clicker on your belt before you walk up to the ball. Recording starts.</p>
     </div>
     <div class="step">
       <div class="step-num">02</div>
-      <h3>Hit. Then tap again.</h3>
+      <h3>Swing. Then click again.</h3>
       <p>Take your shot. Press the clicker again when you're done. Repeat for every shot on the course — the clips upload automatically.</p>
     </div>
     <div class="step">
       <div class="step-num">03</div>
-      <h3>AI does the rest.</h3>
+      <h3>AI clips the highlights.</h3>
       <p>Our detection pipeline trims each clip to the perfect moment — pose, ball flight, impact. Walk off with a highlight reel, ready to share.</p>
     </div>
   </div>
