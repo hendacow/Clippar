@@ -271,6 +271,21 @@
   .phone-frame video {
     width: 100%; display: block;
     aspect-ratio: 9/16; object-fit: cover;
+    /* Hide iOS play button overlay */
+    -webkit-media-controls-panel { display: none !important; }
+    -webkit-media-controls-play-button { display: none !important; }
+    -webkit-media-controls-start-playback-button { display: none !important; }
+  }
+  /* Additional iOS video control hiding */
+  .phone-frame video::-webkit-media-controls {
+    display: none !important;
+  }
+  .phone-frame video::-webkit-media-controls-start-playback-button {
+    display: none !important;
+    -webkit-appearance: none;
+  }
+  .phone-frame video::-webkit-media-controls-panel {
+    display: none !important;
   }
   .phone-label {
     position: absolute; bottom: 0; left: 0; right: 0;
@@ -1487,6 +1502,50 @@
     }, { threshold: 0.3 });
     
     carouselObserver.observe(section);
+  })();
+
+  // ── Force autoplay videos on mobile (iOS requires user interaction workaround) ──
+  (function() {
+    const phoneVideos = document.querySelectorAll('.phone-frame video');
+    
+    // Try to play all phone videos immediately
+    function forcePlayVideos() {
+      phoneVideos.forEach(video => {
+        video.muted = true; // Ensure muted for autoplay
+        video.setAttribute('playsinline', ''); // Ensure playsinline
+        video.play().catch(() => {
+          // Silently fail - will retry on interaction
+        });
+      });
+    }
+    
+    // Initial attempt
+    forcePlayVideos();
+    
+    // Retry on any user interaction (required for iOS)
+    const retryPlay = () => {
+      forcePlayVideos();
+      // Remove listeners after first interaction
+      document.removeEventListener('touchstart', retryPlay);
+      document.removeEventListener('click', retryPlay);
+      document.removeEventListener('scroll', retryPlay);
+    };
+    
+    document.addEventListener('touchstart', retryPlay, { once: true, passive: true });
+    document.addEventListener('click', retryPlay, { once: true });
+    document.addEventListener('scroll', retryPlay, { once: true, passive: true });
+    
+    // Also observe when videos come into view
+    const videoObserver = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const video = entry.target;
+          video.play().catch(() => {});
+        }
+      });
+    }, { threshold: 0.1 });
+    
+    phoneVideos.forEach(video => videoObserver.observe(video));
   })();
 </script>
 </main>
