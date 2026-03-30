@@ -943,7 +943,7 @@
           <p><strong style="color:var(--green)">Click your phone mount</strong> onto your buggy or bag. Place your phone in the holder. <strong style="color:#fff">Tighten it, angle it</strong> how you like.</p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline>
+          <video class="step-video" muted playsinline preload="auto">
             <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
           </video>
         </div>
@@ -957,7 +957,7 @@
           <p>Press the <strong style="color:var(--green)">Bluetooth clicker</strong> on your belt before you walk up to the ball. Take your shot and <strong style="color:#fff">pose for the camera.</strong> Your swing is captured automatically. Press the clicker when you're done.</p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline>
+          <video class="step-video" muted playsinline preload="auto">
             <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
           </video>
         </div>
@@ -972,7 +972,7 @@
           <div class="step-note">↑ Example of detection system</div>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline>
+          <video class="step-video" muted playsinline preload="auto">
             <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
           </video>
         </div>
@@ -1546,6 +1546,21 @@
     }, { threshold: 0.1 });
     
     phoneVideos.forEach(video => videoObserver.observe(video));
+  })();
+
+  // ── Preload step carousel videos immediately on page load ──
+  (function() {
+    const stepVideos = document.querySelectorAll('.step-video');
+    
+    stepVideos.forEach(video => {
+      // Force load the video
+      video.load();
+      
+      // Preload by seeking to first frame
+      video.addEventListener('loadeddata', () => {
+        video.currentTime = 0.01; // Seek to show first frame
+      }, { once: true });
+    });
   })();
 </script>
 </main>
