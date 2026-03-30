@@ -845,7 +845,7 @@
   <!-- Phone showcase with real footage - rotating carousel -->
   <div class="phone-showcase" id="phone-carousel">
     <div class="phone-frame pos-left" id="phone-1">
-      <video autoplay loop muted playsinline>
+      <video autoplay loop muted playsinline preload="auto">
         <source src="/landing_assets/demo_detected.mp4" type="video/mp4">
       </video>
       <div class="phone-label">
@@ -855,7 +855,7 @@
       <div class="detection-badge">POSE</div>
     </div>
     <div class="phone-frame pos-center featured" id="phone-2">
-      <video autoplay loop muted playsinline>
+      <video autoplay loop muted playsinline preload="auto">
         <source src="/landing_assets/demo_clean.mp4" type="video/mp4">
       </video>
       <div class="phone-label">
@@ -865,7 +865,7 @@
       <div class="detection-badge">BALL + AUDIO</div>
     </div>
     <div class="phone-frame pos-right" id="phone-3">
-      <video autoplay loop muted playsinline>
+      <video autoplay loop muted playsinline preload="auto">
         <source src="/landing_assets/demo_raw.mp4" type="video/mp4">
       </video>
       <div class="phone-label">
@@ -943,7 +943,7 @@
           <p><strong style="color:var(--green)">Click your phone mount</strong> onto your buggy or bag. Place your phone in the holder. <strong style="color:#fff">Tighten it, angle it</strong> how you like.</p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline preload="auto">
+          <video class="step-video" muted playsinline preload="auto" poster="landing_assets/steps/step1_poster.jpg">
             <source src="landing_assets/steps/step1_click.mp4" type="video/mp4">
           </video>
         </div>
@@ -957,7 +957,7 @@
           <p>Press the <strong style="color:var(--green)">Bluetooth clicker</strong> on your belt before you walk up to the ball. Take your shot and <strong style="color:#fff">pose for the camera.</strong> Your swing is captured automatically. Press the clicker when you're done.</p>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline preload="auto">
+          <video class="step-video" muted playsinline preload="auto" poster="landing_assets/steps/step2_poster.jpg">
             <source src="landing_assets/steps/step2_swing.mp4" type="video/mp4">
           </video>
         </div>
@@ -972,7 +972,7 @@
           <div class="step-note">↑ Example of detection system</div>
         </div>
         <div class="step-video-container">
-          <video class="step-video" muted playsinline preload="auto">
+          <video class="step-video" muted playsinline preload="auto" poster="landing_assets/steps/step3_poster.jpg">
             <source src="landing_assets/steps/step3_clip.mp4" type="video/mp4">
           </video>
         </div>
@@ -1048,7 +1048,7 @@
       </div>
       <div class="demo-card-body">
         <div class="output-thumb" style="margin-bottom:12px;">
-          <video autoplay loop muted playsinline>
+          <video autoplay loop muted playsinline preload="auto">
             <source src="/landing_assets/demo_reel.mp4" type="video/mp4">
           </video>
         </div>
@@ -1361,13 +1361,13 @@
     function stopAllVideos() {
       videos.forEach(v => {
         v.pause();
-        v.currentTime = 0;
+        v.currentTime = 0.1; // Seek to 0.1 not 0 — ensures a visible frame is painted (no black)
       });
     }
-    
+
     function playCurrentVideo() {
       const video = videos[currentIndex];
-      video.currentTime = 0;
+      video.currentTime = 0.1; // Start just past 0 to avoid black first-frame on some browsers
       video.play().catch(() => {});
     }
     
@@ -1504,61 +1504,96 @@
     carouselObserver.observe(section);
   })();
 
-  // ── Force autoplay videos on mobile (iOS requires user interaction workaround) ──
+  // ── Aggressive video preload — all videos load first frame BEFORE user scrolls ──
   (function() {
+    const ALL_VIDEOS = document.querySelectorAll('video');
     const phoneVideos = document.querySelectorAll('.phone-frame video');
-    
-    // Try to play all phone videos immediately
-    function forcePlayVideos() {
+    const stepVideos = document.querySelectorAll('.step-video');
+
+    // 1. Force every video on the page to fully load its data immediately
+    ALL_VIDEOS.forEach(video => {
+      video.preload = 'auto';   // override any metadata-only setting
+      video.muted = true;       // required for autoplay on mobile
+      video.setAttribute('playsinline', '');
+      video.load();             // kick off network fetch now
+    });
+
+    // 2. Once each video has data, seek to first frame so it paints (no black)
+    ALL_VIDEOS.forEach(video => {
+      const showFirstFrame = () => {
+        if (video.readyState >= 2 && video.paused && !video.autoplay) {
+          video.currentTime = 0.1;   // seek past 0 to guarantee a visible frame renders
+        }
+      };
+      // Try immediately if already loaded
+      showFirstFrame();
+      // Also listen for the events in case not loaded yet
+      video.addEventListener('loadeddata', showFirstFrame, { once: true });
+      video.addEventListener('canplay', showFirstFrame, { once: true });
+      // Belt-and-suspenders: also try after seekable ranges are ready
+      video.addEventListener('loadedmetadata', () => {
+        if (video.paused && !video.autoplay) {
+          video.currentTime = 0.1;
+        }
+      }, { once: true });
+    });
+
+    // 3. Force autoplay videos to start playing immediately
+    function forcePlayAutoplay() {
       phoneVideos.forEach(video => {
-        video.muted = true; // Ensure muted for autoplay
-        video.setAttribute('playsinline', ''); // Ensure playsinline
-        video.play().catch(() => {
-          // Silently fail - will retry on interaction
-        });
+        video.play().catch(() => {});
+      });
+      // Also play any other autoplay video (demo_reel etc)
+      ALL_VIDEOS.forEach(video => {
+        if (video.autoplay && video.paused) {
+          video.play().catch(() => {});
+        }
       });
     }
-    
-    // Initial attempt
-    forcePlayVideos();
-    
-    // Retry on any user interaction (required for iOS)
+
+    // Initial attempt right now
+    forcePlayAutoplay();
+
+    // Retry after a short delay (helps on slower mobile connections)
+    setTimeout(forcePlayAutoplay, 300);
+    setTimeout(forcePlayAutoplay, 1000);
+
+    // Retry on first user interaction (required for iOS Safari)
     const retryPlay = () => {
-      forcePlayVideos();
-      // Remove listeners after first interaction
+      forcePlayAutoplay();
       document.removeEventListener('touchstart', retryPlay);
       document.removeEventListener('click', retryPlay);
       document.removeEventListener('scroll', retryPlay);
     };
-    
     document.addEventListener('touchstart', retryPlay, { once: true, passive: true });
     document.addEventListener('click', retryPlay, { once: true });
     document.addEventListener('scroll', retryPlay, { once: true, passive: true });
-    
-    // Also observe when videos come into view
-    const videoObserver = new IntersectionObserver((entries) => {
+
+    // 4. IntersectionObserver — play/pause autoplay videos as they enter/leave viewport
+    //    This saves CPU for offscreen videos while keeping them ready
+    const autoplayObserver = new IntersectionObserver((entries) => {
       entries.forEach(entry => {
+        const video = entry.target;
         if (entry.isIntersecting) {
-          const video = entry.target;
           video.play().catch(() => {});
+        } else if (video.autoplay) {
+          // Pause offscreen autoplay videos to save resources, but keep frame painted
+          video.pause();
         }
       });
-    }, { threshold: 0.1 });
-    
-    phoneVideos.forEach(video => videoObserver.observe(video));
-  })();
+    }, { threshold: 0.05, rootMargin: '200px' }); // 200px lookahead = start loading before visible
 
-  // ── Preload step carousel videos immediately on page load ──
-  (function() {
-    const stepVideos = document.querySelectorAll('.step-video');
-    
+    phoneVideos.forEach(v => autoplayObserver.observe(v));
+    // Observe the demo reel too
+    document.querySelectorAll('.output-thumb video').forEach(v => autoplayObserver.observe(v));
+
+    // 5. Step carousel videos — preload all frames so they're instant when carousel switches
     stepVideos.forEach(video => {
-      // Force load the video
-      video.load();
-      
-      // Preload by seeking to first frame
-      video.addEventListener('loadeddata', () => {
-        video.currentTime = 0.01; // Seek to show first frame
+      video.addEventListener('canplaythrough', () => {
+        // Video fully buffered — seek to paint first frame
+        if (video.paused) {
+          video.currentTime = 0.1;
+        }
       }, { once: true });
     });
   })();
