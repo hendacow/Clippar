@@ -4,6 +4,8 @@ drive_utils.py — Google Drive download (gdown) and upload (OAuth2 user account
 
 import os
 import re
+import socket
+import time
 from pathlib import Path
 
 import gdown
@@ -14,6 +16,9 @@ TOKEN_PATH = Path(__file__).parent / "drive_token.json"
 load_dotenv(ENV_PATH, override=True)
 
 SCOPES = ["https://www.googleapis.com/auth/drive"]
+UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MB chunks are more reliable on large uploads.
+UPLOAD_TIMEOUT_SECS = 600
+UPLOAD_MAX_RETRIES = 8
 
 
 def _extract_folder_id(url):
@@ -111,31 +116,74 @@ def _run_oauth_flow():
     return creds
 
 
+def _build_drive_service(creds, timeout=UPLOAD_TIMEOUT_SECS):
+    """Build a Drive client and raise its underlying HTTP timeout."""
+    from googleapiclient.discovery import build
+
+    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+    transport = getattr(service, "_http", None)
+    raw_http = getattr(transport, "http", transport)
+    if raw_http is not None and hasattr(raw_http, "timeout"):
+        raw_http.timeout = timeout
+    return service
+
+
 def upload_to_drive(local_path, filename):
     """Upload a file to the admin's Google Drive folder via OAuth2, return share link."""
-    from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
     from googleapiclient.http import MediaFileUpload
 
     folder_id = _get_folder_id()
     creds = _get_oauth_creds()
-    service = build("drive", "v3", credentials=creds)
+    service = _build_drive_service(creds)
 
     # Verify folder exists
     try:
-        service.files().get(fileId=folder_id, fields="id").execute()
+        service.files().get(fileId=folder_id, fields="id").execute(num_retries=5)
     except HttpError as exc:
         raise RuntimeError(
             f"Drive output folder '{folder_id}' not accessible. Check DRIVE_OUTPUT_FOLDER_ID."
         ) from exc
 
     file_metadata = {"name": filename, "parents": [folder_id]}
-    media = MediaFileUpload(local_path, resumable=True)
-    uploaded = service.files().create(
+    media = MediaFileUpload(
+        local_path,
+        resumable=True,
+        chunksize=UPLOAD_CHUNK_SIZE,
+    )
+    request = service.files().create(
         body=file_metadata,
         media_body=media,
         fields="id",
-    ).execute()
+    )
+
+    uploaded = None
+    attempt = 0
+    last_reported_pct = -1
+    while uploaded is None:
+        try:
+            status, uploaded = request.next_chunk(num_retries=5)
+            attempt = 0
+            if status:
+                pct = int(status.progress() * 100)
+                if pct >= last_reported_pct + 10:
+                    last_reported_pct = pct
+                    print(f"[Drive] Upload progress: {pct}%")
+        except HttpError as exc:
+            status_code = getattr(exc.resp, "status", None)
+            if status_code not in {500, 502, 503, 504} or attempt >= UPLOAD_MAX_RETRIES:
+                raise
+            attempt += 1
+            wait_secs = min(2 ** attempt, 60)
+            print(f"[Drive] Transient upload error ({status_code}); retrying in {wait_secs}s...")
+            time.sleep(wait_secs)
+        except (TimeoutError, socket.timeout, OSError) as exc:
+            if attempt >= UPLOAD_MAX_RETRIES:
+                raise RuntimeError("Drive upload timed out repeatedly") from exc
+            attempt += 1
+            wait_secs = min(2 ** attempt, 60)
+            print(f"[Drive] Upload interrupted ({exc}); retrying in {wait_secs}s...")
+            time.sleep(wait_secs)
 
     file_id = uploaded["id"]
 
@@ -143,7 +191,7 @@ def upload_to_drive(local_path, filename):
     service.permissions().create(
         fileId=file_id,
         body={"type": "anyone", "role": "reader"},
-    ).execute()
+    ).execute(num_retries=5)
 
     share_url = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
     return share_url

@@ -116,6 +116,8 @@ def probe_clip(path):
     rot_result = subprocess.run(rot_cmd, capture_output=True, text=True)
     rot_str = rot_result.stdout.strip()
     if rot_str:
+        # ffprobe may return ",-90" or "-90" — strip commas and whitespace
+        rot_str = rot_str.replace(",", "").strip()
         try:
             rotation = abs(int(float(rot_str)))
             if rotation in (90, 270):
