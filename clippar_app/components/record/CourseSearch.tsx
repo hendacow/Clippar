@@ -27,6 +27,10 @@ export function CourseSearch({
   const [showResults, setShowResults] = useState(false);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guard: after a course is selected, ignore the next onChangeText from the
+  // TextInput re-rendering with the new value (React Native fires the callback
+  // when the controlled `value` prop changes on iOS).
+  const justSelectedRef = useRef(false);
 
   // Fetch nearby courses on mount if location available
   useEffect(() => {
@@ -38,6 +42,14 @@ export function CourseSearch({
   }, [userLocation?.latitude, userLocation?.longitude]);
 
   const handleChange = useCallback((text: string) => {
+    // After selecting a course, the controlled TextInput re-renders with the
+    // full course name which can re-fire onChangeText on iOS.  Ignore that
+    // synthetic event so we don't overwrite the selection or re-open the dropdown.
+    if (justSelectedRef.current) {
+      justSelectedRef.current = false;
+      return;
+    }
+
     onChangeText(text);
     setShowResults(true);
 
@@ -62,6 +74,12 @@ export function CourseSearch({
   }, [onChangeText]);
 
   const handleSelect = useCallback(async (course: any) => {
+    // Cancel any pending search so it doesn't overwrite after selection
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
+    justSelectedRef.current = true;
     onChangeText(course.name);
     setShowResults(false);
     setResults([]);

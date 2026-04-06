@@ -24,7 +24,7 @@ import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { getRounds, getUserStats, deleteRound, getSignedReelUrl } from '@/lib/api';
+import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl } from '@/lib/api';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -289,14 +289,23 @@ export default function HomeScreen() {
 
         // Sign reel URLs for rounds that have a reel
         const reelRounds = data.filter((r: any) => r.reel_url);
-        if (reelRounds.length > 0) {
-          const signedMap: Record<string, string> = {};
-          await Promise.all(
-            reelRounds.map(async (r: any) => {
-              const signed = await getSignedReelUrl(r.reel_url);
-              if (signed) signedMap[r.id] = signed;
-            })
-          );
+        const noReelRounds = data.filter((r: any) => !r.reel_url && (r.clips_count ?? 0) > 0);
+        const signedMap: Record<string, string> = {};
+
+        await Promise.all([
+          // Sign reel URLs
+          ...reelRounds.map(async (r: any) => {
+            const signed = await getSignedReelUrl(r.reel_url);
+            if (signed) signedMap[r.id] = signed;
+          }),
+          // For rounds without a reel but with clips, use the first clip as preview
+          ...noReelRounds.slice(0, 5).map(async (r: any) => {
+            const signed = await getFirstClipSignedUrl(r.id);
+            if (signed) signedMap[r.id] = signed;
+          }),
+        ]);
+
+        if (Object.keys(signedMap).length > 0) {
           setReelSignedUrls(signedMap);
         }
       }

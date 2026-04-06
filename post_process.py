@@ -21,17 +21,59 @@ def ffmpeg_available():
     return shutil.which("ffmpeg") is not None
 
 
-def get_bundled_music():
-    """Return path to bundled royalty-free background music if it exists."""
+def get_bundled_music(track_name: str | None = None):
+    """Return path to a bundled royalty-free background music track.
+
+    Args:
+        track_name: Name of the track to load. One of:
+            - "chill_vibes"  (relaxed ambient, loopable)
+            - "victory_lap"  (upbeat celebratory)
+            - "focus_mode"   (calm minimal)
+            If None, returns the first available track.
+    """
+    music_dir = Path(__file__).parent / "assets" / "music"
+
+    # If a specific track is requested, look for it directly
+    if track_name:
+        for ext in (".mp3", ".wav", ".m4a"):
+            p = music_dir / f"{track_name}{ext}"
+            if p.exists():
+                return str(p)
+
+    # Fall back: try named tracks in order, then legacy default_bg
     candidates = [
-        Path(__file__).parent / "assets" / "music" / "default_bg.mp3",
-        Path(__file__).parent / "assets" / "music" / "default_bg.m4a",
+        music_dir / "chill_vibes.mp3",
+        music_dir / "chill_vibes.wav",
+        music_dir / "victory_lap.mp3",
+        music_dir / "victory_lap.wav",
+        music_dir / "focus_mode.mp3",
+        music_dir / "focus_mode.wav",
+        music_dir / "default_bg.mp3",
+        music_dir / "default_bg.m4a",
         Path(__file__).parent / "static" / "music" / "default_bg.mp3",
     ]
     for p in candidates:
         if p.exists():
             return str(p)
     return None
+
+
+def list_bundled_music():
+    """Return list of available bundled music tracks as dicts."""
+    music_dir = Path(__file__).parent / "assets" / "music"
+    tracks = [
+        {"id": "chill_vibes", "title": "Chill Vibes", "artist": "Clippar", "duration_seconds": 30},
+        {"id": "victory_lap", "title": "Victory Lap", "artist": "Clippar", "duration_seconds": 30},
+        {"id": "focus_mode", "title": "Focus Mode", "artist": "Clippar", "duration_seconds": 30},
+    ]
+    available = []
+    for t in tracks:
+        for ext in (".mp3", ".wav"):
+            p = music_dir / f"{t['id']}{ext}"
+            if p.exists():
+                available.append({**t, "path": str(p)})
+                break
+    return available
 
 
 def create_scorecard_image(

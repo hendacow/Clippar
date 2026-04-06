@@ -251,7 +251,7 @@ SELECT seed_course(
   'Victoria Park Golf Complex',
   'Herston', 'QLD', 'AU',
   -27.4530, 153.0260,
-  18, 65, NULL, 62.0, 'seed',
+  18, 63, NULL, 62.0, 'seed',
   '[
     {"n":1,  "par":4, "m":280, "si":5},
     {"n":2,  "par":3, "m":135, "si":15},
@@ -641,7 +641,7 @@ SELECT seed_course(
   'Keperra Country Golf Club',
   'Keperra', 'QLD', 'AU',
   -27.4190, 152.9410,
-  18, 72, NULL, 71.0, 'seed',
+  18, 70, NULL, 71.0, 'seed',
   '[
     {"n":1,  "par":5, "m":460, "si":5},
     {"n":2,  "par":4, "m":355, "si":9},
@@ -671,7 +671,7 @@ SELECT seed_course(
   'Pelican Waters Golf Club',
   'Pelican Waters', 'QLD', 'AU',
   -26.8380, 153.0930,
-  18, 71, NULL, 72.0, 'seed',
+  18, 72, NULL, 72.0, 'seed',
   '[
     {"n":1,  "par":4, "m":375, "si":3},
     {"n":2,  "par":5, "m":500, "si":7},
@@ -761,7 +761,7 @@ SELECT seed_course(
   'Brisbane River Golf Course',
   'Karana Downs', 'QLD', 'AU',
   -27.5480, 152.8450,
-  18, 66, NULL, 63.0, 'seed',
+  18, 65, NULL, 63.0, 'seed',
   '[
     {"n":1,  "par":4, "m":295, "si":5},
     {"n":2,  "par":3, "m":135, "si":13},

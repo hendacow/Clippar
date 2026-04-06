@@ -775,6 +775,34 @@ export async function getSignedReelUrl(
   }
 }
 
+/**
+ * For rounds that don't have a reel yet, fetch the first clip from
+ * Supabase Storage at clips/{roundId}/ and return a signed URL.
+ * Returns null if no clips exist or signing fails.
+ */
+export async function getFirstClipSignedUrl(
+  roundId: string,
+  expiresIn = 3600,
+): Promise<string | null> {
+  try {
+    const { data: files, error: listError } = await supabase.storage
+      .from('clips')
+      .list(roundId, { limit: 1, sortBy: { column: 'name', order: 'asc' } });
+
+    if (listError || !files || files.length === 0) return null;
+
+    const filePath = `${roundId}/${files[0].name}`;
+    const { data, error } = await supabase.storage
+      .from('clips')
+      .createSignedUrl(filePath, expiresIn);
+
+    if (error || !data?.signedUrl) return null;
+    return data.signedUrl;
+  } catch {
+    return null;
+  }
+}
+
 // ============ Music Tracks ============
 
 export async function getMusicTracks() {

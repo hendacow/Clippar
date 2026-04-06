@@ -176,10 +176,24 @@ export function ClipTrimModal({
         style={{
           flex: 1,
           backgroundColor: '#000',
-          paddingTop: 16,
+          paddingTop: Platform.OS === 'ios' ? 10 : 16,
           paddingBottom: insets.bottom + 16,
         }}
       >
+        {/* Drag indicator for iOS pageSheet */}
+        {Platform.OS === 'ios' && (
+          <View style={{ alignItems: 'center', paddingTop: 8, paddingBottom: 4 }}>
+            <View
+              style={{
+                width: 36,
+                height: 5,
+                borderRadius: 2.5,
+                backgroundColor: 'rgba(255,255,255,0.3)',
+              }}
+            />
+          </View>
+        )}
+
         {/* Header */}
         <View
           style={{
@@ -187,17 +201,41 @@ export function ClipTrimModal({
             alignItems: 'center',
             justifyContent: 'space-between',
             paddingHorizontal: 16,
-            paddingVertical: 12,
+            paddingVertical: 10,
+            borderBottomWidth: 1,
+            borderBottomColor: 'rgba(255,255,255,0.12)',
           }}
         >
-          <Pressable onPress={onDismiss} hitSlop={12}>
-            <X size={24} color="#fff" />
+          <Pressable
+            onPress={onDismiss}
+            hitSlop={12}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 18,
+              backgroundColor: 'rgba(255,255,255,0.15)',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <X size={20} color="#fff" />
           </Pressable>
           <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>
             Trim Clip
           </Text>
-          <Pressable onPress={handleSave} hitSlop={12}>
-            <Check size={24} color={theme.colors.primary} />
+          <Pressable
+            onPress={handleSave}
+            hitSlop={12}
+            style={{
+              width: 36,
+              height: 36,
+              borderRadius: 18,
+              backgroundColor: theme.colors.primary,
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <Check size={20} color="#fff" />
           </Pressable>
         </View>
 

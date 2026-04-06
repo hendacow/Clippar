@@ -13,6 +13,31 @@ interface MusicTrack {
   preview_url: string | null;
 }
 
+/** Bundled royalty-free tracks that are always available. */
+const BUNDLED_TRACKS: MusicTrack[] = [
+  {
+    id: 'chill_vibes',
+    title: 'Chill Vibes',
+    artist: 'Clippar',
+    duration_seconds: 30,
+    preview_url: null,
+  },
+  {
+    id: 'victory_lap',
+    title: 'Victory Lap',
+    artist: 'Clippar',
+    duration_seconds: 30,
+    preview_url: null,
+  },
+  {
+    id: 'focus_mode',
+    title: 'Focus Mode',
+    artist: 'Clippar',
+    duration_seconds: 30,
+    preview_url: null,
+  },
+];
+
 interface MusicPickerProps {
   visible: boolean;
   selectedTrackId: string | null;
@@ -26,8 +51,17 @@ export function MusicPicker({ visible, selectedTrackId, onSelect, onDismiss }: M
 
   useEffect(() => {
     getMusicTracks()
-      .then((data) => setTracks(data ?? []))
-      .catch(() => {});
+      .then((data) => {
+        // Merge server tracks with bundled tracks, avoiding duplicates
+        const serverTracks: MusicTrack[] = data ?? [];
+        const serverIds = new Set(serverTracks.map((t) => t.id));
+        const bundled = BUNDLED_TRACKS.filter((t) => !serverIds.has(t.id));
+        setTracks([...bundled, ...serverTracks]);
+      })
+      .catch(() => {
+        // Offline or no server — show bundled tracks
+        setTracks(BUNDLED_TRACKS);
+      });
   }, []);
 
   useEffect(() => {
