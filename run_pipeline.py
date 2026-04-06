@@ -138,8 +138,14 @@ def run(job_id):
     cfg["verbose"] = False
 
     from shot_detector import detect_shots
+
+    def _on_clip_done(clip_idx, total, shots_found):
+        pct = 20 + int((clip_idx / total) * 25)  # 20-45% range
+        db.update_job(job_id, progress=pct,
+                      stage_detail=f"Analysed clip {clip_idx} of {total} ({shots_found} shot{'s' if shots_found != 1 else ''})...")
+
     try:
-        detect_shots(cfg)
+        detect_shots(cfg, on_clip_done=_on_clip_done)
     except SystemExit:
         db.update_job(job_id, status="processing_failed", error_message="detect_shots exited")
         sys.exit(1)

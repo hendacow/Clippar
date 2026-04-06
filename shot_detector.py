@@ -3816,8 +3816,10 @@ def _process_clip_worker(args):
     return (Path(clip_path).name, shots)
 
 
-def detect_shots(cfg):
-    """Run detection over all clips using a config dict."""
+def detect_shots(cfg, on_clip_done=None):
+    """Run detection over all clips using a config dict.
+    on_clip_done(clip_index, total_clips, shots_found) is called after each clip.
+    """
     # ── fast_mode overrides ──
     if cfg.get("fast_mode"):
         cfg["save_annotated"] = False
@@ -3892,6 +3894,8 @@ def detect_shots(cfg):
             )
             total_shots += shots
             shot_counts[clip_path.name] = shots
+            if on_clip_done:
+                on_clip_done(i, len(clips), shots)
 
     if cfg["display"]:
         cv2.destroyAllWindows()
