@@ -2822,7 +2822,7 @@ def process_clip(
     vision_setup_confidence_min=0.75,
     vision_posture_break_grace_sec=3.0,
     display=False, save_annotated=True, verbose=True,
-    device="cpu", inference_imgsz=640,
+    device="cpu", inference_imgsz=640, frame_stride=1,
 ):
     cap = cv2.VideoCapture(str(clip_path))
     if not cap.isOpened():
@@ -3112,11 +3112,16 @@ def process_clip(
 
         return saved_timeout_shot
 
+    _stride = max(1, int(frame_stride))
     while True:
         ret, frame = cap.read()
         if not ret:
             break
         frame_idx += 1
+
+        # Skip frames in fast mode — only run inference on every Nth frame
+        if _stride > 1 and frame_idx % _stride != 1:
+            continue
 
         if frame_idx % 30 == 0:
             elapsed     = time.time() - fps_timer
@@ -3126,7 +3131,7 @@ def process_clip(
         # ── Pose ──
         pose_res = pose_model.predict(
             source=frame, conf=0.4, verbose=False,
-            device=device)
+            device=device, imgsz=inference_imgsz)
         raw_kp = raw_cf = None
         if (pose_res[0].keypoints is not None
                 and len(pose_res[0].keypoints) > 0):
@@ -3797,6 +3802,7 @@ def _build_clip_kwargs(cfg, clips_dir, output_dir):
         verbose=cfg["verbose"],
         device=cfg["device"],
         inference_imgsz=cfg["inference_imgsz"],
+        frame_stride=cfg.get("frame_stride", 1),
     )
 
 
@@ -3825,6 +3831,11 @@ def detect_shots(cfg, on_clip_done=None):
         cfg["save_annotated"] = False
         cfg["verbose"] = False
         cfg["display"] = False
+        # Smaller inference size for CPU — 3-4x faster with minimal accuracy loss
+        if cfg.get("device", "cpu") == "cpu" or cfg.get("device") == "auto":
+            cfg.setdefault("inference_imgsz", 320)
+        # Process every 3rd frame on CPU to cut time by ~3x
+        cfg.setdefault("frame_stride", 3)
 
     # ── Resolve device ──
     dev = cfg.get("device", "auto")

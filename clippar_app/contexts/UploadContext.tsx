@@ -164,7 +164,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
                   update({
                     stage: 'processing',
-                    progress: Math.max(displayProgress, 42), // Never go below upload-complete baseline
+                    progress: displayProgress,
                     stageLabel: displayLabel,
                   });
                 }
