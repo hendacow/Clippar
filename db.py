@@ -151,6 +151,12 @@ def get_next_pending():
     if not row:
         return None
     job = dict(row)
+
+    # Mobile app jobs have clip_count set — clips are in Supabase Storage
+    # (run_pipeline.py downloads them from there)
+    if job.get("clip_count") and job["clip_count"] > 0:
+        return job
+
     # Check for uploaded files in R2 or a drive link
     has_link = bool(job.get("drive_link") and job["drive_link"].strip())
     # For R2-based storage, we check if there are files via storage module
