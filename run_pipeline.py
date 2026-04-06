@@ -121,44 +121,122 @@ def run(job_id):
                   list(inputs_dir.glob("*.mp4")) + list(inputs_dir.glob("*.MP4"))
     total_inputs = len(input_files)
 
-    # ── 2. Run shot detection on each clip ──
-    print(f"[Pipeline] Running shot detection on {total_inputs} clip(s)...")
+    # ── 2. Shot detection via Modal GPU ──
+    # Send clips to Modal (T4 GPU) for YOLO-based swing detection,
+    # then trim locally with FFmpeg using the detected timestamps.
+    import subprocess as _sp
+    import requests as _req
+
+    MODAL_BATCH_URL = os.environ.get(
+        "MODAL_DETECT_URL",
+        "https://hendacow--clippar-shot-detector-detect-shots-batch.modal.run"
+    )
+    PRE_ROLL = 2.0
+    POST_ROLL = 3.0
+    MIN_CLIP_DURATION = 3.0
+
+    print(f"[Pipeline] Running GPU shot detection on {total_inputs} clip(s) via Modal...")
     db.update_job(job_id, status="detecting", progress=20,
-                  stage_detail=f"Analysing clip 1 of {total_inputs}...")
+                  stage_detail=f"Analysing {total_inputs} clips on GPU...")
 
-    from shot_detector import load_config
-    cfg = load_config()
+    # Build signed URLs for Modal to download clips from Supabase
+    clips_payload = []
+    for clip_path in input_files:
+        storage_key = f"{job_id}/{clip_path.name}"
+        clips_payload.append({
+            "video_url": storage_key,
+            "filename": clip_path.name,
+        })
 
-    # Override paths for this job
-    cfg["clips_dir"] = str(inputs_dir)
-    cfg["output_dir"] = str(outputs_clips)
-    cfg["fast_mode"] = True
-    cfg["display"] = False
-    cfg["save_annotated"] = False
-    cfg["verbose"] = False
-
-    from shot_detector import detect_shots
-
-    def _on_clip_done(clip_idx, total, shots_found):
-        pct = 20 + int((clip_idx / total) * 25)  # 20-45% range
-        db.update_job(job_id, progress=pct,
-                      stage_detail=f"Analysed clip {clip_idx} of {total} ({shots_found} shot{'s' if shots_found != 1 else ''})...")
-
+    # Call Modal batch endpoint
+    detect_results = []
     try:
-        detect_shots(cfg, on_clip_done=_on_clip_done)
-    except SystemExit:
-        db.update_job(job_id, status="processing_failed", error_message="detect_shots exited")
-        sys.exit(1)
+        resp = _req.post(MODAL_BATCH_URL, json={
+            "clips": clips_payload,
+            "supabase_url": supabase_url,
+            "supabase_key": supabase_key,
+        }, timeout=300)
+        if resp.status_code == 200:
+            data = resp.json()
+            detect_results = data.get("results", [])
+            print(f"[Pipeline] Modal returned {len(detect_results)} results")
+        else:
+            print(f"[Pipeline] Modal request failed: {resp.status_code} {resp.text[:200]}")
+    except Exception as e:
+        print(f"[Pipeline] Modal request error: {e}")
 
-    # Count clips produced
-    clip_files = list(outputs_clips.glob("*.mov")) + list(outputs_clips.glob("*.mp4"))
+    # Build a lookup: filename → trim points
+    trim_map = {}
+    for r in detect_results:
+        fname = r.get("filename", "")
+        if r.get("found"):
+            trim_map[fname] = (r["trim_start_sec"], r["trim_end_sec"])
+        elif r.get("trim_start_sec") is not None:
+            # Fallback trim (center) from Modal
+            trim_map[fname] = (r["trim_start_sec"], r["trim_end_sec"])
+
+    db.update_job(job_id, progress=35,
+                  stage_detail=f"Detected shots — trimming {total_inputs} clips...")
+
+    # Trim each clip using FFmpeg with detected timestamps
+    for idx, clip_path in enumerate(input_files):
+        db.update_job(job_id, progress=35 + int(((idx + 1) / total_inputs) * 10),
+                      stage_detail=f"Trimming clip {idx + 1} of {total_inputs}...")
+
+        # Get duration
+        try:
+            probe = _sp.run(
+                ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                 "-of", "csv=p=0", str(clip_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            duration = float(probe.stdout.strip())
+        except Exception:
+            duration = 15.0
+
+        if duration < MIN_CLIP_DURATION:
+            print(f"  Skipping {clip_path.name} — too short ({duration:.1f}s)")
+            continue
+
+        # Use Modal detection results if available, else center trim
+        if clip_path.name in trim_map:
+            start, end = trim_map[clip_path.name]
+            trim_dur = end - start
+            print(f"  {clip_path.name}: swing detected at {start:.1f}s-{end:.1f}s")
+        else:
+            start = max(0, (duration - 5.0) / 2.0)
+            trim_dur = min(5.0, duration)
+            print(f"  {clip_path.name}: no detection — center trim {start:.1f}s-{start + trim_dur:.1f}s")
+
+        out_path = outputs_clips / f"clip{idx + 1:03d}_{clip_path.stem}.mp4"
+        try:
+            _sp.run(
+                ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(clip_path),
+                 "-t", f"{trim_dur:.2f}", "-c:v", "libx264", "-preset", "ultrafast",
+                 "-c:a", "aac", "-b:a", "128k", str(out_path)],
+                capture_output=True, text=True, timeout=120
+            )
+            if out_path.exists() and out_path.stat().st_size > 0:
+                print(f"  Trimmed → {out_path.name}")
+        except Exception as e:
+            print(f"  Error trimming {clip_path.name}: {e}")
+
+    clip_files = list(outputs_clips.glob("*.mp4"))
     clip_count = len(clip_files)
     db.update_job(job_id, clip_count=clip_count, progress=45,
-                  stage_detail=f"Detected {clip_count} shots from {total_inputs} clips")
+                  stage_detail=f"Trimmed {clip_count} clips")
 
     if clip_count == 0:
-        db.update_job(job_id, status="processing_failed", error_message="No shots detected")
-        sys.exit(1)
+        # Fallback: copy originals
+        print("[Pipeline] No trimmed clips — using originals")
+        import shutil
+        for clip_path in input_files:
+            shutil.copy2(str(clip_path), str(outputs_clips / clip_path.name))
+        clip_files = list(outputs_clips.glob("*.mp4")) + list(outputs_clips.glob("*.mov"))
+        clip_count = len(clip_files)
+        if clip_count == 0:
+            db.update_job(job_id, status="processing_failed", error_message="No clips to process")
+            sys.exit(1)
 
     # ── 3. Merge clips ──
     print("[Pipeline] Merging clips...")
