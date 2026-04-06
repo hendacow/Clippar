@@ -121,55 +121,38 @@ def run(job_id):
                   list(inputs_dir.glob("*.mp4")) + list(inputs_dir.glob("*.MP4"))
     total_inputs = len(input_files)
 
-    # Mobile app jobs: clips are already individual shots — skip shot detection
-    # Detect by checking if job was submitted with clip_count (mobile) or has a drive_link (web)
-    is_mobile_job = bool(job.get("clip_count") and job["clip_count"] > 0) or not job.get("drive_link")
+    # ── 2. Run shot detection on each clip ──
+    print(f"[Pipeline] Running shot detection on {total_inputs} clip(s)...")
+    db.update_job(job_id, status="detecting", progress=20,
+                  stage_detail=f"Analysing clip 1 of {total_inputs}...")
 
-    if is_mobile_job and total_inputs > 0:
-        print(f"[Pipeline] Mobile app job — skipping shot detection, using {total_inputs} clips directly")
-        db.update_job(job_id, status="preparing_clips", progress=25,
-                      stage_detail=f"Preparing {total_inputs} clips...")
-        import shutil
-        for f in input_files:
-            shutil.copy2(str(f), str(outputs_clips / f.name))
-        clip_files = list(outputs_clips.glob("*.mov")) + list(outputs_clips.glob("*.mp4")) + \
-                     list(outputs_clips.glob("*.MOV")) + list(outputs_clips.glob("*.MP4"))
-        clip_count = len(clip_files)
-        db.update_job(job_id, clip_count=clip_count, progress=40,
-                      stage_detail=f"{clip_count} clips ready for merging")
-    else:
-        # ── 2. Run shot detection (web/Drive uploads with long footage) ──
-        print("[Pipeline] Running shot detection...")
-        db.update_job(job_id, status="detecting", progress=20,
-                      stage_detail="Analysing clips for golf shots...")
+    from shot_detector import load_config
+    cfg = load_config()
 
-        from shot_detector import load_config
-        cfg = load_config()
+    # Override paths for this job
+    cfg["clips_dir"] = str(inputs_dir)
+    cfg["output_dir"] = str(outputs_clips)
+    cfg["fast_mode"] = True
+    cfg["display"] = False
+    cfg["save_annotated"] = False
+    cfg["verbose"] = False
 
-        # Override paths for this job
-        cfg["clips_dir"] = str(inputs_dir)
-        cfg["output_dir"] = str(outputs_clips)
-        cfg["fast_mode"] = True
-        cfg["display"] = False
-        cfg["save_annotated"] = False
-        cfg["verbose"] = False
+    from shot_detector import detect_shots
+    try:
+        detect_shots(cfg)
+    except SystemExit:
+        db.update_job(job_id, status="processing_failed", error_message="detect_shots exited")
+        sys.exit(1)
 
-        from shot_detector import detect_shots
-        try:
-            detect_shots(cfg)
-        except SystemExit:
-            db.update_job(job_id, status="processing_failed", error_message="detect_shots exited")
-            sys.exit(1)
+    # Count clips produced
+    clip_files = list(outputs_clips.glob("*.mov")) + list(outputs_clips.glob("*.mp4"))
+    clip_count = len(clip_files)
+    db.update_job(job_id, clip_count=clip_count, progress=45,
+                  stage_detail=f"Detected {clip_count} shots from {total_inputs} clips")
 
-        # Count clips produced
-        clip_files = list(outputs_clips.glob("*.mov")) + list(outputs_clips.glob("*.mp4"))
-        clip_count = len(clip_files)
-        db.update_job(job_id, clip_count=clip_count, progress=45,
-                      stage_detail=f"Detected {clip_count} shots from {total_inputs} clips")
-
-        if clip_count == 0:
-            db.update_job(job_id, status="processing_failed", error_message="No shots detected")
-            sys.exit(1)
+    if clip_count == 0:
+        db.update_job(job_id, status="processing_failed", error_message="No shots detected")
+        sys.exit(1)
 
     # ── 3. Merge clips ──
     print("[Pipeline] Merging clips...")
