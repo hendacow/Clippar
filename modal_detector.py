@@ -1,15 +1,17 @@
 """
-modal_detector.py — GPU-accelerated shot detection on Modal.
+modal_detector.py — GPU-accelerated full pipeline on Modal.
 
-Deployed as a web endpoint that the Render pipeline calls instead of running
-YOLO locally. Each call processes one video clip and returns the detected
-shot timestamps (trim start/end in seconds).
+Runs the COMPLETE shot_detector.py logic (4-state machine, PuttVeto, audio
+confirmation, ball tracking, etc.) on a T4/A10G GPU with parallel clip
+processing + NVENC encoding.
 
 Usage:
   modal deploy modal_detector.py          # deploy once
   modal serve modal_detector.py           # dev mode with hot-reload
 
-The Render pipeline POSTs a video file → gets back JSON with trim points.
+Endpoints:
+  POST /detect_shots_batch   — detect shots in multiple clips (returns trim points)
+  POST /run_full_pipeline    — full end-to-end: download → detect → trim → merge → post-process → upload
 """
 
 import modal
@@ -21,222 +23,222 @@ import os
 
 app = modal.App("clippar-shot-detector")
 
-# Build an image with all dependencies + model weights baked in
+# Build image with ALL dependencies + pipeline code + models baked in
 detector_image = (
     modal.Image.debian_slim(python_version="3.11")
-    .apt_install("ffmpeg", "libgl1", "libglib2.0-0", "libsm6", "libxext6",
-                 "libxrender1", "libsndfile1")
+    .apt_install(
+        "ffmpeg", "libgl1", "libglib2.0-0", "libsm6", "libxext6",
+        "libxrender1", "libsndfile1",
+    )
     .pip_install(
         "torch", "torchvision",
         "ultralytics",
         "opencv-python-headless",
         "numpy",
+        "librosa",
+        "scipy",
+        "pyyaml",
         "requests",
         "fastapi",
         "psycopg2-binary",
     )
+    # Bundle the full pipeline code + models
+    .add_local_file("shot_detector.py", remote_path="/app/shot_detector.py")
+    .add_local_file("merge_clips.py", remote_path="/app/merge_clips.py")
+    .add_local_file("post_process.py", remote_path="/app/post_process.py")
+    .add_local_file("config.yaml", remote_path="/app/config.yaml")
     .add_local_dir("models", remote_path="/app/models")
 )
 
 
 # ---------------------------------------------------------------------------
-# Shot detection logic (simplified for single-clip mobile processing)
+# Helpers
 # ---------------------------------------------------------------------------
 
-@app.function(
-    image=detector_image,
-    gpu="T4",
-    timeout=300,
-
-)
-def detect_shot_in_clip(video_bytes: bytes, filename: str = "clip.mp4") -> dict:
-    """Process a single video clip and return the shot trim points.
-
-    Returns:
-        {
-            "found": bool,
-            "impact_time_sec": float,       # time of detected swing impact
-            "trim_start_sec": float,         # suggested trim start (2s pre-roll)
-            "trim_end_sec": float,            # suggested trim end (3s post-roll)
-            "duration_sec": float,            # original clip duration
-            "confidence": float,              # 0-1 detection confidence
-        }
-    """
-    import tempfile
-    import cv2
-    import numpy as np
-    import torch
-    from pathlib import Path
-    from ultralytics import YOLO
-
-    # Write video to temp file
-    tmp = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-    tmp.write(video_bytes)
-    tmp.close()
-    video_path = tmp.name
-
+def _update_neon_job(neon_url, job_id, **kwargs):
+    """Update job status in Neon Postgres."""
+    if not neon_url:
+        return
     try:
-        # Load models
-        pose_model = YOLO("/app/models/yolov8n-pose.pt")
-        ball_model = YOLO("/app/models/golfballyolov8n.pt")
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[ModalDetector] Device: {device}")
-
-        cap = cv2.VideoCapture(video_path)
-        if not cap.isOpened():
-            return {"found": False, "error": "Cannot open video"}
-
-        fps = cap.get(cv2.CAP_PROP_FPS) or 30
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        duration = total_frames / fps
-
-        PRE_ROLL = 2.0
-        POST_ROLL = 3.0
-        STRIDE = 2  # process every 2nd frame (GPU is fast enough)
-
-        # Track wrist positions for swing detection
-        prev_wrists = None
-        max_wrist_speed = 0
-        max_wrist_frame = 0
-        wrist_speeds = []
-
-        frame_idx = 0
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame_idx += 1
-
-            if frame_idx % STRIDE != 1:
-                continue
-
-            # Pose detection
-            pose_res = pose_model.predict(
-                source=frame, conf=0.4, verbose=False,
-                device=device, imgsz=640
+        import psycopg2
+        conn = psycopg2.connect(neon_url)
+        sets, vals = [], []
+        for k, v in kwargs.items():
+            sets.append(f"{k} = %s")
+            vals.append(v)
+        if sets:
+            vals.append(job_id)
+            conn.cursor().execute(
+                f"UPDATE jobs SET {', '.join(sets)} WHERE id = %s", vals
             )
+            conn.commit()
+        conn.close()
+    except Exception as e:
+        print(f"[Pipeline] DB update error: {e}")
 
-            # Extract wrist keypoints (indices 9=left_wrist, 10=right_wrist)
-            kp = None
-            if (pose_res[0].keypoints is not None
-                    and len(pose_res[0].keypoints) > 0):
-                kp = pose_res[0].keypoints[0].xy[0].cpu().numpy()
 
-            if kp is not None and len(kp) > 10:
-                left_wrist = kp[9]
-                right_wrist = kp[10]
-                avg_wrist = (left_wrist + right_wrist) / 2.0
+def _download_clips_parallel(supabase_url, supabase_key, job_id, inputs_dir):
+    """Download all clips from Supabase Storage in parallel."""
+    import requests
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
 
-                if prev_wrists is not None:
-                    speed = np.linalg.norm(avg_wrist - prev_wrists)
-                    wrist_speeds.append((frame_idx, speed))
-                    if speed > max_wrist_speed:
-                        max_wrist_speed = speed
-                        max_wrist_frame = frame_idx
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+    }
 
-                prev_wrists = avg_wrist
+    # List files
+    list_resp = requests.post(
+        f"{supabase_url}/storage/v1/object/list/clips",
+        headers={**headers, "Content-Type": "application/json"},
+        json={"prefix": f"{job_id}/", "limit": 100},
+    )
+    if list_resp.status_code != 200:
+        return []
 
-        cap.release()
+    files = [
+        f for f in list_resp.json()
+        if f.get("name", "").endswith((".mp4", ".mov", ".MP4", ".MOV"))
+    ]
+    if not files:
+        return []
 
-        # Find the swing: the frame with maximum wrist speed
-        if max_wrist_speed < 15.0 or not wrist_speeds:
-            # No clear swing detected — return center trim as fallback
-            center = duration / 2.0
-            return {
-                "found": False,
-                "impact_time_sec": center,
-                "trim_start_sec": max(0, center - PRE_ROLL),
-                "trim_end_sec": min(duration, center + POST_ROLL),
-                "duration_sec": duration,
-                "confidence": 0.0,
-            }
+    def _download_one(f):
+        fname = f["name"]
+        dl = requests.get(
+            f"{supabase_url}/storage/v1/object/clips/{job_id}/{fname}",
+            headers=headers, timeout=120,
+        )
+        if dl.status_code == 200 and len(dl.content) > 1000:
+            out_path = Path(inputs_dir) / fname
+            out_path.write_bytes(dl.content)
+            return fname, len(dl.content)
+        return fname, 0
 
-        impact_time = max_wrist_frame / fps
+    results = []
+    # Download up to 8 clips concurrently
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_download_one, f): f for f in files}
+        for fut in as_completed(futures):
+            fname, size = fut.result()
+            if size > 0:
+                results.append(fname)
+                print(f"  Downloaded {fname} ({size // 1024}KB)")
+            else:
+                print(f"  FAILED {fname}")
 
-        # Confidence based on how much the peak stands out
-        speeds_arr = np.array([s for _, s in wrist_speeds])
-        median_speed = np.median(speeds_arr)
-        confidence = min(1.0, (max_wrist_speed / max(median_speed, 1.0)) / 10.0)
+    return results
 
-        return {
-            "found": True,
-            "impact_time_sec": round(impact_time, 2),
-            "trim_start_sec": round(max(0, impact_time - PRE_ROLL), 2),
-            "trim_end_sec": round(min(duration, impact_time + POST_ROLL), 2),
-            "duration_sec": round(duration, 2),
-            "confidence": round(confidence, 2),
+
+def _trim_clips_parallel(input_files, trim_map, clips_dir, use_nvenc=False):
+    """Trim clips in parallel using ThreadPoolExecutor."""
+    import subprocess as sp
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from pathlib import Path
+
+    PRE_ROLL, POST_ROLL = 2.0, 3.0
+    MIN_CLIP_DURATION = 3.0
+
+    encoder = "h264_nvenc" if use_nvenc else "libx264"
+    preset = "fast" if use_nvenc else "ultrafast"
+
+    def _trim_one(idx_clip):
+        idx, clip_path = idx_clip
+        clip_path = Path(clip_path)
+
+        # Get duration
+        try:
+            probe = sp.run(
+                ["ffprobe", "-v", "quiet", "-show_entries",
+                 "format=duration", "-of", "csv=p=0", str(clip_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            duration = float(probe.stdout.strip())
+        except Exception:
+            duration = 15.0
+
+        if duration < MIN_CLIP_DURATION:
+            return None
+
+        # Use detection results or center trim
+        if clip_path.name in trim_map:
+            start, end = trim_map[clip_path.name]
+            trim_dur = end - start
+        else:
+            start = max(0, (duration - 5.0) / 2.0)
+            trim_dur = min(5.0, duration)
+
+        out_path = Path(clips_dir) / f"clip{idx:03d}_{clip_path.stem}.mp4"
+        try:
+            sp.run(
+                ["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(clip_path),
+                 "-t", f"{trim_dur:.2f}", "-c:v", encoder, "-preset", preset,
+                 "-c:a", "aac", "-b:a", "128k", str(out_path)],
+                capture_output=True, text=True, timeout=120
+            )
+            if out_path.exists() and out_path.stat().st_size > 0:
+                return out_path
+        except Exception as e:
+            print(f"  Error trimming {clip_path.name}: {e}")
+        return None
+
+    trimmed = []
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {
+            pool.submit(_trim_one, (idx, cp)): idx
+            for idx, cp in enumerate(input_files, 1)
         }
+        for fut in as_completed(futures):
+            result = fut.result()
+            if result:
+                trimmed.append(result)
 
-    finally:
-        os.unlink(video_path)
+    return sorted(trimmed)
 
 
-# ---------------------------------------------------------------------------
-# Web endpoint — the Render pipeline calls this via HTTP
-# ---------------------------------------------------------------------------
-
-@app.function(
-    image=detector_image,
-    gpu="T4",
-    timeout=300,
-
-)
-@modal.fastapi_endpoint(method="POST")
-def detect_shot_endpoint(request: dict) -> dict:
-    """HTTP endpoint for shot detection.
-
-    Accepts JSON with:
-      - video_url: URL to download the video from (e.g. Supabase signed URL)
-      - filename: optional filename
-
-    Returns JSON with trim points.
-    """
-    import requests as req
-
-    video_url = request.get("video_url")
-    filename = request.get("filename", "clip.mp4")
-
-    if not video_url:
-        return {"error": "video_url required"}
-
-    # Download the video
-    print(f"[ModalDetector] Downloading {filename} from Supabase...")
-    resp = req.get(video_url, timeout=120)
-    if resp.status_code != 200:
-        return {"error": f"Download failed: {resp.status_code}"}
-
-    video_bytes = resp.content
-    print(f"[ModalDetector] Downloaded {len(video_bytes) // 1024}KB — running detection...")
-
-    # Run detection
-    result = detect_shot_in_clip.local(video_bytes, filename)
-    print(f"[ModalDetector] Result: {result}")
-    return result
+def _check_nvenc():
+    """Check if NVIDIA NVENC is available."""
+    import subprocess as sp
+    try:
+        result = sp.run(
+            ["ffmpeg", "-hide_banner", "-encoders"],
+            capture_output=True, text=True, timeout=10
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------
-# Batch endpoint — process multiple clips in one call
+# Batch detection endpoint (returns trim points only — no merge)
 # ---------------------------------------------------------------------------
 
 @app.function(
     image=detector_image,
     gpu="T4",
     timeout=600,
-
 )
 @modal.fastapi_endpoint(method="POST")
 def detect_shots_batch(request: dict) -> dict:
-    """Process multiple clips in a single GPU session.
+    """Process multiple clips using the FULL shot_detector.py logic.
+
+    Runs all clips in parallel using ThreadPoolExecutor with shared GPU.
 
     Accepts JSON with:
       - clips: list of {video_url, filename}
       - supabase_url: base Supabase URL
       - supabase_key: service key for downloading
 
-    Returns JSON with results per clip.
+    Returns JSON with per-clip trim points + shot info.
     """
-    import requests as req
+    import sys
+    import tempfile
+    import time
+    from pathlib import Path
+
+    sys.path.insert(0, "/app")
+    from shot_detector import load_config, detect_shots
 
     clips = request.get("clips", [])
     supabase_url = request.get("supabase_url", "")
@@ -245,78 +247,153 @@ def detect_shots_batch(request: dict) -> dict:
     if not clips:
         return {"error": "No clips provided"}
 
-    results = []
-    for i, clip_info in enumerate(clips):
-        video_url = clip_info.get("video_url", "")
-        filename = clip_info.get("filename", f"clip_{i}.mp4")
+    work_dir = Path(tempfile.mkdtemp(prefix="clippar_batch_"))
+    inputs_dir = work_dir / "inputs"
+    outputs_dir = work_dir / "outputs"
+    inputs_dir.mkdir()
+    outputs_dir.mkdir()
 
-        # If video_url is a storage path, build the full download URL
+    # Download clips in parallel
+    import requests as req
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    headers = {}
+    if supabase_key:
+        headers = {
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+        }
+
+    def _download(clip_info):
+        video_url = clip_info.get("video_url", "")
+        filename = clip_info.get("filename", "clip.mp4")
         if not video_url.startswith("http") and supabase_url and supabase_key:
             video_url = f"{supabase_url}/storage/v1/object/clips/{video_url}"
-
-        headers = {}
-        if supabase_key:
-            headers = {
-                "apikey": supabase_key,
-                "Authorization": f"Bearer {supabase_key}",
-            }
-
         try:
-            print(f"[ModalDetector] [{i+1}/{len(clips)}] Downloading {filename}...")
             resp = req.get(video_url, headers=headers, timeout=120)
-            if resp.status_code != 200:
-                results.append({"filename": filename, "found": False,
-                                "error": f"Download failed: {resp.status_code}"})
-                continue
-
-            video_bytes = resp.content
-            if len(video_bytes) < 1000:
-                results.append({"filename": filename, "found": False,
-                                "error": f"File too small ({len(video_bytes)} bytes)"})
-                continue
-
-            print(f"[ModalDetector] [{i+1}/{len(clips)}] Detecting in {filename} ({len(video_bytes)//1024}KB)...")
-            result = detect_shot_in_clip.local(video_bytes, filename)
-            result["filename"] = filename
-            results.append(result)
-
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                (inputs_dir / filename).write_bytes(resp.content)
+                return filename, True
         except Exception as e:
-            results.append({"filename": filename, "found": False, "error": str(e)})
+            print(f"Download error for {filename}: {e}")
+        return filename, False
 
-    return {"ok": True, "results": results}
+    print(f"[Pipeline] Downloading {len(clips)} clips in parallel...")
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for fname, ok in pool.map(_download, clips):
+            print(f"  {'OK' if ok else 'FAIL'}: {fname}")
+
+    # Run full shot detection with parallel_workers on GPU
+    cfg = load_config("/app/config.yaml")
+    cfg["clips_dir"] = str(inputs_dir)
+    cfg["output_dir"] = str(outputs_dir)
+    cfg["fast_mode"] = True
+    cfg["save_annotated"] = False
+    cfg["display"] = False
+    cfg["verbose"] = False
+    cfg["device"] = "cuda"
+    cfg["inference_imgsz"] = 640
+    cfg["parallel_workers"] = 0  # sequential on GPU (shared CUDA context)
+    cfg["save_putts"] = True
+
+    start_t = time.time()
+    detect_shots(cfg)
+    detect_time = time.time() - start_t
+    print(f"[Pipeline] Detection completed in {detect_time:.1f}s")
+
+    # Parse output files to build trim results
+    results = []
+    for clip_info in clips:
+        filename = clip_info.get("filename", "")
+        stem = Path(filename).stem
+
+        # Look for output files matching this clip
+        matching = list(outputs_dir.glob(f"*_{stem}_*"))
+        matching += list(outputs_dir.glob(f"*_{stem}.*"))
+
+        if matching:
+            # Get the trim info from the output filename
+            out = matching[0]
+            # Probe the output to get duration
+            import subprocess as sp
+            try:
+                probe = sp.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries",
+                     "format=duration", "-of", "csv=p=0", str(out)],
+                    capture_output=True, text=True, timeout=10
+                )
+                out_dur = float(probe.stdout.strip())
+            except Exception:
+                out_dur = 5.0
+
+            is_putt = "putt" in out.name.lower()
+            is_no_detect = "no_detection" in out.name.lower()
+
+            results.append({
+                "filename": filename,
+                "found": not is_no_detect,
+                "is_putt": is_putt,
+                "output_file": out.name,
+                "output_duration": round(out_dur, 2),
+                "trim_start_sec": 0.0 if is_putt or is_no_detect else None,
+                "trim_end_sec": out_dur if is_putt or is_no_detect else None,
+            })
+        else:
+            results.append({
+                "filename": filename,
+                "found": False,
+                "error": "No output produced",
+            })
+
+    # Cleanup
+    import shutil
+    shutil.rmtree(str(work_dir), ignore_errors=True)
+
+    return {
+        "ok": True,
+        "results": results,
+        "detection_time_sec": round(detect_time, 1),
+    }
 
 
 # ---------------------------------------------------------------------------
-# Full pipeline endpoint — download, detect, trim, merge, upload reel
-# Runs entirely on Modal so Render doesn't need to do heavy work.
+# Full pipeline endpoint — download → detect → trim → merge → post-process → upload
 # ---------------------------------------------------------------------------
 
 @app.function(
     image=detector_image,
     gpu="T4",
-    timeout=600,
-
+    timeout=900,  # 15 min for large clip sets
+    memory=16384,  # 16GB RAM
 )
 @modal.fastapi_endpoint(method="POST")
 def run_full_pipeline(request: dict) -> dict:
-    """Full pipeline: download clips → detect swings → trim → merge → upload reel.
+    """Full pipeline using the COMPLETE shot_detector.py logic.
+
+    1. Download clips from Supabase (parallel)
+    2. Run full detect_shots() with state machine, PuttVeto, audio, etc.
+    3. Merge detected clips (shot_detector already trims + saves clips)
+    4. Post-process (scorecard overlay + music)
+    5. Transcode to mp4
+    6. Upload reel to Supabase Storage
 
     Accepts JSON with:
       - job_id: round UUID
       - supabase_url: Supabase URL
       - supabase_key: service role key
-      - neon_database_url: Neon Postgres connection string for job status updates
-
-    Returns JSON with reel_url on success.
+      - neon_database_url: optional Neon Postgres for job status
     """
-    import requests as req
+    import sys
+    import time
     import tempfile
     import subprocess as sp
-    import cv2
-    import numpy as np
-    import torch
+    import requests as req
     from pathlib import Path
-    from ultralytics import YOLO
+
+    sys.path.insert(0, "/app")
+    from shot_detector import load_config, detect_shots
+    from merge_clips import load_config as load_merge_config, merge
+    from post_process import post_process as _post_process
 
     job_id = request.get("job_id")
     supabase_url = request.get("supabase_url", "")
@@ -331,164 +408,177 @@ def run_full_pipeline(request: dict) -> dict:
         "Authorization": f"Bearer {supabase_key}",
     }
 
-    def update_job(status=None, progress=None, stage_detail=None, **extra):
-        """Update job in Neon DB if available."""
-        if not neon_url:
-            return
-        try:
-            import psycopg2
-            conn = psycopg2.connect(neon_url)
-            sets = []
-            vals = []
-            if status:
-                sets.append("status = %s")
-                vals.append(status)
-            if progress is not None:
-                sets.append("progress = %s")
-                vals.append(progress)
-            if stage_detail:
-                sets.append("stage_detail = %s")
-                vals.append(stage_detail)
-            for k, v in extra.items():
-                sets.append(f"{k} = %s")
-                vals.append(v)
-            if sets:
-                vals.append(job_id)
-                conn.cursor().execute(
-                    f"UPDATE jobs SET {', '.join(sets)} WHERE id = %s", vals
-                )
-                conn.commit()
-            conn.close()
-        except Exception as e:
-            print(f"[Pipeline] DB update error: {e}")
+    def update_job(**kwargs):
+        _update_neon_job(neon_url, job_id, **kwargs)
+
+    use_nvenc = _check_nvenc()
+    print(f"[Pipeline] NVENC available: {use_nvenc}")
 
     try:
-        # ── 1. Download clips from Supabase Storage ──
-        update_job(status="downloading", progress=5, stage_detail="Downloading clips...")
-
-        list_resp = req.post(
-            f"{supabase_url}/storage/v1/object/list/clips",
-            headers={**headers, "Content-Type": "application/json"},
-            json={"prefix": f"{job_id}/", "limit": 100},
-        )
-        if list_resp.status_code != 200:
-            update_job(status="processing_failed", stage_detail=f"Failed to list clips: {list_resp.status_code}")
-            return {"error": f"Failed to list clips: {list_resp.status_code}"}
-
-        files = [f for f in list_resp.json()
-                 if f.get("name", "").endswith((".mp4", ".mov", ".MP4", ".MOV"))]
-        if not files:
-            update_job(status="processing_failed", stage_detail="No clips found in storage")
-            return {"error": "No clips found"}
-
         work_dir = Path(tempfile.mkdtemp(prefix=f"clippar_{job_id}_"))
         inputs_dir = work_dir / "inputs"
-        clips_dir = work_dir / "clips"
-        inputs_dir.mkdir()
-        clips_dir.mkdir()
+        outputs_dir = work_dir / "outputs" / "clips"
+        merged_dir = work_dir / "outputs" / "merged"
+        inputs_dir.mkdir(parents=True)
+        outputs_dir.mkdir(parents=True)
+        merged_dir.mkdir(parents=True)
 
-        total = len(files)
-        print(f"[Pipeline] Downloading {total} clips...")
-        for idx, f in enumerate(files):
-            fname = f["name"]
-            update_job(progress=5 + int((idx / total) * 15),
-                       stage_detail=f"Downloading clip {idx+1} of {total}")
-            dl = req.get(f"{supabase_url}/storage/v1/object/clips/{job_id}/{fname}", headers=headers)
-            if dl.status_code == 200 and len(dl.content) > 1000:
-                (inputs_dir / fname).write_bytes(dl.content)
-                print(f"  Downloaded {fname} ({len(dl.content)//1024}KB)")
+        # ── 1. Download clips from Supabase (parallel) ──
+        update_job(status="downloading", progress=5,
+                   stage_detail="Downloading clips...")
+        t0 = time.time()
+        downloaded = _download_clips_parallel(
+            supabase_url, supabase_key, job_id, inputs_dir
+        )
+        print(f"[Pipeline] Downloaded {len(downloaded)} clips in {time.time()-t0:.1f}s")
+
+        if not downloaded:
+            update_job(status="processing_failed",
+                       stage_detail="No clips found in storage")
+            return {"error": "No clips found"}
 
         input_files = sorted(inputs_dir.glob("*"))
-        if not input_files:
-            update_job(status="processing_failed", stage_detail="All downloads failed")
-            return {"error": "No clips downloaded"}
+        total = len(input_files)
 
-        # ── 2. Detect swings with YOLO on GPU ──
+        # ── 2. Full shot detection with shot_detector.py ──
         update_job(status="detecting", progress=20,
-                   stage_detail=f"Detecting swings in {len(input_files)} clips...")
+                   stage_detail=f"Analysing {total} clips on GPU...")
+        t0 = time.time()
 
-        pose_model = YOLO("/app/models/yolov8n-pose.pt")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"[Pipeline] Detection device: {device}")
+        cfg = load_config("/app/config.yaml")
+        cfg["clips_dir"] = str(inputs_dir)
+        cfg["output_dir"] = str(outputs_dir)
+        cfg["fast_mode"] = True
+        cfg["save_annotated"] = False
+        cfg["display"] = False
+        cfg["verbose"] = False
+        cfg["device"] = "cuda"
+        cfg["inference_imgsz"] = 640
+        cfg["parallel_workers"] = 0  # sequential (shared CUDA context is faster than multiprocess on single GPU)
+        cfg["save_putts"] = True
 
-        trim_map = {}
-        PRE_ROLL, POST_ROLL = 2.0, 3.0
+        def on_clip_done(clip_idx, total_clips, shots):
+            pct = 20 + int((clip_idx / total_clips) * 25)
+            update_job(progress=pct,
+                       stage_detail=f"Analysed clip {clip_idx} of {total_clips} ({shots} shots)")
 
-        for idx, clip_path in enumerate(input_files):
-            update_job(progress=20 + int(((idx+1) / len(input_files)) * 15),
-                       stage_detail=f"Analysing clip {idx+1} of {len(input_files)}...")
+        detect_shots(cfg, on_clip_done=on_clip_done)
+        detect_time = time.time() - t0
+        print(f"[Pipeline] Detection completed in {detect_time:.1f}s")
 
-            video_bytes = clip_path.read_bytes()
-            result = detect_shot_in_clip.local(video_bytes, clip_path.name)
-
-            if result.get("trim_start_sec") is not None:
-                trim_map[clip_path.name] = (result["trim_start_sec"], result["trim_end_sec"])
-                print(f"  {clip_path.name}: {'swing' if result['found'] else 'center'} "
-                      f"{result['trim_start_sec']:.1f}s-{result['trim_end_sec']:.1f}s")
-
-        # ── 3. Trim clips with FFmpeg ──
-        update_job(status="merging", progress=40, stage_detail="Trimming clips...")
-
-        for idx, clip_path in enumerate(input_files):
-            if clip_path.name in trim_map:
-                start, end = trim_map[clip_path.name]
-                trim_dur = end - start
-            else:
-                # Probe duration
-                try:
-                    probe = sp.run(["ffprobe", "-v", "quiet", "-show_entries",
-                                    "format=duration", "-of", "csv=p=0", str(clip_path)],
-                                   capture_output=True, text=True, timeout=30)
-                    dur = float(probe.stdout.strip())
-                except Exception:
-                    dur = 15.0
-                start = max(0, (dur - 5.0) / 2.0)
-                trim_dur = min(5.0, dur)
-
-            out = clips_dir / f"clip{idx+1:03d}_{clip_path.stem}.mp4"
-            sp.run(["ffmpeg", "-y", "-ss", f"{start:.2f}", "-i", str(clip_path),
-                    "-t", f"{trim_dur:.2f}", "-c:v", "libx264", "-preset", "ultrafast",
-                    "-c:a", "aac", "-b:a", "128k", str(out)],
-                   capture_output=True, text=True, timeout=120)
-
-        trimmed = sorted(clips_dir.glob("*.mp4"))
-        if not trimmed:
-            # Fallback: use originals
-            import shutil
-            for f in input_files:
-                shutil.copy2(str(f), str(clips_dir / f.name))
-            trimmed = sorted(clips_dir.glob("*"))
-
-        update_job(clip_count=len(trimmed), progress=50,
-                   stage_detail=f"Merging {len(trimmed)} clips...")
-
-        # ── 4. Merge clips using FFmpeg concat ──
-        merged_path = work_dir / "highlight_reel.mp4"
-        concat_file = work_dir / "concat.txt"
-        with open(concat_file, "w") as cf:
-            for t in trimmed:
-                cf.write(f"file '{t}'\n")
-
-        merge_result = sp.run(
-            ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(concat_file),
-             "-c:v", "libx264", "-preset", "fast", "-crf", "23",
-             "-c:a", "aac", "-movflags", "+faststart", str(merged_path)],
-            capture_output=True, text=True, timeout=300
+        # Count output clips
+        output_clips = sorted(
+            [f for f in outputs_dir.glob("*")
+             if f.suffix.lower() in (".mp4", ".mov") and "_annotated" not in f.name]
         )
+        clip_count = len(output_clips)
+        print(f"[Pipeline] {clip_count} output clip(s)")
 
-        if merge_result.returncode != 0 or not merged_path.exists():
-            err = merge_result.stderr[-300:] if merge_result.stderr else "Unknown error"
-            update_job(status="processing_failed", stage_detail=f"Merge failed: {err[:100]}")
-            return {"error": f"Merge failed: {err}"}
+        if clip_count == 0:
+            update_job(status="processing_failed",
+                       stage_detail="No clips produced by detection")
+            return {"error": "Detection produced no output"}
 
-        print(f"[Pipeline] Merged reel: {merged_path.stat().st_size // 1024}KB")
+        update_job(clip_count=clip_count, progress=45,
+                   stage_detail=f"Detected {clip_count} shots")
 
-        # ── 5. Upload reel to Supabase Storage ──
+        # ── 3. Merge clips ──
+        update_job(status="merging", progress=50,
+                   stage_detail=f"Stitching {clip_count} shots together...")
+        t0 = time.time()
+
+        merged_output = merged_dir / "highlight_reel.mov"
+        merge_cfg = load_merge_config()
+        merge_cfg["shots_dir"] = str(outputs_dir)
+        merge_cfg["merged_output"] = str(merged_output)
+        merge_cfg["include_no_detection"] = True
+        merge(merge_cfg)
+
+        if not merged_output.exists():
+            update_job(status="processing_failed",
+                       stage_detail="Merge produced no output")
+            return {"error": "Merge failed"}
+
+        merge_time = time.time() - t0
+        print(f"[Pipeline] Merged in {merge_time:.1f}s ({merged_output.stat().st_size // 1024}KB)")
+
+        # ── 4. Post-process (scorecard overlay + music) ──
+        update_job(status="post_processing", progress=65,
+                   stage_detail="Adding scorecard overlay & music...")
+
+        # Fetch round info from Supabase
+        course_name, date_str = "Golf Course", ""
+        total_score, score_to_par, holes_played = None, None, 18
+
+        try:
+            resp = req.get(
+                f"{supabase_url}/rest/v1/rounds?id=eq.{job_id}&select=*",
+                headers=headers,
+            )
+            if resp.status_code == 200:
+                rounds = resp.json()
+                if rounds:
+                    r = rounds[0]
+                    course_name = r.get("course_name", course_name)
+                    date_str = r.get("date", "")[:10]
+                    total_score = r.get("total_score")
+                    score_to_par = r.get("score_to_par")
+                    holes_played = r.get("holes_played", 18)
+                    print(f"[Pipeline] Round: {course_name}, score={total_score}")
+        except Exception as e:
+            print(f"[Pipeline] Could not fetch round info: {e}")
+
+        processed_output = merged_dir / "highlight_reel_processed.mov"
+        _post_process(
+            str(merged_output),
+            str(processed_output),
+            course_name=course_name,
+            date_str=date_str,
+            total_score=total_score,
+            score_to_par=score_to_par,
+            holes_played=holes_played,
+        )
+        final_mov = processed_output if processed_output.exists() else merged_output
+
+        # ── 5. Transcode to mp4 ──
+        update_job(status="transcoding", progress=78,
+                   stage_detail="Transcoding to mobile format...")
+        t0 = time.time()
+
+        mp4_output = merged_dir / "highlight_reel.mp4"
+        encoder = "h264_nvenc" if use_nvenc else "libx264"
+        preset = "fast" if use_nvenc else "fast"
+
+        tc = sp.run([
+            "ffmpeg", "-y", "-i", str(final_mov),
+            "-c:v", encoder, "-preset", preset,
+            *(["-crf", "23"] if not use_nvenc else ["-rc", "vbr", "-cq", "23"]),
+            "-c:a", "aac", "-movflags", "+faststart",
+            str(mp4_output),
+        ], capture_output=True, text=True, timeout=300)
+
+        if tc.returncode != 0:
+            # Fallback to libx264 if NVENC failed
+            if use_nvenc:
+                print(f"[Pipeline] NVENC failed, falling back to libx264...")
+                sp.run([
+                    "ffmpeg", "-y", "-i", str(final_mov),
+                    "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+                    "-c:a", "aac", "-movflags", "+faststart",
+                    str(mp4_output),
+                ], capture_output=True, text=True, timeout=300)
+
+        transcode_time = time.time() - t0
+        print(f"[Pipeline] Transcoded in {transcode_time:.1f}s")
+
+        # ── 6. Upload reel to Supabase Storage ──
         update_job(status="uploading_reel", progress=85,
                    stage_detail="Uploading highlight reel...")
 
         reel_storage_path = f"reels/{job_id}/highlight.mp4"
-        with open(merged_path, "rb") as f:
+        upload_file = mp4_output if mp4_output.exists() else final_mov
+
+        with open(upload_file, "rb") as f:
             upload_resp = req.post(
                 f"{supabase_url}/storage/v1/object/clips/{reel_storage_path}",
                 headers={
@@ -507,22 +597,35 @@ def run_full_pipeline(request: dict) -> dict:
         reel_url = f"{supabase_url}/storage/v1/object/public/clips/{reel_storage_path}"
         print(f"[Pipeline] Reel uploaded: {reel_url}")
 
-        # ── 6. Update round in Supabase ──
+        # ── 7. Update round in Supabase ──
         req.patch(
             f"{supabase_url}/rest/v1/rounds?id=eq.{job_id}",
             json={"reel_url": reel_url, "status": "ready"},
-            headers={**headers, "Content-Type": "application/json", "Prefer": "return=minimal"},
+            headers={
+                **headers,
+                "Content-Type": "application/json",
+                "Prefer": "return=minimal",
+            },
         )
 
         update_job(status="ready_for_review", progress=100,
                    stage_detail="Highlight reel ready!")
 
-        # Clean up
+        # Cleanup
         import shutil
         shutil.rmtree(str(work_dir), ignore_errors=True)
 
-        return {"ok": True, "reel_url": reel_url, "clips_processed": len(trimmed)}
+        return {
+            "ok": True,
+            "reel_url": reel_url,
+            "clips_processed": clip_count,
+            "detection_time_sec": round(detect_time, 1),
+            "merge_time_sec": round(merge_time, 1),
+            "transcode_time_sec": round(transcode_time, 1),
+        }
 
     except Exception as e:
         update_job(status="processing_failed", stage_detail=str(e)[:200])
+        import traceback
+        traceback.print_exc()
         return {"error": str(e)}

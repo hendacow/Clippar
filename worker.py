@@ -44,7 +44,7 @@ def _poll_loop():
                     "supabase_url": supabase_url,
                     "supabase_key": supabase_key,
                     "neon_database_url": neon_url,
-                }, timeout=540)  # 9 min timeout (Modal has 10 min)
+                }, timeout=840)  # 14 min timeout (Modal has 15 min)
 
                 if resp.status_code == 200:
                     data = resp.json()
