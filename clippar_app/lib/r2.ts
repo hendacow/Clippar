@@ -24,8 +24,9 @@ export async function uploadClipToStorage(
   }
 
   // Read file as base64 using expo-file-system (reliable on React Native)
+  // Use string literal 'base64' — FileSystem.EncodingType may be undefined in some Expo versions
   const base64Data = await FileSystem.readAsStringAsync(fileUri, {
-    encoding: FileSystem.EncodingType.Base64,
+    encoding: 'base64' as any,
   });
 
   if (!base64Data || base64Data.length === 0) {
