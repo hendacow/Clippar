@@ -247,16 +247,16 @@ function formatScoreToPar(scoreToPar: number): string {
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
-  const [useMock, setUseMock] = useState(true);
   const [liveRounds, setLiveRounds] = useState<MockRound[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [activeFilter, setActiveFilter] = useState<FilterOption>('all');
   const [stats, setStats] = useState(MOCK_STATS);
 
-  // Try fetching real data; fall back to mock
+  // Always try real data first; only show mock if user has zero rounds
   const fetchRounds = useCallback(async () => {
     try {
       const data = await getRounds();
-      if (data && data.length > 0) {
+      if (data) {
         setLiveRounds(
           data.map((r: any, i: number) => ({
             ...r,
@@ -264,11 +264,11 @@ export default function HomeScreen() {
             best_hole: null,
           }))
         );
-        setUseMock(false);
       }
     } catch {
-      // Use mock data
+      // Network error — keep whatever we had
     } finally {
+      setLoaded(true);
       setRefreshing(false);
     }
   }, []);
@@ -289,6 +289,8 @@ export default function HomeScreen() {
     fetchStats();
   }, [fetchRounds, fetchStats]);
 
+  // Show real rounds if we have them, otherwise show mock as placeholder
+  const useMock = loaded && liveRounds.length === 0;
   const rounds = useMock ? MOCK_ROUNDS : liveRounds;
 
   // Derived data for sections
@@ -392,6 +394,26 @@ export default function HomeScreen() {
             <Bell size={18} color={theme.colors.textSecondary} />
           </Pressable>
         </View>
+
+        {/* ---- SAMPLE DATA BANNER ---- */}
+        {useMock && (
+          <View
+            style={{
+              marginHorizontal: 16,
+              marginBottom: 12,
+              paddingVertical: 10,
+              paddingHorizontal: 14,
+              backgroundColor: 'rgba(168, 230, 61, 0.08)',
+              borderRadius: theme.radius.md,
+              borderWidth: 1,
+              borderColor: 'rgba(168, 230, 61, 0.15)',
+            }}
+          >
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, textAlign: 'center' }}>
+              Sample data shown below — upload your first round to see your stats
+            </Text>
+          </View>
+        )}
 
         {/* ---- HERO REEL ---- */}
         <HeroReel

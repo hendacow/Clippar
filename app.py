@@ -209,6 +209,19 @@ def mobile_job_status(job_id):
     return jsonify(**result)
 
 
+@app.route("/api/mobile/retry-job/<job_id>", methods=["POST"])
+@mobile_auth_required
+def mobile_retry_job(job_id):
+    """Reset a stuck/failed job back to pending so the worker retries it."""
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify(ok=False, error="Job not found"), 404
+    if job["status"] in ("ready_for_review", "approved", "delivered"):
+        return jsonify(ok=False, error="Job already completed"), 400
+    db.update_job(job_id, status="pending", progress=0, stage_detail="Queued for retry...")
+    return jsonify(ok=True, job_id=job_id)
+
+
 @app.route("/api/mobile/reel-url/<round_id>", methods=["GET"])
 @mobile_auth_required
 def mobile_reel_url(round_id):

@@ -392,21 +392,13 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         update({ stage: 'processing', progress: 42, stageLabel: 'Queued for processing...' });
         startPolling(roundId);
       } else {
-        // Clips uploaded — user can edit the reel in the editor
-        try {
-          await supabase.from('processing_jobs')
-            .update({ status: 'completed', completed_at: new Date().toISOString() })
-            .eq('round_id', roundId)
-            .eq('status', 'queued');
-        } catch {}
-        try {
-          await updateRound(roundId, { status: 'ready' } as any);
-        } catch {}
+        // Pipeline submit failed — clips are uploaded but processing didn't start.
+        // Keep status as 'processing' and start polling — the worker may pick it up.
+        startPolling(roundId);
         update({
-          stage: 'completed',
-          progress: 100,
-          stageLabel: clips.length > 0 ? 'Clips uploaded — edit your reel' : 'Round saved',
-          reelUrl: null,
+          stage: 'processing',
+          progress: 40,
+          stageLabel: 'Clips uploaded — waiting for processing to start...',
         });
       }
     } catch (err) {

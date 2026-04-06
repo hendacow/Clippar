@@ -169,8 +169,21 @@ def _sweep_stale():
         _auto_deliver(job["id"])
 
 
+def _reset_stuck_jobs():
+    """On startup, reset any in-progress jobs back to pending.
+    These were likely killed by a server restart / deploy."""
+    stuck_statuses = ["downloading", "detecting", "merging", "post_processing",
+                      "transcoding", "uploading_reel"]
+    for status in stuck_statuses:
+        for job in db.list_jobs(status=status):
+            print(f"[Worker] Resetting stuck job {job['id']} (was '{status}') → pending")
+            db.update_job(job["id"], status="pending", progress=0,
+                          stage_detail="Requeued after server restart")
+
+
 def start_worker():
     """Launch the polling loop as a daemon thread."""
+    _reset_stuck_jobs()
     _sweep_stale()
     t = threading.Thread(target=_poll_loop, daemon=True, name="clippar-worker")
     t.start()
