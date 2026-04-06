@@ -1,6 +1,4 @@
 import { Platform } from 'react-native';
-import * as FileSystem from 'expo-file-system';
-import { decode } from 'base64-arraybuffer';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/constants/config';
 
@@ -8,7 +6,8 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 /**
  * Upload a clip to Supabase Storage.
- * Uses expo-file-system to read files on native (fetch+blob produces 0-byte uploads).
+ * Uses FormData with file URI on native — React Native's fetch streams the file
+ * directly from disk without reading it all into memory.
  */
 export async function uploadClipToStorage(
   roundId: string,
@@ -23,28 +22,37 @@ export async function uploadClipToStorage(
     return storagePath;
   }
 
-  // Read file as base64 using expo-file-system (reliable on React Native)
-  // Use string literal 'base64' — FileSystem.EncodingType may be undefined in some Expo versions
-  const base64Data = await FileSystem.readAsStringAsync(fileUri, {
-    encoding: 'base64' as any,
-  });
-
-  if (!base64Data || base64Data.length === 0) {
-    throw new Error(`File is empty or unreadable: ${fileUri}`);
+  // Get auth token for direct REST upload
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  if (!token) {
+    throw new Error('Not authenticated');
   }
 
-  // Convert base64 to ArrayBuffer for Supabase upload
-  const arrayBuffer = decode(base64Data);
+  // Use FormData with file URI — React Native handles streaming from disk
+  const formData = new FormData();
+  formData.append('', {
+    uri: fileUri,
+    name: filename,
+    type: 'video/mp4',
+  } as any);
 
-  const { error } = await supabase.storage
-    .from('clips')
-    .upload(storagePath, arrayBuffer, {
-      contentType: 'video/mp4',
-      upsert: true,
-    });
+  const response = await fetch(
+    `${config.supabase.url}/storage/v1/object/clips/${storagePath}`,
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        apikey: config.supabase.anonKey,
+        'x-upsert': 'true',
+      },
+      body: formData,
+    }
+  );
 
-  if (error) {
-    throw new Error(`Upload failed: ${error.message}`);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Upload failed (${response.status}): ${text}`);
   }
 
   onProgress?.(1);
