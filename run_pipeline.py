@@ -57,10 +57,14 @@ def run(job_id):
             if list_resp.status_code == 200:
                 files = [f for f in list_resp.json() if f.get("name", "").endswith((".mp4", ".mov", ".MP4", ".MOV"))]
                 if files:
-                    print(f"[Pipeline] Downloading {len(files)} clip(s) from Supabase Storage")
-                    db.update_job(job_id, status="downloading")
-                    for f in files:
+                    total_files = len(files)
+                    print(f"[Pipeline] Downloading {total_files} clip(s) from Supabase Storage")
+                    db.update_job(job_id, status="downloading", progress=5,
+                                  stage_detail=f"Downloading clip 1 of {total_files}")
+                    for idx, f in enumerate(files):
                         file_key = f"{job_id}/{f['name']}"
+                        db.update_job(job_id, progress=5 + int((idx / total_files) * 15),
+                                      stage_detail=f"Downloading clip {idx + 1} of {total_files}")
                         dl_resp = requests.get(
                             f"{supabase_url}/storage/v1/object/clips/{file_key}",
                             headers={
@@ -114,7 +118,8 @@ def run(job_id):
 
     # ── 2. Run shot detection ──
     print("[Pipeline] Running shot detection...")
-    db.update_job(job_id, status="processing")
+    db.update_job(job_id, status="detecting", progress=20,
+                  stage_detail="Analysing clips for golf shots...")
 
     from shot_detector import load_config
     cfg = load_config()
@@ -127,6 +132,11 @@ def run(job_id):
     cfg["save_annotated"] = False
     cfg["verbose"] = False
 
+    # Count input files so we can report per-clip progress
+    input_files = list(inputs_dir.glob("*.mov")) + list(inputs_dir.glob("*.MOV")) + \
+                  list(inputs_dir.glob("*.mp4")) + list(inputs_dir.glob("*.MP4"))
+    total_inputs = len(input_files)
+
     from shot_detector import detect_shots
     try:
         detect_shots(cfg)
@@ -137,7 +147,8 @@ def run(job_id):
     # Count clips produced
     clip_files = list(outputs_clips.glob("*.mov")) + list(outputs_clips.glob("*.mp4"))
     clip_count = len(clip_files)
-    db.update_job(job_id, clip_count=clip_count)
+    db.update_job(job_id, clip_count=clip_count, progress=45,
+                  stage_detail=f"Detected {clip_count} shots from {total_inputs} clips")
 
     if clip_count == 0:
         db.update_job(job_id, status="processing_failed", error_message="No shots detected")
@@ -145,6 +156,8 @@ def run(job_id):
 
     # ── 3. Merge clips ──
     print("[Pipeline] Merging clips...")
+    db.update_job(job_id, status="merging", progress=50,
+                  stage_detail=f"Stitching {clip_count} shots together...")
     import subprocess as _sp
     merge_result = _sp.run(
         [sys.executable, "-c",
@@ -172,6 +185,8 @@ merge(cfg)
 
     # ── 4. Post-process: scorecard overlay + background music ──
     print("[Pipeline] Post-processing (scorecard + music)...")
+    db.update_job(job_id, status="post_processing", progress=65,
+                  stage_detail="Adding scorecard overlay & music...")
     from post_process import post_process as _post_process
 
     # Fetch round info from Supabase for scorecard
@@ -224,6 +239,8 @@ merge(cfg)
     # ── 5. Transcode to mp4 for browser/mobile preview ──
     mp4_output = merged_output.parent / "highlight_reel.mp4"
     print("[Pipeline] Transcoding to mp4...")
+    db.update_job(job_id, status="transcoding", progress=78,
+                  stage_detail="Transcoding to mobile format...")
     tc = _sp.run([
         "ffmpeg", "-y", "-i", str(final_mov),
         "-c:v", "libx264", "-preset", "fast", "-crf", "23",
@@ -234,6 +251,8 @@ merge(cfg)
         print(f"[Pipeline] mp4 transcode warning: {tc.stderr[-300:]}")
 
     # ── 6. Upload results to R2 and/or Supabase Storage ──
+    db.update_job(job_id, status="uploading_reel", progress=85,
+                  stage_detail="Uploading your highlight reel...")
     if _use_r2():
         import storage
         print("[Pipeline] Uploading results to R2...")
@@ -289,7 +308,8 @@ merge(cfg)
         except Exception as e:
             print(f"[Pipeline] Supabase Storage upload error: {e}")
 
-    db.update_job(job_id, status="ready_for_review")
+    db.update_job(job_id, status="ready_for_review", progress=100,
+                  stage_detail="Highlight reel ready!")
     print(f"[Pipeline] Job {job_id} ready for review — {clip_count} clip(s)")
 
 

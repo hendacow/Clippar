@@ -5,6 +5,23 @@ import { router } from 'expo-router';
 import { theme } from '@/constants/theme';
 import { useUploadContext } from '@/contexts/UploadContext';
 
+function estimateTimeLeft(currentClip: number, totalClips: number, stage: string, progress: number): string | null {
+  if (stage === 'uploading' && totalClips > 0 && currentClip > 0) {
+    const remaining = totalClips - currentClip;
+    const secondsLeft = remaining * 8;
+    if (secondsLeft < 60) return `~${secondsLeft}s left`;
+    return `~${Math.ceil(secondsLeft / 60)} min left`;
+  }
+  if (stage === 'processing') {
+    // Estimate based on pipeline progress (42-100 range)
+    if (progress < 50) return 'Usually 2-4 minutes';
+    if (progress < 70) return 'About 1-2 minutes left';
+    if (progress < 90) return 'Less than a minute left';
+    return 'Almost done...';
+  }
+  return null;
+}
+
 export function UploadProgressCard() {
   const { upload, cancelUpload, retryUpload, dismissUpload } = useUploadContext();
   const pulseAnim = useRef(new Animated.Value(0.4)).current;
@@ -74,6 +91,8 @@ export function UploadProgressCard() {
             <XCircle size={20} color={iconColor} />
           ) : isComplete ? (
             <CheckCircle size={20} color={iconColor} />
+          ) : upload.stage === 'processing' ? (
+            <Loader size={20} color={iconColor} />
           ) : (
             <Upload size={20} color={iconColor} />
           )}
@@ -90,18 +109,32 @@ export function UploadProgressCard() {
           >
             {upload.stageLabel}
           </Text>
-          {upload.courseName && (
-            <Text
-              style={{
-                color: theme.colors.textTertiary,
-                fontSize: 12,
-                marginTop: 1,
-              }}
-              numberOfLines={1}
-            >
-              {upload.courseName}
-            </Text>
-          )}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 1 }}>
+            {upload.courseName && (
+              <Text
+                style={{
+                  color: theme.colors.textTertiary,
+                  fontSize: 12,
+                }}
+                numberOfLines={1}
+              >
+                {upload.courseName}
+              </Text>
+            )}
+            {upload.totalClips > 0 && isActive && (
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
+                · {upload.currentClip}/{upload.totalClips} clips
+              </Text>
+            )}
+          </View>
+          {isActive && (() => {
+            const eta = estimateTimeLeft(upload.currentClip, upload.totalClips, upload.stage, upload.progress);
+            return eta ? (
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 11, marginTop: 2 }}>
+                {eta}
+              </Text>
+            ) : null;
+          })()}
         </View>
 
         {/* Action buttons */}
@@ -161,9 +194,14 @@ export function UploadProgressCard() {
       </View>
 
       {/* Progress bar */}
+      {isActive && (
+        <Text style={{ color: theme.colors.textTertiary, fontSize: 11, marginTop: 8, textAlign: 'right' }}>
+          {upload.progress}%
+        </Text>
+      )}
       <View
         style={{
-          marginTop: 10,
+          marginTop: isActive ? 2 : 10,
           height: 4,
           borderRadius: 2,
           backgroundColor: theme.colors.surface,

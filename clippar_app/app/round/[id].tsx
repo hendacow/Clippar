@@ -1,8 +1,8 @@
-import { useEffect, useState, useCallback } from 'react';
-import { View, Text, Pressable, Platform, ScrollView } from 'react-native';
+import { useEffect, useState, useCallback, useRef } from 'react';
+import { View, Text, Pressable, Platform, ScrollView, Animated } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { ArrowLeft, Share2, Edit3, Play, Loader } from 'lucide-react-native';
+import { ArrowLeft, Share2, Edit3, Play, Loader, Upload, CheckCircle } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -14,13 +14,121 @@ import { PreviewPlayer } from '@/components/editor/PreviewPlayer';
 import { ShareSheet } from '@/components/shared/ShareSheet';
 import { getRound } from '@/lib/api';
 import { Scorecard } from '@/components/round/Scorecard';
+import { useUploadContext } from '@/contexts/UploadContext';
+
+// ---- Animated progress bar for processing ----
+function ProcessingProgress({ upload }: { upload: { stage: string; currentClip: number; totalClips: number; progress: number; stageLabel: string } }) {
+  const progressAnim = useRef(new Animated.Value(0)).current;
+  const pulseAnim = useRef(new Animated.Value(0.6)).current;
+
+  useEffect(() => {
+    Animated.timing(progressAnim, {
+      toValue: upload.progress / 100,
+      duration: 300,
+      useNativeDriver: false,
+    }).start();
+  }, [upload.progress]);
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: false }),
+        Animated.timing(pulseAnim, { toValue: 0.6, duration: 800, useNativeDriver: false }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, []);
+
+  const isUploading = upload.stage === 'uploading';
+  const isProcessing = upload.stage === 'processing';
+  const isSubmitting = upload.stage === 'submitting';
+
+  // Estimate time
+  let eta = '';
+  if (isUploading && upload.totalClips > 0 && upload.currentClip > 0) {
+    const remaining = upload.totalClips - upload.currentClip;
+    const secs = remaining * 8;
+    eta = secs < 60 ? `~${secs}s left` : `~${Math.ceil(secs / 60)} min left`;
+  } else if (isProcessing) {
+    if (upload.progress < 50) eta = 'Usually 2-4 minutes';
+    else if (upload.progress < 70) eta = 'About 1-2 minutes left';
+    else if (upload.progress < 90) eta = 'Less than a minute';
+    else eta = 'Almost done...';
+  }
+
+  return (
+    <View style={{ alignItems: 'center', width: '100%', paddingHorizontal: 24 }}>
+      <Animated.View style={{ opacity: pulseAnim }}>
+        {isUploading ? (
+          <Upload size={32} color={theme.colors.primary} />
+        ) : (
+          <Loader size={32} color={theme.colors.primary} />
+        )}
+      </Animated.View>
+
+      <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700', marginTop: 14 }}>
+        {upload.stageLabel || 'Processing...'}
+      </Text>
+
+      {/* Clip counter */}
+      {isUploading && upload.totalClips > 0 && (
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 14, marginTop: 4 }}>
+          Clip {upload.currentClip} of {upload.totalClips}
+        </Text>
+      )}
+
+      {isProcessing && (
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
+          Your highlight reel is being created
+        </Text>
+      )}
+
+      {isSubmitting && (
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
+          Sending clips for processing...
+        </Text>
+      )}
+
+      {/* Progress bar */}
+      <View style={{ width: '100%', marginTop: 16 }}>
+        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
+          <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
+            {eta}
+          </Text>
+          <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
+            {upload.progress}%
+          </Text>
+        </View>
+        <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.surface, overflow: 'hidden' }}>
+          <Animated.View
+            style={{
+              height: '100%',
+              borderRadius: 3,
+              backgroundColor: theme.colors.primary,
+              width: progressAnim.interpolate({
+                inputRange: [0, 1],
+                outputRange: ['0%', '100%'],
+              }),
+            }}
+          />
+        </View>
+      </View>
+    </View>
+  );
+}
 
 export default function RoundViewer() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const insets = useSafeAreaInsets();
+  const { upload } = useUploadContext();
   const [round, setRound] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [showShare, setShowShare] = useState(false);
+
+  // Check if this round has an active upload
+  const hasActiveUpload = upload.roundId === id &&
+    ['preparing', 'uploading', 'submitting', 'processing'].includes(upload.stage);
 
   const fetchRound = useCallback(() => {
     if (!id) return;
@@ -34,10 +142,10 @@ export default function RoundViewer() {
     fetchRound();
   }, [fetchRound]);
 
-  // Poll for processing completion every 15s
+  // Poll for processing completion every 10s
   useEffect(() => {
     if (!round || round.status !== 'processing') return;
-    const interval = setInterval(fetchRound, 15_000);
+    const interval = setInterval(fetchRound, 10_000);
     return () => clearInterval(interval);
   }, [round?.status, fetchRound]);
 
@@ -101,7 +209,7 @@ export default function RoundViewer() {
             ) : (
               <View
                 style={{
-                  height: 240,
+                  height: 260,
                   backgroundColor: theme.colors.surface,
                   borderRadius: theme.radius.lg,
                   borderWidth: 1,
@@ -111,29 +219,18 @@ export default function RoundViewer() {
                   marginBottom: 16,
                 }}
               >
-                {round.status === 'processing' ? (
-                  <>
-                    <Loader size={32} color={theme.colors.accent} />
-                    <Text
-                      style={{
-                        color: theme.colors.textSecondary,
-                        fontSize: 14,
-                        fontWeight: '600',
-                        marginTop: 12,
-                      }}
-                    >
-                      Processing...
-                    </Text>
-                    <Text
-                      style={{
-                        color: theme.colors.textTertiary,
-                        fontSize: 13,
-                        marginTop: 4,
-                      }}
-                    >
-                      Your highlight reel is being created
-                    </Text>
-                  </>
+                {hasActiveUpload ? (
+                  <ProcessingProgress upload={upload} />
+                ) : round.status === 'processing' ? (
+                  <ProcessingProgress
+                    upload={{
+                      stage: 'processing',
+                      currentClip: 0,
+                      totalClips: round.clips_count ?? 0,
+                      progress: 50,
+                      stageLabel: 'Processing your highlight reel...',
+                    }}
+                  />
                 ) : round.status === 'failed' ? (
                   <>
                     <Text

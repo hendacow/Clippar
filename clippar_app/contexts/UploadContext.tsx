@@ -92,11 +92,24 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     setState((prev) => ({ ...prev, ...partial }));
   }, []);
 
+  // Map pipeline statuses to user-friendly labels and progress ranges
+  const PIPELINE_STAGES: Record<string, { label: string; progress: number }> = {
+    pending: { label: 'Queued for processing...', progress: 42 },
+    downloading: { label: 'Server downloading clips...', progress: 45 },
+    detecting: { label: 'Analysing clips for golf shots...', progress: 52 },
+    processing: { label: 'Running shot detection...', progress: 55 },
+    merging: { label: 'Stitching shots together...', progress: 62 },
+    post_processing: { label: 'Adding scorecard & music...', progress: 72 },
+    transcoding: { label: 'Transcoding to mobile format...', progress: 80 },
+    uploading_reel: { label: 'Uploading your highlight reel...', progress: 88 },
+    ready_for_review: { label: 'Highlight reel ready!', progress: 98 },
+  };
+
   const startPolling = useCallback((roundId: string) => {
     if (pollingRef.current) clearInterval(pollingRef.current);
 
     let pollCount = 0;
-    const MAX_POLLS = 40; // ~10 minutes at 15s intervals
+    const MAX_POLLS = 60; // ~10 minutes at 10s intervals
 
     pollingRef.current = setInterval(async () => {
       if (cancelledRef.current) {
@@ -107,53 +120,91 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       pollCount++;
 
       try {
-        // Check rounds table status (pipeline updates this directly)
+        // First, poll the pipeline's job-status endpoint for granular progress
+        if (config.pipeline.url) {
+          try {
+            const resp = await fetch(`${config.pipeline.url}/api/mobile/job-status/${roundId}`, {
+              headers: { Authorization: `Bearer ${config.pipeline.apiKey}` },
+            });
+            if (resp.ok) {
+              const data = await resp.json();
+              if (data.ok) {
+                const pipelineStatus = data.status as string;
+                const serverProgress = data.progress as number | undefined;
+                const stageDetail = data.stage_detail as string | undefined;
+
+                // Check for failure
+                if (pipelineStatus === 'processing_failed' || pipelineStatus === 'download_failed') {
+                  if (pollingRef.current) clearInterval(pollingRef.current);
+                  update({
+                    stage: 'error',
+                    stageLabel: 'Processing failed',
+                    error: data.error_message ?? 'Processing failed on server.',
+                  });
+                  return;
+                }
+
+                // Check for completion — pipeline sets ready_for_review, then worker updates Supabase
+                if (pipelineStatus === 'ready_for_review' || pipelineStatus === 'delivered' || pipelineStatus === 'approved') {
+                  // Don't mark complete yet — wait for reel_url in Supabase
+                  // But show near-complete progress
+                  update({
+                    stage: 'processing',
+                    progress: 95,
+                    stageLabel: 'Finalising your highlight reel...',
+                  });
+                  // Fall through to Supabase check below
+                } else {
+                  // Active pipeline stage — use server progress if available, else mapped progress
+                  const mapped = PIPELINE_STAGES[pipelineStatus];
+                  const displayProgress = serverProgress != null && serverProgress > 0
+                    ? Math.min(serverProgress, 92) // Cap at 92 — never near 100 until truly done
+                    : mapped?.progress ?? 50;
+                  const displayLabel = stageDetail || mapped?.label || `Processing (${pipelineStatus})...`;
+
+                  update({
+                    stage: 'processing',
+                    progress: Math.max(displayProgress, 42), // Never go below upload-complete baseline
+                    stageLabel: displayLabel,
+                  });
+                }
+              }
+            }
+          } catch {
+            // Pipeline unreachable — fall back to Supabase polling below
+          }
+        }
+
+        // Check Supabase rounds table for final completion (reel_url)
         const { data: round } = await supabase
           .from('rounds')
           .select('status, reel_url')
           .eq('id', roundId)
           .single();
 
-        if (round?.status === 'ready' || round?.reel_url) {
+        if (round?.reel_url) {
           if (pollingRef.current) clearInterval(pollingRef.current);
           update({
             stage: 'completed',
             progress: 100,
             stageLabel: 'Highlight reel ready!',
-            reelUrl: round.reel_url ?? null,
+            reelUrl: round.reel_url,
           });
           return;
+        }
+
+        if (round?.status === 'ready' && !round?.reel_url) {
+          // Ready but no URL yet — keep polling briefly
+          update({
+            stage: 'processing',
+            progress: 96,
+            stageLabel: 'Almost there...',
+          });
         }
 
         if (round?.status === 'failed') {
           if (pollingRef.current) clearInterval(pollingRef.current);
           update({ stage: 'error', stageLabel: 'Processing failed', error: 'Processing failed on server.' });
-          return;
-        }
-
-        // Also check processing_jobs table
-        const { data: job } = await supabase
-          .from('processing_jobs')
-          .select('status, error_message')
-          .eq('round_id', roundId)
-          .order('created_at', { ascending: false })
-          .limit(1)
-          .single();
-
-        if (job?.status === 'completed') {
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          update({
-            stage: 'completed',
-            progress: 100,
-            stageLabel: 'Highlight reel ready!',
-            reelUrl: round?.reel_url ?? null,
-          });
-          return;
-        }
-
-        if (job?.status === 'failed') {
-          if (pollingRef.current) clearInterval(pollingRef.current);
-          update({ stage: 'error', stageLabel: 'Processing failed', error: job.error_message ?? 'Processing failed.' });
           return;
         }
       } catch {}
@@ -164,11 +215,11 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         update({
           stage: 'completed',
           progress: 100,
-          stageLabel: 'Clips uploaded successfully',
+          stageLabel: 'Clips uploaded — check back soon',
           reelUrl: null,
         });
       }
-    }, 15_000);
+    }, 10_000); // Poll every 10s for more responsive updates
   }, [update]);
 
   const runUpload = useCallback(async (roundId: string, courseName: string) => {
@@ -207,7 +258,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       } catch {}
 
       if (clips.length === 0) {
-        update({ stage: 'submitting', totalClips: 0, progress: 80, stageLabel: 'Submitting for processing...' });
+        update({ stage: 'submitting', totalClips: 0, progress: 39, stageLabel: 'Submitting for processing...' });
       } else {
         update({
           stage: 'uploading',
@@ -239,7 +290,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
             const filename = `hole${clip.hole_number}_shot${clip.shot_number}_${clip.id}.mp4`;
 
             await uploadClipToStorage(roundId, filename, clip.file_uri, (clipProgress) => {
-              const overall = ((i + clipProgress) / clips.length) * 75; // 0-75% for uploads
+              const overall = ((i + clipProgress) / clips.length) * 38; // 0-38% for uploads
               update({ progress: Math.round(overall) });
             });
 
@@ -279,7 +330,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       if (cancelledRef.current) return;
 
       // Submit processing job
-      update({ stage: 'submitting', progress: 80, stageLabel: 'Submitting for processing...' });
+      update({ stage: 'submitting', progress: 39, stageLabel: 'Submitting for processing...' });
 
       try {
         await supabase.from('processing_jobs').insert({
@@ -338,7 +389,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       }
 
       if (processingSubmitted) {
-        update({ stage: 'processing', progress: 90, stageLabel: 'Processing highlight reel...' });
+        update({ stage: 'processing', progress: 42, stageLabel: 'Queued for processing...' });
         startPolling(roundId);
       } else {
         // Clips uploaded — user can edit the reel in the editor

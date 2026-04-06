@@ -185,6 +185,8 @@ def mobile_job_status(job_id):
         "ok": True,
         "status": job["status"],
         "clip_count": job.get("clip_count"),
+        "progress": job.get("progress", 0),
+        "stage_detail": job.get("stage_detail", ""),
     }
 
     # Include reel URL for completed jobs

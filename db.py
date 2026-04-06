@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     admin_note      TEXT,
     result_drive_link TEXT,
     clip_count      INTEGER,
+    progress        INTEGER DEFAULT 0,
+    stage_detail    TEXT,
     created_at      TIMESTAMPTZ,
     updated_at      TIMESTAMPTZ
 );
@@ -67,6 +69,12 @@ def init_db():
     try:
         with conn.cursor() as cur:
             cur.execute(SCHEMA)
+            # Migrate: add columns if they don't exist yet
+            for col, typ in [("progress", "INTEGER DEFAULT 0"), ("stage_detail", "TEXT")]:
+                try:
+                    cur.execute(f"ALTER TABLE jobs ADD COLUMN {col} {typ}")
+                except Exception:
+                    conn.rollback()
         conn.commit()
     finally:
         _release(conn)
