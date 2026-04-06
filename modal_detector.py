@@ -449,10 +449,12 @@ def run_full_pipeline(request: dict) -> dict:
         cfg = load_config("/app/config.yaml")
         cfg["clips_dir"] = str(inputs_dir)
         cfg["output_dir"] = str(outputs_dir)
+        cfg["pose_model_path"] = "/app/models/yolov8n-pose.pt"
+        cfg["ball_model_path"] = "/app/models/golfballyolov8n.pt"
         cfg["fast_mode"] = True
         cfg["save_annotated"] = False
         cfg["display"] = False
-        cfg["verbose"] = False
+        cfg["verbose"] = True  # enable logs to debug detection issues
         cfg["device"] = "cuda"
         cfg["inference_imgsz"] = 640
         cfg["parallel_workers"] = 0  # sequential (shared CUDA context is faster than multiprocess on single GPU)
@@ -476,21 +478,10 @@ def run_full_pipeline(request: dict) -> dict:
         print(f"[Pipeline] {clip_count} output clip(s)")
 
         if clip_count == 0:
-            # No shots detected — likely pre-recorded individual clips from the app.
-            # Use the original input files directly instead of failing.
-            import shutil
-            print("[Pipeline] No shots detected — using original clips directly")
-            for f in input_files:
-                shutil.copy2(str(f), str(outputs_dir / f.name))
-            output_clips = sorted(
-                [f for f in outputs_dir.glob("*")
-                 if f.suffix.lower() in (".mp4", ".mov")]
-            )
-            clip_count = len(output_clips)
-            if clip_count == 0:
-                update_job(status="processing_failed",
-                           stage_detail="No clips to process")
-                return {"error": "No clips to process"}
+            update_job(status="processing_failed",
+                       stage_detail="No shots detected in clips")
+            return {"error": "Detection produced no output", "input_count": total,
+                    "detection_time_sec": round(detect_time, 1)}
 
         update_job(clip_count=clip_count, progress=45,
                    stage_detail=f"Detected {clip_count} shots")
