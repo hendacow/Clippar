@@ -1,0 +1,34 @@
+{
+  "cli": { "version": ">= 12.0.0" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "ios": { "simulator": true }
+    },
+    "preview": {
+      "distribution": "internal",
+      "ios": { "simulator": false }
+    },
+    "production": {
+      "distribution": "store",
+      "ios": { "buildConfiguration": "Release" },
+      "android": { "buildType": "app-bundle" },
+      "env": {
+        "EXPO_PUBLIC_SUPABASE_URL": "@SUPABASE_URL",
+        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "@SUPABASE_ANON_KEY",
+        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "@STRIPE_PK"
+      },
+      "autoIncrement": true
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": {
+        "appleId": "PLACEHOLDER_REPLACE_ME",
+        "ascAppId": "PLACEHOLDER_REPLACE_ME",
+        "appleTeamId": "PLACEHOLDER_REPLACE_ME"
+      }
+    }
+  }
+}

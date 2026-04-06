@@ -29,6 +29,7 @@ app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
 
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "clippar2024")
+MOBILE_API_KEY = os.getenv("MOBILE_API_KEY", "clippar-mobile-dev")
 
 
 def _use_r2():
@@ -45,6 +46,17 @@ def admin_required(f):
     def wrapped(*args, **kwargs):
         if not session.get("admin"):
             return redirect(url_for("admin_login_page"))
+        return f(*args, **kwargs)
+    return wrapped
+
+
+def mobile_auth_required(f):
+    """Require API key for mobile endpoints."""
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer ") or auth[7:] != MOBILE_API_KEY:
+            return jsonify(ok=False, error="Unauthorized"), 401
         return f(*args, **kwargs)
     return wrapped
 
@@ -110,6 +122,111 @@ def api_submit():
             db.update_job(job_id, clip_count=saved)
 
     return jsonify(ok=True, job_id=job_id)
+
+
+# ---------------------------------------------------------------------------
+# Mobile API routes (used by the Clippar app)
+# ---------------------------------------------------------------------------
+
+@app.route("/api/mobile/upload-url", methods=["POST"])
+@mobile_auth_required
+def mobile_upload_url():
+    """Generate a presigned upload URL for a clip file."""
+    data = request.get_json(force=True)
+    round_id = data.get("round_id")
+    filename = data.get("filename")
+    if not round_id or not filename:
+        return jsonify(ok=False, error="round_id and filename required"), 400
+
+    if not _use_r2():
+        return jsonify(ok=False, error="R2 storage not configured"), 500
+
+    import storage
+    key = f"jobs/{round_id}/inputs/{filename}"
+    url = storage.get_presigned_upload_url(key)
+    return jsonify(ok=True, upload_url=url, key=key)
+
+
+@app.route("/api/mobile/submit-job", methods=["POST"])
+@mobile_auth_required
+def mobile_submit_job():
+    """Create a processing job from the mobile app.
+    Uses the Supabase round UUID as the pipeline job ID."""
+    data = request.get_json(force=True)
+    round_id = data.get("round_id")
+    clip_count = data.get("clip_count", 0)
+    user_name = data.get("user_name", "App User")
+    user_email = data.get("user_email", "")
+
+    if not round_id:
+        return jsonify(ok=False, error="round_id required"), 400
+
+    job_id = db.create_job(
+        name=user_name,
+        email=user_email,
+        job_id=round_id,
+        drive_link="",
+    )
+    if clip_count:
+        db.update_job(job_id, clip_count=clip_count)
+
+    return jsonify(ok=True, job_id=job_id)
+
+
+@app.route("/api/mobile/job-status/<job_id>", methods=["GET"])
+@mobile_auth_required
+def mobile_job_status(job_id):
+    """Get the current status of a processing job."""
+    job = db.get_job(job_id)
+    if not job:
+        return jsonify(ok=False, error="Job not found"), 404
+
+    result = {
+        "ok": True,
+        "status": job["status"],
+        "clip_count": job.get("clip_count"),
+    }
+
+    # Include reel URL for completed jobs
+    if job["status"] in ("delivered", "approved", "ready_for_review") and _use_r2():
+        import storage
+        for ext in [".mp4", ".mov"]:
+            try:
+                reel_url = storage.get_presigned_url(
+                    f"jobs/{job_id}/outputs/merged/highlight_reel{ext}",
+                    expires_in=86400 * 7,  # 7 days
+                )
+                result["reel_url"] = reel_url
+                break
+            except Exception:
+                continue
+
+    if job.get("error_message"):
+        result["error_message"] = job["error_message"]
+
+    return jsonify(**result)
+
+
+@app.route("/api/mobile/reel-url/<round_id>", methods=["GET"])
+@mobile_auth_required
+def mobile_reel_url(round_id):
+    """Get a presigned download URL for a round's highlight reel."""
+    if not _use_r2():
+        return jsonify(ok=False, error="R2 not configured"), 500
+
+    import storage
+    for ext in [".mp4", ".mov"]:
+        try:
+            url = storage.get_presigned_url(
+                f"jobs/{round_id}/outputs/merged/highlight_reel{ext}",
+                expires_in=86400 * 7,
+            )
+            return jsonify(ok=True, reel_url=url)
+        except Exception:
+            continue
+
+    return jsonify(ok=False, error="Reel not found"), 404
+
 
 # ---------------------------------------------------------------------------
 # Admin routes
@@ -245,6 +362,68 @@ def _get_merged_video_path(job_id):
         mov_path = base / "highlight_reel.mov"
         merged_path = mp4_path if mp4_path.exists() else mov_path
         return str(merged_path) if merged_path.exists() else None
+
+
+# ---------------------------------------------------------------------------
+# Admin API (JSON endpoints for dashboard widgets)
+# ---------------------------------------------------------------------------
+
+@app.route("/admin/api/stats")
+@admin_required
+def admin_api_stats():
+    """Dashboard stats: job counts by status, Supabase user count."""
+    all_jobs = db.list_jobs()
+    status_counts = {}
+    for job in all_jobs:
+        s = job.get("status", "unknown")
+        status_counts[s] = status_counts.get(s, 0) + 1
+
+    stats = {
+        "total_jobs": len(all_jobs),
+        "by_status": status_counts,
+    }
+
+    # Try to fetch Supabase stats
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if supabase_url and supabase_key:
+        try:
+            import requests as req_lib
+            headers = {
+                "apikey": supabase_key,
+                "Authorization": f"Bearer {supabase_key}",
+                "Prefer": "count=exact",
+            }
+            # User count
+            resp = req_lib.get(
+                f"{supabase_url}/rest/v1/profiles?select=id",
+                headers={**headers, "Range": "0-0"},
+            )
+            content_range = resp.headers.get("Content-Range", "")
+            if "/" in content_range:
+                stats["total_users"] = int(content_range.split("/")[1])
+
+            # Round count
+            resp = req_lib.get(
+                f"{supabase_url}/rest/v1/rounds?select=id",
+                headers={**headers, "Range": "0-0"},
+            )
+            content_range = resp.headers.get("Content-Range", "")
+            if "/" in content_range:
+                stats["total_rounds"] = int(content_range.split("/")[1])
+
+            # Order count
+            resp = req_lib.get(
+                f"{supabase_url}/rest/v1/hardware_orders?select=id",
+                headers={**headers, "Range": "0-0"},
+            )
+            content_range = resp.headers.get("Content-Range", "")
+            if "/" in content_range:
+                stats["total_orders"] = int(content_range.split("/")[1])
+        except Exception as e:
+            stats["supabase_error"] = str(e)
+
+    return jsonify(stats)
 
 
 # ---------------------------------------------------------------------------

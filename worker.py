@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from datetime import datetime, timezone
 
 import db
 
@@ -39,9 +40,66 @@ def _poll_loop():
                     db.update_job(job_id, status="processing_failed", error_message=error_msg)
             else:
                 print(f"[Worker] Job {job_id} completed successfully")
+                _update_supabase(job_id, status="ready")
                 _auto_deliver(job_id)
 
         time.sleep(10)
+
+
+def _update_supabase(job_id, status="ready", reel_url=None):
+    """Update Supabase rounds table with processing results."""
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+    if not supabase_url or not supabase_key:
+        print(f"[Worker] Supabase not configured, skipping update for {job_id}")
+        return
+
+    try:
+        import requests
+    except ImportError:
+        print("[Worker] requests not installed, skipping Supabase update")
+        return
+
+    headers = {
+        "apikey": supabase_key,
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+    data = {
+        "status": status,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Generate reel URL if not provided and status is ready
+    if reel_url is None and status == "ready" and _use_r2():
+        import storage
+        for ext in [".mp4", ".mov"]:
+            try:
+                reel_url = storage.get_presigned_url(
+                    f"jobs/{job_id}/outputs/merged/highlight_reel{ext}",
+                    expires_in=86400 * 30,  # 30 days
+                )
+                break
+            except Exception:
+                continue
+
+    if reel_url:
+        data["reel_url"] = reel_url
+
+    try:
+        resp = requests.patch(
+            f"{supabase_url}/rest/v1/rounds?id=eq.{job_id}",
+            json=data,
+            headers=headers,
+        )
+        if resp.status_code < 300:
+            print(f"[Worker] Updated Supabase round {job_id} -> {status}")
+        else:
+            print(f"[Worker] Supabase update failed: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print(f"[Worker] Supabase update error: {e}")
 
 
 def _auto_deliver(job_id):
