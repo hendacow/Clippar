@@ -7,6 +7,7 @@ import {
   Pressable,
   RefreshControl,
   Dimensions,
+  Alert,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,13 +24,27 @@ import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { getRounds, getUserStats } from '@/lib/api';
+import { getRounds, getUserStats, deleteRound, getSignedReelUrl } from '@/lib/api';
+import { ScoreCollection } from '@/components/library/ScoreCollection';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 // ---- Full-width list card for "All Rounds" section ----
-function RoundListCard({ round, onPress }: { round: MockRound; onPress: () => void }) {
+function RoundListCard({ round, onPress, onDelete }: { round: MockRound; onPress: () => void; onDelete?: () => void }) {
   const scoreColor = getScoreColor(round.score_to_par);
+
+  const handleLongPress = () => {
+    if (!onDelete) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Alert.alert(
+      'Delete this round?',
+      'This will permanently delete the round, all clips, and the highlight reel. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: onDelete },
+      ]
+    );
+  };
 
   return (
     <Pressable
@@ -37,6 +52,7 @@ function RoundListCard({ round, onPress }: { round: MockRound; onPress: () => vo
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         onPress();
       }}
+      onLongPress={handleLongPress}
     >
       <View
         style={{
@@ -142,9 +158,13 @@ function RoundListCard({ round, onPress }: { round: MockRound; onPress: () => vo
 function HorizontalRoundSection({
   rounds,
   size = 'default',
+  onDeleteRound,
+  reelSignedUrls,
 }: {
   rounds: MockRound[];
   size?: 'default' | 'large';
+  onDeleteRound?: (id: string) => void;
+  reelSignedUrls?: Record<string, string>;
 }) {
   return (
     <FlatList
@@ -160,6 +180,8 @@ function HorizontalRoundSection({
           index={index}
           size={size}
           onPress={() => router.push(`/round/${item.id}`)}
+          onDelete={onDeleteRound ? () => onDeleteRound(item.id) : undefined}
+          reelSignedUrl={reelSignedUrls?.[item.id]}
         />
       )}
     />
@@ -251,19 +273,32 @@ export default function HomeScreen() {
   const [loaded, setLoaded] = useState(false);
   const [activeFilter, setActiveFilter] = useState<FilterOption>('all');
   const [stats, setStats] = useState(MOCK_STATS);
+  const [reelSignedUrls, setReelSignedUrls] = useState<Record<string, string>>({});
 
   // Always try real data first; only show mock if user has zero rounds
   const fetchRounds = useCallback(async () => {
     try {
       const data = await getRounds();
       if (data) {
-        setLiveRounds(
-          data.map((r: any, i: number) => ({
-            ...r,
-            clips_count: r.clips_count ?? 0,
-            best_hole: null,
-          }))
-        );
+        const mapped = data.map((r: any, i: number) => ({
+          ...r,
+          clips_count: r.clips_count ?? 0,
+          best_hole: null,
+        }));
+        setLiveRounds(mapped);
+
+        // Sign reel URLs for rounds that have a reel
+        const reelRounds = data.filter((r: any) => r.reel_url);
+        if (reelRounds.length > 0) {
+          const signedMap: Record<string, string> = {};
+          await Promise.all(
+            reelRounds.map(async (r: any) => {
+              const signed = await getSignedReelUrl(r.reel_url);
+              if (signed) signedMap[r.id] = signed;
+            })
+          );
+          setReelSignedUrls(signedMap);
+        }
       }
     } catch {
       // Network error — keep whatever we had
@@ -281,6 +316,17 @@ export default function HomeScreen() {
       }
     } catch {
       // Keep MOCK_STATS as fallback
+    }
+  }, []);
+
+  const handleDeleteRound = useCallback(async (roundId: string) => {
+    try {
+      await deleteRound(roundId);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setLiveRounds((prev) => prev.filter((r) => r.id !== roundId));
+    } catch (err) {
+      console.log('[HomeScreen] delete failed:', err);
+      Alert.alert('Error', 'Failed to delete round. Please try again.');
     }
   }, []);
 
@@ -419,6 +465,7 @@ export default function HomeScreen() {
         <HeroReel
           round={latestRound}
           onPress={() => router.push(`/round/${latestRound.id}`)}
+          reelSignedUrl={reelSignedUrls[latestRound.id]}
         />
 
         {/* ---- UPLOAD PROGRESS (shown when active) ---- */}
@@ -434,17 +481,17 @@ export default function HomeScreen() {
           <>
             {/* ---- RECENT ROUNDS (horizontal scroll) ---- */}
             <SectionHeader title="Recent Rounds" onSeeAll={() => setActiveFilter('all')} />
-            <HorizontalRoundSection rounds={recentRounds} size="large" />
+            <HorizontalRoundSection rounds={recentRounds} size="large" onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
 
             {/* ---- BEST ROUNDS (horizontal scroll) ---- */}
             <SectionHeader title="Best Rounds" onSeeAll={() => setActiveFilter('best')} />
-            <HorizontalRoundSection rounds={bestRounds} />
+            <HorizontalRoundSection rounds={bestRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
 
             {/* ---- BIRDIES & EAGLES ---- */}
             {birdieRounds.length > 0 && (
               <>
                 <SectionHeader title="Birdies & Eagles" onSeeAll={() => setActiveFilter('birdies')} />
-                <HorizontalRoundSection rounds={birdieRounds} />
+                <HorizontalRoundSection rounds={birdieRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
               </>
             )}
           </>
@@ -488,9 +535,13 @@ export default function HomeScreen() {
               key={round.id}
               round={round}
               onPress={() => router.push(`/round/${round.id}`)}
+              onDelete={useMock ? undefined : () => handleDeleteRound(round.id)}
             />
           ))
         )}
+
+        {/* ---- SCORE HIGHLIGHTS (Birdies, Eagles, Bogeys collections) ---- */}
+        {!useMock && <ScoreCollection />}
       </ScrollView>
     </View>
   );

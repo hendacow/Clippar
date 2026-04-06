@@ -1,21 +1,41 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator } from 'react-native';
-import { MapPin } from 'lucide-react-native';
+import { MapPin, Plus } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
-import { searchCourses, getCourseHoles } from '@/lib/api';
+import { searchCourses, searchCoursesNearby, getCourseHoles } from '@/lib/api';
 import type { HoleData } from '@/types/round';
 
 interface CourseSearchProps {
   value: string;
   onChangeText: (text: string) => void;
   onSelectCourse: (course: { id: string; name: string; par_total: number | null }, holes: HoleData[]) => void;
+  /** If provided, shows nearby courses before the user types */
+  userLocation?: { latitude: number; longitude: number } | null;
+  /** Called when user taps "Can't find your course?" */
+  onRequestAddCourse?: () => void;
 }
 
-export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSearchProps) {
+export function CourseSearch({
+  value,
+  onChangeText,
+  onSelectCourse,
+  userLocation,
+  onRequestAddCourse,
+}: CourseSearchProps) {
   const [results, setResults] = useState<any[]>([]);
+  const [nearbyCourses, setNearbyCourses] = useState<any[]>([]);
   const [showResults, setShowResults] = useState(false);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Fetch nearby courses on mount if location available
+  useEffect(() => {
+    if (userLocation) {
+      searchCoursesNearby(userLocation.latitude, userLocation.longitude, 30, 8)
+        .then((courses) => setNearbyCourses(courses ?? []))
+        .catch(() => {});
+    }
+  }, [userLocation?.latitude, userLocation?.longitude]);
 
   const handleChange = useCallback((text: string) => {
     onChangeText(text);
@@ -56,11 +76,15 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
         lengthMeters: h.length_meters,
       }));
     } catch {
-      // No holes data available — will fall back to default par
+      // No holes data available -- will fall back to default par
     }
 
     onSelectCourse(course, holes);
   }, [onChangeText, onSelectCourse]);
+
+  // Determine which list to show
+  const displayResults = results.length > 0 ? results : (value.trim().length < 2 ? nearbyCourses : []);
+  const isShowingNearby = results.length === 0 && value.trim().length < 2 && nearbyCourses.length > 0;
 
   return (
     <View>
@@ -72,7 +96,7 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
         onChangeText={handleChange}
         placeholder="Search for a course..."
         placeholderTextColor={theme.colors.textTertiary}
-        onFocus={() => value.length >= 2 && setShowResults(true)}
+        onFocus={() => setShowResults(true)}
         onBlur={() => setTimeout(() => setShowResults(false), 200)}
         style={{
           backgroundColor: theme.colors.surface,
@@ -85,7 +109,7 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
         }}
       />
 
-      {showResults && value.trim().length >= 2 && (
+      {showResults && (displayResults.length > 0 || loading || (value.trim().length >= 2 && results.length === 0)) && (
         <View
           style={{
             backgroundColor: theme.colors.surfaceElevated,
@@ -93,7 +117,7 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
             borderColor: theme.colors.surfaceBorder,
             borderRadius: theme.radius.md,
             marginTop: 4,
-            maxHeight: 200,
+            maxHeight: 260,
             overflow: 'hidden',
           }}
         >
@@ -101,15 +125,44 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
             <View style={{ padding: 16, alignItems: 'center' }}>
               <ActivityIndicator color={theme.colors.primary} size="small" />
             </View>
-          ) : results.length === 0 ? (
+          ) : displayResults.length === 0 && value.trim().length >= 2 ? (
             <View style={{ padding: 16, alignItems: 'center' }}>
               <Text style={{ color: theme.colors.textTertiary, fontSize: 13 }}>
                 No courses found
               </Text>
+              {onRequestAddCourse && (
+                <Pressable
+                  onPress={onRequestAddCourse}
+                  style={({ pressed }) => ({
+                    marginTop: 10,
+                    paddingVertical: 8,
+                    paddingHorizontal: 16,
+                    backgroundColor: pressed ? theme.colors.surface : theme.colors.surfaceElevated,
+                    borderRadius: theme.radius.sm,
+                    borderWidth: 1,
+                    borderColor: theme.colors.primary,
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
+                  })}
+                >
+                  <Plus size={14} color={theme.colors.primary} />
+                  <Text style={{ color: theme.colors.primary, fontSize: 13, fontWeight: '600' }}>
+                    Add missing course
+                  </Text>
+                </Pressable>
+              )}
             </View>
           ) : (
             <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled>
-              {results.map((item) => (
+              {isShowingNearby && (
+                <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 }}>
+                  <Text style={{ color: theme.colors.textTertiary, fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                    Nearby courses
+                  </Text>
+                </View>
+              )}
+              {displayResults.map((item) => (
                 <Pressable
                   key={item.id}
                   onPress={() => handleSelect(item)}
@@ -137,6 +190,23 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
                   </View>
                 </Pressable>
               ))}
+              {!isShowingNearby && value.trim().length >= 2 && onRequestAddCourse && (
+                <Pressable
+                  onPress={onRequestAddCourse}
+                  style={({ pressed }) => ({
+                    padding: 12,
+                    backgroundColor: pressed ? theme.colors.surface : 'transparent',
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 10,
+                  })}
+                >
+                  <Plus size={16} color={theme.colors.primary} />
+                  <Text style={{ color: theme.colors.primary, fontSize: 14, fontWeight: '500' }}>
+                    Can't find your course? Add it
+                  </Text>
+                </Pressable>
+              )}
             </ScrollView>
           )}
         </View>

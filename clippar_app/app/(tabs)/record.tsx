@@ -24,6 +24,7 @@ import { PenaltySheet } from '@/components/record/PenaltySheet';
 import { CameraPermissionScreen } from '@/components/record/CameraPermissionScreen';
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { useBLE } from '@/hooks/useBLE';
+import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
@@ -43,6 +44,7 @@ export default function RecordScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation();
   const ble = useBLE();
+  const shutter = useShutter();
   const round = useRound();
   const { startUpload } = useUploadContext();
   const { getCurrentLocation } = useLocation();
@@ -78,11 +80,11 @@ export default function RecordScreen() {
     }
   }, [isActive, navigation]);
 
-  // Subscribe BLE press to camera toggle
+  // Subscribe shutter press (BLE or volume button) to camera toggle
   useEffect(() => {
     if (!isActive) return;
 
-    const unsubscribe = ble.onPress(() => {
+    const unsubscribe = shutter.onPress(() => {
       if (isNative) {
         camera.toggleRecording();
       } else {
@@ -91,7 +93,7 @@ export default function RecordScreen() {
     });
 
     return unsubscribe;
-  }, [ble.onPress, isActive, camera.toggleRecording, camera.simulateRecording]);
+  }, [shutter.onPress, isActive, camera.toggleRecording, camera.simulateRecording]);
 
   // Check for orphaned rounds on mount
   useEffect(() => {
@@ -181,25 +183,33 @@ export default function RecordScreen() {
             </Card>
           )}
 
-          {/* BLE Status */}
-          <Card style={{ marginBottom: 24, flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            {ble.connectionState === 'connected' ? (
-              <Bluetooth size={20} color={theme.colors.connected} />
-            ) : (
-              <BluetoothOff size={20} color={theme.colors.disconnected} />
-            )}
-            <View style={{ flex: 1 }}>
-              <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
-                {ble.connectionState === 'connected' ? 'Clicker Connected' : 'No Clicker'}
-              </Text>
-              <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
-                {ble.connectionState === 'connected'
-                  ? 'Ready to record'
-                  : 'Connect in Profile > Bluetooth'}
-              </Text>
-            </View>
-            <Badge variant={ble.connectionState === 'connected' ? 'connected' : 'disconnected'} />
-          </Card>
+          {/* Shutter Status */}
+          <Pressable
+            onPress={() => router.push('/profile/bluetooth')}
+            style={{ marginBottom: 24 }}
+          >
+            <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+              {shutter.connected ? (
+                <Bluetooth size={20} color={theme.colors.connected} />
+              ) : (
+                <BluetoothOff size={20} color={theme.colors.disconnected} />
+              )}
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
+                  {shutter.statusLabel}
+                </Text>
+                <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+                  {shutter.connected
+                    ? 'Press the button to start/stop recording'
+                    : 'Tap to set up your clicker'}
+                </Text>
+              </View>
+              <Badge variant={shutter.connected ? 'connected' : 'disconnected'} />
+              {!shutter.connected && (
+                <ChevronRight size={16} color={theme.colors.textTertiary} />
+              )}
+            </Card>
+          </Pressable>
 
           {/* Course Search */}
           <CourseSearch
@@ -233,8 +243,8 @@ export default function RecordScreen() {
           {/* Dev: Simulate BLE press */}
           {__DEV__ && (
             <Button
-              title="[DEV] Simulate BLE Press"
-              onPress={ble.simulatePress}
+              title="[DEV] Simulate Shutter Press"
+              onPress={shutter.simulatePress}
               variant="ghost"
               style={{ marginTop: 16 }}
             />
@@ -348,6 +358,35 @@ export default function RecordScreen() {
         isRecording={camera.isRecording}
         topInset={insets.top}
       />
+
+      {/* Shutter status badge — top left */}
+      <View
+        style={{
+          position: 'absolute',
+          top: insets.top + 52,
+          left: 12,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 6,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          paddingHorizontal: 10,
+          paddingVertical: 6,
+          borderRadius: 16,
+        }}
+      >
+        {shutter.connected ? (
+          <Bluetooth size={12} color={theme.colors.connected} />
+        ) : (
+          <BluetoothOff size={12} color={theme.colors.textTertiary} />
+        )}
+        <Text style={{
+          color: shutter.connected ? theme.colors.connected : theme.colors.textTertiary,
+          fontSize: 11,
+          fontWeight: '600',
+        }}>
+          {shutter.connected ? 'Clicker' : 'No Clicker'}
+        </Text>
+      </View>
 
       {/* End Round button — top right below overlay */}
       <Pressable

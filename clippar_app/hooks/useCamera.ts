@@ -32,6 +32,7 @@ export function useCamera({
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const isRecordingRef = useRef(false);
   const recordingStartTime = useRef<number>(0);
+  const lastToggleTime = useRef<number>(0);
 
   // Keep refs in sync with params (they change each shot)
   const paramsRef = useRef({ roundId, holeNumber, shotNumber });
@@ -46,8 +47,12 @@ export function useCamera({
     }
     try {
       const { Camera } = require('expo-camera');
-      const { status } = await Camera.requestCameraPermissionsAsync();
-      const granted = status === 'granted';
+      const [camResult, micResult] = await Promise.all([
+        Camera.requestCameraPermissionsAsync(),
+        Camera.requestMicrophonePermissionsAsync(),
+      ]);
+      const granted =
+        camResult.status === 'granted' && micResult.status === 'granted';
       setHasPermission(granted);
       return granted;
     } catch {
@@ -76,6 +81,11 @@ export function useCamera({
       KeepAwake?.activateKeepAwakeAsync('recording');
 
       const { roundId: rid, holeNumber: hole, shotNumber: shot } = paramsRef.current;
+
+      // Small delay to ensure camera is ready (avoids "error while recording" on iOS)
+      await new Promise((r) => setTimeout(r, 200));
+
+      if (!cameraRef.current || !isRecordingRef.current) return;
 
       const video = await cameraRef.current.recordAsync({
         maxDuration: 120,
@@ -145,6 +155,11 @@ export function useCamera({
   }, []);
 
   const toggleRecording = useCallback(async () => {
+    // Debounce — ignore rapid double-fires from shutter (volume + key event)
+    const now = Date.now();
+    if (now - lastToggleTime.current < 500) return;
+    lastToggleTime.current = now;
+
     if (isRecordingRef.current) {
       await stopRecording();
     } else {

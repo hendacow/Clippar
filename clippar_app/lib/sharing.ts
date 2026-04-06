@@ -1,3 +1,7 @@
+import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system/legacy';
+import * as MediaLibrary from 'expo-media-library';
+import * as Haptics from 'expo-haptics';
 import { supabase } from '@/lib/supabase';
 
 // react-native-share requires native module — not available in Expo Go
@@ -9,36 +13,113 @@ try {
 }
 
 /**
- * Share a reel or clip via the system share sheet.
+ * Download a video from a signed URL to a local temp file.
+ * Caches by roundId so re-shares don't re-download.
+ */
+export async function getLocalVideoUri(
+  signedUrl: string,
+  roundId: string,
+  onProgress?: (pct: number) => void
+): Promise<string> {
+  const filename = `clippar_reel_${roundId}.mp4`;
+  const localUri = FileSystem.cacheDirectory + filename;
+
+  // Check cache
+  const info = await FileSystem.getInfoAsync(localUri);
+  if (info.exists && (info as any).size > 0) {
+    return localUri;
+  }
+
+  // Download with progress
+  const download = FileSystem.createDownloadResumable(
+    signedUrl,
+    localUri,
+    {},
+    (progress) => {
+      if (onProgress && progress.totalBytesExpectedToWrite > 0) {
+        onProgress(progress.totalBytesWritten / progress.totalBytesExpectedToWrite);
+      }
+    }
+  );
+
+  const result = await download.downloadAsync();
+  return result?.uri ?? localUri;
+}
+
+/**
+ * Save a video to the device camera roll / photo library.
+ * Creates a "Clippar" album on iOS.
+ */
+export async function saveToGallery(
+  signedUrl: string,
+  roundId: string,
+  onProgress?: (pct: number) => void
+): Promise<boolean> {
+  const { status } = await MediaLibrary.requestPermissionsAsync();
+  if (status !== 'granted') {
+    return false;
+  }
+
+  const localUri = await getLocalVideoUri(signedUrl, roundId, onProgress);
+
+  const asset = await MediaLibrary.createAssetAsync(localUri);
+
+  // Save to a "Clippar" album
+  try {
+    const album = await MediaLibrary.getAlbumAsync('Clippar');
+    if (album) {
+      await MediaLibrary.addAssetsToAlbumAsync([asset], album, false);
+    } else {
+      await MediaLibrary.createAlbumAsync('Clippar', asset, false);
+    }
+  } catch {
+    // Album creation may fail in Expo Go — asset is still saved to camera roll
+  }
+
+  Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  return true;
+}
+
+/**
+ * Share a reel via the system share sheet.
+ * Downloads to local file first (share sheet needs a local file, not a URL).
  */
 export async function shareReel(params: {
   reelUrl: string;
+  roundId: string;
   courseName: string;
   score?: number;
+  onProgress?: (pct: number) => void;
 }) {
   if (!RNShare) return;
+
+  const localUri = await getLocalVideoUri(params.reelUrl, params.roundId, params.onProgress);
 
   await RNShare.open({
     title: `My round at ${params.courseName}`,
     message: params.score
       ? `Check out my round at ${params.courseName} — shot ${params.score}!`
       : `Check out my round at ${params.courseName}!`,
-    url: params.reelUrl,
+    url: Platform.OS === 'android' ? `file://${localUri}` : localUri,
     type: 'video/mp4',
   }).catch(() => {});
 }
 
 /**
- * Share to Instagram Stories.
+ * Share to Instagram Stories with video as background.
  */
-export async function shareToInstagramStories(videoUrl: string) {
+export async function shareToInstagramStories(
+  signedUrl: string,
+  roundId: string
+) {
   if (!RNShare) return;
 
   try {
+    const localUri = await getLocalVideoUri(signedUrl, roundId);
     await RNShare.shareSingle({
-      stickerImage: videoUrl,
       social: 'instagramstories' as any,
-      appId: '',
+      backgroundVideo: Platform.OS === 'android' ? `file://${localUri}` : localUri,
+      type: 'video/mp4',
     });
   } catch {
     // Instagram not installed or share failed

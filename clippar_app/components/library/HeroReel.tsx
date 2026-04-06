@@ -12,6 +12,7 @@ import Animated, {
 import { useEffect } from 'react';
 import { theme } from '@/constants/theme';
 import type { MockRound } from '@/constants/mockData';
+import { ReelPreview } from './ReelPreview';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -31,9 +32,11 @@ function formatScoreToPar(scoreToPar: number): string {
 interface HeroReelProps {
   round: MockRound;
   onPress: () => void;
+  /** Signed URL for the reel video (if available) */
+  reelSignedUrl?: string;
 }
 
-export function HeroReel({ round, onPress }: HeroReelProps) {
+export function HeroReel({ round, onPress, reelSignedUrl }: HeroReelProps) {
   const pulseScale = useSharedValue(1);
 
   useEffect(() => {
@@ -67,13 +70,19 @@ export function HeroReel({ round, onPress }: HeroReelProps) {
           marginBottom: 20,
         }}
       >
-        {/* Background gradient (placeholder for video thumbnail) */}
-        <LinearGradient
-          colors={['#1a3a2a', '#0d1f15', '#0A0A0F']}
-          start={{ x: 0, y: 0 }}
-          end={{ x: 1, y: 1 }}
-          style={{ position: 'absolute', width: '100%', height: '100%' }}
-        />
+        {/* Background: looping video preview or gradient fallback */}
+        {reelSignedUrl ? (
+          <View style={{ position: 'absolute', width: '100%', height: '100%' }}>
+            <ReelPreview signedUrl={reelSignedUrl} height={220} />
+          </View>
+        ) : (
+          <LinearGradient
+            colors={['#1a3a2a', '#0d1f15', '#0A0A0F']}
+            start={{ x: 0, y: 0 }}
+            end={{ x: 1, y: 1 }}
+            style={{ position: 'absolute', width: '100%', height: '100%' }}
+          />
+        )}
 
         {/* Course pattern overlay */}
         <View

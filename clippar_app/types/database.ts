@@ -131,11 +131,33 @@ export type Database = {
           slope_rating: number | null;
           course_rating: number | null;
           source: string;
+          source_id: string | null;
           created_at: string;
           updated_at: string;
         };
         Insert: Partial<Database['public']['Tables']['courses']['Row']> & { name: string };
         Update: Partial<Database['public']['Tables']['courses']['Row']>;
+      };
+      course_suggestions: {
+        Row: {
+          id: string;
+          user_id: string | null;
+          course_name: string;
+          location_name: string | null;
+          state: string | null;
+          country: string;
+          holes_count: number;
+          par_total: number | null;
+          hole_data: { holeNumber: number; par: number; strokeIndex?: number; lengthMeters?: number }[] | null;
+          status: 'pending' | 'approved' | 'rejected';
+          reviewer_notes: string | null;
+          created_at: string;
+          updated_at: string;
+        };
+        Insert: Partial<Database['public']['Tables']['course_suggestions']['Row']> & {
+          course_name: string;
+        };
+        Update: Partial<Database['public']['Tables']['course_suggestions']['Row']>;
       };
       hardware_orders: {
         Row: {

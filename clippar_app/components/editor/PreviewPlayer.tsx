@@ -33,6 +33,8 @@ interface PreviewPlayerProps {
   onDismiss?: () => void;
   /** Optional style override for the container */
   style?: ViewStyle;
+  /** Hide the overlay (progress bars, title) — useful for embedded players */
+  hideOverlay?: boolean;
 }
 
 // ---- Progress bars (Instagram/Snapchat story style) ----
@@ -136,7 +138,9 @@ function WebClipPlaceholder({
   return (
     <View style={styles.webPlaceholder}>
       <Text style={styles.webPlaceholderTitle}>
-        Hole {clip.holeNumber} {'\u00B7'} Stroke {clip.shotNumber}
+        {clip.holeNumber >= 0
+          ? `Hole ${clip.holeNumber} \u00B7 Stroke ${clip.shotNumber}`
+          : 'Highlight Reel'}
       </Text>
       <Text style={styles.webPlaceholderSub}>
         Video preview on device only
@@ -152,6 +156,7 @@ export function PreviewPlayer({
   startIndex = 0,
   onDismiss,
   style,
+  hideOverlay = false,
 }: PreviewPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(startIndex);
   const stableOnDismiss = useRef(onDismiss);
@@ -219,21 +224,24 @@ export function PreviewPlayer({
       </View>
 
       {/* Top overlay */}
-      <View style={styles.topOverlay} pointerEvents="none">
-        <ProgressBars total={clips.length} current={currentIndex} />
+      {!hideOverlay && (
+        <View style={styles.topOverlay} pointerEvents="none">
+          <ProgressBars total={clips.length} current={currentIndex} />
 
-        <View style={styles.infoRow}>
-          <View>
-            <Text style={styles.clipTitle}>
-              Hole {currentClip.holeNumber} {'\u00B7'} Stroke{' '}
-              {currentClip.shotNumber}
-            </Text>
-            <Text style={styles.clipCounter}>
-              {currentIndex + 1} of {clips.length}
-            </Text>
+          <View style={styles.infoRow}>
+            <View>
+              <Text style={styles.clipTitle}>
+                {currentClip.holeNumber >= 0
+                  ? `Hole ${currentClip.holeNumber} \u00B7 Stroke ${currentClip.shotNumber}`
+                  : 'Highlight Reel'}
+              </Text>
+              <Text style={styles.clipCounter}>
+                {currentIndex + 1} of {clips.length}
+              </Text>
+            </View>
           </View>
         </View>
-      </View>
+      )}
     </View>
   );
 }

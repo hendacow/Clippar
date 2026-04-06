@@ -1,10 +1,11 @@
-import { View, Text, Pressable } from 'react-native';
+import { View, Text, Pressable, Alert } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Play, Clock, MapPin } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { CARD_GRADIENTS } from '@/constants/mockData';
 import type { MockRound } from '@/constants/mockData';
+import { ReelPreview } from './ReelPreview';
 
 function getScoreColor(scoreToPar: number | null): string {
   if (scoreToPar === null) return theme.colors.textSecondary;
@@ -23,13 +24,29 @@ interface RoundCardHorizontalProps {
   round: MockRound;
   index: number;
   onPress: () => void;
+  onDelete?: () => void;
   size?: 'default' | 'large';
+  /** Signed URL for the reel video (if available) */
+  reelSignedUrl?: string;
 }
 
-export function RoundCardHorizontal({ round, index, onPress, size = 'default' }: RoundCardHorizontalProps) {
+export function RoundCardHorizontal({ round, index, onPress, onDelete, size = 'default', reelSignedUrl }: RoundCardHorizontalProps) {
   const cardWidth = size === 'large' ? 200 : 170;
   const cardHeight = size === 'large' ? 210 : 180;
   const gradient = CARD_GRADIENTS[index % CARD_GRADIENTS.length];
+
+  const handleLongPress = () => {
+    if (!onDelete) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+    Alert.alert(
+      'Delete this round?',
+      'This will permanently delete the round, all clips, and the highlight reel. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Delete', style: 'destructive', onPress: onDelete },
+      ]
+    );
+  };
 
   return (
     <Pressable
@@ -37,6 +54,7 @@ export function RoundCardHorizontal({ round, index, onPress, size = 'default' }:
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         onPress();
       }}
+      onLongPress={handleLongPress}
     >
       <View
         style={{
@@ -48,8 +66,14 @@ export function RoundCardHorizontal({ round, index, onPress, size = 'default' }:
           borderColor: theme.colors.surfaceBorder,
         }}
       >
+        {/* Looping reel preview when signed URL is available */}
+        {reelSignedUrl ? (
+          <View style={{ position: 'absolute', width: '100%', height: '100%' }}>
+            <ReelPreview signedUrl={reelSignedUrl} height={cardHeight} />
+          </View>
+        ) : null}
         <LinearGradient
-          colors={gradient}
+          colors={reelSignedUrl ? ['rgba(0,0,0,0.1)', 'rgba(0,0,0,0.75)'] : gradient}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={{ flex: 1, padding: 14, justifyContent: 'space-between' }}
