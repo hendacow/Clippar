@@ -365,6 +365,7 @@ def detect_shots_batch(request: dict) -> dict:
     gpu="T4",
     timeout=900,  # 15 min for large clip sets
     memory=16384,  # 16GB RAM
+    secrets=[modal.Secret.from_name("supabase-credentials", required_keys=[])],
 )
 @modal.fastapi_endpoint(method="POST")
 def run_full_pipeline(request: dict) -> dict:
@@ -396,8 +397,8 @@ def run_full_pipeline(request: dict) -> dict:
     from post_process import post_process as _post_process
 
     job_id = request.get("job_id")
-    supabase_url = request.get("supabase_url", "")
-    supabase_key = request.get("supabase_key", "")
+    supabase_url = request.get("supabase_url", "") or os.environ.get("SUPABASE_URL", "")
+    supabase_key = request.get("supabase_key", "") or os.environ.get("SUPABASE_SERVICE_KEY", "")
     neon_url = request.get("neon_database_url", "")
 
     if not job_id or not supabase_url or not supabase_key:
@@ -475,9 +476,21 @@ def run_full_pipeline(request: dict) -> dict:
         print(f"[Pipeline] {clip_count} output clip(s)")
 
         if clip_count == 0:
-            update_job(status="processing_failed",
-                       stage_detail="No clips produced by detection")
-            return {"error": "Detection produced no output"}
+            # No shots detected — likely pre-recorded individual clips from the app.
+            # Use the original input files directly instead of failing.
+            import shutil
+            print("[Pipeline] No shots detected — using original clips directly")
+            for f in input_files:
+                shutil.copy2(str(f), str(outputs_dir / f.name))
+            output_clips = sorted(
+                [f for f in outputs_dir.glob("*")
+                 if f.suffix.lower() in (".mp4", ".mov")]
+            )
+            clip_count = len(output_clips)
+            if clip_count == 0:
+                update_job(status="processing_failed",
+                           stage_detail="No clips to process")
+                return {"error": "No clips to process"}
 
         update_job(clip_count=clip_count, progress=45,
                    stage_detail=f"Detected {clip_count} shots")

@@ -7,7 +7,7 @@ try {
   NetInfo = require('@react-native-community/netinfo').default;
 } catch {}
 
-import { getUnuploadedClips, markClipUploaded, incrementClipRetryCount } from '@/lib/storage';
+import { getUnuploadedClips, getClipsForRound, markClipUploaded, incrementClipRetryCount } from '@/lib/storage';
 import { uploadClipToStorage } from '@/lib/r2';
 import { createShot, updateRound } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
@@ -346,10 +346,41 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         } as any);
       } catch {}
 
-      // Submit for processing: try CV pipeline, then concat service, then just mark uploaded
+      // Submit for processing: try Edge Function, then Modal direct, then Render, then concat
       let processingSubmitted = false;
 
-      // Try CV pipeline (shot detection + scorecard + music)
+      // Try Supabase Edge Function → Modal GPU pipeline
+      if (!processingSubmitted && clips.length > 0) {
+        try {
+          const { data, error } = await supabase.functions.invoke('process-round', {
+            body: { round_id: roundId },
+          });
+          processingSubmitted = !error && (data?.ok || data?.note);
+        } catch {}
+      }
+
+      // Fallback: call Modal GPU pipeline directly (uses its own stored secrets)
+      if (!processingSubmitted && clips.length > 0) {
+        try {
+          const response = await fetch(
+            'https://hendacow--clippar-shot-detector-run-full-pipeline.modal.run',
+            {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                job_id: roundId,
+                supabase_url: config.supabase.url,
+              }),
+            }
+          );
+          if (response.ok) {
+            const data = await response.json();
+            processingSubmitted = !!data?.ok;
+          }
+        } catch {}
+      }
+
+      // Fallback: try Render pipeline
       if (!processingSubmitted && config.pipeline.url && clips.length > 0) {
         try {
           const response = await fetch(`${config.pipeline.url}/api/mobile/submit-job`, {
@@ -372,16 +403,27 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       // Fallback: try concat service (simple stitching, no CV)
       if (!processingSubmitted && config.concat.url && clips.length > 0) {
         try {
+          // Read trim values from local DB (clips may already be marked uploaded)
+          let allLocalClips: Awaited<ReturnType<typeof getClipsForRound>> = [];
+          try {
+            allLocalClips = await getClipsForRound(roundId);
+          } catch {}
+
           const response = await fetch(`${config.concat.url}/api/concat`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               roundId,
-              clips: clips.map((c) => ({
-                storagePath: `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`,
-                trimStartMs: 0,
-                trimEndMs: -1,
-              })),
+              clips: clips.map((c) => {
+                const local = allLocalClips.find(
+                  (lc) => lc.hole_number === c.hole_number && lc.shot_number === c.shot_number
+                );
+                return {
+                  storagePath: `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`,
+                  trimStartMs: local?.trim_start_ms ?? 0,
+                  trimEndMs: local?.trim_end_ms ?? -1,
+                };
+              }),
             }),
           });
           processingSubmitted = response.ok;
