@@ -13,37 +13,39 @@ import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { ProgressBar } from '@/components/ui/ProgressBar';
 import { Button } from '@/components/ui/Button';
-import { useUpload } from '@/hooks/useUpload';
+import { useUploadContext } from '@/contexts/UploadContext';
+import type { UploadState } from '@/contexts/UploadContext';
 
-const STATUS_CONFIG = {
+const STAGE_CONFIG: Record<UploadState['stage'], { label: string; icon: typeof Upload }> = {
   idle: { label: 'Preparing upload...', icon: Upload },
-  checking_wifi: { label: 'Checking connection...', icon: Wifi },
+  preparing: { label: 'Checking connection...', icon: Wifi },
   uploading: { label: 'Uploading clips...', icon: Upload },
   submitting: { label: 'Starting processing...', icon: Upload },
   processing: { label: 'Creating your highlight reel...', icon: Loader },
   completed: { label: 'Your reel is ready!', icon: CheckCircle },
   error: { label: 'Something went wrong', icon: XCircle },
-} as const;
+};
 
 export default function UploadScreen() {
   const insets = useSafeAreaInsets();
   const { roundId } = useLocalSearchParams<{ roundId: string }>();
-  const upload = useUpload(roundId ?? '');
+  const { upload, startUpload, cancelUpload, retryUpload, dismissUpload } = useUploadContext();
 
   useEffect(() => {
-    if (roundId && upload.status === 'idle') {
-      upload.startUpload();
+    if (roundId && upload.stage === 'idle') {
+      startUpload(roundId, '');
     }
   }, [roundId]);
 
-  const { icon: Icon, label } = STATUS_CONFIG[upload.status];
+  const stage = upload.stage;
+  const { icon: Icon, label } = STAGE_CONFIG[stage];
 
   const iconColor =
-    upload.status === 'completed'
+    stage === 'completed'
       ? theme.colors.birdie
-      : upload.status === 'error'
+      : stage === 'error'
         ? theme.colors.accentRed
-        : upload.status === 'uploading' || upload.status === 'submitting'
+        : stage === 'uploading' || stage === 'submitting'
           ? theme.colors.primary
           : theme.colors.textSecondary;
 
@@ -80,9 +82,9 @@ export default function UploadScreen() {
             textAlign: 'center',
           }}
         >
-          {upload.status === 'completed'
+          {stage === 'completed'
             ? 'Reel Ready!'
-            : upload.status === 'error'
+            : stage === 'error'
               ? 'Upload Failed'
               : 'Processing Round'}
         </Text>
@@ -96,19 +98,19 @@ export default function UploadScreen() {
             maxWidth: 300,
           }}
         >
-          {upload.status === 'error' ? (upload.error ?? label) : label}
+          {stage === 'error' ? (upload.error ?? label) : (upload.stageLabel || label)}
         </Text>
 
-        {upload.status === 'uploading' && (
+        {stage === 'uploading' && (
           <View style={{ width: '100%', maxWidth: 300, marginBottom: 32 }}>
             <ProgressBar
-              progress={upload.overallProgress}
-              label={`Clip ${upload.currentClip} of ${upload.totalClips} (${upload.overallProgress}%)`}
+              progress={upload.progress}
+              label={`Clip ${upload.currentClip} of ${upload.totalClips} (${upload.progress}%)`}
             />
           </View>
         )}
 
-        {upload.status === 'processing' && (
+        {stage === 'processing' && (
           <Text
             style={{
               color: theme.colors.textTertiary,
@@ -121,36 +123,45 @@ export default function UploadScreen() {
           </Text>
         )}
 
-        {upload.status === 'completed' && (
+        {stage === 'completed' && (
           <View style={{ width: '100%', maxWidth: 300, gap: 12 }}>
             <Button
               title="View Reel"
-              onPress={() => router.replace(`/round/${roundId}`)}
+              onPress={() => {
+                dismissUpload();
+                router.replace(`/round/${roundId}`);
+              }}
             />
             <Button
               title="Back to Library"
-              onPress={() => router.replace('/(tabs)')}
+              onPress={() => {
+                dismissUpload();
+                router.replace('/(tabs)');
+              }}
               variant="secondary"
             />
           </View>
         )}
 
-        {upload.status === 'error' && (
+        {stage === 'error' && (
           <View style={{ width: '100%', maxWidth: 300, gap: 12 }}>
-            <Button title="Retry" onPress={upload.retry} />
+            <Button title="Retry" onPress={retryUpload} />
             <Button
               title="Back"
-              onPress={() => router.back()}
+              onPress={() => {
+                dismissUpload();
+                router.back();
+              }}
               variant="secondary"
             />
           </View>
         )}
 
-        {(upload.status === 'uploading' || upload.status === 'processing') && (
+        {(stage === 'uploading' || stage === 'processing') && (
           <Button
             title="Cancel"
             onPress={() => {
-              upload.cancelUpload();
+              cancelUpload();
               router.back();
             }}
             variant="ghost"

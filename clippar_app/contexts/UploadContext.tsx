@@ -295,9 +295,11 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         } as any);
       } catch {}
 
-      // Try Flask pipeline
-      let pipelineSubmitted = false;
-      if (config.pipeline.url) {
+      // Submit for processing: try CV pipeline, then concat service, then just mark uploaded
+      let processingSubmitted = false;
+
+      // Try CV pipeline (shot detection + scorecard + music)
+      if (!processingSubmitted && config.pipeline.url && clips.length > 0) {
         try {
           const response = await fetch(`${config.pipeline.url}/api/mobile/submit-job`, {
             method: 'POST',
@@ -312,16 +314,34 @@ export function UploadProvider({ children }: { children: ReactNode }) {
               user_email: user?.email ?? '',
             }),
           });
-          pipelineSubmitted = response.ok;
+          processingSubmitted = response.ok;
         } catch {}
       }
 
-      // If pipeline is available, poll for completion
-      if (pipelineSubmitted) {
+      // Fallback: try concat service (simple stitching, no CV)
+      if (!processingSubmitted && config.concat.url && clips.length > 0) {
+        try {
+          const response = await fetch(`${config.concat.url}/api/concat`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              roundId,
+              clips: clips.map((c) => ({
+                storagePath: `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`,
+                trimStartMs: 0,
+                trimEndMs: -1,
+              })),
+            }),
+          });
+          processingSubmitted = response.ok;
+        } catch {}
+      }
+
+      if (processingSubmitted) {
         update({ stage: 'processing', progress: 90, stageLabel: 'Processing highlight reel...' });
         startPolling(roundId);
       } else {
-        // Pipeline not available — clips are uploaded, mark as complete
+        // Clips uploaded — user can edit the reel in the editor
         try {
           await supabase.from('processing_jobs')
             .update({ status: 'completed', completed_at: new Date().toISOString() })
@@ -334,7 +354,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         update({
           stage: 'completed',
           progress: 100,
-          stageLabel: clips.length > 0 ? 'Clips uploaded successfully' : 'Round saved',
+          stageLabel: clips.length > 0 ? 'Clips uploaded — edit your reel' : 'Round saved',
           reelUrl: null,
         });
       }

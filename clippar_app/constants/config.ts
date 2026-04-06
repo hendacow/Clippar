@@ -10,6 +10,9 @@ export const config = {
     url: process.env.EXPO_PUBLIC_PIPELINE_URL!,
     apiKey: process.env.EXPO_PUBLIC_PIPELINE_API_KEY!,
   },
+  concat: {
+    url: process.env.EXPO_PUBLIC_CONCAT_URL || '',
+  },
   subscription: {
     websiteUrl: 'https://clippargolf.com',
     monthlyPriceAud: 1999,

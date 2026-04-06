@@ -23,7 +23,7 @@ import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { getRounds } from '@/lib/api';
+import { getRounds, getUserStats } from '@/lib/api';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -248,6 +248,7 @@ export default function HomeScreen() {
   const [useMock, setUseMock] = useState(true);
   const [liveRounds, setLiveRounds] = useState<MockRound[]>([]);
   const [activeFilter, setActiveFilter] = useState<FilterOption>('all');
+  const [stats, setStats] = useState(MOCK_STATS);
 
   // Try fetching real data; fall back to mock
   const fetchRounds = useCallback(async () => {
@@ -270,12 +271,23 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const fetchStats = useCallback(async () => {
+    try {
+      const data = await getUserStats();
+      if (data && data.roundsPlayed > 0) {
+        setStats(data);
+      }
+    } catch {
+      // Keep MOCK_STATS as fallback
+    }
+  }, []);
+
   useEffect(() => {
     fetchRounds();
-  }, [fetchRounds]);
+    fetchStats();
+  }, [fetchRounds, fetchStats]);
 
   const rounds = useMock ? MOCK_ROUNDS : liveRounds;
-  const stats = MOCK_STATS;
 
   // Derived data for sections
   const latestRound = rounds[0];
@@ -332,6 +344,7 @@ export default function HomeScreen() {
             onRefresh={() => {
               setRefreshing(true);
               fetchRounds();
+              fetchStats();
             }}
             tintColor={theme.colors.primary}
           />

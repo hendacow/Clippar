@@ -138,7 +138,11 @@ export function UploadProgressCard() {
           <Pressable
             onPress={() => {
               if (upload.roundId) {
-                router.push(`/round/${upload.roundId}`);
+                if (upload.reelUrl) {
+                  router.push(`/round/${upload.roundId}`);
+                } else {
+                  router.push(`/round/editor?roundId=${upload.roundId}`);
+                }
               }
               dismissUpload();
             }}
@@ -149,7 +153,9 @@ export function UploadProgressCard() {
               backgroundColor: theme.colors.primary,
             }}
           >
-            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>View</Text>
+            <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>
+              {upload.reelUrl ? 'View' : 'Edit Reel'}
+            </Text>
           </Pressable>
         )}
       </View>

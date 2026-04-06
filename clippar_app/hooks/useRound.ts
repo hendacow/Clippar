@@ -343,6 +343,72 @@ export function useRound() {
     }
   }, []);
 
+  const endRoundEarly = useCallback(async () => {
+    setState((prev) => {
+      if (!prev) return prev;
+
+      // Finalize the current hole if any shots were taken
+      const par = getParForHole(prev.courseHoles, prev.currentHole);
+      const holeClips = prev.clips.filter((c) => c.holeNumber === prev.currentHole);
+      const strokes = Math.max(1, prev.currentShot - 1);
+      const hasCurrentHoleShots = prev.currentShot > 1 || holeClips.length > 0;
+
+      let newScores = [...prev.scores];
+
+      if (hasCurrentHoleShots) {
+        const score: HoleScore = {
+          holeNumber: prev.currentHole,
+          par,
+          strokes,
+          putts: 0,
+          penaltyStrokes: Math.max(0, strokes - holeClips.length),
+          isPickup: false,
+          scoreToPar: strokes - par,
+        };
+        newScores = [...newScores, score];
+
+        saveLocalScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - holeClips.length),
+          is_pickup: false,
+          par,
+        });
+
+        upsertScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - holeClips.length),
+          is_pickup: false,
+        }).catch(() => {});
+      }
+
+      const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
+      const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
+
+      updateLocalRound(prev.roundId, {
+        status: 'finished',
+        finished_at: new Date().toISOString(),
+      });
+
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+      return {
+        ...prev,
+        scores: newScores,
+        totalScore: newTotalScore,
+        totalPar: newTotalPar,
+        currentHole: prev.currentHole,
+        currentShot: prev.currentShot,
+        status: 'finished' as const,
+      };
+    });
+  }, []);
+
   const resetRound = useCallback(() => {
     setState(null);
   }, []);
@@ -355,6 +421,7 @@ export function useRound() {
     addPenalty,
     endHole,
     endRound,
+    endRoundEarly,
     recoverRound,
     discardRound,
     resetRound,

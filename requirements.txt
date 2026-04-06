@@ -20,5 +20,8 @@ google-auth>=2.23.0
 # ── Database (Neon Postgres) ──
 psycopg2-binary>=2.9.0
 
+# ── HTTP client ──
+requests>=2.31.0
+
 # ── File storage (Cloudflare R2) ──
 boto3>=1.28.0

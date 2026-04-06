@@ -10,6 +10,8 @@ import {
   CheckCircle,
   ChevronRight,
   AlertCircle,
+  Flag,
+  Film,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -208,6 +210,26 @@ export default function RecordScreen() {
 
           <Button title="Start Round" onPress={startRound} style={{ marginTop: 24 }} />
 
+          <Pressable
+            onPress={() => router.push('/round/import')}
+            style={{
+              marginTop: 16,
+              paddingVertical: 14,
+              borderRadius: theme.radius.md,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              alignItems: 'center',
+              flexDirection: 'row',
+              justifyContent: 'center',
+              gap: 8,
+            }}
+          >
+            <Film size={18} color={theme.colors.primary} />
+            <Text style={{ color: theme.colors.primary, fontWeight: '600', fontSize: 15 }}>
+              Import Round from Camera Roll
+            </Text>
+          </Pressable>
+
           {/* Dev: Simulate BLE press */}
           {__DEV__ && (
             <Button
@@ -232,7 +254,7 @@ export default function RecordScreen() {
             Round Complete
           </Text>
           <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginTop: 8, textAlign: 'center' }}>
-            {roundState.clips.length} clips recorded at {roundState.courseName}
+            {roundState.scores.length} holes · {roundState.clips.length} clips at {roundState.courseName}
           </Text>
           <Text style={{ ...theme.typography.score, color: theme.colors.textPrimary, marginTop: 16 }}>
             {roundState.totalScore}
@@ -326,6 +348,41 @@ export default function RecordScreen() {
         isRecording={camera.isRecording}
         topInset={insets.top}
       />
+
+      {/* End Round button — top right below overlay */}
+      <Pressable
+        onPress={() => {
+          if (isNative) {
+            Alert.alert(
+              'End Round',
+              `End round after hole ${roundState.currentHole}?`,
+              [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'End Round', onPress: () => round.endRoundEarly() },
+              ]
+            );
+          } else {
+            round.endRoundEarly();
+          }
+        }}
+        style={{
+          position: 'absolute',
+          top: insets.top + 52,
+          right: 12,
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 4,
+          backgroundColor: 'rgba(0,0,0,0.5)',
+          paddingHorizontal: 10,
+          paddingVertical: 6,
+          borderRadius: 16,
+        }}
+      >
+        <Flag size={12} color={theme.colors.textSecondary} />
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 11, fontWeight: '600' }}>
+          End Round
+        </Text>
+      </Pressable>
 
       {/* Bottom controls overlay */}
       <View style={[styles.bottomControls, { paddingBottom: insets.bottom + 16 }]}>

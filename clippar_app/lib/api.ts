@@ -98,6 +98,24 @@ export async function updateRound(id: string, updates: Partial<Round>) {
 
 // ============ Scores ============
 
+export async function getScores(roundId: string) {
+  try {
+    const { data, error } = await supabase
+      .from('scores')
+      .select('*')
+      .eq('round_id', roundId)
+      .order('hole_number');
+
+    if (error) {
+      console.log('[API] getScores skipped:', error.message);
+      return [];
+    }
+    return data ?? [];
+  } catch {
+    return [];
+  }
+}
+
 export async function upsertScore(score: {
   round_id: string;
   hole_number: number;
@@ -253,6 +271,99 @@ export async function getHardwareOrders() {
     return data ?? [];
   } catch {
     return [];
+  }
+}
+
+// ============ User Stats ============
+
+export async function getUserStats() {
+  const zero = {
+    roundsPlayed: 0,
+    bestScore: 0,
+    avgScore: 0,
+    totalBirdies: 0,
+    totalEagles: 0,
+    totalClips: 0,
+    avgPutts: 0,
+    coursesPlayed: 0,
+  };
+
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return zero;
+
+    // Fetch all rounds for the user
+    const { data: rounds, error: roundsError } = await supabase
+      .from('rounds')
+      .select('*')
+      .eq('user_id', user.id)
+      .order('date', { ascending: false });
+
+    if (roundsError || !rounds || rounds.length === 0) return zero;
+
+    const roundsPlayed = rounds.length;
+
+    // Best score (lowest total_score among completed rounds)
+    const completedScores = rounds
+      .filter((r: any) => r.total_score != null)
+      .map((r: any) => r.total_score as number);
+    const bestScore = completedScores.length > 0 ? Math.min(...completedScores) : 0;
+
+    // Average score
+    const avgScore =
+      completedScores.length > 0
+        ? Math.round((completedScores.reduce((a: number, b: number) => a + b, 0) / completedScores.length) * 10) / 10
+        : 0;
+
+    // Average putts
+    const puttsValues = rounds
+      .filter((r: any) => r.total_putts != null)
+      .map((r: any) => r.total_putts as number);
+    const avgPutts =
+      puttsValues.length > 0
+        ? Math.round((puttsValues.reduce((a: number, b: number) => a + b, 0) / puttsValues.length) * 10) / 10
+        : 0;
+
+    // Unique courses played
+    const uniqueCourses = new Set(rounds.map((r: any) => r.course_name));
+    const coursesPlayed = uniqueCourses.size;
+
+    // Total clips from shots table
+    const roundIds = rounds.map((r: any) => r.id);
+    const { count: totalClips } = await supabase
+      .from('shots')
+      .select('*', { count: 'exact', head: true })
+      .in('round_id', roundIds);
+
+    // Fetch per-hole scores for birdies and eagles
+    let totalBirdies = 0;
+    let totalEagles = 0;
+
+    const { data: scores, error: scoresError } = await supabase
+      .from('scores')
+      .select('score_to_par')
+      .in('round_id', roundIds);
+
+    if (!scoresError && scores) {
+      for (const s of scores) {
+        if (s.score_to_par === -1) totalBirdies++;
+        else if (s.score_to_par != null && s.score_to_par <= -2) totalEagles++;
+      }
+    }
+
+    return {
+      roundsPlayed,
+      bestScore,
+      avgScore,
+      totalBirdies,
+      totalEagles,
+      totalClips: totalClips ?? 0,
+      avgPutts,
+      coursesPlayed,
+    };
+  } catch (err) {
+    console.log('[API] getUserStats error:', err);
+    return zero;
   }
 }
 

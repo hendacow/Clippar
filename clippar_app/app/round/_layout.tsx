@@ -7,8 +7,11 @@ export default function RoundLayout() {
       screenOptions={{
         headerShown: false,
         contentStyle: { backgroundColor: theme.colors.background },
-        animation: 'slide_from_bottom',
+        animation: 'slide_from_right',
+        gestureEnabled: true,
       }}
-    />
+    >
+      <Stack.Screen name="preview" options={{ animation: 'slide_from_bottom', gestureEnabled: false }} />
+    </Stack>
   );
 }

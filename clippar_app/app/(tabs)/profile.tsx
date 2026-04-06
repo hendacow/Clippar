@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { View, Text, ScrollView, Pressable, Alert } from 'react-native';
+import { View, Text, ScrollView, Pressable, Alert, Switch } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import {
@@ -10,12 +10,18 @@ import {
   LogOut,
   ChevronRight,
   Crown,
+  Settings,
+  Trash2,
+  MessageSquare,
+  Star,
+  HelpCircle,
+  Edit2,
+  Film,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
-import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
@@ -56,17 +62,42 @@ function SettingsRow({
         gap: 14,
       }}
     >
-      {icon}
+      <View
+        style={{
+          width: 34,
+          height: 34,
+          borderRadius: 10,
+          backgroundColor: theme.colors.surface,
+          justifyContent: 'center',
+          alignItems: 'center',
+        }}
+      >
+        {icon}
+      </View>
       <View style={{ flex: 1 }}>
         <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '500' }}>
           {title}
         </Text>
         {subtitle && (
-          <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>{subtitle}</Text>
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 1 }}>
+            {subtitle}
+          </Text>
         )}
       </View>
       {trailing ?? <ChevronRight size={18} color={theme.colors.textTertiary} />}
     </Pressable>
+  );
+}
+
+function Divider() {
+  return (
+    <View
+      style={{
+        height: 1,
+        backgroundColor: theme.colors.surfaceBorder,
+        marginHorizontal: 16,
+      }}
+    />
   );
 }
 
@@ -75,12 +106,15 @@ export default function ProfileScreen() {
   const { user, signOut } = useAuth();
   const { status: subscriptionStatus } = useSubscription();
   const [profile, setProfile] = useState<ProfileRow | null>(null);
+  const [useMeters, setUseMeters] = useState(true);
 
   useEffect(() => {
     getProfile()
       .then((data) => setProfile(data as ProfileRow))
       .catch(() => {});
   }, []);
+
+  const displayName = profile?.display_name || user?.user_metadata?.full_name || 'Golfer';
 
   const handleSignOut = () => {
     Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
@@ -101,113 +135,264 @@ export default function ProfileScreen() {
       <ScrollView
         style={{ flex: 1 }}
         contentContainerStyle={{ paddingTop: insets.top + 16, paddingBottom: 120 }}
+        showsVerticalScrollIndicator={false}
       >
         <View style={{ paddingHorizontal: 16 }}>
-          <Text style={{ ...theme.typography.h1, color: theme.colors.textPrimary, marginBottom: 24 }}>
-            Profile
+          {/* ---- GREETING + NAME ---- */}
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>
+            Hello
           </Text>
-
-          {/* User info card */}
-          <Card style={{ marginBottom: 24, alignItems: 'center', paddingVertical: 24 }}>
-            <View
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+            <Text
               style={{
-                width: 72,
-                height: 72,
-                borderRadius: 36,
-                backgroundColor: theme.colors.primaryMuted,
+                color: theme.colors.textPrimary,
+                fontSize: 28,
+                fontWeight: '800',
+                letterSpacing: -0.5,
+              }}
+            >
+              {displayName}
+            </Text>
+            <Pressable
+              onPress={() => Haptics.selectionAsync()}
+              style={{
+                width: 30,
+                height: 30,
+                borderRadius: 8,
+                backgroundColor: theme.colors.surfaceElevated,
                 justifyContent: 'center',
                 alignItems: 'center',
-                marginBottom: 12,
               }}
             >
-              <User size={32} color={theme.colors.primary} />
-            </View>
-            <Text style={{ color: theme.colors.textPrimary, fontWeight: '700', fontSize: 20 }}>
-              {profile?.display_name ?? 'Golfer'}
-            </Text>
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 14, marginTop: 4 }}>
-              {user?.email ?? ''}
-            </Text>
+              <Edit2 size={14} color={theme.colors.textSecondary} />
+            </Pressable>
+          </View>
 
-            {/* Subscription badge */}
-            <View
+          {/* ---- PRO UPSELL CARD ---- */}
+          {subscriptionStatus !== 'active' && (
+            <Card
               style={{
-                marginTop: 12,
+                marginBottom: 20,
+                paddingVertical: 20,
+                paddingHorizontal: 16,
                 flexDirection: 'row',
                 alignItems: 'center',
-                gap: 6,
-                paddingHorizontal: 12,
-                paddingVertical: 6,
-                borderRadius: theme.radius.full,
-                backgroundColor:
-                  subscriptionStatus === 'active'
-                    ? theme.colors.primaryMuted
-                    : 'rgba(255, 152, 0, 0.15)',
+                gap: 14,
               }}
             >
-              <Crown
-                size={14}
-                color={subscriptionStatus === 'active' ? theme.colors.primary : theme.colors.processing}
-              />
-              <Text
+              <View
                 style={{
-                  fontSize: 12,
-                  fontWeight: '600',
-                  color: subscriptionStatus === 'active' ? theme.colors.primary : theme.colors.processing,
+                  width: 48,
+                  height: 48,
+                  borderRadius: 24,
+                  backgroundColor: theme.colors.primaryMuted,
+                  justifyContent: 'center',
+                  alignItems: 'center',
                 }}
               >
-                {subscriptionStatus === 'active'
-                  ? 'Pro Subscriber'
-                  : subscriptionStatus === 'trial'
-                    ? 'Trial'
-                    : 'Free Plan'}
-              </Text>
-            </View>
-
-            {subscriptionStatus !== 'active' && (
-              <Text
+                <Crown size={24} color={theme.colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text
+                  style={{
+                    color: theme.colors.primary,
+                    fontWeight: '800',
+                    fontSize: 17,
+                  }}
+                >
+                  Clippar Pro
+                </Text>
+                <Text
+                  style={{
+                    color: theme.colors.textSecondary,
+                    fontSize: 13,
+                    marginTop: 2,
+                  }}
+                >
+                  Unlimited highlight reels & exports
+                </Text>
+              </View>
+              <Pressable
+                onPress={() => Haptics.selectionAsync()}
                 style={{
-                  color: theme.colors.textSecondary,
-                  fontSize: 13,
-                  marginTop: 12,
-                  textAlign: 'center',
+                  paddingHorizontal: 14,
+                  paddingVertical: 8,
+                  borderRadius: theme.radius.md,
+                  backgroundColor: theme.colors.primary,
                 }}
               >
-                Subscribe at clippargolf.com to unlock all features
-              </Text>
-            )}
-          </Card>
+                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>
+                  Go Pro
+                </Text>
+              </Pressable>
+            </Card>
+          )}
 
-          {/* Settings */}
-          <Card style={{ marginBottom: 24, paddingVertical: 4, paddingHorizontal: 0 }}>
+          {/* ---- MAIN SETTINGS ---- */}
+          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
             <SettingsRow
-              icon={<Bluetooth size={20} color={theme.colors.accentBlue} />}
+              icon={<Film size={18} color={theme.colors.primary} />}
+              title="Drafts"
+              subtitle="Saved rounds & reels"
+              onPress={() => Haptics.selectionAsync()}
+              trailing={
+                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                  <View
+                    style={{
+                      backgroundColor: theme.colors.surfaceBorder,
+                      paddingHorizontal: 8,
+                      paddingVertical: 2,
+                      borderRadius: theme.radius.full,
+                    }}
+                  >
+                    <Text style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' }}>
+                      0
+                    </Text>
+                  </View>
+                  <ChevronRight size={18} color={theme.colors.textTertiary} />
+                </View>
+              }
+            />
+            <Divider />
+            <SettingsRow
+              icon={<Bluetooth size={18} color={theme.colors.accentBlue} />}
               title="Bluetooth Clicker"
               subtitle="Manage clicker connection"
               onPress={() => router.push('/profile/bluetooth')}
             />
-            <View style={{ height: 1, backgroundColor: theme.colors.surfaceBorder, marginHorizontal: 16 }} />
+            <Divider />
             <SettingsRow
-              icon={<Bell size={20} color={theme.colors.processing} />}
+              icon={<Settings size={18} color={theme.colors.textSecondary} />}
+              title="Settings"
+              onPress={() => router.push('/profile/notifications')}
+            />
+          </Card>
+
+          {/* ---- UNITS ---- */}
+          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
+            <SettingsRow
+              icon={<Text style={{ fontSize: 16 }}>📏</Text>}
+              title="Units"
+              trailing={
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    borderRadius: 8,
+                    overflow: 'hidden',
+                    borderWidth: 1,
+                    borderColor: theme.colors.surfaceBorder,
+                  }}
+                >
+                  <Pressable
+                    onPress={() => setUseMeters(false)}
+                    style={{
+                      paddingHorizontal: 16,
+                      paddingVertical: 8,
+                      backgroundColor: !useMeters ? theme.colors.surfaceElevated : 'transparent',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color: !useMeters ? theme.colors.textPrimary : theme.colors.textTertiary,
+                        fontSize: 13,
+                        fontWeight: '600',
+                      }}
+                    >
+                      Yards
+                    </Text>
+                  </Pressable>
+                  <Pressable
+                    onPress={() => setUseMeters(true)}
+                    style={{
+                      paddingHorizontal: 16,
+                      paddingVertical: 8,
+                      backgroundColor: useMeters ? theme.colors.surfaceElevated : 'transparent',
+                    }}
+                  >
+                    <Text
+                      style={{
+                        color: useMeters ? theme.colors.textPrimary : theme.colors.textTertiary,
+                        fontSize: 13,
+                        fontWeight: '600',
+                      }}
+                    >
+                      Meters
+                    </Text>
+                  </Pressable>
+                </View>
+              }
+            />
+          </Card>
+
+          {/* ---- SECONDARY SETTINGS ---- */}
+          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
+            <SettingsRow
+              icon={<Bell size={18} color={theme.colors.processing} />}
               title="Notifications"
               subtitle="Reel ready, shipping updates"
               onPress={() => router.push('/profile/notifications')}
             />
-            <View style={{ height: 1, backgroundColor: theme.colors.surfaceBorder, marginHorizontal: 16 }} />
+            <Divider />
             <SettingsRow
-              icon={<CreditCard size={20} color={theme.colors.primary} />}
+              icon={<CreditCard size={18} color={theme.colors.primary} />}
               title="Orders"
               subtitle="Hardware kit order status"
               onPress={() => router.push('/profile/orders')}
             />
+            <Divider />
+            <SettingsRow
+              icon={<Trash2 size={18} color={theme.colors.textTertiary} />}
+              title="Clear Cache"
+              onPress={() => {
+                Haptics.selectionAsync();
+                Alert.alert('Clear Cache', 'This will remove cached thumbnails and temp files.', [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'Clear', style: 'destructive', onPress: () => {} },
+                ]);
+              }}
+            />
           </Card>
 
+          {/* ---- SUPPORT ---- */}
+          <Card style={{ marginBottom: 24, paddingVertical: 4, paddingHorizontal: 0 }}>
+            <SettingsRow
+              icon={<HelpCircle size={18} color={theme.colors.textTertiary} />}
+              title="Tutorials"
+              onPress={() => Haptics.selectionAsync()}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<Star size={18} color={theme.colors.accentGold} />}
+              title="Rate Clippar"
+              onPress={() => Haptics.selectionAsync()}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<MessageSquare size={18} color={theme.colors.textTertiary} />}
+              title="Feedback"
+              onPress={() => Haptics.selectionAsync()}
+            />
+          </Card>
+
+          {/* ---- SIGN OUT ---- */}
           <Button
             title="Sign Out"
             onPress={handleSignOut}
             variant="ghost"
             icon={<LogOut size={18} color={theme.colors.textSecondary} />}
           />
+
+          {/* App version */}
+          <Text
+            style={{
+              color: theme.colors.textTertiary,
+              fontSize: 11,
+              textAlign: 'center',
+              marginTop: 16,
+            }}
+          >
+            Clippar v1.0.0
+          </Text>
         </View>
       </ScrollView>
     </GradientBackground>

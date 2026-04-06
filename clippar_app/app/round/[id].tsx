@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react';
-import { View, Text, Pressable, Platform } from 'react-native';
+import { View, Text, Pressable, Platform, ScrollView } from 'react-native';
 import { useLocalSearchParams, router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ArrowLeft, Share2, Edit3, Play, Loader } from 'lucide-react-native';
@@ -13,6 +13,7 @@ import { Button } from '@/components/ui/Button';
 import { PreviewPlayer } from '@/components/editor/PreviewPlayer';
 import { ShareSheet } from '@/components/shared/ShareSheet';
 import { getRound } from '@/lib/api';
+import { Scorecard } from '@/components/round/Scorecard';
 
 export default function RoundViewer() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -66,17 +67,15 @@ export default function RoundViewer() {
             >
               <Share2 size={22} color={theme.colors.textPrimary} />
             </Pressable>
-            {round?.reel_url && (
-              <Pressable
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  if (id) router.push(`/round/editor?roundId=${id}`);
-                }}
-                hitSlop={12}
-              >
-                <Edit3 size={22} color={theme.colors.textPrimary} />
-              </Pressable>
-            )}
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                if (id) router.push(`/round/editor?roundId=${id}`);
+              }}
+              hitSlop={12}
+            >
+              <Edit3 size={22} color={theme.colors.textPrimary} />
+            </Pressable>
           </View>
         </View>
 
@@ -90,11 +89,14 @@ export default function RoundViewer() {
             <Text style={{ color: theme.colors.textSecondary }}>Round not found</Text>
           </View>
         ) : (
-          <View style={{ flex: 1, padding: 16 }}>
+          <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 32 }}>
             {/* Video player or status */}
             {round.reel_url ? (
               <View style={{ marginBottom: 16 }}>
-                <PreviewPlayer source={round.reel_url} />
+                <PreviewPlayer
+                  clips={[{ uri: round.reel_url, holeNumber: 0, shotNumber: 0 }]}
+                  style={{ height: 240, borderRadius: theme.radius.lg, overflow: 'hidden' }}
+                />
               </View>
             ) : (
               <View
@@ -153,21 +155,46 @@ export default function RoundViewer() {
                   </>
                 ) : (
                   <>
-                    <Badge
-                      variant="disconnected"
-                      label={round.status ?? 'Pending'}
-                    />
+                    <Play size={32} color={theme.colors.textTertiary} />
                     <Text
                       style={{
                         color: theme.colors.textSecondary,
-                        fontSize: 13,
-                        marginTop: 8,
+                        fontSize: 14,
+                        fontWeight: '600',
+                        marginTop: 12,
                       }}
                     >
-                      Reel not available
+                      No highlight reel yet
                     </Text>
+                    <Pressable
+                      onPress={() => {
+                        if (id) router.push(`/round/editor?roundId=${id}`);
+                      }}
+                      style={{
+                        marginTop: 12,
+                        paddingHorizontal: 20,
+                        paddingVertical: 10,
+                        backgroundColor: theme.colors.primary,
+                        borderRadius: theme.radius.md,
+                      }}
+                    >
+                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>
+                        Edit Reel
+                      </Text>
+                    </Pressable>
                   </>
                 )}
+              </View>
+            )}
+
+            {/* Scorecard */}
+            {id && (
+              <View style={{ marginBottom: 16 }}>
+                <Scorecard
+                  roundId={id}
+                  courseId={round.course_id}
+                  holesPlayed={round.holes_played}
+                />
               </View>
             )}
 
@@ -268,7 +295,7 @@ export default function RoundViewer() {
                 </View>
               )}
             </Card>
-          </View>
+          </ScrollView>
         )}
       </View>
 
