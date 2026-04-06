@@ -6,6 +6,7 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   if (!db) {
     db = await SQLite.openDatabaseAsync('clippar.db');
     await initTables();
+    await migrateEditorColumns();
   }
   return db;
 }
@@ -25,7 +26,11 @@ async function initTables() {
       timestamp TEXT NOT NULL,
       uploaded INTEGER DEFAULT 0,
       upload_retry_count INTEGER DEFAULT 0,
-      remote_clip_id TEXT
+      remote_clip_id TEXT,
+      trim_start_ms INTEGER DEFAULT 0,
+      trim_end_ms INTEGER DEFAULT -1,
+      is_excluded INTEGER DEFAULT 0,
+      sort_order INTEGER DEFAULT 0
     );
 
     CREATE TABLE IF NOT EXISTS local_rounds (
@@ -51,6 +56,70 @@ async function initTables() {
       UNIQUE(round_id, hole_number)
     );
   `);
+}
+
+// Migrate existing databases to add new columns
+async function migrateEditorColumns() {
+  if (!db) return;
+  try {
+    await db.execAsync(`
+      ALTER TABLE local_clips ADD COLUMN trim_start_ms INTEGER DEFAULT 0;
+    `);
+  } catch {} // column already exists
+  try {
+    await db.execAsync(`
+      ALTER TABLE local_clips ADD COLUMN trim_end_ms INTEGER DEFAULT -1;
+    `);
+  } catch {}
+  try {
+    await db.execAsync(`
+      ALTER TABLE local_clips ADD COLUMN is_excluded INTEGER DEFAULT 0;
+    `);
+  } catch {}
+  try {
+    await db.execAsync(`
+      ALTER TABLE local_clips ADD COLUMN sort_order INTEGER DEFAULT 0;
+    `);
+  } catch {}
+}
+
+export async function updateClipEditorState(
+  clipId: number,
+  updates: {
+    trim_start_ms?: number;
+    trim_end_ms?: number;
+    is_excluded?: boolean;
+    sort_order?: number;
+  }
+) {
+  const database = await getDatabase();
+  const fields: string[] = [];
+  const values: (number)[] = [];
+
+  if (updates.trim_start_ms !== undefined) {
+    fields.push('trim_start_ms = ?');
+    values.push(updates.trim_start_ms);
+  }
+  if (updates.trim_end_ms !== undefined) {
+    fields.push('trim_end_ms = ?');
+    values.push(updates.trim_end_ms);
+  }
+  if (updates.is_excluded !== undefined) {
+    fields.push('is_excluded = ?');
+    values.push(updates.is_excluded ? 1 : 0);
+  }
+  if (updates.sort_order !== undefined) {
+    fields.push('sort_order = ?');
+    values.push(updates.sort_order);
+  }
+
+  if (fields.length === 0) return;
+  values.push(clipId);
+
+  await database.runAsync(
+    `UPDATE local_clips SET ${fields.join(', ')} WHERE id = ?`,
+    ...values
+  );
 }
 
 export async function saveLocalClip(clip: {
@@ -113,8 +182,13 @@ export async function getClipsForRound(roundId: string) {
     file_uri: string;
     uploaded: number;
     timestamp: string;
+    trim_start_ms: number;
+    trim_end_ms: number;
+    is_excluded: number;
+    sort_order: number;
+    duration_seconds: number | null;
   }>(
-    'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, shot_number',
+    'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, sort_order, shot_number',
     roundId
   );
 }

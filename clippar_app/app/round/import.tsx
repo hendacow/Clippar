@@ -26,7 +26,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { createRound, createShot, updateRound } from '@/lib/api';
-import { saveLocalClip } from '@/lib/storage';
+import { saveLocalClip, saveLocalRound, saveLocalScore } from '@/lib/storage';
 import { supabase } from '@/lib/supabase';
 import type { HoleData } from '@/types/round';
 
@@ -187,6 +187,15 @@ export default function ImportRoundScreen() {
 
       const roundId = round.id;
 
+      // Save round to local SQLite so editor can load clips from local storage
+      try {
+        await saveLocalRound({
+          id: roundId,
+          course_name: courseName.trim(),
+          course_id: selectedCourseId,
+        });
+      } catch {}
+
       // Save each clip locally and to Supabase
       for (const hole of holes) {
         for (let shotIdx = 0; shotIdx < hole.clips.length; shotIdx++) {
@@ -212,6 +221,23 @@ export default function ImportRoundScreen() {
               hole_number: hole.holeNumber,
               shot_number: shotNumber,
               clip_url: '', // Will be set after upload
+            });
+          } catch {}
+        }
+      }
+
+      // Save scores per hole to local SQLite
+      for (const hole of holes) {
+        if (hole.clips.length > 0) {
+          try {
+            await saveLocalScore({
+              round_id: roundId,
+              hole_number: hole.holeNumber,
+              strokes: hole.clips.length,
+              putts: 0,
+              penalty_strokes: 0,
+              is_pickup: false,
+              par: hole.par,
             });
           } catch {}
         }

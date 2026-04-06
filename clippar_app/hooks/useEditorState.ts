@@ -8,9 +8,10 @@ const DEFAULT_PAR = 4;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 // Conditionally import local storage (only works on native with expo-sqlite)
-const storage = isNative
-  ? (require('@/lib/storage') as typeof import('@/lib/storage'))
-  : null;
+let storage: typeof import('@/lib/storage') | null = null;
+if (isNative) {
+  storage = require('@/lib/storage') as typeof import('@/lib/storage');
+}
 
 function buildHoleSections(
   clips: EditorClip[],
@@ -176,9 +177,10 @@ export function useEditorState(roundId: string | undefined) {
         storagePath: c.uploaded
           ? `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`
           : null,
-        trimStartMs: 0,
-        trimEndMs: -1,
-        durationMs: 0,
+        trimStartMs: c.trim_start_ms ?? 0,
+        trimEndMs: c.trim_end_ms ?? -1,
+        durationMs: (c.duration_seconds ?? 0) * 1000,
+        isExcluded: (c.is_excluded ?? 0) === 1,
       }));
 
       // Fetch course hole pars if course_id exists
@@ -220,13 +222,21 @@ export function useEditorState(roundId: string | undefined) {
 
     setState((prev) => ({ ...prev, loading: true, error: null }));
 
-    // Try Supabase first
+    // On native, try local SQLite first (clips live here after import/record)
+    if (isNative) {
+      const localOk = await loadFromLocal();
+      if (localOk) return;
+    }
+
+    // Try Supabase (for web, or if local has no clips)
     const supabaseOk = await loadFromSupabase();
     if (supabaseOk) return;
 
-    // Fall back to local SQLite
-    const localOk = await loadFromLocal();
-    if (localOk) return;
+    // Last resort: try local on web too (shouldn't happen but safe)
+    if (!isNative) {
+      const localOk = await loadFromLocal();
+      if (localOk) return;
+    }
 
     // Both failed
     setState((prev) => ({
@@ -275,6 +285,14 @@ export function useEditorState(roundId: string | undefined) {
           ),
         })),
       }));
+      // Persist to SQLite
+      const numId = parseInt(clipId, 10);
+      if (!isNaN(numId) && storage) {
+        storage.updateClipEditorState(numId, {
+          trim_start_ms: trimStartMs,
+          trim_end_ms: trimEndMs,
+        }).catch(() => {});
+      }
     },
     []
   );
@@ -303,15 +321,31 @@ export function useEditorState(roundId: string | undefined) {
   }, []);
 
   const toggleExclude = useCallback((clipId: string) => {
-    setState((prev) => ({
-      ...prev,
-      holes: prev.holes.map((h) => ({
-        ...h,
-        clips: h.clips.map((c) =>
-          c.id === clipId ? { ...c, isExcluded: !c.isExcluded } : c
-        ),
-      })),
-    }));
+    let newExcluded = false;
+    setState((prev) => {
+      const next = {
+        ...prev,
+        holes: prev.holes.map((h) => ({
+          ...h,
+          clips: h.clips.map((c) => {
+            if (c.id === clipId) {
+              newExcluded = !c.isExcluded;
+              return { ...c, isExcluded: newExcluded };
+            }
+            return c;
+          }),
+        })),
+      };
+      return next;
+    });
+    // Persist to SQLite
+    const numId = parseInt(clipId, 10);
+    if (!isNaN(numId) && storage) {
+      // Use setTimeout to ensure state has settled
+      setTimeout(() => {
+        storage!.updateClipEditorState(numId, { is_excluded: newExcluded }).catch(() => {});
+      }, 0);
+    }
   }, []);
 
   // Get all clips in playback order: intro → hole clips in order → outro

@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
-import { View, Text, TextInput, Pressable, FlatList, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator } from 'react-native';
 import { MapPin } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { searchCourses, getCourseHoles } from '@/lib/api';
@@ -108,12 +108,10 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
               </Text>
             </View>
           ) : (
-            <FlatList
-              data={results}
-              keyExtractor={(item) => item.id}
-              keyboardShouldPersistTaps="handled"
-              renderItem={({ item }) => (
+            <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+              {results.map((item) => (
                 <Pressable
+                  key={item.id}
                   onPress={() => handleSelect(item)}
                   style={({ pressed }) => ({
                     padding: 12,
@@ -138,8 +136,8 @@ export function CourseSearch({ value, onChangeText, onSelectCourse }: CourseSear
                     )}
                   </View>
                 </Pressable>
-              )}
-            />
+              ))}
+            </ScrollView>
           )}
         </View>
       )}

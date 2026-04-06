@@ -13,6 +13,25 @@ export async function getProfile() {
     .eq('id', user.id)
     .single();
 
+  // If profile row is missing (e.g. the on_auth_user_created trigger failed),
+  // create it now so the app can continue normally.
+  if (error && error.code === 'PGRST116') {
+    const displayName =
+      user.user_metadata?.full_name || user.email?.split('@')[0] || '';
+    const { data: created, error: insertErr } = await supabase
+      .from('profiles')
+      .insert({
+        id: user.id,
+        email: user.email,
+        display_name: displayName,
+      })
+      .select()
+      .single();
+
+    if (insertErr) throw insertErr;
+    return created;
+  }
+
   if (error) throw error;
   return data;
 }

@@ -91,28 +91,32 @@ export function RoundCardHorizontal({ round, index, onPress, size = 'default' }:
             )}
 
             {/* Score */}
-            <View style={{ alignItems: 'flex-end' }}>
-              <Text
-                style={{
-                  fontSize: 28,
-                  fontWeight: '900',
-                  color: getScoreColor(round.score_to_par),
-                  letterSpacing: -1,
-                }}
-              >
-                {round.total_score}
-              </Text>
-              <Text
-                style={{
-                  fontSize: 12,
-                  fontWeight: '700',
-                  color: getScoreColor(round.score_to_par),
-                  marginTop: -3,
-                }}
-              >
-                {formatScoreToPar(round.score_to_par)}
-              </Text>
-            </View>
+            {round.total_score != null && (
+              <View style={{ alignItems: 'flex-end' }}>
+                <Text
+                  style={{
+                    fontSize: 28,
+                    fontWeight: '900',
+                    color: getScoreColor(round.score_to_par),
+                    letterSpacing: -1,
+                  }}
+                >
+                  {round.total_score}
+                </Text>
+                {round.score_to_par != null && (
+                  <Text
+                    style={{
+                      fontSize: 12,
+                      fontWeight: '700',
+                      color: getScoreColor(round.score_to_par),
+                      marginTop: -3,
+                    }}
+                  >
+                    {formatScoreToPar(round.score_to_par)}
+                  </Text>
+                )}
+              </View>
+            )}
           </View>
 
           {/* Bottom: Course + date */}

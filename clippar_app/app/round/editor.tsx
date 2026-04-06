@@ -14,7 +14,6 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Plus, XCircle, Film, Upload, Music } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
-import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
 import { useUploadContext } from '@/contexts/UploadContext';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
@@ -322,9 +321,23 @@ export default function EditorScreen() {
 
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
-  const [exporting, setExporting] = useState(false);
   const [musicPickerVisible, setMusicPickerVisible] = useState(false);
   const [selectedMusic, setSelectedMusic] = useState<{ id: string; title: string; file_url?: string | null } | null>(null);
+
+  const handleClose = useCallback(() => {
+    if (totalClips === 0) {
+      router.back();
+      return;
+    }
+    Alert.alert(
+      'Leave Editor?',
+      'Your edits are saved as a draft. You can come back to finish later.',
+      [
+        { text: 'Stay', style: 'cancel' },
+        { text: 'Leave', style: 'default', onPress: () => router.back() },
+      ]
+    );
+  }, [totalClips]);
 
   const handleClipEdit = useCallback((clip: EditorClip) => {
     setTrimClip(clip);
@@ -338,72 +351,26 @@ export default function EditorScreen() {
     });
   }, [state.roundId, totalClips]);
 
-  const handleExport = useCallback(async () => {
+  const handleExport = useCallback(() => {
     const allClips = editor.getAllClipsInOrder();
-    const clipsWithPaths = allClips.filter((c) => c.storagePath);
 
-    if (clipsWithPaths.length === 0) {
+    if (allClips.length === 0) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       if (isNative) {
-        Alert.alert('No Clips', 'Upload your clips first before exporting a highlight reel.');
+        Alert.alert('No Clips', 'Add clips to your reel before exporting.');
       }
       return;
     }
 
-    setExporting(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    try {
-      if (config.concat.url) {
-        // Concat service available — send clips for server-side stitching
-        const response = await fetch(`${config.concat.url}/api/concat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            roundId: state.roundId,
-            musicTrackId: selectedMusic?.id ?? null,
-            clips: clipsWithPaths.map((c) => ({
-              storagePath: c.storagePath,
-              trimStartMs: c.trimStartMs,
-              trimEndMs: c.trimEndMs,
-            })),
-          }),
-        });
+    // Start upload via UploadContext — this runs in background
+    // and shows progress on the home screen UploadProgressCard
+    startUpload(state.roundId, state.courseName);
 
-        if (!response.ok) {
-          const err = await response.json().catch(() => ({ error: 'Export failed' }));
-          throw new Error(err.error || 'Export failed');
-        }
-
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        if (isNative) {
-          Alert.alert('Export Started', 'Your highlight reel is being processed. You\'ll be notified when it\'s ready.', [
-            { text: 'OK', onPress: () => router.replace(`/round/${state.roundId}`) },
-          ]);
-        } else {
-          router.replace(`/round/${state.roundId}`);
-        }
-      } else {
-        // No concat service — trigger upload pipeline as fallback
-        startUpload(state.roundId, state.courseName);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        if (isNative) {
-          Alert.alert('Clips Uploading', 'Your clips are being uploaded. You can edit the reel once processing is complete.', [
-            { text: 'OK', onPress: () => router.replace('/(tabs)') },
-          ]);
-        } else {
-          router.replace('/(tabs)');
-        }
-      }
-    } catch (err) {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      if (isNative) {
-        Alert.alert('Export Failed', err instanceof Error ? err.message : 'Something went wrong. Please try again.');
-      }
-    } finally {
-      setExporting(false);
-    }
-  }, [editor, state.roundId, state.courseName, selectedMusic, startUpload]);
+    // Navigate to home so user can see progress
+    router.replace('/(tabs)');
+  }, [editor, state.roundId, state.courseName, startUpload]);
 
   // ---- Loading ----
   if (state.loading) {
@@ -488,7 +455,7 @@ export default function EditorScreen() {
       >
         {/* Close */}
         <Pressable
-          onPress={() => router.back()}
+          onPress={handleClose}
           hitSlop={12}
           style={{
             width: 34,
@@ -547,7 +514,6 @@ export default function EditorScreen() {
 
           <Pressable
             onPress={handleExport}
-            disabled={exporting}
             style={{
               flexDirection: 'row',
               alignItems: 'center',
@@ -558,13 +524,9 @@ export default function EditorScreen() {
               backgroundColor: '#000',
             }}
           >
-            {exporting ? (
-              <ActivityIndicator size={12} color="#fff" />
-            ) : (
-              <Upload size={13} color="#fff" />
-            )}
+            <Upload size={13} color="#fff" />
             <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-              {exporting ? '...' : 'Export'}
+              Export
             </Text>
           </Pressable>
         </View>

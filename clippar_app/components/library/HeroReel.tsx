@@ -178,26 +178,30 @@ export function HeroReel({ round, onPress }: HeroReelProps) {
           </View>
 
           <View style={{ alignItems: 'flex-end' }}>
-            <Text
-              style={{
-                fontSize: 36,
-                fontWeight: '900',
-                color: getScoreColor(round.score_to_par),
-                letterSpacing: -1,
-              }}
-            >
-              {round.total_score}
-            </Text>
-            <Text
-              style={{
-                fontSize: 14,
-                fontWeight: '700',
-                color: getScoreColor(round.score_to_par),
-                marginTop: -4,
-              }}
-            >
-              {formatScoreToPar(round.score_to_par)}
-            </Text>
+            {round.total_score != null && (
+              <Text
+                style={{
+                  fontSize: 36,
+                  fontWeight: '900',
+                  color: getScoreColor(round.score_to_par),
+                  letterSpacing: -1,
+                }}
+              >
+                {round.total_score}
+              </Text>
+            )}
+            {round.score_to_par != null && (
+              <Text
+                style={{
+                  fontSize: 14,
+                  fontWeight: '700',
+                  color: getScoreColor(round.score_to_par),
+                  marginTop: -4,
+                }}
+              >
+                {formatScoreToPar(round.score_to_par)}
+              </Text>
+            )}
           </View>
         </View>
       </View>

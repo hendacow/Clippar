@@ -66,7 +66,7 @@ function RoundListCard({ round, onPress }: { round: MockRound; onPress: () => vo
           }}
         >
           <Text style={{ fontSize: 20, fontWeight: '900', color: scoreColor }}>
-            {round.total_score}
+            {round.total_score ?? '—'}
           </Text>
         </View>
 
@@ -112,9 +112,11 @@ function RoundListCard({ round, onPress }: { round: MockRound; onPress: () => vo
 
         {/* Score to par */}
         <View style={{ alignItems: 'flex-end' }}>
-          <Text style={{ fontSize: 15, fontWeight: '700', color: scoreColor }}>
-            {formatScoreToPar(round.score_to_par)}
-          </Text>
+          {round.score_to_par != null && (
+            <Text style={{ fontSize: 15, fontWeight: '700', color: scoreColor }}>
+              {formatScoreToPar(round.score_to_par)}
+            </Text>
+          )}
           {round.best_hole && round.best_hole.label !== 'Par' && (
             <Text
               style={{
