@@ -1273,6 +1273,9 @@ def _swing_context_looks_like_putt(swing_ctx, ball_move_dist=None):
                 break
             stable_green_spine_frames += 1
 
+    # Very large ball displacement indicates a struck ball, not a putt roll
+    if ball_move_dist is not None and ball_move_dist >= 150.0:
+        return False
     strong_full_swing_burst = (
         max_wrist_motion >= 110.0
         and max_wrist_speed >= 25.0
@@ -2879,6 +2882,7 @@ def process_clip(
         print(f"  Annotated: {ann_path.name}")
 
     pending_shots = []
+    putt_full_clip = False  # set True when PuttVeto detects a putt and save_putts is on
     frame_records = [None]
     setup_spans = []
     active_setup_span = None
@@ -2896,6 +2900,7 @@ def process_clip(
         audio_info_until_frame = frame_no + max(1, int(audio_overlay_sec * fps))
 
     def finalize_swing_fallback(frame_no, swing_ctx, swing_entry_frame, shot_type, reason):
+        nonlocal putt_full_clip
         saved_timeout_shot = False
         motion_faded = reason == "motion-faded"
         min_motion_fade_vision_score = 1.35
@@ -2940,7 +2945,7 @@ def process_clip(
                 )
 
         if (vision_fallback_enabled and effective_shot_type == "SWING" and vision_swing_ctx):
-            if not save_putts and motion_faded:
+            if motion_faded:
                 metrics = vision_swing_ctx.get("metrics", [])
                 scene_peak = max((metric.get("scene_putt_score", 0.0) for metric in metrics), default=0.0)
                 pose_heights = [
@@ -2950,13 +2955,21 @@ def process_clip(
                 ]
                 pose_height = min(pose_heights) if pose_heights else None
                 if scene_peak >= 0.90 and (pose_height is None or pose_height <= 0.24):
-                    print(f"    [PuttVeto f{frame_no}] Strong putt-like scene on faded vision fallback — leaving clip unchanged")
+                    if save_putts:
+                        print(f"    [PuttVeto f{frame_no}] Strong putt-like scene on faded vision fallback — will save full clip")
+                        putt_full_clip = True
+                    else:
+                        print(f"    [PuttVeto f{frame_no}] Strong putt-like scene on faded vision fallback — leaving clip unchanged")
                     return False
-            if not save_putts and _swing_context_looks_like_putt(
+            if _swing_context_looks_like_putt(
                 vision_swing_ctx,
                 ball_move_dist=getattr(sm, "last_ball_move_dist", None),
             ):
-                print(f"    [PuttVeto f{frame_no}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
+                if save_putts:
+                    print(f"    [PuttVeto f{frame_no}] Reclassified swing-like motion as PUTT — will save full clip")
+                    putt_full_clip = True
+                else:
+                    print(f"    [PuttVeto f{frame_no}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
                 return False
             metrics = vision_swing_ctx.get("metrics", [])
             scene_peak = max((metric.get("scene_putt_score", 0.0) for metric in metrics), default=0.0)
@@ -2981,8 +2994,7 @@ def process_clip(
             )
             if vision_candidate:
                 weak_far_green_scene = (
-                    not save_putts
-                    and scene_peak >= 0.72
+                    scene_peak >= 0.72
                     and pose_height is not None
                     and pose_height <= 0.18
                     and (
@@ -2992,7 +3004,11 @@ def process_clip(
                     and vision_candidate.get("validation_tier", 3) >= 3
                 )
                 if weak_far_green_scene:
-                    print(f"    [PuttVeto f{frame_no}] Far weak-setup green scene on vision fallback — leaving clip unchanged")
+                    if save_putts:
+                        print(f"    [PuttVeto f{frame_no}] Far weak-setup green scene on vision fallback — will save full clip")
+                        putt_full_clip = True
+                    else:
+                        print(f"    [PuttVeto f{frame_no}] Far weak-setup green scene on vision fallback — leaving clip unchanged")
                     return False
                 audio_info = None
                 if audio.enabled:
@@ -3007,7 +3023,17 @@ def process_clip(
                     )
                     if audio_hit:
                         hold_audio_info(frame_no, audio_info)
-                if (not motion_faded
+                # For motion-faded vision-only (no audio, no ball): require
+                # a valid setup span to avoid false triggers on walking
+                has_ball = vision_swing_ctx.get("ball_confirm_frame") is not None
+                vision_setup = vision_candidate.get("setup_span") or {}
+                has_setup = (
+                    vision_setup.get("frame_count", 0) >= vision_setup_min_frames
+                    and vision_setup.get("avg_confidence", vision_setup.get("confidence", 0.0)) >= 0.50
+                )
+                if motion_faded and not audio_info and not has_ball and not has_setup:
+                    print(f"    [VisionReject f{frame_no}] Motion-faded vision-only without setup — skipped")
+                elif (not motion_faded
                         or audio_info
                         or vision_candidate["score"] >= min_motion_fade_vision_score):
                     provisional_ball_only = (
@@ -3049,6 +3075,7 @@ def process_clip(
                         "anchor_spine_angle": vision_candidate.get("anchor_spine_angle"),
                         "spine_stable_fraction": vision_candidate.get("spine_stable_fraction", 0.0),
                         "post_anchor_break": vision_candidate.get("post_anchor_break", False),
+                        "ball_move_dist": getattr(sm, "last_ball_move_dist", None),
                     })
                     print(f"\n  ★ SWING detected at {format_time(impact_frame / fps)}  "
                           f"[{confirm_tag}]  "
@@ -3073,6 +3100,7 @@ def process_clip(
                     "selection_score": 0.0,
                     "selection_anchor_frame": impact_frame,
                     "weak_ball_only_anchor": False,
+                    "ball_move_dist": getattr(sm, "last_ball_move_dist", None),
                 })
                 print(f"\n  ★ {shot_type} detected at {format_time(audio_info['clip_time_sec'])}  "
                       f"[audio]  "
@@ -3322,40 +3350,15 @@ def process_clip(
             raw_candidate = None
             last_ball_move_dist = getattr(sm, "last_ball_move_dist", None)
 
-            if (shot_type == "SWING"
-                    and not save_putts
-                    and _live_scores_look_like_putt(
-                        sm.swing_scores or {},
-                        sm.scene_green_ratio,
-                        sm.scene_putt_score,
-                        ball_move_dist=last_ball_move_dist,
-                    )):
-                print(f"    [PuttVeto f{frame_idx}] Live motion + rolling ball looked like PUTT — leaving clip unchanged")
-                sm._audio_confirmed = False
-                sm._audio_info = None
-                sm._ball_confirmed = False
-                sm.start_cooldown()
-                active_swing = None
-                continue
-
-            if (shot_type == "SWING"
-                    and active_swing
-                    and not save_putts
-                    and _swing_context_looks_like_putt(
-                        active_swing,
-                        ball_move_dist=last_ball_move_dist,
-                    )):
-                print(f"    [PuttVeto f{frame_idx}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
-                sm._audio_confirmed = False
-                sm._audio_info = None
-                sm._ball_confirmed = False
-                sm.start_cooldown()
-                active_swing = None
-                continue
-
+            # ── Audio check BEFORE PuttVeto ──
+            # If audio confirms the swing, PuttVeto should not override it.
+            # Use a tight window around the ball movement frame (±1s) rather
+            # than the full swing window, so distant audio can't falsely confirm.
             if shot_type == "SWING" and ball_conf_shot and audio.enabled and active_swing:
+                audio_ball_window_sec = 1.0  # ±1s around ball movement
+                ball_window_start = max(0, int(frame_idx - audio_ball_window_sec * fps))
                 audio_hit, confirm_audio = audio.check_window(
-                    active_swing["entry_frame"],
+                    ball_window_start,
                     frame_idx,
                     fps,
                 )
@@ -3367,6 +3370,45 @@ def process_clip(
                           f"amp={confirm_audio['amplitude']:.3f}  "
                           f"strength={confirm_audio['strength']}  "
                           f"transient={confirm_audio.get('transient_score', 0.0):.2f}")
+
+            # ── PuttVeto — skip if audio already confirmed this as a real swing ──
+            if not audio_info:
+                if (shot_type == "SWING"
+                        and _live_scores_look_like_putt(
+                            sm.swing_scores or {},
+                            sm.scene_green_ratio,
+                            sm.scene_putt_score,
+                            ball_move_dist=last_ball_move_dist,
+                        )):
+                    if save_putts:
+                        print(f"    [PuttVeto f{frame_idx}] Live motion + rolling ball looked like PUTT — will save full clip")
+                        putt_full_clip = True
+                    else:
+                        print(f"    [PuttVeto f{frame_idx}] Live motion + rolling ball looked like PUTT — leaving clip unchanged")
+                    sm._audio_confirmed = False
+                    sm._audio_info = None
+                    sm._ball_confirmed = False
+                    sm.start_cooldown()
+                    active_swing = None
+                    continue
+
+                if (shot_type == "SWING"
+                        and active_swing
+                        and _swing_context_looks_like_putt(
+                            active_swing,
+                            ball_move_dist=last_ball_move_dist,
+                        )):
+                    if save_putts:
+                        print(f"    [PuttVeto f{frame_idx}] Reclassified swing-like motion as PUTT — will save full clip")
+                        putt_full_clip = True
+                    else:
+                        print(f"    [PuttVeto f{frame_idx}] Reclassified swing-like motion as PUTT — leaving clip unchanged")
+                    sm._audio_confirmed = False
+                    sm._audio_info = None
+                    sm._ball_confirmed = False
+                    sm.start_cooldown()
+                    active_swing = None
+                    continue
 
             vision_anchor_frame = None
             if shot_type == "SWING" and active_swing:
@@ -3490,6 +3532,7 @@ def process_clip(
                 "anchor_spine_angle": anchor_spine_angle,
                 "spine_stable_fraction": spine_stable_fraction,
                 "post_anchor_break": post_anchor_break,
+                "ball_move_dist": last_ball_move_dist,
             })
             print(f"\n  ★ {shot_type} detected at {format_time(frame_idx / fps)}  "
                   f"[{confirm_tag}]")
@@ -3660,6 +3703,41 @@ def process_clip(
         )
         print(f"    [Trim] {shot['confirm_tag']} saved via {shot.get('trim_source', 'event')}-anchored window  "
               f"{shot['start_sec']:.2f}s → {shot['end_sec']:.2f}s")
+
+    # ── Putt full-clip save ──
+    # When putt is detected (via PuttVeto or normal SM putt path), save full
+    # clip untrimmed — BUT only if there's no strong swing confirmation
+    # (ball+audio or ball). A real swing takes priority over a putt.
+    has_putt_detection = any(s.get("shot_type") == "PUTT" for s in pending_shots)
+    has_strong_swing = any(
+        s.get("shot_type") == "SWING" and s.get("confirm_tag") in ("ball+audio", "ball")
+        for s in pending_shots
+    )
+    # A ball+audio swing with tiny ball movement shouldn't override a PuttVeto —
+    # it's likely a putt roll that coincided with ambient audio.
+    if putt_full_clip and has_strong_swing:
+        max_swing_ball_dist = max(
+            (s.get("ball_move_dist") or 0)
+            for s in pending_shots
+            if s.get("shot_type") == "SWING" and s.get("confirm_tag") in ("ball+audio", "ball")
+        )
+        if max_swing_ball_dist < 15.0:
+            has_strong_swing = False
+    if save_putts and (putt_full_clip or has_putt_detection) and not has_strong_swing:
+        # Remove any trimmed clips already saved (putt full clip takes priority)
+        for shot in merged:
+            trimmed_name = (f"clip{clip_index:03d}_{clip_name}"
+                           f"_{shot['shot_type'].lower()}01"
+                           f"_{shot['confirm_tag']}{src_ext}")
+            trimmed_path = output_dir / trimmed_name
+            if trimmed_path.exists():
+                trimmed_path.unlink()
+        merged = []  # clear — we'll save full clip instead
+        out_name = f"clip{clip_index:03d}_{clip_name}_putt{src_ext}"
+        out_path = output_dir / out_name
+        print(f"\n  ★ Putt detected in '{clip_name}' — saving full clip → {out_name}")
+        copy_clip_with_audio(clip_path, out_path)
+        merged = [{"shot_type": "PUTT", "confirm_tag": "putt_full"}]
 
     # ── No-detection fallback — preserve the whole clip as-is ──
     if not merged:

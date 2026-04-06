@@ -57,6 +57,15 @@ def get_presigned_url(key, expires_in=3600):
     )
 
 
+def get_presigned_upload_url(key, expires_in=3600, content_type="video/mp4"):
+    """Get a presigned upload URL for a key (used by mobile app)."""
+    return _get_client().generate_presigned_url(
+        "put_object",
+        Params={"Bucket": _bucket(), "Key": key, "ContentType": content_type},
+        ExpiresIn=expires_in,
+    )
+
+
 def delete_prefix(prefix):
     """Delete all objects under a prefix (for cleanup)."""
     keys = list_files(prefix)

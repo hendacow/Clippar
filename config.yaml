@@ -53,7 +53,7 @@ vision_posture_break_grace_sec:   3.0
 ball_move_threshold:  8.0    # px displacement to confirm ball moved
 putt_ball_move_threshold:  4.5  # lower threshold for confirming small putt rolls
 putt_confirm_frames:  2        # consecutive putt-move frames needed to confirm
-save_putts:  false            # if false, putt-sized motions do not save shot clips
+save_putts:  true             # if true, putt detections save the full clip untrimmed
 max_shots_per_clip:  1        # save at most one shot clip per input video
 ball_wait_frames:   360      # max frames to wait for ball to move after swing
 

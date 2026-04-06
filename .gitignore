@@ -30,3 +30,22 @@ clippar_error.log
 
 # Generated logos (keep in repo if you want, remove this line)
 # clippar_logo_*.png
+
+# Clippar App
+clippar_app/node_modules/
+clippar_app/.env.local
+clippar_app/.expo/
+clippar_app/dist/
+clippar_app/ios/
+clippar_app/android/
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+tmp_flip_run/
+
+# SQLite WAL files
+clippar.db-shm
+clippar.db-wal

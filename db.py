@@ -76,15 +76,17 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def create_job(name, email, frequency=None, drive_link=None):
-    job_id = uuid.uuid4().hex[:12]
+def create_job(name, email, frequency=None, drive_link=None, job_id=None):
+    if job_id is None:
+        job_id = uuid.uuid4().hex[:12]
     now = _now()
     conn = _connect()
     try:
         with conn.cursor() as cur:
             cur.execute(
                 """INSERT INTO jobs (id, name, email, frequency, drive_link, status, created_at, updated_at)
-                   VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s)""",
+                   VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s)
+                   ON CONFLICT (id) DO NOTHING""",
                 (job_id, name, email, frequency, drive_link, now, now),
             )
         conn.commit()
