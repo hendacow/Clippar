@@ -1,4 +1,6 @@
 import { Platform } from 'react-native';
+import * as FileSystem from 'expo-file-system';
+import { decode } from 'base64-arraybuffer';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/constants/config';
 
@@ -6,7 +8,7 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 /**
  * Upload a clip to Supabase Storage.
- * Falls back to pipeline presigned URLs if configured and reachable.
+ * Uses expo-file-system to read files on native (fetch+blob produces 0-byte uploads).
  */
 export async function uploadClipToStorage(
   roundId: string,
@@ -21,13 +23,21 @@ export async function uploadClipToStorage(
     return storagePath;
   }
 
-  // Try Supabase Storage (always available)
-  const fileResponse = await fetch(fileUri);
-  const blob = await fileResponse.blob();
+  // Read file as base64 using expo-file-system (reliable on React Native)
+  const base64Data = await FileSystem.readAsStringAsync(fileUri, {
+    encoding: FileSystem.EncodingType.Base64,
+  });
+
+  if (!base64Data || base64Data.length === 0) {
+    throw new Error(`File is empty or unreadable: ${fileUri}`);
+  }
+
+  // Convert base64 to ArrayBuffer for Supabase upload
+  const arrayBuffer = decode(base64Data);
 
   const { error } = await supabase.storage
     .from('clips')
-    .upload(storagePath, blob, {
+    .upload(storagePath, arrayBuffer, {
       contentType: 'video/mp4',
       upsert: true,
     });
