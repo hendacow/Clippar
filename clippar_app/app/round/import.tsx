@@ -191,46 +191,114 @@ export default function ImportRoundScreen() {
     await runAutoDetect(videos);
   };
 
-  // Classify every clip, then group them into holes using putt→swing transitions.
-  // If classification returns putt followed by swing, that's a new hole boundary.
-  const runAutoDetect = async (videos: { uri: string; duration?: number }[]) => {
+  // Classify every clip, then group them into holes.
+  // PRIMARY strategy: timestamp gaps from MediaLibrary creationTime (> 3min = new hole).
+  // SECONDARY: pose-based putt→swing transitions (used for ambiguous 2-3min gaps, or as
+  // a full fallback if no clips have creationTime / permission denied).
+  const runAutoDetect = async (
+    videos: { uri: string; duration?: number; assetId?: string }[]
+  ) => {
     setStep('auto-processing');
-    setAutoProgress({ current: 0, total: videos.length, phase: 'Analysing shots...' });
+    setAutoProgress({ current: 0, total: videos.length, phase: 'Reading metadata...' });
 
-    // Step 1: classify each clip
-    type Classified = {
+    // Step 0: Try to fetch creationTime for each clip via MediaLibrary.
+    // Request permission lazily the first time we hit a clip that has an assetId.
+    let permissionChecked = false;
+    let permissionGranted = false;
+
+    type WithMeta = {
       uri: string;
       duration?: number;
+      assetId?: string;
+      creationTime?: number;
+      pickerIndex: number;
+    };
+    const withMeta: WithMeta[] = [];
+
+    for (let i = 0; i < videos.length; i++) {
+      const v = videos[i];
+      let creationTime: number | undefined;
+
+      if (MediaLibrary && v.assetId) {
+        if (!permissionChecked) {
+          try {
+            const current = await MediaLibrary.getPermissionsAsync();
+            permissionGranted = current.granted;
+            if (!permissionGranted && current.canAskAgain) {
+              const req = await MediaLibrary.requestPermissionsAsync();
+              permissionGranted = req.granted;
+            }
+          } catch (err) {
+            console.log('[AutoDetect] MediaLibrary permission check failed:', err);
+          }
+          permissionChecked = true;
+        }
+
+        if (permissionGranted) {
+          try {
+            const info = await MediaLibrary.getAssetInfoAsync(v.assetId);
+            if (info?.creationTime) {
+              creationTime = info.creationTime;
+            }
+          } catch (err) {
+            console.log('[AutoDetect] getAssetInfoAsync failed for', v.assetId, err);
+          }
+        }
+      }
+
+      withMeta.push({
+        uri: v.uri,
+        duration: v.duration,
+        assetId: v.assetId,
+        creationTime,
+        pickerIndex: i,
+      });
+    }
+
+    const anyHasCreationTime = withMeta.some((m) => m.creationTime !== undefined);
+    const anyAssetIds = videos.some((v) => v.assetId);
+
+    // If clips had assetIds but permission was denied, warn the user and bail to mode.
+    if (anyAssetIds && permissionChecked && !permissionGranted) {
+      Alert.alert(
+        'Photos access needed',
+        'Auto-detect needs Photos access to group clips by time. Please allow access in Settings, or use Manual import.'
+      );
+      setStep('mode');
+      return;
+    }
+
+    // Step 1: classify each clip (pose-based).
+    type Classified = WithMeta & {
       shotType: ShotTypeClassification;
       confidence: number;
     };
     const classified: Classified[] = [];
 
-    for (let i = 0; i < videos.length; i++) {
-      const v = videos[i];
+    for (let i = 0; i < withMeta.length; i++) {
+      const v = withMeta[i];
       setAutoProgress({
         current: i + 1,
-        total: videos.length,
-        phase: `Analysing shot ${i + 1} of ${videos.length}...`,
+        total: withMeta.length,
+        phase: `Analysing shot ${i + 1} of ${withMeta.length}...`,
       });
       try {
         const r = await detectSwing(v.uri);
         classified.push({
-          uri: v.uri,
-          duration: v.duration,
+          ...v,
           shotType: r.found ? r.shotType : 'swing',
           confidence: r.confidence,
         });
       } catch (err) {
         console.log('[AutoDetect] detectSwing failed, defaulting to swing:', err);
-        classified.push({ uri: v.uri, duration: v.duration, shotType: 'swing', confidence: 0 });
+        classified.push({ ...v, shotType: 'swing', confidence: 0 });
       }
     }
 
-    // Step 2: group into holes using putt→swing boundaries
+    // Step 2: group into holes.
     setAutoProgress({
-      current: videos.length,
-      total: videos.length,
+      current: withMeta.length,
+      total: withMeta.length,
       phase: 'Grouping into holes...',
     });
 
@@ -245,16 +313,119 @@ export default function ImportRoundScreen() {
       };
     });
 
-    let holeIdx = 0;
-    let prevShotType: ShotTypeClassification | null = null;
+    // Decide grouping strategy.
+    // If at least one clip has creationTime AND they aren't all identical → timestamp strategy.
+    // Otherwise → fall back to pose-based putt→swing grouping.
+    const creationTimes = classified
+      .map((c) => c.creationTime)
+      .filter((t): t is number => t !== undefined);
+    const allSameTimestamp =
+      creationTimes.length > 0 &&
+      creationTimes.every((t) => t === creationTimes[0]);
 
-    for (const c of classified) {
-      // putt → swing means the swing belongs to the NEXT hole
-      if (prevShotType === 'putt' && c.shotType === 'swing') {
-        holeIdx = Math.min(holeIdx + 1, groupedHoles.length - 1);
+    const useTimestampStrategy = anyHasCreationTime && !allSameTimestamp;
+
+    if (useTimestampStrategy) {
+      console.log(
+        `[AutoDetect] Using timestamp strategy for ${classified.length} clips ` +
+          `(${creationTimes.length} have creationTime)`
+      );
+
+      // Sort by creationTime ascending; preserve picker order for ties / missing values.
+      const sorted = [...classified].sort((a, b) => {
+        const at = a.creationTime;
+        const bt = b.creationTime;
+        if (at === undefined && bt === undefined) return a.pickerIndex - b.pickerIndex;
+        if (at === undefined) return a.pickerIndex - b.pickerIndex;
+        if (bt === undefined) return a.pickerIndex - b.pickerIndex;
+        if (at === bt) return a.pickerIndex - b.pickerIndex;
+        return at - bt;
+      });
+
+      let holeIdx = 0;
+      let prevTime: number | undefined;
+      let prevShotType: ShotTypeClassification | null = null;
+
+      for (let i = 0; i < sorted.length; i++) {
+        const c = sorted[i];
+        const curTime = c.creationTime;
+        let gapMs = 0;
+        if (prevTime !== undefined && curTime !== undefined) {
+          gapMs = curTime - prevTime;
+        }
+
+        let newHole = false;
+        let reason = '';
+
+        if (i === 0) {
+          reason = 'first clip';
+        } else if (gapMs > HOLE_GAP_MS) {
+          newHole = true;
+          reason = `gap=${(gapMs / 60000).toFixed(1)}min > 3min`;
+        } else if (gapMs > HOLE_GAP_AMBIGUOUS_MS) {
+          // Ambiguous: confirm with pose transition
+          if (prevShotType === 'putt' && c.shotType === 'swing') {
+            newHole = true;
+            reason = `gap=${(gapMs / 60000).toFixed(1)}min + putt→swing`;
+          } else {
+            reason = `gap=${(gapMs / 60000).toFixed(1)}min ambiguous, no putt→swing`;
+          }
+        } else if (curTime === undefined || prevTime === undefined) {
+          // No timestamp for this transition → use pose fallback
+          if (prevShotType === 'putt' && c.shotType === 'swing') {
+            newHole = true;
+            reason = 'no timestamp + putt→swing';
+          } else {
+            reason = 'no timestamp';
+          }
+        } else {
+          reason = `gap=${(gapMs / 60000).toFixed(1)}min (same hole)`;
+        }
+
+        if (newHole && holeIdx + 1 < groupedHoles.length) {
+          holeIdx += 1;
+        }
+
+        console.log(
+          `[AutoDetect] Clip ${i + 1}: ${reason}${newHole ? ' → new hole' : ''} ` +
+            `(hole ${groupedHoles[holeIdx].holeNumber}, shotType=${c.shotType})`
+        );
+
+        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
+        prevTime = curTime ?? prevTime;
+        prevShotType = c.shotType;
       }
-      groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
-      prevShotType = c.shotType;
+    } else {
+      console.log(
+        `[AutoDetect] Falling back to pose-based grouping ` +
+          `(anyHasCreationTime=${anyHasCreationTime}, allSameTimestamp=${allSameTimestamp})`
+      );
+
+      let holeIdx = 0;
+      let prevShotType: ShotTypeClassification | null = null;
+
+      for (let i = 0; i < classified.length; i++) {
+        const c = classified[i];
+        // putt → swing means the swing belongs to the NEXT hole
+        if (
+          prevShotType === 'putt' &&
+          c.shotType === 'swing' &&
+          holeIdx + 1 < groupedHoles.length
+        ) {
+          holeIdx += 1;
+          console.log(
+            `[AutoDetect] Clip ${i + 1}: putt→swing → new hole ` +
+              `(hole ${groupedHoles[holeIdx].holeNumber})`
+          );
+        } else {
+          console.log(
+            `[AutoDetect] Clip ${i + 1}: shotType=${c.shotType} ` +
+              `(hole ${groupedHoles[holeIdx].holeNumber})`
+          );
+        }
+        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
+        prevShotType = c.shotType;
+      }
     }
 
     // Expand holes that have clips
