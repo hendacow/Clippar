@@ -12,7 +12,7 @@ import {
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Bell, TrendingDown, Trophy, Flame } from 'lucide-react-native';
+import { Bell, TrendingDown, Trophy, Flame, CircleDot, ArrowRight } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { MOCK_ROUNDS, MOCK_STATS } from '@/constants/mockData';
@@ -24,8 +24,15 @@ import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl } from '@/lib/api';
+import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl, getProfile } from '@/lib/api';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
+
+function getGreeting(): string {
+  const hour = new Date().getHours();
+  if (hour < 12) return 'Good morning';
+  if (hour < 18) return 'Good afternoon';
+  return 'Good evening';
+}
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -214,37 +221,64 @@ function EmptyState() {
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 48, marginTop: 60 }}>
       <View
         style={{
-          width: 80,
-          height: 80,
-          borderRadius: 40,
+          width: 96,
+          height: 96,
+          borderRadius: 48,
           backgroundColor: theme.colors.primaryMuted,
           justifyContent: 'center',
           alignItems: 'center',
-          marginBottom: 20,
+          marginBottom: 24,
+          ...theme.shadows.glow,
         }}
       >
-        <Trophy size={36} color={theme.colors.primary} />
+        <Trophy size={44} color={theme.colors.primary} />
       </View>
       <Text
         style={{
-          ...theme.typography.h2,
+          ...theme.typography.h1,
           color: theme.colors.textPrimary,
           textAlign: 'center',
-          marginBottom: 8,
+          marginBottom: 10,
         }}
       >
-        Your Library is Empty
+        Ready for your first round?
       </Text>
       <Text
         style={{
           ...theme.typography.body,
           color: theme.colors.textSecondary,
           textAlign: 'center',
-          maxWidth: 280,
+          maxWidth: 300,
+          marginBottom: 28,
         }}
       >
-        Play your first round with Clippar to start building your personal golf highlight library.
+        Record your shots, let Clippar build the reel. Your highlights live right here.
       </Text>
+      <Pressable
+        onPress={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          router.push('/(tabs)/record');
+        }}
+        style={({ pressed }) => ({
+          flexDirection: 'row',
+          alignItems: 'center',
+          gap: 10,
+          paddingHorizontal: 24,
+          paddingVertical: 14,
+          borderRadius: theme.radius.full,
+          backgroundColor: theme.colors.primary,
+          opacity: pressed ? 0.85 : 1,
+          ...theme.shadows.glow,
+        })}
+        accessibilityLabel="Start your first round"
+        accessibilityRole="button"
+      >
+        <CircleDot size={20} color="#FFFFFF" strokeWidth={2.5} />
+        <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 16 }}>
+          Start a Round
+        </Text>
+        <ArrowRight size={18} color="#FFFFFF" />
+      </Pressable>
     </View>
   );
 }
@@ -274,6 +308,7 @@ export default function HomeScreen() {
   const [activeFilter, setActiveFilter] = useState<FilterOption>('all');
   const [stats, setStats] = useState(MOCK_STATS);
   const [reelSignedUrls, setReelSignedUrls] = useState<Record<string, string>>({});
+  const [displayName, setDisplayName] = useState<string | null>(null);
 
   // Always try real data first; only show mock if user has zero rounds
   const fetchRounds = useCallback(async () => {
@@ -328,6 +363,19 @@ export default function HomeScreen() {
     }
   }, []);
 
+  const fetchName = useCallback(async () => {
+    try {
+      const p: any = await getProfile();
+      const name = (p?.display_name ?? '').toString().trim();
+      if (name) {
+        // Just first name for the greeting
+        setDisplayName(name.split(' ')[0]);
+      }
+    } catch {
+      // Silently ignore — greeting will fall back to generic
+    }
+  }, []);
+
   const handleDeleteRound = useCallback(async (roundId: string) => {
     try {
       await deleteRound(roundId);
@@ -342,7 +390,8 @@ export default function HomeScreen() {
   useEffect(() => {
     fetchRounds();
     fetchStats();
-  }, [fetchRounds, fetchStats]);
+    fetchName();
+  }, [fetchRounds, fetchStats, fetchName]);
 
   // Show real rounds if we have them, otherwise show mock as placeholder
   const useMock = loaded && liveRounds.length === 0;
@@ -378,6 +427,14 @@ export default function HomeScreen() {
         return rounds;
     }
   }, [rounds, activeFilter]);
+
+  if (!loaded) {
+    return (
+      <View style={{ flex: 1, backgroundColor: theme.colors.background, paddingTop: insets.top + 16 }}>
+        <HomeSkeleton />
+      </View>
+    );
+  }
 
   if (!latestRound) {
     return (
@@ -421,24 +478,42 @@ export default function HomeScreen() {
             paddingBottom: 16,
           }}
         >
-          <View>
+          <View style={{ flex: 1 }}>
             <Text
               style={{
-                fontSize: 28,
+                fontSize: 12,
+                fontWeight: '600',
+                color: theme.colors.textTertiary,
+                letterSpacing: 0.5,
+                textTransform: 'uppercase',
+              }}
+            >
+              {getGreeting()}{displayName ? `, ${displayName}` : ''}
+            </Text>
+            <Text
+              style={{
+                fontSize: 26,
                 fontWeight: '900',
                 color: theme.colors.primary,
                 letterSpacing: -0.8,
+                marginTop: 2,
               }}
             >
               Clippar
             </Text>
           </View>
           <Pressable
-            onPress={() => Haptics.selectionAsync()}
+            onPress={() => {
+              Haptics.selectionAsync();
+              router.push('/profile/notifications');
+            }}
+            hitSlop={10}
+            accessibilityLabel="Notifications"
+            accessibilityRole="button"
             style={{
-              width: 38,
-              height: 38,
-              borderRadius: 19,
+              width: 44,
+              height: 44,
+              borderRadius: 22,
               backgroundColor: theme.colors.surfaceElevated,
               borderWidth: 1,
               borderColor: theme.colors.surfaceBorder,
@@ -446,7 +521,7 @@ export default function HomeScreen() {
               alignItems: 'center',
             }}
           >
-            <Bell size={18} color={theme.colors.textSecondary} />
+            <Bell size={20} color={theme.colors.textSecondary} />
           </Pressable>
         </View>
 

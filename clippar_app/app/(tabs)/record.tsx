@@ -149,7 +149,7 @@ export default function RecordScreen() {
             Record
           </Text>
           <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
-            Start a new round to begin recording shots.
+            Pick your course and you're ready to go.
           </Text>
 
           {/* Orphaned round recovery */}
@@ -218,7 +218,14 @@ export default function RecordScreen() {
             onSelectCourse={handleCourseSelect}
           />
 
-          <Button title="Start Round" onPress={startRound} style={{ marginTop: 24 }} />
+          <Button
+            title="Start Round"
+            onPress={startRound}
+            style={{
+              marginTop: 24,
+              ...(courseName.trim() ? theme.shadows.glow : {}),
+            }}
+          />
 
           <Pressable
             onPress={() => router.push('/round/import')}

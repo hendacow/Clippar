@@ -21,6 +21,7 @@ import {
   Film,
   MapPin,
   Hash,
+  Ruler,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -135,7 +136,9 @@ export default function ProfileScreen() {
     }, [])
   );
 
-  const displayName = profile?.display_name || user?.user_metadata?.full_name || 'Golfer';
+  const rawName = profile?.display_name || user?.user_metadata?.full_name || 'Golfer';
+  const displayName = rawName.trim() || 'Golfer';
+  const avatarInitial = (displayName[0] ?? 'G').toUpperCase();
   const avatarUrl = profile?.avatar_url || null;
 
   const handleSignOut = () => {
@@ -190,7 +193,7 @@ export default function ProfileScreen() {
                   />
                 ) : (
                   <Text style={{ fontSize: 24, fontWeight: '800', color: theme.colors.primary }}>
-                    {displayName[0].toUpperCase()}
+                    {avatarInitial}
                   </Text>
                 )}
               </View>
@@ -373,7 +376,7 @@ export default function ProfileScreen() {
           {/* ---- UNITS ---- */}
           <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
             <SettingsRow
-              icon={<Text style={{ fontSize: 16 }}>📏</Text>}
+              icon={<Ruler size={18} color={theme.colors.textSecondary} />}
               title="Units"
               trailing={
                 <View
@@ -445,12 +448,23 @@ export default function ProfileScreen() {
             <SettingsRow
               icon={<Trash2 size={18} color={theme.colors.textTertiary} />}
               title="Clear Cache"
+              subtitle="Free up space from thumbnails"
               onPress={() => {
                 Haptics.selectionAsync();
-                Alert.alert('Clear Cache', 'This will remove cached thumbnails and temp files.', [
-                  { text: 'Cancel', style: 'cancel' },
-                  { text: 'Clear', style: 'destructive', onPress: () => {} },
-                ]);
+                Alert.alert(
+                  'Clear Cache',
+                  'Cached thumbnails and temp files will be removed. Your rounds and reels stay safe.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Clear',
+                      style: 'destructive',
+                      onPress: () => {
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                      },
+                    },
+                  ]
+                );
               }}
             />
           </Card>
@@ -460,19 +474,34 @@ export default function ProfileScreen() {
             <SettingsRow
               icon={<HelpCircle size={18} color={theme.colors.textTertiary} />}
               title="Tutorials"
-              onPress={() => Haptics.selectionAsync()}
+              subtitle="Coming soon"
+              onPress={() => {
+                Haptics.selectionAsync();
+                Alert.alert('Coming Soon', 'In-app tutorials are on the way.');
+              }}
             />
             <Divider />
             <SettingsRow
               icon={<Star size={18} color={theme.colors.accentGold} />}
               title="Rate Clippar"
-              onPress={() => Haptics.selectionAsync()}
+              subtitle="Coming soon"
+              onPress={() => {
+                Haptics.selectionAsync();
+                Alert.alert('Coming Soon', "We'll wire this up when we're live on the App Store.");
+              }}
             />
             <Divider />
             <SettingsRow
               icon={<MessageSquare size={18} color={theme.colors.textTertiary} />}
               title="Feedback"
-              onPress={() => Haptics.selectionAsync()}
+              subtitle="Email us at support@clippar.com"
+              onPress={() => {
+                Haptics.selectionAsync();
+                Alert.alert(
+                  'Send Feedback',
+                  'Email support@clippar.com with your thoughts. We read every one.'
+                );
+              }}
             />
           </Card>
 

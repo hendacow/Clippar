@@ -5,7 +5,6 @@ import {
   SectionList,
   Pressable,
   Alert,
-  ActivityIndicator,
   RefreshControl,
 } from 'react-native';
 import { router, Stack } from 'expo-router';
@@ -22,6 +21,7 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { getRounds, deleteRound, getProcessingJob } from '@/lib/api';
 import { ProgressBar } from '@/components/ui/ProgressBar';
+import { Skeleton } from '@/components/ui/Skeleton';
 import type { Round } from '@/types/round';
 
 type RoundStatus = 'recording' | 'uploading' | 'processing' | 'ready' | 'failed';
@@ -207,24 +207,25 @@ function EmptyState() {
     <View style={{ alignItems: 'center', paddingVertical: 64, paddingHorizontal: 32 }}>
       <View
         style={{
-          width: 64,
-          height: 64,
-          borderRadius: 32,
+          width: 80,
+          height: 80,
+          borderRadius: 40,
           backgroundColor: theme.colors.primaryMuted,
           justifyContent: 'center',
           alignItems: 'center',
-          marginBottom: 16,
+          marginBottom: 20,
         }}
       >
-        <Film size={28} color={theme.colors.primary} />
+        <Film size={34} color={theme.colors.primary} />
       </View>
       <Text
         style={{
           color: theme.colors.textPrimary,
-          fontSize: 18,
-          fontWeight: '700',
+          fontSize: 20,
+          fontWeight: '800',
           textAlign: 'center',
           marginBottom: 8,
+          letterSpacing: -0.3,
         }}
       >
         No Rounds Yet
@@ -235,10 +236,31 @@ function EmptyState() {
           fontSize: 14,
           textAlign: 'center',
           maxWidth: 260,
+          marginBottom: 24,
+          lineHeight: 20,
         }}
       >
-        Start recording your first round to see it here. Your drafts, processing rounds, and completed reels will all appear in one place.
+        Your drafts, processing rounds, and completed reels will all appear here.
       </Text>
+      <Pressable
+        onPress={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          router.push('/(tabs)/record');
+        }}
+        style={({ pressed }) => ({
+          paddingHorizontal: 24,
+          paddingVertical: 12,
+          borderRadius: theme.radius.full,
+          backgroundColor: theme.colors.primary,
+          opacity: pressed ? 0.85 : 1,
+        })}
+        accessibilityLabel="Record your first round"
+        accessibilityRole="button"
+      >
+        <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 15 }}>
+          Record Your First Round
+        </Text>
+      </Pressable>
     </View>
   );
 }
@@ -373,8 +395,13 @@ export default function MyRoundsScreen() {
       <Stack.Screen options={{ title: 'My Rounds' }} />
 
       {loading ? (
-        <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}>
-          <ActivityIndicator color={theme.colors.primary} size="large" />
+        <View style={{ padding: 16, gap: 10 }}>
+          <Skeleton width="40%" height={18} style={{ marginBottom: 8 }} />
+          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
+          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
+          <Skeleton width="40%" height={18} style={{ marginTop: 16, marginBottom: 8 }} />
+          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
+          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
         </View>
       ) : rounds.length === 0 ? (
         <EmptyState />
