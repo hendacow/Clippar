@@ -33,6 +33,7 @@ import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
 import { saveLocalClip, saveLocalRound, saveLocalScore } from '@/lib/storage';
+import { resolveAssetUri } from '@/lib/media';
 import { supabase } from '@/lib/supabase';
 import type { HoleData } from '@/types/round';
 import { detectSwing } from 'shot-detector';
@@ -802,12 +803,18 @@ export default function ImportRoundScreen() {
           const clip = hole.clips[shotIdx];
           const shotNumber = shotIdx + 1;
 
+          // Normalize ph:// / assets-library:// URIs to a durable file:// path
+          // BEFORE persisting. Without this, iOS evicts the tmp copy on reinstall
+          // and AVFoundation/ExpoFS both fail on the raw PhotoKit reference,
+          // which surfaces as "videos don't load" and "File not found: ph://...".
+          const durableUri = await resolveAssetUri(clip.uri);
+
           await saveLocalClip({
             round_id: roundId,
             hole_number: hole.holeNumber,
             shot_number: shotNumber,
-            file_uri: clip.uri,          // original picker URI
-            original_file_uri: clip.uri, // same — original video
+            file_uri: durableUri,          // resolved file:// path
+            original_file_uri: durableUri, // same — original video
             duration_seconds: clip.durationMs ? clip.durationMs / 1000 : undefined,
             auto_trimmed: 0,             // NOT trimmed yet — editor will process lazily
             needs_trim: 1,               // Flag for editor to auto-trim on load

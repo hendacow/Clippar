@@ -13,6 +13,7 @@ import {
   getBiometricPreference,
   authenticateWithBiometrics,
 } from '@/lib/biometrics';
+import { repairScoresParData } from '@/lib/api';
 import '@/global.css';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -45,6 +46,15 @@ export default function RootLayout() {
       }
       setBiometricChecked(true);
       SplashScreen.hideAsync();
+
+      // One-time idempotent repair: backfill scores.par/score_to_par for rows
+      // written before migration 005. Safe to call every startup (no-op when
+      // there's nothing to fix).
+      repairScoresParData()
+        .then((n) => {
+          if (n > 0) console.log(`[Startup] repairScoresParData: fixed ${n} rows`);
+        })
+        .catch((e) => console.log('[Startup] repairScoresParData skipped:', e));
     })();
   }, [loading]);
 

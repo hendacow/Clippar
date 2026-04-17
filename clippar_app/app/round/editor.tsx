@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,17 +8,23 @@ import {
   ActivityIndicator,
   Platform,
   Alert,
+  Modal,
 } from 'react-native';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Plus, XCircle, Film, Upload, Music } from 'lucide-react-native';
+import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
-import { useUploadContext } from '@/contexts/UploadContext';
+import { type UploadMode } from '@/contexts/UploadContext';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
-import { MusicPicker } from '@/components/editor/MusicPicker';
+import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
+import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
+import { updateRound } from '@/lib/api';
+import { uploadReelToStorage } from '@/lib/r2';
+import { resolveTrackToLocalUri } from '@/lib/music';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -98,7 +104,7 @@ function ClipCard({
             borderRadius: theme.radius.md,
             backgroundColor: theme.colors.surface,
             overflow: 'hidden',
-            opacity: clip.isExcluded ? 0.4 : 1,
+            opacity: clip.isExcluded ? 0.4 : clip.needsTrim ? 0.6 : 1,
           }}
         >
           {/* Thumbnail or placeholder */}
@@ -118,6 +124,34 @@ function ClipCard({
               }}
             >
               <Film size={24} color={theme.colors.textTertiary} />
+            </View>
+          )}
+
+          {/* Spinner overlay while waiting for auto-trim */}
+          {clip.needsTrim && (
+            <View
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: 'rgba(0,0,0,0.35)',
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <ActivityIndicator size="small" color="#fff" />
+              <Text
+                style={{
+                  color: 'rgba(255,255,255,0.85)',
+                  fontSize: 10,
+                  fontWeight: '600',
+                  marginTop: 4,
+                }}
+              >
+                Waiting...
+              </Text>
             </View>
           )}
 
@@ -157,7 +191,7 @@ function ClipCard({
             <XCircle size={18} color="rgba(255,255,255,0.8)" fill="rgba(0,0,0,0.5)" />
           </Pressable>
 
-          {/* "Edit" or "Excluded" label at bottom */}
+          {/* Bottom label: "Edit", "Excluded", or "Trimmed" badge */}
           <View
             style={{
               position: 'absolute',
@@ -165,10 +199,20 @@ function ClipCard({
               left: 0,
               right: 0,
               paddingVertical: 6,
-              backgroundColor: clip.isExcluded ? 'rgba(180,0,0,0.7)' : 'rgba(0,0,0,0.6)',
+              backgroundColor: clip.isExcluded
+                ? 'rgba(180,0,0,0.7)'
+                : clip.autoTrimmed && !clip.needsTrim
+                  ? 'rgba(46,125,50,0.85)'
+                  : 'rgba(0,0,0,0.6)',
               alignItems: 'center',
+              flexDirection: 'row',
+              justifyContent: 'center',
+              gap: 3,
             }}
           >
+            {clip.autoTrimmed && !clip.needsTrim && !clip.isExcluded && (
+              <Check size={12} color="#fff" />
+            )}
             <Text
               style={{
                 color: '#fff',
@@ -177,7 +221,7 @@ function ClipCard({
                 textDecorationLine: clip.isExcluded ? 'line-through' : 'none',
               }}
             >
-              {clip.isExcluded ? 'Excluded' : 'Edit'}
+              {clip.isExcluded ? 'Excluded' : clip.autoTrimmed && !clip.needsTrim ? 'Trimmed' : 'Edit'}
             </Text>
           </View>
         </View>
@@ -316,13 +360,50 @@ export default function EditorScreen() {
   const { roundId } = useLocalSearchParams<{ roundId: string }>();
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
-  const { startUpload } = useUploadContext();
   const { state } = editor;
+
+  // Re-read trim state from SQLite when returning from another screen
+  const hasMountedRef = useRef(false);
+  useFocusEffect(
+    useCallback(() => {
+      // Skip the first focus (useEditorState already loads on mount)
+      if (!hasMountedRef.current) {
+        hasMountedRef.current = true;
+        return;
+      }
+      editor.reload();
+    }, [editor.reload])
+  );
 
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
+
+  // Derive trim progress from current state
+  const allClips = state.holes.flatMap((h) => h.clips);
+  const untrimmedCount = allClips.filter((c) => c.needsTrim).length;
+  const isTrimming = untrimmedCount > 0;
+  const hasUntrimmedClips = isTrimming;
+
+  // Start processAllUntrimmed once when loading finishes (guarded by ref)
+  const trimStartedRef = useRef(false);
+  useEffect(() => {
+    if (state.loading || trimStartedRef.current) return;
+    const untrimmed = state.holes.flatMap((h) => h.clips).filter((c) => c.needsTrim);
+    if (untrimmed.length === 0) return;
+    trimStartedRef.current = true;
+    editor.processAllUntrimmed();
+  }, [state.loading]);
   const [musicPickerVisible, setMusicPickerVisible] = useState(false);
-  const [selectedMusic, setSelectedMusic] = useState<{ id: string; title: string; file_url?: string | null } | null>(null);
+  const [selectedMusic, setSelectedMusic] = useState<Pick<MusicTrack, 'id' | 'title' | 'file_url'> | null>(null);
+
+  // Export settings
+  const [exportModalVisible, setExportModalVisible] = useState(false);
+  const [exportResolution, setExportResolution] = useState<string>(config.export.defaultResolution);
+  const [exportFps, setExportFps] = useState<number>(config.export.defaultFrameRate);
+  const exportMode: UploadMode = 'highlight-reel';
+  const [composing, setComposing] = useState(false);
+  const [composeProgress, setComposeProgress] = useState('');
+  const [exportProgress, setExportProgress] = useState<StitchProgressEvent | null>(null);
 
   const handleClose = useCallback(() => {
     if (totalClips === 0) {
@@ -344,16 +425,29 @@ export default function EditorScreen() {
   }, []);
 
   const handlePreviewAll = useCallback(() => {
+    if (hasUntrimmedClips) {
+      Alert.alert(
+        'Auto-Trim in Progress',
+        'Please wait — clips are still being auto-trimmed. This usually takes a few seconds per clip.'
+      );
+      return;
+    }
     if (totalClips === 0) return;
     router.push({
       pathname: '/round/preview',
       params: { roundId: state.roundId, startIndex: '0' },
     });
-  }, [state.roundId, totalClips]);
+  }, [state.roundId, totalClips, hasUntrimmedClips]);
 
-  const handleExport = useCallback(() => {
+  const handleExportPress = useCallback(() => {
+    if (hasUntrimmedClips) {
+      Alert.alert(
+        'Auto-Trim in Progress',
+        'Please wait — clips are still being auto-trimmed. This usually takes a few seconds per clip.'
+      );
+      return;
+    }
     const allClips = editor.getAllClipsInOrder();
-
     if (allClips.length === 0) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       if (isNative) {
@@ -361,16 +455,210 @@ export default function EditorScreen() {
       }
       return;
     }
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setExportModalVisible(true);
+  }, [editor, hasUntrimmedClips]);
 
+  const handleExportConfirm = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    // Start upload via UploadContext — this runs in background
-    // and shows progress on the home screen UploadProgressCard
-    startUpload(state.roundId, state.courseName);
+    if (exportMode === 'highlight-reel') {
+      // On-device reel composition
+      const allClips = editor.getAllClipsInOrder();
+      const clipUris = allClips
+        .filter((c) => c.sourceUri)
+        .map((c) => c.sourceUri!);
 
-    // Navigate to home so user can see progress
-    router.replace('/(tabs)');
-  }, [editor, state.roundId, state.courseName, startUpload]);
+      if (clipUris.length === 0) {
+        Alert.alert('No Clips', 'No video files available to compose.');
+        return;
+      }
+
+      // Log clip URIs for debugging
+      console.log('[Editor] Composing with', clipUris.length, 'clips:', clipUris);
+
+      setComposing(true);
+      setComposeProgress('Checking clip files...');
+
+      // Verify clip files exist on disk AND actually filter missing ones.
+      // Passing a ph:// or evicted tmp URI to composeReel throws mid-export
+      // with an opaque "Export Failed" alert — this pre-flight prevents that.
+      let validClipUris = clipUris;
+      if (isNative) {
+        const FileSystem = require('expo-file-system') as typeof import('expo-file-system');
+        const missing: string[] = [];
+        const checked = await Promise.all(
+          clipUris.map(async (uri) => {
+            try {
+              const info = await FileSystem.getInfoAsync(uri);
+              if (info.exists) return uri;
+              missing.push(uri);
+              return null;
+            } catch {
+              missing.push(uri);
+              return null;
+            }
+          })
+        );
+        validClipUris = checked.filter((u): u is string => u !== null);
+
+        if (missing.length > 0) {
+          console.warn(`[Editor] ${missing.length} clip(s) missing on disk:`, missing);
+          if (validClipUris.length === 0) {
+            Alert.alert(
+              'No Playable Clips',
+              'All clips are missing from this device. Try re-importing or re-recording the round.'
+            );
+            setComposing(false);
+            return;
+          }
+          // Non-blocking note — proceed with what we have
+          setComposeProgress(
+            `${missing.length} clip${missing.length > 1 ? 's' : ''} missing — skipping...`
+          );
+        }
+      }
+
+      setComposeProgress('Composing reel on device...');
+
+      try {
+        // Build scorecard data with per-hole timing
+        let cumulativeMs = 0;
+        const scorecardHoles = state.holes.map((hole) => {
+          const holeClips = hole.clips.filter((c) => !c.isExcluded);
+          const holeDurationMs = holeClips.reduce((sum, c) => {
+            const dur = c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs);
+            return sum + dur;
+          }, 0);
+          const startMs = cumulativeMs;
+          cumulativeMs += holeDurationMs;
+          return {
+            holeNumber: hole.holeNumber,
+            par: hole.par,
+            strokes: hole.strokes,
+            startMs,
+            endMs: cumulativeMs,
+          };
+        });
+
+        const scorecardData: ScorecardData = {
+          courseName: state.courseName || 'Round',
+          totalPar: state.holes.reduce((sum, h) => sum + h.par, 0),
+          totalStrokes: state.holes.reduce((sum, h) => sum + h.strokes, 0),
+          holes: scorecardHoles,
+        };
+
+        // Resolve music to a local file path the native engine can read
+        let musicFileUri: string | null = null;
+        if (selectedMusic) {
+          setComposeProgress('Preparing music track...');
+          musicFileUri = await resolveTrackToLocalUri(
+            selectedMusic.id,
+            selectedMusic.file_url,
+          );
+          if (!musicFileUri) {
+            console.warn('[Editor] Could not resolve music track, composing without music');
+          }
+        }
+
+        setComposeProgress(`Stitching ${clipUris.length} clips + overlay...`);
+        setExportProgress(null);
+
+        // Subscribe to native stitch/compose progress events
+        const progressSub = addStitchProgressListener((event) => {
+          setExportProgress(event);
+          if (event.phase === 'composing') {
+            setComposeProgress(`Composing clip ${event.current} of ${event.total}...`);
+          } else {
+            setComposeProgress(`Exporting: ${Math.round(event.percent)}%...`);
+          }
+        });
+
+        let result;
+        try {
+          result = await composeReel(clipUris, scorecardData, musicFileUri);
+        } finally {
+          progressSub.remove();
+        }
+
+        if (result.reelUri) {
+          setComposeProgress('Reel complete!');
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+          // Save to camera roll if available
+          if (isNative) {
+            try {
+              const MediaLibrary = require('expo-media-library') as typeof import('expo-media-library');
+              const { status } = await MediaLibrary.requestPermissionsAsync();
+              if (status === 'granted') {
+                await MediaLibrary.saveToLibraryAsync(result.reelUri);
+                setComposeProgress('Saved to camera roll!');
+              }
+            } catch {
+              // Camera roll save failed — reel is still in cache
+            }
+          }
+
+          // Upload the reel to Supabase Storage so it survives an app rebuild.
+          // On-device stitching produces a `file://` path in Library/Caches which
+          // is wiped whenever the app is reinstalled — without this upload the
+          // highlight reel disappears after every Xcode rebuild.
+          let reelStoragePath: string | null = null;
+          try {
+            setComposeProgress('Uploading reel to cloud...');
+            reelStoragePath = await uploadReelToStorage(
+              state.roundId,
+              result.reelUri,
+              (p) => setComposeProgress(`Uploading reel: ${Math.round(p * 100)}%`),
+            );
+            setComposeProgress('Reel uploaded!');
+          } catch (e) {
+            console.log('[Editor] Reel upload failed, keeping local path:', e);
+            // Fall through — we still save the file:// path as a best-effort
+            // fallback so the reel plays in the current session.
+          }
+
+          // Save reel URI to round record so the detail page can find it.
+          // Prefer the Storage path (survives rebuilds) over the local file:// path.
+          try {
+            await updateRound(state.roundId, {
+              reel_url: reelStoragePath ?? result.reelUri,
+              status: 'ready',
+            });
+          } catch (e) {
+            console.log('[Editor] Failed to save reel_url:', e);
+          }
+
+          setTimeout(() => {
+            setComposing(false);
+            setExportProgress(null);
+            setExportModalVisible(false);
+            Alert.alert(
+              'Reel Created!',
+              `Your ${result.clipCount}-clip highlight reel (${Math.round(result.durationMs / 1000)}s) has been saved.`,
+              [{ text: 'OK', onPress: () => router.replace('/(tabs)') }]
+            );
+          }, 800);
+        } else {
+          throw new Error('No reel URI returned');
+        }
+      } catch (err) {
+        setComposing(false);
+        setExportProgress(null);
+        const msg = err instanceof Error ? err.message : 'Unknown error';
+        console.error('[Editor] Compose failed:', err);
+        if (msg.includes('native rebuild') || msg.includes('not available')) {
+          Alert.alert(
+            'Native Build Required',
+            'The highlight reel composer needs a native build. Please rebuild: npx expo run:ios --device'
+          );
+        } else {
+          Alert.alert('Export Failed', `Reel composition failed: ${msg}`);
+        }
+      }
+      return;
+    }
+  }, [state, editor, selectedMusic]);
 
   // ---- Loading ----
   if (state.loading) {
@@ -499,6 +787,7 @@ export default function EditorScreen() {
               backgroundColor: theme.colors.surfaceElevated,
               borderWidth: 1,
               borderColor: theme.colors.surfaceBorder,
+              opacity: hasUntrimmedClips ? 0.4 : 1,
             }}
           >
             <Text
@@ -513,7 +802,7 @@ export default function EditorScreen() {
           </Pressable>
 
           <Pressable
-            onPress={handleExport}
+            onPress={handleExportPress}
             style={{
               flexDirection: 'row',
               alignItems: 'center',
@@ -522,6 +811,7 @@ export default function EditorScreen() {
               paddingVertical: 8,
               borderRadius: 8,
               backgroundColor: '#000',
+              opacity: hasUntrimmedClips ? 0.4 : 1,
             }}
           >
             <Upload size={13} color="#fff" />
@@ -531,6 +821,27 @@ export default function EditorScreen() {
           </Pressable>
         </View>
       </View>
+
+      {/* ---- AUTO-TRIM PROGRESS BANNER ---- */}
+      {isTrimming && (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 8,
+            paddingHorizontal: 16,
+            paddingVertical: 10,
+            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+            borderBottomWidth: 1,
+            borderBottomColor: 'rgba(76, 175, 80, 0.2)',
+          }}
+        >
+          <ActivityIndicator size="small" color={theme.colors.primary} />
+          <Text style={{ color: theme.colors.primary, fontSize: 13, fontWeight: '600', flex: 1 }}>
+            Auto-trimming clips... {allClips.length - untrimmedCount} of {allClips.length}
+          </Text>
+        </View>
+      )}
 
       {/* ---- SCROLLABLE CONTENT ---- */}
       <ScrollView
@@ -636,9 +947,9 @@ export default function EditorScreen() {
       <ClipTrimModal
         visible={!!trimClip}
         clip={trimClip}
-        onSave={(startMs, endMs) => {
+        onSave={(startMs, endMs, sourceOverride) => {
           if (trimClip) {
-            editor.updateTrim(trimClip.id, startMs, endMs);
+            editor.updateTrim(trimClip.id, startMs, endMs, sourceOverride);
           }
           setTrimClip(null);
         }}
@@ -650,11 +961,192 @@ export default function EditorScreen() {
         visible={musicPickerVisible}
         selectedTrackId={selectedMusic?.id ?? null}
         onSelect={(track) => {
-          setSelectedMusic(track ? { id: track.id, title: track.title } : null);
+          setSelectedMusic(track ? { id: track.id, title: track.title, file_url: track.file_url } : null);
           setMusicPickerVisible(false);
         }}
         onDismiss={() => setMusicPickerVisible(false)}
       />
+
+      {/* Export Settings Modal */}
+      <Modal
+        visible={exportModalVisible}
+        transparent
+        animationType="slide"
+        onRequestClose={() => setExportModalVisible(false)}
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}
+          onPress={() => setExportModalVisible(false)}
+        >
+          <Pressable
+            onPress={() => {}} // Prevent closing when tapping inside the sheet
+            style={{
+              backgroundColor: theme.colors.background,
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              paddingHorizontal: 20,
+              paddingTop: 16,
+              paddingBottom: insets.bottom + 20,
+            }}
+          >
+            {/* Handle bar */}
+            <View
+              style={{
+                width: 36,
+                height: 4,
+                borderRadius: 2,
+                backgroundColor: theme.colors.surfaceBorder,
+                alignSelf: 'center',
+                marginBottom: 20,
+              }}
+            />
+
+            <Text style={{ color: theme.colors.textPrimary, fontWeight: '800', fontSize: 18, marginBottom: 20 }}>
+              Export Settings
+            </Text>
+
+            {/* Resolution */}
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 8 }}>
+              Resolution
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 16 }}>
+              {config.export.resolutionOptions.map((res) => {
+                const active = exportResolution === res;
+                return (
+                  <Pressable
+                    key={res}
+                    onPress={() => { Haptics.selectionAsync(); setExportResolution(res); }}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 10,
+                      borderRadius: theme.radius.md,
+                      backgroundColor: active ? theme.colors.textPrimary : theme.colors.surfaceElevated,
+                      borderWidth: 1,
+                      borderColor: active ? theme.colors.textPrimary : theme.colors.surfaceBorder,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text style={{ color: active ? theme.colors.background : theme.colors.textPrimary, fontWeight: '700', fontSize: 13 }}>
+                      {res.toUpperCase()}
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 8 }}>
+              Frame Rate
+            </Text>
+            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 20 }}>
+              {config.export.frameRateOptions.map((fps) => {
+                const active = exportFps === fps;
+                return (
+                  <Pressable
+                    key={fps}
+                    onPress={() => { Haptics.selectionAsync(); setExportFps(fps); }}
+                    style={{
+                      flex: 1,
+                      paddingVertical: 10,
+                      borderRadius: theme.radius.md,
+                      backgroundColor: active ? theme.colors.textPrimary : theme.colors.surfaceElevated,
+                      borderWidth: 1,
+                      borderColor: active ? theme.colors.textPrimary : theme.colors.surfaceBorder,
+                      alignItems: 'center',
+                    }}
+                  >
+                    <Text style={{ color: active ? theme.colors.background : theme.colors.textPrimary, fontWeight: '700', fontSize: 13 }}>
+                      {fps} FPS
+                    </Text>
+                  </Pressable>
+                );
+              })}
+            </View>
+
+            <View
+              style={{
+                backgroundColor: theme.colors.surfaceElevated,
+                borderRadius: theme.radius.md,
+                padding: 12,
+                marginBottom: 20,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 10,
+              }}
+            >
+              <Monitor size={16} color={theme.colors.primary} />
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 12, flex: 1 }}>
+                Composed on your phone — stitches clips, adds scorecard overlay and background music. No cloud needed.
+              </Text>
+            </View>
+
+            {/* Composing progress */}
+            {composing && (
+              <View
+                style={{
+                  marginBottom: 16,
+                  paddingVertical: 12,
+                  paddingHorizontal: 14,
+                  backgroundColor: theme.colors.surfaceElevated,
+                  borderRadius: theme.radius.md,
+                }}
+              >
+                <View
+                  style={{
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: 10,
+                  }}
+                >
+                  <ActivityIndicator size="small" color={theme.colors.primary} />
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
+                    {composeProgress}
+                  </Text>
+                </View>
+
+                {/* Progress bar */}
+                {exportProgress && (
+                  <View
+                    style={{
+                      marginTop: 10,
+                      height: 6,
+                      borderRadius: 3,
+                      backgroundColor: 'rgba(255,255,255,0.1)',
+                      overflow: 'hidden',
+                    }}
+                  >
+                    <View
+                      style={{
+                        height: '100%',
+                        borderRadius: 3,
+                        backgroundColor: theme.colors.primary,
+                        width: `${Math.min(100, Math.max(0, exportProgress.percent))}%`,
+                      }}
+                    />
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Export button */}
+            <Pressable
+              onPress={handleExportConfirm}
+              disabled={composing}
+              style={{
+                backgroundColor: composing ? theme.colors.surfaceBorder : theme.colors.primary,
+                paddingVertical: 16,
+                borderRadius: theme.radius.lg,
+                alignItems: 'center',
+                opacity: composing ? 0.6 : 1,
+              }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>
+                {composing ? 'Composing...' : 'Create Highlight Reel'}
+              </Text>
+            </Pressable>
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   );
 }

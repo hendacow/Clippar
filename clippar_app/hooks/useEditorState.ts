@@ -1,7 +1,9 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getClipUrl } from '@/lib/r2';
+import { detectAndTrim, deleteFile, getMemoryStats } from 'shot-detector';
+import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
 const DEFAULT_PAR = 4;
@@ -110,12 +112,27 @@ export function useEditorState(roundId: string | undefined) {
         clip_url: string | null;
       }[];
 
-      // Generate signed URLs for all clips
+      // Filter out shots with empty clip_url (import pre-creates shots with clip_url=''
+      // before the reel-upload step; without this filter those rows become black
+      // unplayable cards in the editor).
+      const realShots = shots.filter((s) => s.clip_url && s.clip_url.trim() !== '');
+      if (realShots.length < shots.length) {
+        console.log(
+          `[useEditorState] Skipped ${shots.length - realShots.length} shot(s) with empty clip_url`
+        );
+      }
+
+      // Generate signed URLs for all remaining clips
       const clips = await Promise.all(
-        shots.map(async (shot): Promise<EditorClip> => {
+        realShots.map(async (shot): Promise<EditorClip> => {
           let sourceUri: string | null = null;
           if (shot.clip_url) {
             sourceUri = await getClipUrl(shot.clip_url);
+            if (!sourceUri) {
+              console.warn(
+                `[useEditorState] Hole ${shot.hole_number} shot ${shot.shot_number}: getClipUrl returned null for "${shot.clip_url}"`
+              );
+            }
           }
           return {
             id: shot.id,
@@ -168,20 +185,35 @@ export function useEditorState(roundId: string | undefined) {
         par: s.par,
       }));
 
-      const clips: EditorClip[] = localClips.map((c) => ({
-        id: String(c.id),
-        type: 'shot' as const,
-        holeNumber: c.hole_number,
-        shotNumber: c.shot_number,
-        sourceUri: c.file_uri, // local file URI on device
-        storagePath: c.uploaded
-          ? `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`
-          : null,
-        trimStartMs: c.trim_start_ms ?? 0,
-        trimEndMs: c.trim_end_ms ?? -1,
-        durationMs: (c.duration_seconds ?? 0) * 1000,
-        isExcluded: (c.is_excluded ?? 0) === 1,
-      }));
+      const clips: EditorClip[] = localClips.map((c) => {
+        const rawDurationMs = (c.duration_seconds ?? 0) * 1000;
+        const trimStart = c.trim_start_ms ?? 0;
+        const trimEnd = c.trim_end_ms ?? -1;
+
+        // Trim offsets are now always relative to the ORIGINAL video.
+        // The trimmer uses originalUri for the timeline and these offsets
+        // mark where the handles should be positioned.
+
+        return {
+          id: String(c.id),
+          type: 'shot' as const,
+          holeNumber: c.hole_number,
+          shotNumber: c.shot_number,
+          sourceUri: c.file_uri,
+          storagePath: c.uploaded
+            ? `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`
+            : null,
+          trimStartMs: trimStart,
+          trimEndMs: trimEnd,
+          durationMs: rawDurationMs,
+          isExcluded: (c.is_excluded ?? 0) === 1,
+          autoTrimmed: c.auto_trimmed === 1,
+          originalUri: c.original_file_uri ?? undefined,
+          needsTrim: c.needs_trim === 1 && c.auto_trimmed !== 1,
+          autoTrimStartMs: c.auto_trim_start_ms ?? undefined,
+          autoTrimEndMs: c.auto_trim_end_ms ?? undefined,
+        };
+      });
 
       // Fetch course hole pars if course_id exists
       let courseHolePars: Record<number, number> = {};
@@ -275,23 +307,39 @@ export function useEditorState(roundId: string | undefined) {
   }, []);
 
   const updateTrim = useCallback(
-    (clipId: string, trimStartMs: number, trimEndMs: number) => {
+    (
+      clipId: string,
+      trimStartMs: number,
+      trimEndMs: number,
+      sourceOverride?: { sourceUri: string; durationMs: number },
+    ) => {
       setState((prev) => ({
         ...prev,
         holes: prev.holes.map((h) => ({
           ...h,
-          clips: h.clips.map((c) =>
-            c.id === clipId ? { ...c, trimStartMs, trimEndMs } : c
-          ),
+          clips: h.clips.map((c) => {
+            if (c.id !== clipId) return c;
+            const updated = { ...c, trimStartMs, trimEndMs };
+            if (sourceOverride) {
+              updated.sourceUri = sourceOverride.sourceUri;
+              updated.durationMs = sourceOverride.durationMs;
+            }
+            return updated;
+          }),
         })),
       }));
       // Persist to SQLite
       const numId = parseInt(clipId, 10);
       if (!isNaN(numId) && storage) {
-        storage.updateClipEditorState(numId, {
+        const dbUpdates: Parameters<typeof storage.updateClipEditorState>[1] = {
           trim_start_ms: trimStartMs,
           trim_end_ms: trimEndMs,
-        }).catch(() => {});
+        };
+        if (sourceOverride) {
+          dbUpdates.file_uri = sourceOverride.sourceUri;
+          dbUpdates.duration_seconds = sourceOverride.durationMs / 1000;
+        }
+        storage.updateClipEditorState(numId, dbUpdates).catch(() => {});
       }
     },
     []
@@ -348,6 +396,325 @@ export function useEditorState(roundId: string | undefined) {
     }
   }, []);
 
+  // ---- Lazy trim processing ----
+
+  // Cancellation flag — set to true when the editor unmounts to abort background processing
+  const trimCancelledRef = useRef(false);
+
+  // Clean up on unmount: cancel any in-progress trim processing
+  useEffect(() => {
+    return () => {
+      trimCancelledRef.current = true;
+    };
+  }, []);
+
+  /** Load user's trim settings (pre/post roll) from SQLite, falling back to config defaults. */
+  const getTrimSettings = useCallback(async (): Promise<{
+    preRollMs: number;
+    postRollMs: number;
+  }> => {
+    let preRollMs = config.trim.defaultPreRollMs;
+    let postRollMs = config.trim.defaultPostRollMs;
+    if (storage) {
+      try {
+        const saved = await storage.getSetting('trim_settings');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed.preRollMs) preRollMs = parsed.preRollMs;
+          if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+        }
+      } catch {}
+    }
+    return { preRollMs, postRollMs };
+  }, []);
+
+  /** Helper: update a single clip in React state by ID */
+  const updateClipInState = useCallback(
+    (clipId: string, updater: (clip: EditorClip) => EditorClip) => {
+      setState((prev) => ({
+        ...prev,
+        holes: prev.holes.map((h) => ({
+          ...h,
+          clips: h.clips.map((c) => (c.id === clipId ? updater(c) : c)),
+        })),
+      }));
+    },
+    []
+  );
+
+  /**
+   * Trim a single clip that hasn't been processed yet.
+   * Calls detectAndTrim, updates React state + SQLite.
+   */
+  const trimClip = useCallback(
+    async (clipId: string): Promise<EditorClip | null> => {
+      // Find the clip across all holes
+      let clip: EditorClip | undefined;
+      for (const hole of state.holes) {
+        clip = hole.clips.find((c) => c.id === clipId);
+        if (clip) break;
+      }
+      if (!clip || !clip.sourceUri) return null;
+
+      // If already trimmed or doesn't need trim, return as-is
+      if (!clip.needsTrim) return clip;
+
+      const originalSourceUri = clip.sourceUri;
+      const { preRollMs, postRollMs } = await getTrimSettings();
+
+      try {
+        const result = await detectAndTrim(originalSourceUri, preRollMs, postRollMs);
+
+        const updatedClip: EditorClip = {
+          ...clip,
+          needsTrim: false,
+          autoTrimmed: true,
+        };
+
+        if (result.found && result.trimmedUri) {
+          updatedClip.sourceUri = result.trimmedUri;
+          updatedClip.originalUri = originalSourceUri;
+          // Store trim offsets relative to the ORIGINAL video
+          updatedClip.trimStartMs = result.trimStartMs;
+          updatedClip.trimEndMs = result.trimEndMs;
+          updatedClip.autoTrimStartMs = result.trimStartMs;
+          updatedClip.autoTrimEndMs = result.trimEndMs;
+          updatedClip.trimConfidence = result.confidence;
+          updatedClip.impactTimeMs = result.impactTimeMs;
+        }
+
+        // Update React state
+        updateClipInState(clipId, () => updatedClip);
+
+        // Persist to SQLite
+        const numId = parseInt(clipId, 10);
+        if (!isNaN(numId) && storage) {
+          if (result.found && result.trimmedUri) {
+            await storage
+              .markClipTrimmed(
+                numId,
+                result.trimmedUri,
+                result.impactTimeMs,
+                result.confidence,
+                result.trimStartMs,
+                result.trimEndMs
+              )
+              .catch(() => {});
+            // Persist trim offsets (relative to original) + shot type
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: result.trimStartMs,
+                trim_end_ms: result.trimEndMs,
+                shot_type: result.shotType,
+              })
+              .catch(() => {});
+          } else if (result.found && !result.trimmedUri && result.shotType === 'putt') {
+            // Putt — no trim file created (full clip kept), but persist classification
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              })
+              .catch(() => {});
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
+              .catch(() => {});
+          } else {
+            // No swing found — mark as processed anyway so we don't retry
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+              })
+              .catch(() => {});
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, null, null)
+              .catch(() => {});
+          }
+        }
+
+        // Keep the original file — the trimmer needs it for full-timeline editing.
+
+        return updatedClip;
+      } catch (err) {
+        console.warn(`[useEditorState] trimClip failed for ${clipId}:`, err);
+        return null;
+      }
+    },
+    [state.holes, getTrimSettings, updateClipInState]
+  );
+
+  /**
+   * Process all untrimmed clips in the background, one at a time.
+   * Called once on editor mount. Respects cancellation via trimCancelledRef.
+   */
+  const processAllUntrimmed = useCallback(async () => {
+    // Reset cancellation flag in case the hook is re-used
+    trimCancelledRef.current = false;
+
+    const { preRollMs, postRollMs } = await getTrimSettings();
+
+    // Collect all clips that need trimming across all holes
+    const untrimmedClips: EditorClip[] = [];
+    for (const hole of state.holes) {
+      for (const clip of hole.clips) {
+        if (clip.needsTrim && clip.sourceUri) {
+          untrimmedClips.push(clip);
+        }
+      }
+    }
+
+    if (untrimmedClips.length === 0) return;
+
+    // Log initial memory stats
+    try {
+      const initialStats = await getMemoryStats();
+      console.log(
+        `[MEMORY] === START: ${untrimmedClips.length} clips to process ===\n` +
+        `[MEMORY] Available: ${initialStats.availableMemoryMB}MB | Used: ${initialStats.usedMemoryMB}MB | Free disk: ${initialStats.freeDiskMB}MB | Caches: ${initialStats.cachesDirMB}MB`
+      );
+    } catch {}
+
+    for (let clipIdx = 0; clipIdx < untrimmedClips.length; clipIdx++) {
+      const clip = untrimmedClips[clipIdx];
+
+      // Check for cancellation before each clip
+      if (trimCancelledRef.current) {
+        console.log('[useEditorState] Trim processing cancelled (unmount)');
+        return;
+      }
+
+      try {
+        // Log memory BEFORE each clip
+        try {
+          const before = await getMemoryStats();
+          console.log(
+            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} BEFORE: Available: ${before.availableMemoryMB}MB | Used: ${before.usedMemoryMB}MB | Free disk: ${before.freeDiskMB}MB`
+          );
+          // CRASH WARNING: if available memory drops below 200MB
+          if (before.availableMemoryMB > 0 && before.availableMemoryMB < 200) {
+            console.warn(`[MEMORY] ⚠️ LOW MEMORY WARNING: Only ${before.availableMemoryMB}MB available! iOS may kill the app soon.`);
+          }
+        } catch {}
+
+        const result = await detectAndTrim(
+          clip.sourceUri!,
+          preRollMs,
+          postRollMs
+        );
+
+        // Check cancellation again after the async call
+        if (trimCancelledRef.current) return;
+
+        const updatedClip: EditorClip = {
+          ...clip,
+          needsTrim: false,
+          autoTrimmed: true,
+        };
+
+        const originalSourceUri = clip.sourceUri!;
+
+        if (result.found && result.trimmedUri) {
+          updatedClip.sourceUri = result.trimmedUri;
+          updatedClip.originalUri = originalSourceUri;
+          // Store trim offsets relative to the ORIGINAL video (for full-timeline trimmer)
+          updatedClip.trimStartMs = result.trimStartMs;
+          updatedClip.trimEndMs = result.trimEndMs;
+          updatedClip.autoTrimStartMs = result.trimStartMs;
+          updatedClip.autoTrimEndMs = result.trimEndMs;
+          updatedClip.trimConfidence = result.confidence;
+          updatedClip.impactTimeMs = result.impactTimeMs;
+        }
+
+        // Update React state
+        updateClipInState(clip.id, () => updatedClip);
+
+        // Persist to SQLite
+        const numId = parseInt(clip.id, 10);
+        if (!isNaN(numId) && storage) {
+          if (result.found && result.trimmedUri) {
+            await storage
+              .markClipTrimmed(
+                numId,
+                result.trimmedUri,
+                result.impactTimeMs,
+                result.confidence,
+                result.trimStartMs,
+                result.trimEndMs
+              )
+              .catch(() => {});
+            // Also persist trim offsets (relative to original) + shot type
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: result.trimStartMs,
+                trim_end_ms: result.trimEndMs,
+                shot_type: result.shotType,
+              })
+              .catch(() => {});
+          } else if (result.found && !result.trimmedUri && result.shotType === 'putt') {
+            // Putt — no trim file created (full clip kept), but persist classification
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
+              .catch(() => {});
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              })
+              .catch(() => {});
+          } else {
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, null, null)
+              .catch(() => {});
+          }
+        }
+
+        // Keep the original file — the trimmer needs it for full-timeline editing.
+        // Original cleanup is now manual via settings.
+
+        // Log memory AFTER each clip (including cleanup)
+        try {
+          const after = await getMemoryStats();
+          console.log(
+            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} AFTER:  Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB` +
+            ` | ${result.found ? 'TRIMMED' : 'no swing'} (hole ${clip.holeNumber}, shot ${clip.shotNumber})`
+          );
+        } catch {}
+      } catch (err) {
+        console.warn(
+          `[useEditorState] Failed to process clip ${clip.id}:`,
+          err
+        );
+        // Log memory even on failure
+        try {
+          const errStats = await getMemoryStats();
+          console.log(
+            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} FAILED: Available: ${errStats.availableMemoryMB}MB | Used: ${errStats.usedMemoryMB}MB`
+          );
+        } catch {}
+        // CRITICAL: mark the failed clip as processed so it doesn't block the
+        // "Auto-trimming X of Y" spinner forever and doesn't keep Export/Preview
+        // disabled. Without this, one bad clip wedges the entire editor.
+        const numId = parseInt(clip.id, 10);
+        if (!isNaN(numId) && storage) {
+          try {
+            await storage.markClipTrimmed(numId, clip.sourceUri!, null, null);
+          } catch {}
+        }
+        updateClipInState(clip.id, (c) => ({
+          ...c,
+          needsTrim: false,
+          autoTrimmed: false,
+        }));
+        // Continue with next clip — don't abort the whole batch
+      }
+    }
+
+    console.log('[useEditorState] All untrimmed clips processed');
+  }, [state.holes, getTrimSettings, updateClipInState]);
+
   // Get all clips in playback order: intro → hole clips in order → outro
   // Excluded clips are skipped
   const getAllClipsInOrder = useCallback((): EditorClip[] => {
@@ -371,5 +738,7 @@ export function useEditorState(roundId: string | undefined) {
     setOutro,
     toggleExclude,
     getAllClipsInOrder,
+    trimClip,
+    processAllUntrimmed,
   };
 }

@@ -3,7 +3,31 @@ import { Platform } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
-import { saveLocalClip } from '@/lib/storage';
+import type { ShotTypeClassification } from 'shot-detector';
+import {
+  saveLocalClip,
+  updateClipEditorState,
+  markClipTrimmed,
+  getSetting,
+} from '@/lib/storage';
+import { detectAndTrim } from 'shot-detector';
+import { config } from '@/constants/config';
+
+// Read user-configured pre/post roll from SQLite, falling back to config defaults.
+// Mirrors useEditorState.getTrimSettings so live record uses the same numbers as import.
+async function loadTrimSettings(): Promise<{ preRollMs: number; postRollMs: number }> {
+  let preRollMs = config.trim.defaultPreRollMs;
+  let postRollMs = config.trim.defaultPostRollMs;
+  try {
+    const saved = await getSetting('trim_settings');
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (parsed.preRollMs) preRollMs = parsed.preRollMs;
+      if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+    }
+  } catch {}
+  return { preRollMs, postRollMs };
+}
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -18,6 +42,7 @@ interface UseCameraParams {
   shotNumber: number;
   getLocation?: () => Promise<{ latitude: number; longitude: number } | null>;
   onClipSaved?: (clip: ClipMetadata) => void;
+  onShotClassified?: (shotType: ShotTypeClassification) => void;
 }
 
 export function useCamera({
@@ -26,6 +51,7 @@ export function useCamera({
   shotNumber,
   getLocation,
   onClipSaved,
+  onShotClassified,
 }: UseCameraParams) {
   const cameraRef = useRef<CameraView>(null);
   const [isRecording, setIsRecording] = useState(false);
@@ -87,6 +113,8 @@ export function useCamera({
 
       if (!cameraRef.current || !isRecordingRef.current) return;
 
+      // Note: videoQuality must be set as a PROP on <CameraView> (in record.tsx),
+      // not passed to recordAsync. It's not a valid recordAsync option.
       const video = await cameraRef.current.recordAsync({
         maxDuration: 120,
       });
@@ -106,15 +134,82 @@ export function useCamera({
           }
         }
 
-        // Save to SQLite
-        await saveLocalClip({
+        // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
+        // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
+        // and swap file_uri to the trimmed file. If detection fails, the editor's
+        // processAllUntrimmed pass will retry using the same detectAndTrim path.
+        const clipId = await saveLocalClip({
           round_id: rid,
           hole_number: hole,
           shot_number: shot,
           file_uri: finalUri,
+          original_file_uri: finalUri,
           gps_latitude: gps?.latitude,
           gps_longitude: gps?.longitude,
           duration_seconds: durationSeconds,
+          auto_trimmed: 0,
+          needs_trim: 1,
+          trim_start_ms: 0,
+          trim_end_ms: -1,
+        });
+
+        // Run the SAME native detect+trim pipeline as imports in background.
+        // This produces a trimmed passthrough file, persists boundaries relative
+        // to the original, and classifies the shot for hole auto-advance.
+        loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
+          try {
+            const result = await detectAndTrim(finalUri, preRollMs, postRollMs);
+            if (!clipId) return;
+
+            if (result.found && result.trimmedUri) {
+              // Swing detected + trimmed file produced
+              console.log(
+                `[ShotDetector] Swing @ ${result.impactTimeMs}ms ` +
+                  `(conf ${result.confidence.toFixed(2)}) → trim ${result.trimStartMs}..${result.trimEndMs}ms`
+              );
+              await markClipTrimmed(
+                clipId,
+                result.trimmedUri,
+                result.impactTimeMs,
+                result.confidence,
+                result.trimStartMs,
+                result.trimEndMs
+              ).catch(() => {});
+              await updateClipEditorState(clipId, {
+                trim_start_ms: Math.round(result.trimStartMs),
+                trim_end_ms: Math.round(result.trimEndMs),
+                shot_type: result.shotType,
+              }).catch(() => {});
+              onShotClassified?.(result.shotType);
+            } else if (result.found && result.shotType === 'putt') {
+              // Putt — no trim file, keep full original
+              console.log(
+                `[ShotDetector] Putt @ ${result.impactTimeMs}ms ` +
+                  `(conf ${result.confidence.toFixed(2)}) — keeping full clip`
+              );
+              await markClipTrimmed(
+                clipId,
+                finalUri,
+                result.impactTimeMs,
+                result.confidence
+              ).catch(() => {});
+              await updateClipEditorState(clipId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              }).catch(() => {});
+              onShotClassified?.('putt');
+            } else {
+              // No usable detection — still mark as processed so editor won't retry
+              console.log('[ShotDetector] No swing detected — keeping full clip, mark processed');
+              await markClipTrimmed(clipId, finalUri, null, null).catch(() => {});
+              // Assume swing for hole-advance purposes; the auto-advance logic
+              // is tolerant of bogus classifications across many clips.
+              onShotClassified?.('swing');
+            }
+          } catch (err) {
+            console.log('[ShotDetector] Detection error (non-fatal):', err);
+          }
         });
 
         const clip: ClipMetadata = {
@@ -138,7 +233,7 @@ export function useCamera({
       setIsRecording(false);
       KeepAwake?.deactivateKeepAwake('recording');
     }
-  }, [getLocation, onClipSaved]);
+  }, [getLocation, onClipSaved, onShotClassified]);
 
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
