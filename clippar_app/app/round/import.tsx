@@ -34,6 +34,7 @@ import { CourseSearch } from '@/components/record/CourseSearch';
 import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
 import { saveLocalClip, saveLocalRound, saveLocalScore } from '@/lib/storage';
 import { resolveAssetUri } from '@/lib/media';
+import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { supabase } from '@/lib/supabase';
 import type { HoleData } from '@/types/round';
 import { detectSwing } from 'shot-detector';
@@ -896,6 +897,10 @@ export default function ImportRoundScreen() {
           status: 'ready',
         } as any);
       } catch {}
+
+      // Fire-and-forget background upload so every imported clip reaches
+      // Supabase Storage — the reel-export flow no longer gates durability.
+      void enqueueRoundUpload(roundId, courseName.trim(), 'local-only');
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.replace(`/round/editor?roundId=${roundId}`);

@@ -21,6 +21,7 @@ import {
   Film,
   MapPin,
   Hash,
+  ShieldCheck,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -30,6 +31,8 @@ import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { getProfile, getRounds } from '@/lib/api';
+import { verifyAllRoundsReachable } from '@/lib/verifyRound';
+import { processUploadQueue } from '@/lib/uploadQueue';
 
 interface ProfileRow {
   display_name: string | null;
@@ -151,6 +154,50 @@ export default function ProfileScreen() {
       },
     ]);
   };
+
+  // Debug: smoke-test reachability of every round in Supabase so the user
+  // can confirm their videos would survive a reinstall / cross-device sign-in.
+  const [verifying, setVerifying] = useState(false);
+  const handleVerifyRounds = useCallback(async () => {
+    if (verifying) return;
+    setVerifying(true);
+    Haptics.selectionAsync();
+    try {
+      // Flush any pending uploads first so the check isn't racing the queue.
+      void processUploadQueue();
+      const reports = await verifyAllRoundsReachable();
+      const failing = reports.filter((r) => !r.ok);
+      if (reports.length === 0) {
+        Alert.alert('Verify Rounds', 'No rounds found in Supabase.');
+      } else if (failing.length === 0) {
+        Alert.alert(
+          'All Rounds Reachable',
+          `Checked ${reports.length} round(s). All videos would play on a fresh install.`
+        );
+      } else {
+        const lines = failing
+          .slice(0, 5)
+          .map(
+            (r) =>
+              `• ${r.courseName ?? r.roundId.slice(0, 8)}: ${r.issues.join(', ')}`
+          )
+          .join('\n');
+        const more =
+          failing.length > 5 ? `\n…and ${failing.length - 5} more` : '';
+        Alert.alert(
+          `${failing.length}/${reports.length} rounds have issues`,
+          `${lines}${more}`
+        );
+      }
+    } catch (err) {
+      Alert.alert(
+        'Verify Failed',
+        err instanceof Error ? err.message : 'Something went wrong.'
+      );
+    } finally {
+      setVerifying(false);
+    }
+  }, [verifying]);
 
   return (
     <GradientBackground>
@@ -473,6 +520,13 @@ export default function ProfileScreen() {
               icon={<MessageSquare size={18} color={theme.colors.textTertiary} />}
               title="Feedback"
               onPress={() => Haptics.selectionAsync()}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<ShieldCheck size={18} color={theme.colors.primary} />}
+              title={verifying ? 'Verifying Rounds…' : 'Verify My Rounds'}
+              subtitle="Check every round is playable after reinstall"
+              onPress={handleVerifyRounds}
             />
           </Card>
 

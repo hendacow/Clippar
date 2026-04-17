@@ -12,6 +12,7 @@ import {
 } from '@/lib/storage';
 import { detectAndTrim } from 'shot-detector';
 import { config } from '@/constants/config';
+import { enqueueClipUpload } from '@/lib/uploadQueue';
 
 // Read user-configured pre/post roll from SQLite, falling back to config defaults.
 // Mirrors useEditorState.getTrimSettings so live record uses the same numbers as import.
@@ -225,6 +226,11 @@ export function useCamera({
         };
 
         onClipSaved?.(clip);
+
+        // Auto-upload in background so the clip reaches Supabase Storage
+        // without waiting for the user to hit "Finish round". The queue is
+        // idempotent — calling it once per clip is fine.
+        void enqueueClipUpload(rid, null);
       }
     } catch (error) {
       console.error('[useCamera] Recording error:', error);
