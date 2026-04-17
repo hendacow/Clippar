@@ -30,6 +30,7 @@ import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
 import { getOrphanedRounds } from '@/lib/storage';
 import { useUploadContext } from '@/contexts/UploadContext';
+import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -53,6 +54,7 @@ export default function RecordScreen() {
   const [courseHoles, setCourseHoles] = useState<HoleData[] | undefined>();
   const [showPenalty, setShowPenalty] = useState(false);
   const [orphanedRound, setOrphanedRound] = useState<{ id: string; course_name: string } | null>(null);
+  const importTarget = useOnboardingTarget('import-card');
 
   const roundState = round.state;
   const isActive = roundState?.status === 'in_progress';
@@ -221,6 +223,8 @@ export default function RecordScreen() {
           <Button title="Start Round" onPress={startRound} style={{ marginTop: 24 }} />
 
           <Pressable
+            ref={importTarget.ref}
+            onLayout={importTarget.onLayout}
             onPress={() => router.push('/round/import')}
             style={{
               marginTop: 16,

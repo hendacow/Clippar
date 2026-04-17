@@ -14,6 +14,11 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
 async function initTables() {
   if (!db) return;
   await db.execAsync(`
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT
+    );
+
     CREATE TABLE IF NOT EXISTS local_clips (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       round_id TEXT NOT NULL,
@@ -331,3 +336,28 @@ export async function deleteLocalRound(roundId: string) {
   await database.runAsync('DELETE FROM local_clips WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_rounds WHERE id = ?', roundId);
 }
+
+// Generic key/value settings (used by onboarding flags, etc.)
+export async function getSetting(key: string): Promise<string | null> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ value: string | null }>(
+    'SELECT value FROM app_settings WHERE key = ?',
+    key
+  );
+  return row?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string | null): Promise<void> {
+  const database = await getDatabase();
+  if (value === null) {
+    await database.runAsync('DELETE FROM app_settings WHERE key = ?', key);
+    return;
+  }
+  await database.runAsync(
+    `INSERT INTO app_settings (key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+    key,
+    value
+  );
+}
+
