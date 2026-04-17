@@ -37,6 +37,7 @@ import { ScoreCollection } from '@/components/library/ScoreCollection';
 import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
 import { StatsHero } from '@/components/stats/StatsHero';
 import { useStatsFilter, type StatCategoryKey } from '@/hooks/useStatsFilter';
+import { processUploadQueue } from '@/lib/uploadQueue';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -400,7 +401,17 @@ export default function HomeScreen() {
               try {
                 const localClips = await storage!.getClipsForRound(r.id);
                 if (localClips && localClips.length > 0) {
-                  signedMap[r.id] = localClips[0].file_uri;
+                  // Only use a local URI as preview if it's actually playable —
+                  // `ph://`/`assets-library://` choke expo-video and produce the
+                  // broken-play-icon watermark. Prefer normalized file:// paths.
+                  const first = localClips[0];
+                  const rawUri = first.file_uri ?? '';
+                  const normalizedUri = rawUri.startsWith('file://') || rawUri.startsWith('/')
+                    ? rawUri
+                    : null;
+                  if (normalizedUri) {
+                    signedMap[r.id] = normalizedUri;
+                  }
                   // Also update clips_count if the round shows 0
                   if ((r.clips_count ?? 0) === 0) {
                     const idx = mapped.findIndex((m: any) => m.id === r.id);
@@ -474,11 +485,17 @@ export default function HomeScreen() {
   );
 
   // Initial data fetch on mount (par/score_to_par repair is already called
-  // once at app startup in app/_layout.tsx).
+  // once at app startup in app/_layout.tsx). Also kick the upload queue so
+  // any clips still sitting locally get pushed to Supabase — this is what
+  // produces the signed URLs the preview cards need.
   useEffect(() => {
     fetchRounds();
     fetchStats();
     fetchName();
+    processUploadQueue()
+      // Re-fetch rounds after queue drain so any newly-signed URLs show up
+      .then(() => fetchRounds())
+      .catch(() => {});
   }, [fetchRounds, fetchStats, fetchName]);
 
   // Show real rounds if we have them, otherwise show mock as placeholder

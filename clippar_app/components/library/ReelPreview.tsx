@@ -48,6 +48,7 @@ function NativeReelPreview({
 }) {
   const { useVideoPlayer, VideoView } = ExpoVideo!;
   const [isLoading, setIsLoading] = useState(true);
+  const [hasError, setHasError] = useState(false);
 
   const player = useVideoPlayer(signedUrl, (p) => {
     p.loop = true;
@@ -57,19 +58,33 @@ function NativeReelPreview({
 
   // Ensure playback restarts after player recreation
   useEffect(() => {
-    player.play();
+    try {
+      player.play();
+    } catch {}
   }, [player]);
 
   useEffect(() => {
-    const sub = player.addListener('statusChange', (event: any) => {
+    const statusSub = player.addListener('statusChange', (event: any) => {
       if (event.status === 'readyToPlay' || event.status === 'playing') {
+        setIsLoading(false);
+        setHasError(false);
+      } else if (event.status === 'error') {
+        // Invalid URL / unreachable file — hide the broken-play watermark
+        // and let the parent card's gradient placeholder show through.
+        setHasError(true);
         setIsLoading(false);
       }
     });
     return () => {
-      sub.remove();
+      statusSub.remove();
     };
   }, [player]);
+
+  // Render nothing on error so the parent's placeholder (gradient / Film icon
+  // / play button overlay) shows instead of iOS's broken-play watermark.
+  if (hasError) {
+    return null;
+  }
 
   return (
     <View style={[styles.container, { height }]}>
