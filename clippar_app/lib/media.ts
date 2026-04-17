@@ -25,14 +25,14 @@ import { Platform } from 'react-native';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
-// Lazy requires so web / jest / simulator without native modules still loads the file.
-function lazy<T>(name: string): T | null {
-  if (!isNative) return null;
-  try {
-    return require(name) as T;
-  } catch {
-    return null;
-  }
+// Metro can't handle `require(variable)` — it inlines static strings at bundle
+// time. Guard with isNative so web builds don't try to pull in native-only
+// Expo modules, but use literal require() so Metro knows what to bundle.
+let MediaLibrary: typeof import('expo-media-library') | null = null;
+let FileSystemLegacy: typeof import('expo-file-system/legacy') | null = null;
+if (isNative) {
+  try { MediaLibrary = require('expo-media-library'); } catch {}
+  try { FileSystemLegacy = require('expo-file-system/legacy'); } catch {}
 }
 
 /**
@@ -50,7 +50,6 @@ export async function resolveAssetUri(uri: string): Promise<string> {
 
   // Photos-backed URI — ask MediaLibrary for the real file.
   if (uri.startsWith('ph://') || uri.startsWith('assets-library://')) {
-    const MediaLibrary = lazy<typeof import('expo-media-library')>('expo-media-library');
     if (!MediaLibrary) return uri;
 
     try {
@@ -77,20 +76,19 @@ export async function resolveAssetUri(uri: string): Promise<string> {
  * is enough for most cases.
  */
 export async function persistAsset(uri: string, filename: string): Promise<string> {
-  const FileSystem = lazy<typeof import('expo-file-system/legacy')>('expo-file-system/legacy');
-  if (!FileSystem) return uri;
+  if (!FileSystemLegacy) return uri;
 
   try {
     const resolved = await resolveAssetUri(uri);
-    const dir = `${FileSystem.documentDirectory}clips/`;
-    const dirInfo = await FileSystem.getInfoAsync(dir);
+    const dir = `${FileSystemLegacy.documentDirectory}clips/`;
+    const dirInfo = await FileSystemLegacy.getInfoAsync(dir);
     if (!dirInfo.exists) {
-      await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
+      await FileSystemLegacy.makeDirectoryAsync(dir, { intermediates: true });
     }
     const dest = `${dir}${filename}`;
-    const destInfo = await FileSystem.getInfoAsync(dest);
+    const destInfo = await FileSystemLegacy.getInfoAsync(dest);
     if (destInfo.exists) return dest;
-    await FileSystem.copyAsync({ from: resolved, to: dest });
+    await FileSystemLegacy.copyAsync({ from: resolved, to: dest });
     return dest;
   } catch (err) {
     console.warn('[media] persistAsset failed for', uri, err);
