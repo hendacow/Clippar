@@ -261,9 +261,28 @@ export default function RoundViewer() {
       .then((data) => {
         setRound(data);
         if (data?.reel_url) {
-          const match = data.reel_url.match(/\/object\/(?:public\/)?clips\/(.+)$/);
-          if (match) {
-            supabase.storage.from('clips').createSignedUrl(match[1], 86400)
+          const reelUrl = data.reel_url;
+
+          if (reelUrl.startsWith('file://') || reelUrl.startsWith('/')) {
+            // Legacy: local file URI from on-device composition.  This only
+            // works while the app has the original install — wiped on rebuild.
+            setReelSignedUrl(reelUrl);
+          } else if (reelUrl.startsWith('http')) {
+            // Full URL — re-sign the underlying storage path so it doesn't expire.
+            const match = reelUrl.match(/\/object\/(?:public\/)?clips\/(.+?)(?:\?|$)/);
+            if (match) {
+              supabase.storage.from('clips').createSignedUrl(match[1], 86400)
+                .then(({ data: signed }) => {
+                  if (signed?.signedUrl) setReelSignedUrl(signed.signedUrl);
+                });
+            } else {
+              setReelSignedUrl(reelUrl);
+            }
+          } else {
+            // Bare storage path within the `clips` bucket (e.g. "reels/xxx.mp4").
+            // Strip any redundant "clips/" prefix for forward compatibility.
+            const path = reelUrl.startsWith('clips/') ? reelUrl.slice(6) : reelUrl;
+            supabase.storage.from('clips').createSignedUrl(path, 86400)
               .then(({ data: signed }) => {
                 if (signed?.signedUrl) setReelSignedUrl(signed.signedUrl);
               });
@@ -611,8 +630,8 @@ export default function RoundViewer() {
       <ClipTrimModal
         visible={!!trimClip}
         clip={trimClip}
-        onSave={(startMs, endMs) => {
-          if (trimClip) editor.updateTrim(trimClip.id, startMs, endMs);
+        onSave={(startMs, endMs, sourceOverride) => {
+          if (trimClip) editor.updateTrim(trimClip.id, startMs, endMs, sourceOverride);
           setTrimClip(null);
         }}
         onDismiss={() => setTrimClip(null)}

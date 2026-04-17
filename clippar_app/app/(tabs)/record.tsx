@@ -71,6 +71,12 @@ export default function RecordScreen() {
       },
       [round.recordClip]
     ),
+    onShotClassified: useCallback(
+      (shotType: import('shot-detector').ShotTypeClassification) => {
+        round.onShotClassified(shotType);
+      },
+      [round.onShotClassified]
+    ),
   });
 
   // Hide tab bar during active recording
@@ -345,6 +351,7 @@ export default function RecordScreen() {
           style={StyleSheet.absoluteFillObject}
           facing="back"
           mode="video"
+          videoQuality="1080p"
         />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }]}>

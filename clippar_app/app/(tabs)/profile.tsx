@@ -367,8 +367,9 @@ export default function ProfileScreen() {
             <Divider />
             <SettingsRow
               icon={<Settings size={18} color={theme.colors.textSecondary} />}
-              title="Settings"
-              onPress={() => router.push('/profile/notifications')}
+              title="Trim Settings"
+              subtitle="Auto-trim, timing, quality"
+              onPress={() => router.push('/profile/trim-settings')}
             />
           </Card>
 

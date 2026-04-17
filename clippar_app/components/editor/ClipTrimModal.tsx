@@ -7,13 +7,19 @@ import {
   PanResponder,
   Dimensions,
   Platform,
+  Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Check, RotateCcw } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import type { EditorClip } from '@/types/editor';
+import { trimVideo } from 'shot-detector';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const VideoThumbnails = Platform.OS !== 'web'
+  ? (require('expo-video-thumbnails') as typeof import('expo-video-thumbnails'))
+  : null;
+
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const TIMELINE_PADDING = 24;
 const TIMELINE_WIDTH = SCREEN_WIDTH - TIMELINE_PADDING * 2;
 const HANDLE_WIDTH = 28;
@@ -23,6 +29,10 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 const ExpoVideo = isNative
   ? (require('expo-video') as typeof import('expo-video'))
+  : null;
+
+const ExpoAV = isNative
+  ? (require('expo-av') as typeof import('expo-av'))
   : null;
 
 function formatMs(ms: number): string {
@@ -41,7 +51,11 @@ function formatMsFull(ms: number): string {
 interface ClipTrimModalProps {
   visible: boolean;
   clip: EditorClip | null;
-  onSave: (trimStartMs: number, trimEndMs: number) => void;
+  onSave: (
+    trimStartMs: number,
+    trimEndMs: number,
+    sourceOverride?: { sourceUri: string; durationMs: number },
+  ) => void;
   onDismiss: () => void;
 }
 
@@ -54,19 +68,65 @@ export function ClipTrimModal({
   const insets = useSafeAreaInsets();
   const [startMs, setStartMs] = useState(0);
   const [endMs, setEndMs] = useState(-1);
-  const durationMs = clip?.durationMs || 5000;
+  const [durationMs, setDurationMs] = useState(clip?.durationMs || 5000);
+  const [activeUri, setActiveUri] = useState<string | null>(clip?.sourceUri ?? null);
+  const [savingTrim, setSavingTrim] = useState(false);
 
-  // Bump this counter to signal the player to seek to startMs
+  // Track which handle was last released so the player seeks to the right position
+  const [seekTarget, setSeekTarget] = useState<'start' | 'end'>('start');
+
+  // Track which handle is actively being dragged for real-time scrubbing
+  const [draggingHandle, setDraggingHandle] = useState<'none' | 'start' | 'end'>('none');
+
+  // Bump this counter to signal the player to seek
   const [seekGeneration, setSeekGeneration] = useState(0);
 
-  // Reset when clip changes
-  useEffect(() => {
-    if (clip) {
-      setStartMs(clip.trimStartMs);
-      setEndMs(clip.trimEndMs === -1 ? durationMs : clip.trimEndMs);
-      setSeekGeneration((g) => g + 1);
+  // Probe duration of a video URI using ExpoAV
+  const probeDuration = useCallback(async (uri: string): Promise<number> => {
+    if (!ExpoAV) return 5000;
+    try {
+      const { sound, status } = await ExpoAV.Audio.Sound.createAsync(
+        { uri },
+        {},
+        undefined,
+        false,
+      );
+      const dur = status.isLoaded && status.durationMillis ? status.durationMillis : 5000;
+      await sound.unloadAsync();
+      return dur;
+    } catch {
+      return 5000;
     }
-  }, [clip, durationMs]);
+  }, []);
+
+  // Reset when clip changes — auto-probe original if available
+  useEffect(() => {
+    if (!clip) return;
+    let cancelled = false;
+
+    const init = async () => {
+      // If auto-trimmed and original exists, use original as the timeline source
+      if (clip.autoTrimmed && clip.originalUri && clip.originalUri !== clip.sourceUri) {
+        const origDur = await probeDuration(clip.originalUri);
+        if (cancelled) return;
+        setDurationMs(origDur);
+        setActiveUri(clip.originalUri);
+        setStartMs(clip.trimStartMs);
+        setEndMs(clip.trimEndMs === -1 ? origDur : clip.trimEndMs);
+      } else {
+        // Non-auto-trimmed: use sourceUri directly
+        const dur = clip.durationMs || 5000;
+        setDurationMs(dur);
+        setActiveUri(clip.sourceUri);
+        setStartMs(clip.trimStartMs);
+        setEndMs(clip.trimEndMs === -1 ? dur : clip.trimEndMs);
+      }
+      if (!cancelled) setSeekGeneration((g) => g + 1);
+    };
+
+    init();
+    return () => { cancelled = true; };
+  }, [clip, probeDuration]);
 
   const effectiveEndMs = endMs === -1 ? durationMs : endMs;
   const trimmedDuration = effectiveEndMs - startMs;
@@ -94,6 +154,7 @@ export function ClipTrimModal({
         onMoveShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
           startHandleOriginRef.current = startMsRef.current;
+          setDraggingHandle('start');
         },
         onPanResponderMove: (_, gestureState) => {
           const dur = durationMsRef.current;
@@ -107,14 +168,17 @@ export function ClipTrimModal({
           setStartMs(clamped);
         },
         onPanResponderRelease: () => {
-          // After releasing the left handle, seek to left handle and play
+          setDraggingHandle('none');
+          setSeekTarget('start');
           triggerSeek();
         },
         onPanResponderTerminate: () => {
+          setDraggingHandle('none');
+          setSeekTarget('start');
           triggerSeek();
         },
       }),
-    [triggerSeek],
+    [triggerSeek, setDraggingHandle],
   );
 
   const endPanResponder = useMemo(
@@ -124,6 +188,7 @@ export function ClipTrimModal({
         onMoveShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
           endHandleOriginRef.current = endMsRef.current;
+          setDraggingHandle('end');
         },
         onPanResponderMove: (_, gestureState) => {
           const dur = durationMsRef.current;
@@ -137,14 +202,17 @@ export function ClipTrimModal({
           setEndMs(clamped);
         },
         onPanResponderRelease: () => {
-          // After releasing the right handle, seek to left handle and play through
+          setDraggingHandle('none');
+          setSeekTarget('end');
           triggerSeek();
         },
         onPanResponderTerminate: () => {
+          setDraggingHandle('none');
+          setSeekTarget('end');
           triggerSeek();
         },
       }),
-    [triggerSeek],
+    [triggerSeek, setDraggingHandle],
   );
 
   // Convert ms to timeline position
@@ -157,11 +225,71 @@ export function ClipTrimModal({
     setTimeout(() => setSeekGeneration((g) => g + 1), 0);
   }, [durationMs]);
 
-  const handleSave = useCallback(() => {
+  const handleSave = useCallback(async () => {
     const finalEnd = endMs >= durationMs ? -1 : endMs;
     const finalStart = startMs <= 0 ? 0 : startMs;
-    onSave(finalStart, finalEnd);
-  }, [startMs, endMs, durationMs, onSave]);
+
+    // If editing from the original video, re-trim to create a new file
+    if (clip?.autoTrimmed && activeUri && activeUri === clip?.originalUri) {
+      setSavingTrim(true);
+      try {
+        const trimEnd = finalEnd === -1 ? durationMs : finalEnd;
+        const result = await trimVideo(activeUri, finalStart, trimEnd);
+        onSave(finalStart, finalEnd, {
+          sourceUri: result.trimmedUri,
+          durationMs: trimEnd - finalStart,
+        });
+      } catch (err) {
+        console.warn('[ClipTrimModal] Re-trim failed, saving offsets only:', err);
+        onSave(finalStart, finalEnd);
+      } finally {
+        setSavingTrim(false);
+      }
+    } else {
+      onSave(finalStart, finalEnd);
+    }
+  }, [startMs, endMs, durationMs, onSave, activeUri, clip?.autoTrimmed, clip?.originalUri]);
+
+  // Generate filmstrip thumbnails
+  const THUMB_COUNT = 15;
+  const THUMB_WIDTH = Math.floor(TIMELINE_WIDTH / THUMB_COUNT);
+  const [filmstripThumbs, setFilmstripThumbs] = useState<(string | null)[]>([]);
+
+  useEffect(() => {
+    if (!visible || !activeUri || !isNative || !VideoThumbnails) {
+      setFilmstripThumbs([]);
+      return;
+    }
+
+    let cancelled = false;
+    const generateThumbs = async () => {
+      const thumbs: (string | null)[] = new Array(THUMB_COUNT).fill(null);
+      const interval = durationMs / THUMB_COUNT;
+
+      // Generate all thumbs concurrently for speed
+      const promises = Array.from({ length: THUMB_COUNT }, async (_, i) => {
+        if (cancelled) return;
+        try {
+          const time = Math.round(i * interval + interval / 2);
+          const result = await VideoThumbnails!.getThumbnailAsync(activeUri!, {
+            time,
+            quality: 0.3,
+          });
+          if (!cancelled) {
+            thumbs[i] = result.uri;
+          }
+        } catch {}
+      });
+
+      await Promise.all(promises);
+      if (!cancelled) {
+        setFilmstripThumbs([...thumbs]);
+      }
+    };
+
+    generateThumbs();
+    return () => { cancelled = true; };
+  }, [visible, activeUri, durationMs]);
 
   if (!clip) return null;
 
@@ -204,6 +332,7 @@ export function ClipTrimModal({
             paddingVertical: 10,
             borderBottomWidth: 1,
             borderBottomColor: 'rgba(255,255,255,0.12)',
+            zIndex: 10,
           }}
         >
           <Pressable
@@ -225,6 +354,7 @@ export function ClipTrimModal({
           </Text>
           <Pressable
             onPress={handleSave}
+            disabled={savingTrim}
             hitSlop={12}
             style={{
               width: 36,
@@ -233,6 +363,7 @@ export function ClipTrimModal({
               backgroundColor: theme.colors.primary,
               justifyContent: 'center',
               alignItems: 'center',
+              opacity: savingTrim ? 0.5 : 1,
             }}
           >
             <Check size={20} color="#fff" />
@@ -241,14 +372,16 @@ export function ClipTrimModal({
 
         {/* Video preview area */}
         <View
-          style={{ flex: 1, justifyContent: 'center', alignItems: 'center' }}
+          style={{ flex: 1, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' }}
         >
-          {clip.sourceUri && isNative && ExpoVideo ? (
+          {activeUri && isNative && ExpoVideo ? (
             <NativeTrimPlayer
-              uri={clip.sourceUri}
+              uri={activeUri}
               startMs={startMs}
               endMs={effectiveEndMs}
               seekGeneration={seekGeneration}
+              seekTarget={seekTarget}
+              draggingHandle={draggingHandle}
             />
           ) : (
             <View style={{ alignItems: 'center' }}>
@@ -313,7 +446,7 @@ export function ClipTrimModal({
             </Text>
           </View>
 
-          {/* Track background */}
+          {/* Track background with filmstrip thumbnails */}
           <View
             style={{
               height: 48,
@@ -322,6 +455,35 @@ export function ClipTrimModal({
               overflow: 'visible',
             }}
           >
+            {/* Filmstrip thumbnails */}
+            {filmstripThumbs.length > 0 && (
+              <View
+                style={{
+                  position: 'absolute',
+                  top: 0,
+                  left: 0,
+                  right: 0,
+                  bottom: 0,
+                  flexDirection: 'row',
+                  borderRadius: 8,
+                  overflow: 'hidden',
+                }}
+              >
+                {filmstripThumbs.map((thumbUri, i) => (
+                  <View key={i} style={{ width: THUMB_WIDTH, height: 48 }}>
+                    {thumbUri ? (
+                      <Image
+                        source={{ uri: thumbUri }}
+                        style={{ width: THUMB_WIDTH, height: 48 }}
+                        resizeMode="cover"
+                      />
+                    ) : (
+                      <View style={{ width: THUMB_WIDTH, height: 48, backgroundColor: 'rgba(255,255,255,0.05)' }} />
+                    )}
+                  </View>
+                ))}
+              </View>
+            )}
             {/* Dimmed left region */}
             {startMs > 0 && (
               <View
@@ -417,11 +579,12 @@ export function ClipTrimModal({
           </View>
         </View>
 
-        {/* Reset button */}
+        {/* Action buttons */}
         <View
           style={{
             flexDirection: 'row',
             justifyContent: 'center',
+            gap: 12,
             paddingBottom: 16,
           }}
         >
@@ -448,6 +611,31 @@ export function ClipTrimModal({
               Reset
             </Text>
           </Pressable>
+
+          {/* Saving indicator */}
+          {savingTrim && (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 6,
+                paddingHorizontal: 16,
+                paddingVertical: 8,
+                borderRadius: theme.radius.full,
+                backgroundColor: `${theme.colors.primary}30`,
+              }}
+            >
+              <Text
+                style={{
+                  color: theme.colors.primary,
+                  fontSize: 13,
+                  fontWeight: '600',
+                }}
+              >
+                Saving...
+              </Text>
+            </View>
+          )}
         </View>
       </View>
     </Modal>
@@ -461,11 +649,15 @@ function NativeTrimPlayer({
   startMs,
   endMs,
   seekGeneration,
+  seekTarget = 'start',
+  draggingHandle = 'none',
 }: {
   uri: string;
   startMs: number;
   endMs: number;
   seekGeneration: number;
+  seekTarget?: 'start' | 'end';
+  draggingHandle?: 'none' | 'start' | 'end';
 }) {
   if (!ExpoVideo) return null;
 
@@ -474,8 +666,10 @@ function NativeTrimPlayer({
   // Keep refs for the polling interval to read
   const startSecRef = useRef(startMs / 1000);
   const endSecRef = useRef(endMs / 1000);
+  const draggingRef = useRef(draggingHandle);
   startSecRef.current = startMs / 1000;
   endSecRef.current = endMs / 1000;
+  draggingRef.current = draggingHandle;
 
   const player = useVideoPlayer(uri, (p) => {
     p.loop = false; // We handle looping manually to respect trim bounds
@@ -483,17 +677,32 @@ function NativeTrimPlayer({
     p.play();
   });
 
-  // Seek to startMs whenever seekGeneration changes (i.e., handle released)
+  // Real-time scrubbing: pause and seek to the relevant frame while a handle is being dragged
+  useEffect(() => {
+    if (draggingHandle === 'end') {
+      player.pause();
+      player.currentTime = Math.max(0, endSecRef.current - 0.1);
+    } else if (draggingHandle === 'start') {
+      player.pause();
+      player.currentTime = startSecRef.current;
+    }
+    // When draggingHandle === 'none', don't interfere — let seekGeneration effect handle it
+  }, [draggingHandle, startMs, endMs, player]);
+
+  // Seek when handle is released — left handle seeks to start, right handle seeks to end
   useEffect(() => {
     if (seekGeneration > 0) {
-      player.currentTime = startSecRef.current;
+      player.currentTime = seekTarget === 'end'
+        ? Math.max(0, endSecRef.current - 0.1)
+        : startSecRef.current;
       player.play();
     }
-  }, [seekGeneration, player]);
+  }, [seekGeneration, player, seekTarget]);
 
-  // Poll currentTime to loop between trim points
+  // Poll currentTime to loop between trim points (skip while dragging)
   useEffect(() => {
     const interval = setInterval(() => {
+      if (draggingRef.current !== 'none') return; // Don't interfere during drag
       const currentTime = player.currentTime;
       const endSec = endSecRef.current;
       const startSec = startSecRef.current;
@@ -517,10 +726,18 @@ function NativeTrimPlayer({
     return () => sub.remove();
   }, [player]);
 
+  // Cap video height to fit within modal (leave room for header, timeline, controls)
+  const maxVideoHeight = SCREEN_HEIGHT * 0.5;
+  const idealHeight = SCREEN_WIDTH * (16 / 9);
+  const videoHeight = Math.min(idealHeight, maxVideoHeight);
+  const videoWidth = videoHeight < idealHeight
+    ? videoHeight * (9 / 16)
+    : SCREEN_WIDTH;
+
   return (
     <VideoView
       player={player}
-      style={{ width: SCREEN_WIDTH, height: SCREEN_WIDTH * (16 / 9) }}
+      style={{ width: videoWidth, height: videoHeight }}
       contentFit="contain"
       nativeControls={false}
     />

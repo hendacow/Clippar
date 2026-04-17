@@ -2,7 +2,7 @@ import { ScrollView, Pressable, Text } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 
-export type FilterOption = 'all' | 'birdies' | 'eagles' | 'best' | 'month';
+export type FilterOption = 'all' | 'best' | 'recent' | 'month';
 
 interface FilterChipsProps {
   selected: FilterOption;
@@ -11,9 +11,8 @@ interface FilterChipsProps {
 
 export const FILTERS: { key: FilterOption; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'birdies', label: 'Birdies' },
-  { key: 'eagles', label: 'Eagles' },
   { key: 'best', label: 'Best Rounds' },
+  { key: 'recent', label: 'This Week' },
   { key: 'month', label: 'This Month' },
 ];
 

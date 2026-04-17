@@ -83,8 +83,7 @@
           "photosPermission": "Clippar saves your highlight reels to your photo library.",
           "savePhotosPermission": "Clippar saves your highlight reels to your photo library."
         }
-      ],
-      "expo-notifications"
+      ]
     ],
     "experiments": {
       "typedRoutes": true

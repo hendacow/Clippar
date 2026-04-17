@@ -13,6 +13,9 @@ export const config = {
   concat: {
     url: process.env.EXPO_PUBLIC_CONCAT_URL || '',
   },
+  golfCourseApi: {
+    key: process.env.EXPO_PUBLIC_GOLF_COURSE_API_KEY || '',
+  },
   subscription: {
     websiteUrl: 'https://clippargolf.com',
     monthlyPriceAud: 1999,
@@ -30,5 +33,17 @@ export const config = {
   upload: {
     maxRetries: 3,
     chunkSizeMb: 5,
+  },
+  trim: {
+    defaultPreRollMs: 3000,
+    defaultPostRollMs: 2000,
+    autoTrimEnabled: true,
+    durationPresets: [4000, 5000, 6000] as readonly number[], // 4s, 5s, 6s total
+  },
+  export: {
+    defaultResolution: '1080p' as const,
+    defaultFrameRate: 30 as const,
+    resolutionOptions: ['720p', '1080p', '2k', '4k'] as const,
+    frameRateOptions: [30, 60] as const,
   },
 } as const;

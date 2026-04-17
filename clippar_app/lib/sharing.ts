@@ -60,7 +60,13 @@ export async function saveToGallery(
     return false;
   }
 
-  const localUri = await getLocalVideoUri(signedUrl, roundId, onProgress);
+  // If the URL is already a local file, use it directly — no download needed
+  let localUri: string;
+  if (signedUrl.startsWith('file://') || signedUrl.startsWith('/')) {
+    localUri = signedUrl;
+  } else {
+    localUri = await getLocalVideoUri(signedUrl, roundId, onProgress);
+  }
 
   const asset = await MediaLibrary.createAssetAsync(localUri);
 
@@ -93,7 +99,13 @@ export async function shareReel(params: {
 }) {
   if (!RNShare) return;
 
-  const localUri = await getLocalVideoUri(params.reelUrl, params.roundId, params.onProgress);
+  // If the URL is already a local file, use it directly — no download needed
+  let localUri: string;
+  if (params.reelUrl.startsWith('file://') || params.reelUrl.startsWith('/')) {
+    localUri = params.reelUrl;
+  } else {
+    localUri = await getLocalVideoUri(params.reelUrl, params.roundId, params.onProgress);
+  }
 
   await RNShare.open({
     title: `My round at ${params.courseName}`,
@@ -115,7 +127,13 @@ export async function shareToInstagramStories(
   if (!RNShare) return;
 
   try {
-    const localUri = await getLocalVideoUri(signedUrl, roundId);
+    // If the URL is already a local file, use it directly — no download needed
+    let localUri: string;
+    if (signedUrl.startsWith('file://') || signedUrl.startsWith('/')) {
+      localUri = signedUrl;
+    } else {
+      localUri = await getLocalVideoUri(signedUrl, roundId);
+    }
     await RNShare.shareSingle({
       social: 'instagramstories' as any,
       backgroundVideo: Platform.OS === 'android' ? `file://${localUri}` : localUri,

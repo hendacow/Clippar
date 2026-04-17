@@ -1,7 +1,8 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
 import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from '@/types/round';
 import { PENALTY_STROKES } from '@/types/round';
+import type { ShotTypeClassification } from 'shot-detector';
 import { createRound, updateRound, upsertScore } from '@/lib/api';
 import {
   saveLocalRound,
@@ -45,12 +46,15 @@ function getParForHole(courseHoles: HoleData[] | undefined, holeNumber: number):
 
 export function useRound() {
   const [state, setState] = useState<RoundState | null>(null);
+  // Track the last classified shot type for auto hole detection
+  const lastShotTypeRef = useRef<ShotTypeClassification | null>(null);
 
   const startRound = useCallback(async (
     courseName: string,
     courseId?: string,
     courseHoles?: HoleData[]
   ) => {
+    lastShotTypeRef.current = null;
     try {
       const round = await createRound({
         course_name: courseName,
@@ -89,6 +93,84 @@ export function useRound() {
         currentShot: prev.currentShot + 1,
       };
     });
+  }, []);
+
+  // Auto hole detection: when classification arrives for a shot, check if
+  // the pattern putt→swing indicates a new hole has started.
+  // The swing that triggered the transition belongs to the NEW hole.
+  const onShotClassified = useCallback((shotType: ShotTypeClassification) => {
+    const prevType = lastShotTypeRef.current;
+    lastShotTypeRef.current = shotType;
+
+    // putt → swing = hole boundary (the swing is on the next hole)
+    if (prevType === 'putt' && shotType === 'swing') {
+      console.log('[useRound] Auto hole detection: putt→swing transition — advancing hole');
+      setState((prev) => {
+        if (!prev || prev.status !== 'in_progress') return prev;
+
+        // Don't auto-advance if we're already past hole 18
+        if (prev.currentHole >= 18) return prev;
+
+        const par = getParForHole(prev.courseHoles, prev.currentHole);
+        const holeClips = prev.clips.filter((c) => c.holeNumber === prev.currentHole);
+        // The current shot that was just classified as 'swing' belongs to the NEW hole,
+        // so strokes for the completed hole = currentShot - 2
+        // (currentShot was already incremented by recordClip, and the swing shot is on the new hole)
+        const strokes = Math.max(1, prev.currentShot - 2);
+
+        const score: HoleScore = {
+          holeNumber: prev.currentHole,
+          par,
+          strokes,
+          putts: 0,
+          penaltyStrokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
+          isPickup: false,
+          scoreToPar: strokes - par,
+        };
+
+        const newScores = [...prev.scores, score];
+        const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
+        const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
+        const nextHole = prev.currentHole + 1;
+
+        // Persist score
+        saveLocalScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
+          is_pickup: false,
+          par,
+        });
+
+        upsertScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
+          is_pickup: false,
+          par,
+        }).catch(() => {});
+
+        updateLocalRound(prev.roundId, {
+          current_hole: nextHole,
+          current_shot: 1,
+        });
+
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+        return {
+          ...prev,
+          scores: newScores,
+          totalScore: newTotalScore,
+          totalPar: newTotalPar,
+          currentHole: nextHole,
+          currentShot: 1,
+        };
+      });
+    }
   }, []);
 
   const setRecording = useCallback((isRecording: boolean) => {
@@ -136,6 +218,7 @@ export function useRound() {
           putts: 0,
           penalty_strokes: 0,
           is_pickup: true,
+          par,
         }).catch(() => {});
 
         updateLocalRound(prev.roundId, {
@@ -178,6 +261,8 @@ export function useRound() {
   }, []);
 
   const endHole = useCallback(async () => {
+    // Reset shot type tracking when manually advancing hole
+    lastShotTypeRef.current = null;
     setState((prev) => {
       if (!prev) return prev;
 
@@ -220,6 +305,7 @@ export function useRound() {
         putts: 0,
         penalty_strokes: Math.max(0, strokes - holeClips.length),
         is_pickup: false,
+        par,
       }).catch(() => {});
 
       updateLocalRound(prev.roundId, {
@@ -384,6 +470,7 @@ export function useRound() {
           putts: 0,
           penalty_strokes: Math.max(0, strokes - holeClips.length),
           is_pickup: false,
+          par,
         }).catch(() => {});
       }
 
@@ -417,6 +504,7 @@ export function useRound() {
     state,
     startRound,
     recordClip,
+    onShotClassified,
     setRecording,
     addPenalty,
     endHole,

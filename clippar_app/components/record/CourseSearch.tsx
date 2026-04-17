@@ -1,8 +1,9 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator } from 'react-native';
-import { MapPin, Plus } from 'lucide-react-native';
+import { MapPin, Plus, Globe } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
-import { searchCourses, searchCoursesNearby, getCourseHoles } from '@/lib/api';
+import { searchCourses, searchCoursesNearby, getCourseHoles, upsertCourseFromLiveApi } from '@/lib/api';
+import { searchGolfCoursesLive, getGolfCourseDetailLive } from '@/lib/golfCourseApi';
 import type { HoleData } from '@/types/round';
 
 interface CourseSearchProps {
@@ -27,10 +28,11 @@ export function CourseSearch({
   const [showResults, setShowResults] = useState(false);
   const [loading, setLoading] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Guard: after a course is selected, ignore the next onChangeText from the
-  // TextInput re-rendering with the new value (React Native fires the callback
-  // when the controlled `value` prop changes on iOS).
-  const justSelectedRef = useRef(false);
+  // Guard: after a course is selected, ignore onChangeText events for 500ms.
+  // React Native on iOS can fire the callback multiple times when the controlled
+  // `value` prop changes, and a simple boolean flag gets reset too early.
+  // A timestamp approach ignores ALL synthetic change events in the window.
+  const justSelectedRef = useRef<number>(0);
 
   // Fetch nearby courses on mount if location available
   useEffect(() => {
@@ -43,10 +45,10 @@ export function CourseSearch({
 
   const handleChange = useCallback((text: string) => {
     // After selecting a course, the controlled TextInput re-renders with the
-    // full course name which can re-fire onChangeText on iOS.  Ignore that
-    // synthetic event so we don't overwrite the selection or re-open the dropdown.
-    if (justSelectedRef.current) {
-      justSelectedRef.current = false;
+    // full course name which can re-fire onChangeText on iOS (sometimes more
+    // than once).  Ignore ALL synthetic events within 500ms of a selection so
+    // we don't overwrite the selection or re-open the dropdown.
+    if (Date.now() - justSelectedRef.current < 500) {
       return;
     }
 
@@ -63,8 +65,30 @@ export function CourseSearch({
     debounceRef.current = setTimeout(async () => {
       setLoading(true);
       try {
-        const courses = await searchCourses(text.trim());
-        setResults(courses ?? []);
+        // Search BOTH live API and local Supabase in parallel
+        const [liveResults, localResults] = await Promise.all([
+          searchGolfCoursesLive(text.trim()),
+          searchCourses(text.trim()),
+        ]);
+
+        // Merge: start with live results, then add unique local results
+        const merged: any[] = liveResults.map((lr) => ({
+          ...lr,
+          // Normalize live result fields to match the shape expected by the UI
+          location_name: lr.city,
+          par_total: null,
+          _source: 'live' as const,
+          _liveId: lr.id, // preserve the API id for detail fetch
+        }));
+
+        const liveNames = new Set(liveResults.map((r) => r.name.toLowerCase()));
+        for (const local of localResults) {
+          if (!liveNames.has(local.name.toLowerCase())) {
+            merged.push({ ...local, _source: 'local' as const });
+          }
+        }
+
+        setResults(merged);
       } catch {
         setResults([]);
       } finally {
@@ -79,26 +103,118 @@ export function CourseSearch({
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
-    justSelectedRef.current = true;
+    justSelectedRef.current = Date.now();
     onChangeText(course.name);
     setShowResults(false);
     setResults([]);
 
-    let holes: HoleData[] = [];
+    setLoading(true);
     try {
-      const holesData = await getCourseHoles(course.id);
-      holes = (holesData ?? []).map((h: any) => ({
-        holeNumber: h.hole_number,
-        par: h.par,
-        strokeIndex: h.stroke_index,
-        lengthMeters: h.length_meters,
-      }));
-    } catch {
-      // No holes data available -- will fall back to default par
+      let holes: HoleData[] = [];
+      let supabaseCourseId = course.id;
+      let parTotal = course.par_total || null;
+
+      if (course._source === 'live' && course._liveId) {
+        // Fetch full detail from live API for hole-by-hole data
+        const detail = await getGolfCourseDetailLive(course._liveId);
+
+        if (detail && detail.tees.length > 0) {
+          // Pick the best tee set (prefer blue/white/men/regular, or first)
+          const tee =
+            detail.tees.find((t) => /blue|white|men|regular/i.test(t.name)) ||
+            detail.tees[0];
+          holes = tee.holes.map((h) => ({
+            holeNumber: h.number,
+            par: h.par,
+            strokeIndex: h.handicap,
+            lengthMeters: h.metres,
+          }));
+        }
+
+        parTotal = holes.reduce((sum, h) => sum + h.par, 0) || parTotal;
+
+        // Upsert into Supabase cache (fire-and-forget for speed, but await
+        // just long enough to get the Supabase UUID back for the round FK)
+        try {
+          const cached = await upsertCourseFromLiveApi(
+            {
+              id: course._liveId,
+              name: course.name,
+              city: course.city,
+              state: course.state,
+              country: course.country || 'AU',
+              holes: course.holes,
+              latitude: course.latitude,
+              longitude: course.longitude,
+            },
+            holes.length > 0
+              ? holes.map((h) => ({
+                  number: h.holeNumber,
+                  par: h.par,
+                  handicap: h.strokeIndex,
+                  metres: h.lengthMeters,
+                }))
+              : undefined,
+          );
+          if (cached?.id) {
+            supabaseCourseId = cached.id;
+          }
+        } catch {
+          // Cache write failed -- not critical, we still have the data
+        }
+      } else {
+        // Local course -- fetch holes from Supabase
+        try {
+          const holesData = await getCourseHoles(course.id);
+          holes = (holesData ?? []).map((h: any) => ({
+            holeNumber: h.hole_number,
+            par: h.par,
+            strokeIndex: h.stroke_index,
+            lengthMeters: h.length_meters,
+          }));
+          parTotal = holes.reduce((sum, h) => sum + h.par, 0) || parTotal;
+        } catch {
+          // No holes data available -- will fall back to default par
+        }
+      }
+
+      onSelectCourse(
+        { id: supabaseCourseId, name: course.name, par_total: parTotal },
+        holes,
+      );
+    } catch (err) {
+      console.warn('[CourseSearch] Select error:', err);
+      // Fallback: just pass the course with no hole data
+      onSelectCourse(
+        { id: course.id, name: course.name, par_total: course.par_total || null },
+        [],
+      );
+    } finally {
+      setLoading(false);
     }
 
-    onSelectCourse(course, holes);
+    justSelectedRef.current = Date.now();
   }, [onChangeText, onSelectCourse]);
+
+  // Auto-select top result when user blurs without explicitly selecting
+  const handleBlur = useCallback(() => {
+    setTimeout(() => {
+      // If the guard just fired (user tapped a result), skip
+      if (Date.now() - justSelectedRef.current < 500) return;
+
+      // If there are search results and the user typed something, auto-select the first match
+      if (results.length > 0 && value.trim().length >= 2) {
+        const exactMatch = results.find(
+          (r: any) => r.name.toLowerCase() === value.trim().toLowerCase()
+        );
+        const topResult = exactMatch ?? results[0];
+        handleSelect(topResult);
+        return;
+      }
+
+      setShowResults(false);
+    }, 250);
+  }, [results, value, handleSelect]);
 
   // Determine which list to show
   const displayResults = results.length > 0 ? results : (value.trim().length < 2 ? nearbyCourses : []);
@@ -115,7 +231,7 @@ export function CourseSearch({
         placeholder="Search for a course..."
         placeholderTextColor={theme.colors.textTertiary}
         onFocus={() => setShowResults(true)}
-        onBlur={() => setTimeout(() => setShowResults(false), 200)}
+        onBlur={handleBlur}
         style={{
           backgroundColor: theme.colors.surface,
           borderWidth: 1,
@@ -180,9 +296,9 @@ export function CourseSearch({
                   </Text>
                 </View>
               )}
-              {displayResults.map((item) => (
+              {displayResults.map((item, index) => (
                 <Pressable
-                  key={item.id}
+                  key={`${item._source ?? 'local'}-${item.id ?? index}`}
                   onPress={() => handleSelect(item)}
                   style={({ pressed }) => ({
                     padding: 12,
@@ -194,14 +310,18 @@ export function CourseSearch({
                     gap: 10,
                   })}
                 >
-                  <MapPin size={16} color={theme.colors.textTertiary} />
+                  {item._source === 'live' ? (
+                    <Globe size={16} color={theme.colors.primary} />
+                  ) : (
+                    <MapPin size={16} color={theme.colors.textTertiary} />
+                  )}
                   <View style={{ flex: 1 }}>
                     <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '500' }}>
                       {item.name}
                     </Text>
-                    {(item.location_name || item.state) && (
+                    {(item.location_name || item.city || item.state) && (
                       <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 2 }}>
-                        {[item.location_name, item.state].filter(Boolean).join(', ')}
+                        {[item.location_name || item.city, item.state].filter(Boolean).join(', ')}
                         {item.par_total ? ` · Par ${item.par_total}` : ''}
                       </Text>
                     )}

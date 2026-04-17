@@ -1,16 +1,16 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
   Pressable,
-  FlatList,
   ActivityIndicator,
   Modal,
   StyleSheet,
   Platform,
+  Alert,
 } from 'react-native';
-import { Play, ChevronRight, X, Film } from 'lucide-react-native';
+import { Play, Film } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import {
@@ -19,7 +19,19 @@ import {
   type ScoreCategory,
   type ScoreHighlightGroup,
 } from '@/lib/api';
-import { PreviewPlayer, type PreviewClip } from '@/components/editor/PreviewPlayer';
+import {
+  PreviewPlayer,
+  type PreviewClip,
+  type RoundGroupMeta,
+} from '@/components/editor/PreviewPlayer';
+
+const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+// Conditionally import local storage (only works on native with expo-sqlite)
+let storage: typeof import('@/lib/storage') | null = null;
+if (isNative) {
+  storage = require('@/lib/storage') as typeof import('@/lib/storage');
+}
 
 // ---- Types ----
 
@@ -251,26 +263,15 @@ function HoleCard({
 
 // ---- Round Group ----
 
-function RoundGroup({
+function RoundGroupView({
   group,
   signedUrls,
   onPlayHole,
 }: {
   group: ScoreHighlightGroup;
   signedUrls: Record<string, string>;
-  onPlayHole: (clips: PreviewClip[]) => void;
+  onPlayHole: (roundId: string, holeNumber: number) => void;
 }) {
-  const handlePlayHole = (hole: ScoreHighlightGroup['holes'][0]) => {
-    const clips: PreviewClip[] = hole.shots
-      .filter((s) => s.clipUrl)
-      .map((s) => ({
-        uri: signedUrls[s.clipUrl!] ?? s.clipUrl!,
-        holeNumber: hole.holeNumber,
-        shotNumber: s.shotNumber,
-      }));
-    if (clips.length > 0) onPlayHole(clips);
-  };
-
   return (
     <View style={styles.roundGroup}>
       {/* Round header */}
@@ -292,7 +293,7 @@ function RoundGroup({
           hole={hole}
           courseName={group.courseName}
           date={group.date}
-          onPlay={() => handlePlayHole(hole)}
+          onPlay={() => onPlayHole(group.roundId, hole.holeNumber)}
         />
       ))}
     </View>
@@ -305,22 +306,30 @@ function PlayAllButton({
   onPress,
   count,
   color,
+  loading,
 }: {
   onPress: () => void;
   count: number;
   color: string;
+  loading?: boolean;
 }) {
   return (
     <Pressable
       onPress={() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-        onPress();
+        if (!loading) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          onPress();
+        }
       }}
-      style={[styles.playAllBtn, { backgroundColor: color }]}
+      style={[styles.playAllBtn, { backgroundColor: color, opacity: loading ? 0.7 : 1 }]}
     >
-      <Play size={16} color="#FFFFFF" fill="#FFFFFF" />
+      {loading ? (
+        <ActivityIndicator size="small" color="#FFFFFF" />
+      ) : (
+        <Play size={16} color="#FFFFFF" fill="#FFFFFF" />
+      )}
       <Text style={styles.playAllText}>
-        Play All ({count} hole{count !== 1 ? 's' : ''})
+        {loading ? 'Loading Clips...' : `Play All (${count} hole${count !== 1 ? 's' : ''})`}
       </Text>
     </Pressable>
   );
@@ -331,10 +340,16 @@ function PlayAllButton({
 function VideoPlayerModal({
   visible,
   clips,
+  roundGroups,
+  enableTrim,
+  onTrimSave,
   onDismiss,
 }: {
   visible: boolean;
   clips: PreviewClip[];
+  roundGroups?: RoundGroupMeta[];
+  enableTrim?: boolean;
+  onTrimSave?: (clipIndex: number, trimStartMs: number, trimEndMs: number) => void;
   onDismiss: () => void;
 }) {
   return (
@@ -345,13 +360,13 @@ function VideoPlayerModal({
       onRequestClose={onDismiss}
     >
       <View style={{ flex: 1, backgroundColor: theme.colors.background }}>
-        <PreviewPlayer clips={clips} onDismiss={onDismiss} />
-        <Pressable
-          onPress={onDismiss}
-          style={styles.modalCloseBtn}
-        >
-          <X size={22} color={theme.colors.textPrimary} />
-        </Pressable>
+        <PreviewPlayer
+          clips={clips}
+          onDismiss={onDismiss}
+          roundGroups={roundGroups}
+          enableTrim={enableTrim}
+          onTrimSave={onTrimSave}
+        />
       </View>
     </Modal>
   );
@@ -373,6 +388,116 @@ function EmptyCategory({ label, color }: { label: string; color: string }) {
   );
 }
 
+// ---- Helper: Build clips with local trim data ----
+
+async function buildClipsWithLocalData(
+  groups: ScoreHighlightGroup[],
+  signedUrls: Record<string, string>,
+  filterRoundId?: string,
+  filterHoleNumber?: number,
+): Promise<{ clips: PreviewClip[]; roundGroups: RoundGroupMeta[] }> {
+  const roundIds = groups.map((g) => g.roundId);
+
+  // Load local clip data if on native
+  type LocalClipRow = {
+    id: number;
+    round_id: string;
+    hole_number: number;
+    shot_number: number;
+    file_uri: string;
+    trim_start_ms: number;
+    trim_end_ms: number;
+    duration_seconds: number | null;
+    auto_trimmed: number;
+    original_file_uri: string | null;
+    auto_trim_start_ms: number | null;
+    auto_trim_end_ms: number | null;
+  };
+
+  let localClips: LocalClipRow[] = [];
+  if (storage && roundIds.length > 0) {
+    try {
+      localClips = await storage.getClipsForMultipleRounds(roundIds);
+    } catch {
+      // Fall back to no local data
+    }
+  }
+
+  // Build a lookup: `roundId:holeNumber:shotNumber` -> local clip
+  const localLookup = new Map<string, LocalClipRow>();
+  for (const lc of localClips) {
+    const key = `${lc.round_id}:${lc.hole_number}:${lc.shot_number}`;
+    localLookup.set(key, lc);
+  }
+
+  const allClips: PreviewClip[] = [];
+  const roundGroupsMeta: RoundGroupMeta[] = [];
+
+  for (const group of groups) {
+    // Filter to specific round if requested
+    if (filterRoundId && group.roundId !== filterRoundId) continue;
+
+    const groupStartIndex = allClips.length;
+
+    for (const hole of group.holes) {
+      // Filter to specific hole if requested
+      if (filterHoleNumber !== undefined && hole.holeNumber !== filterHoleNumber) continue;
+
+      for (const shot of hole.shots) {
+        const localKey = `${group.roundId}:${hole.holeNumber}:${shot.shotNumber}`;
+        const localClip = localLookup.get(localKey);
+
+        // Resolve the best available video source:
+        // 1. Signed URL from Supabase Storage (works for all uploaded clips)
+        // 2. Local file URI from SQLite (only if the file still exists on disk)
+        // NOTE: raw shot.clipUrl is a storage PATH, not a URL — never use it directly
+        const signedUrl = shot.clipUrl ? signedUrls[shot.clipUrl] : null;
+        const localFileUri = localClip?.file_uri ?? null;
+        const uri = signedUrl ?? localFileUri ?? null;
+
+        // Skip if we have no playable video source
+        if (!uri) continue;
+
+        const clip: PreviewClip = {
+          uri,
+          holeNumber: hole.holeNumber,
+          shotNumber: shot.shotNumber,
+        };
+
+        // Add trim metadata from local SQLite
+        if (localClip) {
+          clip.localClipId = localClip.id;
+          clip.trimStartMs = localClip.trim_start_ms;
+          clip.trimEndMs = localClip.trim_end_ms;
+          clip.durationMs = localClip.duration_seconds != null
+            ? localClip.duration_seconds * 1000
+            : undefined;
+          clip.originalUri = localClip.original_file_uri ?? undefined;
+          clip.autoTrimmed = localClip.auto_trimmed === 1;
+          clip.autoTrimStartMs = localClip.auto_trim_start_ms ?? undefined;
+          clip.autoTrimEndMs = localClip.auto_trim_end_ms ?? undefined;
+        }
+
+        allClips.push(clip);
+      }
+    }
+
+    const groupEndIndex = allClips.length;
+
+    if (groupEndIndex > groupStartIndex) {
+      roundGroupsMeta.push({
+        roundId: group.roundId,
+        courseName: group.courseName,
+        date: group.date,
+        startIndex: groupStartIndex,
+        endIndex: groupEndIndex,
+      });
+    }
+  }
+
+  return { clips: allClips, roundGroups: roundGroupsMeta };
+}
+
 // ---- Main Component ----
 
 export function ScoreCollection() {
@@ -382,6 +507,7 @@ export function ScoreCollection() {
   const [loading, setLoading] = useState(false);
   const [signedUrls, setSignedUrls] = useState<Record<string, string>>({});
   const [playerClips, setPlayerClips] = useState<PreviewClip[] | null>(null);
+  const [playerRoundGroups, setPlayerRoundGroups] = useState<RoundGroupMeta[] | undefined>(undefined);
   const [counts, setCounts] = useState<Record<ScoreCategory, number>>({
     eagle: 0,
     birdie: 0,
@@ -449,24 +575,72 @@ export function ScoreCollection() {
     fetchHighlights();
   }, [fetchHighlights]);
 
-  // Build "Play All" clips for the current category
-  const handlePlayAll = useCallback(() => {
-    const allClips: PreviewClip[] = [];
-    for (const group of groups) {
-      for (const hole of group.holes) {
-        for (const shot of hole.shots) {
-          if (shot.clipUrl) {
-            allClips.push({
-              uri: signedUrls[shot.clipUrl] ?? shot.clipUrl,
-              holeNumber: hole.holeNumber,
-              shotNumber: shot.shotNumber,
-            });
-          }
-        }
+  const [playAllLoading, setPlayAllLoading] = useState(false);
+
+  // Build "Play All" clips for the current category with local data
+  const handlePlayAll = useCallback(async () => {
+    setPlayAllLoading(true);
+    try {
+      const result = await buildClipsWithLocalData(groups, signedUrls);
+      if (result.clips.length > 0) {
+        setPlayerClips(result.clips);
+        setPlayerRoundGroups(result.roundGroups.length > 1 ? result.roundGroups : undefined);
+      } else {
+        // Show feedback: no clips available
+        Alert.alert(
+          'No Clips Available',
+          'The highlights for this category don\'t have any video clips yet. Record some rounds to see them here!',
+        );
       }
+    } catch (err) {
+      console.warn('[ScoreCollection] Play All error:', err);
+      Alert.alert('Error', 'Failed to load clips. Please try again.');
+    } finally {
+      setPlayAllLoading(false);
     }
-    if (allClips.length > 0) setPlayerClips(allClips);
   }, [groups, signedUrls]);
+
+  // Build clips for a single hole with local data
+  const handlePlayHole = useCallback(async (roundId: string, holeNumber: number) => {
+    try {
+      const result = await buildClipsWithLocalData(groups, signedUrls, roundId, holeNumber);
+      if (result.clips.length > 0) {
+        setPlayerClips(result.clips);
+        setPlayerRoundGroups(undefined); // Single hole, no round groups needed
+      } else {
+        Alert.alert(
+          'No Clips',
+          'No video clips found for this hole. The clips may still be uploading.',
+        );
+      }
+    } catch (err) {
+      console.warn('[ScoreCollection] Play Hole error:', err);
+    }
+  }, [groups, signedUrls]);
+
+  // Handle trim save from the player modal
+  const handleTrimSave = useCallback(async (clipIndex: number, trimStartMs: number, trimEndMs: number) => {
+    const clip = playerClips?.[clipIndex];
+    if (!clip?.localClipId || !storage) return;
+
+    await storage.updateClipEditorState(clip.localClipId, {
+      trim_start_ms: trimStartMs,
+      trim_end_ms: trimEndMs,
+    });
+
+    // Update the clip in state too
+    setPlayerClips(prev => {
+      if (!prev) return prev;
+      const updated = [...prev];
+      updated[clipIndex] = { ...updated[clipIndex], trimStartMs, trimEndMs };
+      return updated;
+    });
+  }, [playerClips]);
+
+  const handleDismiss = useCallback(() => {
+    setPlayerClips(null);
+    setPlayerRoundGroups(undefined);
+  }, []);
 
   const activeCat = CATEGORIES.find((c) => c.key === category)!;
   const totalHoles = groups.reduce((sum, g) => sum + g.holes.length, 0);
@@ -491,6 +665,7 @@ export function ScoreCollection() {
             onPress={handlePlayAll}
             count={totalHoles}
             color={activeCat.color}
+            loading={playAllLoading}
           />
         </View>
       )}
@@ -505,11 +680,11 @@ export function ScoreCollection() {
         <EmptyCategory label={activeCat.label} color={activeCat.color} />
       ) : (
         groups.map((group) => (
-          <RoundGroup
+          <RoundGroupView
             key={group.roundId}
             group={group}
             signedUrls={signedUrls}
-            onPlayHole={(clips) => setPlayerClips(clips)}
+            onPlayHole={handlePlayHole}
           />
         ))
       )}
@@ -518,7 +693,10 @@ export function ScoreCollection() {
       <VideoPlayerModal
         visible={playerClips !== null}
         clips={playerClips ?? []}
-        onDismiss={() => setPlayerClips(null)}
+        roundGroups={playerRoundGroups}
+        enableTrim={isNative}
+        onTrimSave={handleTrimSave}
+        onDismiss={handleDismiss}
       />
     </View>
   );
@@ -628,20 +806,6 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 14,
     fontWeight: '700',
-  },
-
-  // Modal
-  modalCloseBtn: {
-    position: 'absolute',
-    top: 60,
-    right: 16,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
   },
 
   // Loading

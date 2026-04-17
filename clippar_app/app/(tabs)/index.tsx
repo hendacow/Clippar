@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,8 +8,9 @@ import {
   RefreshControl,
   Dimensions,
   Alert,
+  Platform,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Bell, TrendingDown, Trophy, Flame } from 'lucide-react-native';
@@ -24,8 +25,17 @@ import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
-import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl } from '@/lib/api';
+import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl, repairScoresParData } from '@/lib/api';
+import { supabase } from '@/lib/supabase';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
+
+const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+// Conditionally import local storage (only works on native with expo-sqlite)
+let storage: typeof import('@/lib/storage') | null = null;
+if (isNative) {
+  storage = require('@/lib/storage') as typeof import('@/lib/storage');
+}
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -280,11 +290,40 @@ export default function HomeScreen() {
     try {
       const data = await getRounds();
       if (data) {
-        const mapped = data.map((r: any, i: number) => ({
+        let mapped = data.map((r: any) => ({
           ...r,
           clips_count: r.clips_count ?? 0,
-          best_hole: null,
+          best_hole: null as { hole: number; par: number; score: number; label: string } | null,
         }));
+
+        // Compute best_hole for each round from scores
+        const roundIds = data.map((r: any) => r.id);
+        const { data: scores } = await supabase
+          .from('scores')
+          .select('round_id, hole_number, strokes, par, score_to_par')
+          .in('round_id', roundIds);
+
+        if (scores) {
+          const bestHoleMap = new Map<string, { hole: number; par: number; score: number; label: string }>();
+          for (const s of scores) {
+            if (s.score_to_par == null) continue;
+            const existing = bestHoleMap.get(s.round_id);
+            if (!existing || s.score_to_par < (existing.score - existing.par)) {
+              let label = 'Par';
+              if (s.score_to_par <= -2) label = 'Eagle';
+              else if (s.score_to_par === -1) label = 'Birdie';
+              else if (s.score_to_par === 1) label = 'Bogey';
+              else if (s.score_to_par >= 2) label = 'Double Bogey';
+              bestHoleMap.set(s.round_id, { hole: s.hole_number, par: s.par, score: s.strokes, label });
+            }
+          }
+          mapped = mapped.map((r) => ({
+            ...r,
+            best_hole: bestHoleMap.get(r.id) ?? null,
+          }));
+        }
+
+        // Set rounds immediately so the screen isn't blank while we sign URLs
         setLiveRounds(mapped);
 
         // Sign reel URLs for rounds that have a reel
@@ -305,9 +344,40 @@ export default function HomeScreen() {
           }),
         ]);
 
+        // Fallback: check local SQLite for rounds that still have no preview URL
+        // Note: clips_count may be 0 for rounds where clips were only saved locally,
+        // so we check ALL rounds without a preview URL, not just those with clips_count > 0
+        if (isNative && storage) {
+          const roundsWithoutPreview = data.filter(
+            (r: any) => !signedMap[r.id]
+          );
+          await Promise.all(
+            roundsWithoutPreview.slice(0, 10).map(async (r: any) => {
+              try {
+                const localClips = await storage!.getClipsForRound(r.id);
+                if (localClips && localClips.length > 0) {
+                  signedMap[r.id] = localClips[0].file_uri;
+                  // Also update clips_count if the round shows 0
+                  if ((r.clips_count ?? 0) === 0) {
+                    const idx = mapped.findIndex((m: any) => m.id === r.id);
+                    if (idx !== -1) {
+                      mapped[idx] = { ...mapped[idx], clips_count: localClips.length };
+                    }
+                  }
+                }
+              } catch {
+                // Local DB lookup failed — skip
+              }
+            })
+          );
+        }
+
         if (Object.keys(signedMap).length > 0) {
           setReelSignedUrls(signedMap);
         }
+
+        // Re-set rounds if local clips_count was updated
+        setLiveRounds([...mapped]);
       }
     } catch {
       // Network error — keep whatever we had
@@ -339,10 +409,17 @@ export default function HomeScreen() {
     }
   }, []);
 
+  useFocusEffect(
+    useCallback(() => {
+      fetchRounds();
+      fetchStats();
+    }, [fetchRounds, fetchStats])
+  );
+
+  // One-time repair: backfill par/score_to_par for existing scores
   useEffect(() => {
-    fetchRounds();
-    fetchStats();
-  }, [fetchRounds, fetchStats]);
+    repairScoresParData();
+  }, []);
 
   // Show real rounds if we have them, otherwise show mock as placeholder
   const useMock = loaded && liveRounds.length === 0;
@@ -355,23 +432,19 @@ export default function HomeScreen() {
     () => [...rounds].sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99)).slice(0, 5),
     [rounds]
   );
-  const birdieRounds = useMemo(
-    () => rounds.filter((r) => r.best_hole && (r.best_hole.label === 'Birdie' || r.best_hole.label === 'Eagle')),
-    [rounds]
-  );
-
   // Filtered rounds for the "All Rounds" section
   const filteredRounds = useMemo(() => {
     const now = new Date();
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
 
     switch (activeFilter) {
-      case 'birdies':
-        return rounds.filter((r) => r.best_hole?.label === 'Birdie');
-      case 'eagles':
-        return rounds.filter((r) => r.best_hole?.label === 'Eagle');
       case 'best':
         return [...rounds].sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99));
+      case 'recent': {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        return rounds.filter((r) => new Date(r.date) >= weekAgo);
+      }
       case 'month':
         return rounds.filter((r) => new Date(r.date) >= monthStart);
       default:
@@ -489,20 +562,13 @@ export default function HomeScreen() {
         {activeFilter === 'all' ? (
           <>
             {/* ---- RECENT ROUNDS (horizontal scroll) ---- */}
-            <SectionHeader title="Recent Rounds" onSeeAll={() => setActiveFilter('all')} />
+            <SectionHeader title="Recent Rounds" onSeeAll={() => setActiveFilter('recent')} />
             <HorizontalRoundSection rounds={recentRounds} size="large" onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
 
             {/* ---- BEST ROUNDS (horizontal scroll) ---- */}
             <SectionHeader title="Best Rounds" onSeeAll={() => setActiveFilter('best')} />
             <HorizontalRoundSection rounds={bestRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
 
-            {/* ---- BIRDIES & EAGLES ---- */}
-            {birdieRounds.length > 0 && (
-              <>
-                <SectionHeader title="Birdies & Eagles" onSeeAll={() => setActiveFilter('birdies')} />
-                <HorizontalRoundSection rounds={birdieRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
-              </>
-            )}
           </>
         ) : null}
 

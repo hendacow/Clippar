@@ -19,8 +19,6 @@ interface ReelPreviewProps {
  * Auto-plays muted in a continuous loop, like Instagram Reels / TikTok thumbnails.
  */
 export function ReelPreview({ signedUrl, height = 200 }: ReelPreviewProps) {
-  const [isLoading, setIsLoading] = useState(true);
-
   if (!isNative || !ExpoVideo) {
     // Web fallback: show a placeholder
     return (
@@ -34,10 +32,9 @@ export function ReelPreview({ signedUrl, height = 200 }: ReelPreviewProps) {
 
   return (
     <NativeReelPreview
+      key={signedUrl}
       signedUrl={signedUrl}
       height={height}
-      isLoading={isLoading}
-      setIsLoading={setIsLoading}
     />
   );
 }
@@ -45,21 +42,23 @@ export function ReelPreview({ signedUrl, height = 200 }: ReelPreviewProps) {
 function NativeReelPreview({
   signedUrl,
   height,
-  isLoading,
-  setIsLoading,
 }: {
   signedUrl: string;
   height: number;
-  isLoading: boolean;
-  setIsLoading: (v: boolean) => void;
 }) {
   const { useVideoPlayer, VideoView } = ExpoVideo!;
+  const [isLoading, setIsLoading] = useState(true);
 
   const player = useVideoPlayer(signedUrl, (p) => {
     p.loop = true;
     p.volume = 0;
     p.play();
   });
+
+  // Ensure playback restarts after player recreation
+  useEffect(() => {
+    player.play();
+  }, [player]);
 
   useEffect(() => {
     const sub = player.addListener('statusChange', (event: any) => {
@@ -70,7 +69,7 @@ function NativeReelPreview({
     return () => {
       sub.remove();
     };
-  }, [player, setIsLoading]);
+  }, [player]);
 
   return (
     <View style={[styles.container, { height }]}>
