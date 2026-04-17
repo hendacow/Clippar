@@ -1,56 +1,83 @@
-import { View, ViewStyle } from 'react-native';
+import { View, ViewStyle, DimensionValue } from 'react-native';
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
   withRepeat,
   withTiming,
-  withSequence,
+  interpolate,
+  Extrapolation,
 } from 'react-native-reanimated';
+import { LinearGradient } from 'expo-linear-gradient';
 import { useEffect } from 'react';
 import { theme } from '@/constants/theme';
 
 interface SkeletonProps {
-  width: number | string;
+  width: DimensionValue;
   height: number;
   borderRadius?: number;
   style?: ViewStyle;
 }
 
+const AnimatedLinearGradient = Animated.createAnimatedComponent(LinearGradient);
+
+/**
+ * Shimmering skeleton — a moving highlight sweeps across the surface.
+ * More polished than a simple opacity pulse.
+ */
 export function Skeleton({
   width,
   height,
   borderRadius = theme.radius.sm,
   style,
 }: SkeletonProps) {
-  const opacity = useSharedValue(0.3);
+  const shimmer = useSharedValue(0);
 
   useEffect(() => {
-    opacity.value = withRepeat(
-      withSequence(
-        withTiming(0.7, { duration: 1000 }),
-        withTiming(0.3, { duration: 1000 })
-      ),
-      -1
-    );
-  }, [opacity]);
+    shimmer.value = withRepeat(withTiming(1, { duration: 1400 }), -1, false);
+  }, [shimmer]);
 
   const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacity.value,
+    transform: [
+      {
+        translateX: interpolate(
+          shimmer.value,
+          [0, 1],
+          [-200, 400],
+          Extrapolation.CLAMP
+        ),
+      },
+    ],
   }));
 
   return (
-    <Animated.View
+    <View
       style={[
         {
-          width: width as number,
+          width,
           height,
           borderRadius,
-          backgroundColor: theme.colors.surfaceBorder,
+          backgroundColor: theme.colors.surface,
+          overflow: 'hidden',
         },
-        animatedStyle,
         style,
       ]}
-    />
+      accessibilityLabel="Loading"
+      accessibilityRole="progressbar"
+    >
+      <AnimatedLinearGradient
+        colors={[
+          'transparent',
+          theme.colors.surfaceBorder,
+          'transparent',
+        ]}
+        start={{ x: 0, y: 0.5 }}
+        end={{ x: 1, y: 0.5 }}
+        style={[
+          { width: '60%', height: '100%' },
+          animatedStyle,
+        ]}
+      />
+    </View>
   );
 }
 

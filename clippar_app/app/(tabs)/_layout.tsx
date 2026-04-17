@@ -114,15 +114,16 @@ export default function TabLayout() {
         tabBarActiveTintColor: theme.colors.primary,
         tabBarInactiveTintColor: theme.colors.textTertiary,
         tabBarLabelStyle: {
-          fontSize: 11,
-          fontWeight: '500',
+          fontSize: 12,
+          fontWeight: '600',
+          marginTop: 2,
         },
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
-          title: 'Library',
+          title: 'Rounds',
           tabBarIcon: ({ color, size }) => <LibraryTabIcon color={color} size={size} />,
         }}
       />
