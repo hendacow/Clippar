@@ -27,6 +27,27 @@ export function ScoreEntrySheet({
   const [putts, setPutts] = useState(2);
   const autoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Ref to the live confirm handler so the auto-dismiss timer always reads
+  // the latest strokes/putts values, not a stale closure from first render.
+  const handleConfirmRef = useRef<() => void>(() => {});
+
+  const handleConfirm = useCallback(() => {
+    if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
+    onConfirm(strokes, putts);
+  }, [strokes, putts, onConfirm]);
+
+  // Keep the ref in sync with the latest handler every render.
+  useEffect(() => {
+    handleConfirmRef.current = handleConfirm;
+  }, [handleConfirm]);
+
+  const resetAutoDismiss = useCallback(() => {
+    if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
+    autoDismissTimer.current = setTimeout(() => {
+      handleConfirmRef.current();
+    }, 5000);
+  }, []);
+
   // Reset when sheet opens with new data
   useEffect(() => {
     if (visible) {
@@ -37,25 +58,13 @@ export function ScoreEntrySheet({
     } else {
       bottomSheetRef.current?.close();
     }
-  }, [visible, autoStrokes]);
-
-  const resetAutoDismiss = useCallback(() => {
-    if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
-    autoDismissTimer.current = setTimeout(() => {
-      handleConfirm();
-    }, 5000);
-  }, []);
+  }, [visible, autoStrokes, resetAutoDismiss]);
 
   useEffect(() => {
     return () => {
       if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
     };
   }, []);
-
-  const handleConfirm = useCallback(() => {
-    if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
-    onConfirm(strokes, putts);
-  }, [strokes, putts, onConfirm]);
 
   const adjustStrokes = (delta: number) => {
     Haptics.selectionAsync();

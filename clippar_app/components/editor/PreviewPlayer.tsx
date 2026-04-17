@@ -441,6 +441,9 @@ function SimpleTrimPanel({
 
 // ---- Native video clip player ----
 
+// ExpoVideo is guaranteed to be non-null when this component is rendered
+// because the caller gates on `isNative && ExpoVideo` before using it.
+// We call hooks unconditionally to respect the Rules of Hooks.
 function NativeClipPlayer({
   clip,
   isTrimming,
@@ -450,9 +453,7 @@ function NativeClipPlayer({
   isTrimming: boolean;
   onEnd: () => void;
 }) {
-  if (!ExpoVideo) return null;
-
-  const { useVideoPlayer, VideoView } = ExpoVideo;
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
 
   const effectiveStart = clip.trimStartMs ?? clip.startMs ?? 0;
   const rawEnd = clip.trimEndMs != null && clip.trimEndMs !== -1
@@ -489,13 +490,17 @@ function NativeClipPlayer({
     if (endSecRef.current > 0) {
       interval = setInterval(() => {
         if (hasErrorRef.current) return;
-        if (player.currentTime >= endSecRef.current - 0.05) {
-          if (isTrimmingRef.current) {
-            player.currentTime = startSecRef.current;
-            player.play();
-          } else {
-            onEndRef.current();
+        try {
+          if (player.currentTime >= endSecRef.current - 0.05) {
+            if (isTrimmingRef.current) {
+              player.currentTime = startSecRef.current;
+              player.play();
+            } else {
+              onEndRef.current();
+            }
           }
+        } catch {
+          // Player may have been disposed during cleanup race — ignore
         }
       }, LOOP_POLL_MS);
     }

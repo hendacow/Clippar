@@ -350,6 +350,8 @@ function formatMsFull(ms: number): string {
 
 // ============================================================
 // NATIVE VIDEO PLAYER — respects trim bounds, loops in trim mode
+// ExpoVideo is guaranteed non-null because the caller gates on `isNative`.
+// Hooks are called unconditionally to respect the Rules of Hooks.
 // ============================================================
 function NativeClipPlayer({
   uri,
@@ -370,9 +372,9 @@ function NativeClipPlayer({
   seekTarget?: 'start' | 'end';
   draggingHandle?: 'none' | 'start' | 'end';
 }) {
-  if (!ExpoVideo) return null;
-
-  const { useVideoPlayer, VideoView } = ExpoVideo;
+  // CRITICAL: never early-return before calling hooks. ExpoVideo is non-null
+  // because the caller gates on `isNative`; the non-null assertion is safe.
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
 
   const effectiveEnd = trimEndMs === -1 ? durationMs : trimEndMs;
   const startSec = trimStartMs / 1000;
@@ -839,9 +841,10 @@ export default function PreviewScreen() {
   }>();
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
-  const [currentIndex, setCurrentIndex] = useState(
-    parseInt(startIndex ?? '0', 10)
-  );
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    const parsed = parseInt(startIndex ?? '0', 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  });
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Trim state

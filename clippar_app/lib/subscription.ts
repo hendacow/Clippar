@@ -13,7 +13,9 @@ export async function checkSubscription(): Promise<boolean> {
   if (!profile) return false;
 
   if (profile.subscription_status === 'active') {
-    if (profile.subscription_expires_at && new Date(profile.subscription_expires_at) > new Date()) {
+    // Lifetime / perpetual subscriptions have no expiry date — grant access.
+    if (!profile.subscription_expires_at) return true;
+    if (new Date(profile.subscription_expires_at) > new Date()) {
       return true;
     }
     // Expired — update status
