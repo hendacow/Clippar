@@ -19,13 +19,14 @@ import { MOCK_ROUNDS, MOCK_STATS } from '@/constants/mockData';
 import type { MockRound } from '@/constants/mockData';
 import { HeroReel } from '@/components/library/HeroReel';
 import { UploadProgressCard } from '@/components/library/UploadProgressCard';
-import { StatsRow } from '@/components/library/StatsRow';
 import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
-import { FilterChips, FILTERS, type FilterOption } from '@/components/library/FilterChips';
 import { Skeleton } from '@/components/ui/Skeleton';
 import { getRounds, getUserStats, deleteRound, getSignedReelUrl, getFirstClipSignedUrl } from '@/lib/api';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
+import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
+import { StatsHero } from '@/components/stats/StatsHero';
+import { useStatsFilter, type StatCategoryKey } from '@/hooks/useStatsFilter';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -271,9 +272,9 @@ export default function HomeScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [liveRounds, setLiveRounds] = useState<MockRound[]>([]);
   const [loaded, setLoaded] = useState(false);
-  const [activeFilter, setActiveFilter] = useState<FilterOption>('all');
   const [stats, setStats] = useState(MOCK_STATS);
   const [reelSignedUrls, setReelSignedUrls] = useState<Record<string, string>>({});
+  const [activeStatCategory, setActiveStatCategory] = useState<StatCategoryKey | null>(null);
 
   // Always try real data first; only show mock if user has zero rounds
   const fetchRounds = useCallback(async () => {
@@ -348,36 +349,71 @@ export default function HomeScreen() {
   const useMock = loaded && liveRounds.length === 0;
   const rounds = useMock ? MOCK_ROUNDS : liveRounds;
 
-  // Derived data for sections
-  const latestRound = rounds[0];
-  const recentRounds = rounds.slice(0, 5);
+  // ---- Shared stats filter (course / hole / timeframe / clips-only) ----
+  const {
+    filters,
+    setTimeframe,
+    setCourseId,
+    setHole,
+    setClipsOnly,
+    filteredRounds: statsFilteredRounds,
+    breakdown,
+    trend,
+    availableCourses,
+  } = useStatsFilter(rounds);
+
+  const avgScoreToPar = useMemo(() => {
+    const vals = statsFilteredRounds
+      .map((r) => r.score_to_par)
+      .filter((v): v is number => typeof v === 'number');
+    if (vals.length === 0) return null;
+    return vals.reduce((a, b) => a + b, 0) / vals.length;
+  }, [statsFilteredRounds]);
+
+  // Derived data for sections (use filtered list so the whole screen obeys the filter bar)
+  const latestRound = statsFilteredRounds[0] ?? rounds[0];
+  const recentRounds = statsFilteredRounds.slice(0, 5);
   const bestRounds = useMemo(
-    () => [...rounds].sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99)).slice(0, 5),
-    [rounds]
+    () =>
+      [...statsFilteredRounds]
+        .sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99))
+        .slice(0, 5),
+    [statsFilteredRounds],
   );
   const birdieRounds = useMemo(
-    () => rounds.filter((r) => r.best_hole && (r.best_hole.label === 'Birdie' || r.best_hole.label === 'Eagle')),
-    [rounds]
+    () =>
+      statsFilteredRounds.filter(
+        (r) =>
+          r.best_hole &&
+          (r.best_hole.label === 'Birdie' || r.best_hole.label === 'Eagle'),
+      ),
+    [statsFilteredRounds],
   );
 
-  // Filtered rounds for the "All Rounds" section
+  // Rounds list filtered further by the selected stat category tile (if any).
   const filteredRounds = useMemo(() => {
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-
-    switch (activeFilter) {
-      case 'birdies':
-        return rounds.filter((r) => r.best_hole?.label === 'Birdie');
-      case 'eagles':
-        return rounds.filter((r) => r.best_hole?.label === 'Eagle');
-      case 'best':
-        return [...rounds].sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99));
-      case 'month':
-        return rounds.filter((r) => new Date(r.date) >= monthStart);
-      default:
-        return rounds;
-    }
-  }, [rounds, activeFilter]);
+    if (!activeStatCategory) return statsFilteredRounds;
+    // A round qualifies if any of its holes sits in the selected category.
+    // Cheap heuristic from round-level data: for eagles/birdies we expose via
+    // best_hole when available. Otherwise fall back to score_to_par ranges.
+    return statsFilteredRounds.filter((r) => {
+      const bhLabel = r.best_hole?.label;
+      if (activeStatCategory === 'eagle') return bhLabel === 'Eagle';
+      if (activeStatCategory === 'birdie')
+        return bhLabel === 'Birdie' || bhLabel === 'Eagle';
+      // For par/bogey/double/triple we lack per-hole info on mock rounds,
+      // so fall back to including rounds whose score_to_par is consistent.
+      if (activeStatCategory === 'par')
+        return r.score_to_par != null && r.score_to_par <= 2;
+      if (activeStatCategory === 'bogey')
+        return r.score_to_par != null && r.score_to_par >= 1;
+      if (activeStatCategory === 'double')
+        return r.score_to_par != null && r.score_to_par >= 5;
+      if (activeStatCategory === 'triple')
+        return r.score_to_par != null && r.score_to_par >= 10;
+      return true;
+    });
+  }, [statsFilteredRounds, activeStatCategory]);
 
   if (!latestRound) {
     return (
@@ -470,6 +506,26 @@ export default function HomeScreen() {
           </View>
         )}
 
+        {/* ---- STATS FILTER BAR (hero filters) ---- */}
+        <StatsFilterBar
+          filters={filters}
+          courses={availableCourses}
+          onTimeframe={setTimeframe}
+          onCourse={setCourseId}
+          onHole={setHole}
+          onClipsOnly={setClipsOnly}
+        />
+
+        {/* ---- STATS HERO (tiles + chart) ---- */}
+        <StatsHero
+          breakdown={breakdown}
+          trend={trend}
+          activeCategory={activeStatCategory}
+          onSelectCategory={setActiveStatCategory}
+          totalRounds={statsFilteredRounds.length}
+          avgScoreToPar={avgScoreToPar}
+        />
+
         {/* ---- HERO REEL ---- */}
         <HeroReel
           round={latestRound}
@@ -480,27 +536,42 @@ export default function HomeScreen() {
         {/* ---- UPLOAD PROGRESS (shown when active) ---- */}
         <UploadProgressCard />
 
-        {/* ---- QUICK STATS ---- */}
-        <StatsRow stats={stats} />
-
-        {/* ---- FILTER CHIPS ---- */}
-        <FilterChips selected={activeFilter} onSelect={setActiveFilter} />
-
-        {activeFilter === 'all' ? (
+        {activeStatCategory == null ? (
           <>
             {/* ---- RECENT ROUNDS (horizontal scroll) ---- */}
-            <SectionHeader title="Recent Rounds" onSeeAll={() => setActiveFilter('all')} />
-            <HorizontalRoundSection rounds={recentRounds} size="large" onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
+            {recentRounds.length > 0 && (
+              <>
+                <SectionHeader title="Recent Rounds" onSeeAll={() => { /* filters already applied */ }} />
+                <HorizontalRoundSection
+                  rounds={recentRounds}
+                  size="large"
+                  onDeleteRound={useMock ? undefined : handleDeleteRound}
+                  reelSignedUrls={reelSignedUrls}
+                />
+              </>
+            )}
 
             {/* ---- BEST ROUNDS (horizontal scroll) ---- */}
-            <SectionHeader title="Best Rounds" onSeeAll={() => setActiveFilter('best')} />
-            <HorizontalRoundSection rounds={bestRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
+            {bestRounds.length > 0 && (
+              <>
+                <SectionHeader title="Best Rounds" onSeeAll={() => { /* filters already applied */ }} />
+                <HorizontalRoundSection
+                  rounds={bestRounds}
+                  onDeleteRound={useMock ? undefined : handleDeleteRound}
+                  reelSignedUrls={reelSignedUrls}
+                />
+              </>
+            )}
 
             {/* ---- BIRDIES & EAGLES ---- */}
             {birdieRounds.length > 0 && (
               <>
-                <SectionHeader title="Birdies & Eagles" onSeeAll={() => setActiveFilter('birdies')} />
-                <HorizontalRoundSection rounds={birdieRounds} onDeleteRound={useMock ? undefined : handleDeleteRound} reelSignedUrls={reelSignedUrls} />
+                <SectionHeader title="Birdies & Eagles" onSeeAll={() => setActiveStatCategory('birdie')} />
+                <HorizontalRoundSection
+                  rounds={birdieRounds}
+                  onDeleteRound={useMock ? undefined : handleDeleteRound}
+                  reelSignedUrls={reelSignedUrls}
+                />
               </>
             )}
           </>
@@ -516,7 +587,19 @@ export default function HomeScreen() {
               letterSpacing: -0.2,
             }}
           >
-            {activeFilter === 'all' ? 'All Rounds' : FILTERS.find((f) => f.key === activeFilter)?.label ?? 'Rounds'}
+            {activeStatCategory == null
+              ? 'All Rounds'
+              : activeStatCategory === 'eagle'
+                ? 'Eagles'
+                : activeStatCategory === 'birdie'
+                  ? 'Birdies'
+                  : activeStatCategory === 'par'
+                    ? 'Pars'
+                    : activeStatCategory === 'bogey'
+                      ? 'Bogeys'
+                      : activeStatCategory === 'double'
+                        ? 'Doubles'
+                        : 'Triples+'}
           </Text>
           <View
             style={{
@@ -530,6 +613,27 @@ export default function HomeScreen() {
               {filteredRounds.length}
             </Text>
           </View>
+          {activeStatCategory != null && (
+            <Pressable
+              onPress={() => {
+                Haptics.selectionAsync();
+                setActiveStatCategory(null);
+              }}
+              style={{
+                marginLeft: 'auto',
+                paddingHorizontal: 10,
+                paddingVertical: 4,
+                borderRadius: theme.radius.full,
+                backgroundColor: theme.colors.surface,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+              }}
+            >
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' }}>
+                Clear
+              </Text>
+            </Pressable>
+          )}
         </View>
 
         {filteredRounds.length === 0 ? (
