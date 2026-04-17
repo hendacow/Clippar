@@ -16,6 +16,8 @@ import {
   authenticateWithBiometrics,
 } from '@/lib/biometrics';
 import { repairScoresParData } from '@/lib/api';
+import { migrateLegacyUris } from '@/lib/uriMigration';
+import { initializeUploadQueueProcessor } from '@/lib/uploadQueue';
 import '@/global.css';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -57,6 +59,24 @@ export default function RootLayout() {
           if (n > 0) console.log(`[Startup] repairScoresParData: fixed ${n} rows`);
         })
         .catch((e) => console.log('[Startup] repairScoresParData skipped:', e));
+
+      // Retroactively promote ph:// / assets-library:// / /tmp/ URIs to durable
+      // file:// paths so already-imported rounds survive iOS tmp eviction.
+      migrateLegacyUris()
+        .then(({ scanned, migrated }) => {
+          if (scanned > 0) {
+            console.log(`[Startup] migrateLegacyUris: ${migrated}/${scanned} clips updated`);
+          }
+        })
+        .catch((e) => console.log('[Startup] migrateLegacyUris skipped:', e));
+
+      // Drain the persistent upload queue + subscribe to NetInfo so queued
+      // rounds upload automatically whenever connectivity returns.
+      try {
+        initializeUploadQueueProcessor();
+      } catch (e) {
+        console.log('[Startup] initializeUploadQueueProcessor skipped:', e);
+      }
     })();
   }, [loading]);
 

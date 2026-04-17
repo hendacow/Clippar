@@ -79,10 +79,29 @@ async function migrateEditorColumns() {
     'ALTER TABLE local_clips ADD COLUMN auto_trim_end_ms INTEGER',
     // Shot type classification: 'swing' | 'putt' | null (unknown)
     "ALTER TABLE local_clips ADD COLUMN shot_type TEXT",
+    // Last upload error (string) when background upload fails — surfaces a
+    // "Retry upload" affordance in the library. NULL when no error.
+    'ALTER TABLE local_clips ADD COLUMN upload_error TEXT',
+    // Timestamp of most recent upload attempt (ISO string). Used to throttle
+    // auto-retry so we don't burn battery on a clip that keeps failing.
+    'ALTER TABLE local_clips ADD COLUMN last_upload_attempt_at TEXT',
     // Settings table
     `CREATE TABLE IF NOT EXISTS local_settings (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
+    )`,
+    // Persistent queue of rounds/clips that need to be uploaded to Supabase
+    // so the work survives app kill / restart / offline periods. Each row is
+    // a round waiting to have its clips streamed up.
+    `CREATE TABLE IF NOT EXISTS local_upload_queue (
+      round_id TEXT PRIMARY KEY,
+      course_name TEXT,
+      mode TEXT DEFAULT 'local-only',
+      status TEXT DEFAULT 'pending',
+      last_error TEXT,
+      attempt_count INTEGER DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
     )`,
   ];
   for (const sql of migrations) {
@@ -467,6 +486,180 @@ export async function deleteLocalRound(roundId: string) {
   await database.runAsync('DELETE FROM local_scores WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_clips WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_rounds WHERE id = ?', roundId);
+  await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
+}
+
+// ---- Upload error tracking ----
+
+export async function markClipUploadError(clipId: number, errorMessage: string) {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_clips SET upload_error = ?, last_upload_attempt_at = ? WHERE id = ?',
+    errorMessage.slice(0, 500), // cap length
+    new Date().toISOString(),
+    clipId
+  );
+}
+
+export async function clearClipUploadError(clipId: number) {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_clips SET upload_error = NULL WHERE id = ?',
+    clipId
+  );
+}
+
+export async function getClipsWithUploadErrors(roundId?: string) {
+  const database = await getDatabase();
+  if (roundId) {
+    return database.getAllAsync<{
+      id: number;
+      round_id: string;
+      hole_number: number;
+      shot_number: number;
+      file_uri: string;
+      upload_error: string;
+      upload_retry_count: number;
+      last_upload_attempt_at: string | null;
+    }>(
+      'SELECT * FROM local_clips WHERE round_id = ? AND upload_error IS NOT NULL AND uploaded = 0',
+      roundId
+    );
+  }
+  return database.getAllAsync<{
+    id: number;
+    round_id: string;
+    hole_number: number;
+    shot_number: number;
+    file_uri: string;
+    upload_error: string;
+    upload_retry_count: number;
+    last_upload_attempt_at: string | null;
+  }>(
+    'SELECT * FROM local_clips WHERE upload_error IS NOT NULL AND uploaded = 0'
+  );
+}
+
+// ---- Upload queue (rounds to auto-upload in background) ----
+
+export async function enqueueRoundForUpload(
+  roundId: string,
+  courseName: string | null,
+  mode: 'local-only' | 'highlight-reel' = 'local-only'
+) {
+  const database = await getDatabase();
+  const now = new Date().toISOString();
+  await database.runAsync(
+    `INSERT INTO local_upload_queue (round_id, course_name, mode, status, attempt_count, created_at, updated_at)
+     VALUES (?, ?, ?, 'pending', 0, ?, ?)
+     ON CONFLICT(round_id) DO UPDATE SET
+       course_name = excluded.course_name,
+       mode = excluded.mode,
+       status = 'pending',
+       last_error = NULL,
+       updated_at = excluded.updated_at`,
+    roundId,
+    courseName,
+    mode,
+    now,
+    now
+  );
+}
+
+export async function getQueuedRoundUploads() {
+  const database = await getDatabase();
+  return database.getAllAsync<{
+    round_id: string;
+    course_name: string | null;
+    mode: string;
+    status: string;
+    last_error: string | null;
+    attempt_count: number;
+    created_at: string;
+    updated_at: string;
+  }>(
+    "SELECT * FROM local_upload_queue WHERE status IN ('pending', 'error') ORDER BY created_at"
+  );
+}
+
+export async function markQueuedRoundStatus(
+  roundId: string,
+  status: 'pending' | 'in_progress' | 'done' | 'error',
+  errorMessage?: string | null
+) {
+  const database = await getDatabase();
+  const now = new Date().toISOString();
+  if (status === 'error') {
+    await database.runAsync(
+      `UPDATE local_upload_queue
+       SET status = ?, last_error = ?, attempt_count = attempt_count + 1, updated_at = ?
+       WHERE round_id = ?`,
+      status,
+      errorMessage?.slice(0, 500) ?? null,
+      now,
+      roundId
+    );
+  } else {
+    await database.runAsync(
+      `UPDATE local_upload_queue SET status = ?, last_error = NULL, updated_at = ? WHERE round_id = ?`,
+      status,
+      now,
+      roundId
+    );
+  }
+}
+
+export async function removeQueuedRoundUpload(roundId: string) {
+  const database = await getDatabase();
+  await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
+}
+
+// ---- Legacy URI migration ----
+
+/**
+ * Return all local_clips rows whose file_uri or original_file_uri points at
+ * a location iOS will purge (ph://, assets-library://, or any path under
+ * /tmp/). These need to be resolved to a durable file:// path on next load.
+ */
+export async function getClipsWithLegacyUris() {
+  const database = await getDatabase();
+  return database.getAllAsync<{
+    id: number;
+    round_id: string;
+    file_uri: string;
+    original_file_uri: string | null;
+  }>(
+    `SELECT id, round_id, file_uri, original_file_uri
+     FROM local_clips
+     WHERE file_uri LIKE 'ph://%'
+        OR file_uri LIKE 'assets-library://%'
+        OR file_uri LIKE '%/tmp/%'
+        OR original_file_uri LIKE 'ph://%'
+        OR original_file_uri LIKE 'assets-library://%'
+        OR original_file_uri LIKE '%/tmp/%'`
+  );
+}
+
+export async function updateClipFileUris(
+  clipId: number,
+  fileUri: string,
+  originalFileUri?: string | null
+) {
+  const database = await getDatabase();
+  if (originalFileUri !== undefined) {
+    await database.runAsync(
+      'UPDATE local_clips SET file_uri = ?, original_file_uri = ? WHERE id = ?',
+      fileUri,
+      originalFileUri,
+      clipId
+    );
+  } else {
+    await database.runAsync(
+      'UPDATE local_clips SET file_uri = ? WHERE id = ?',
+      fileUri,
+      clipId
+    );
+  }
 }
 
 // (Generic key/value settings live earlier in this file against the
