@@ -5,21 +5,23 @@ import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { theme } from '@/constants/theme';
 import { getMusicTracks } from '@/lib/api';
 
-interface MusicTrack {
+export interface MusicTrack {
   id: string;
   title: string;
   artist: string;
   duration_seconds: number;
+  file_url: string | null;
   preview_url: string | null;
 }
 
-/** Bundled royalty-free tracks that are always available. */
+/** Bundled royalty-free tracks that are always available (shipped with the app). */
 const BUNDLED_TRACKS: MusicTrack[] = [
   {
     id: 'chill_vibes',
     title: 'Chill Vibes',
     artist: 'Clippar',
     duration_seconds: 30,
+    file_url: null, // resolved from app bundle at export time
     preview_url: null,
   },
   {
@@ -27,6 +29,7 @@ const BUNDLED_TRACKS: MusicTrack[] = [
     title: 'Victory Lap',
     artist: 'Clippar',
     duration_seconds: 30,
+    file_url: null, // resolved from app bundle at export time
     preview_url: null,
   },
   {
@@ -34,6 +37,7 @@ const BUNDLED_TRACKS: MusicTrack[] = [
     title: 'Focus Mode',
     artist: 'Clippar',
     duration_seconds: 30,
+    file_url: null, // resolved from app bundle at export time
     preview_url: null,
   },
 ];
@@ -52,8 +56,15 @@ export function MusicPicker({ visible, selectedTrackId, onSelect, onDismiss }: M
   useEffect(() => {
     getMusicTracks()
       .then((data) => {
-        // Merge server tracks with bundled tracks, avoiding duplicates
-        const serverTracks: MusicTrack[] = data ?? [];
+        // Map server rows (which use `name`) to our MusicTrack interface (which uses `title`)
+        const serverTracks: MusicTrack[] = (data ?? []).map((row: any) => ({
+          id: row.id,
+          title: row.name ?? row.title ?? 'Untitled',
+          artist: row.artist ?? 'Unknown',
+          duration_seconds: row.duration_seconds ?? 0,
+          file_url: row.file_url ?? null,
+          preview_url: row.preview_url ?? null,
+        }));
         const serverIds = new Set(serverTracks.map((t) => t.id));
         const bundled = BUNDLED_TRACKS.filter((t) => !serverIds.has(t.id));
         setTracks([...bundled, ...serverTracks]);

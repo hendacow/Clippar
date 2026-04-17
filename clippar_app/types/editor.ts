@@ -10,6 +10,15 @@ export interface EditorClip {
   trimEndMs: number; // -1 = use full duration
   durationMs: number;
   isExcluded?: boolean;
+  // Auto-trim metadata
+  autoTrimmed?: boolean;
+  trimConfidence?: number;
+  impactTimeMs?: number;
+  originalUri?: string; // original URI before auto-trim
+  needsTrim?: boolean; // true if clip was imported but not yet processed by detectAndTrim
+  // Auto-trim boundaries in ORIGINAL video milliseconds
+  autoTrimStartMs?: number;
+  autoTrimEndMs?: number;
 }
 
 export interface EditorHoleSection {

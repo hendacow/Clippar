@@ -176,15 +176,22 @@ export async function upsertScore(score: {
   round_id: string;
   hole_number: number;
   strokes: number;
+  par?: number;
   putts?: number;
   penalty_strokes?: number;
   is_pickup?: boolean;
   score_to_par?: number;
 }) {
   try {
+    // Auto-compute score_to_par when par is provided but score_to_par isn't
+    const finalScore = { ...score };
+    if (finalScore.par != null && finalScore.score_to_par == null) {
+      finalScore.score_to_par = finalScore.strokes - finalScore.par;
+    }
+
     const { data, error } = await supabase
       .from('scores')
-      .upsert(score, { onConflict: 'round_id,hole_number' })
+      .upsert(finalScore, { onConflict: 'round_id,hole_number' })
       .select()
       .single();
 
@@ -196,6 +203,98 @@ export async function upsertScore(score: {
     return data;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Repair existing scores that are missing par/score_to_par.
+ * Joins scores -> rounds -> courses -> holes to backfill par data,
+ * then computes score_to_par = strokes - par.
+ * Call once on app startup (idempotent, only updates NULLs).
+ */
+export async function repairScoresParData(): Promise<number> {
+  try {
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return 0;
+
+    // Find scores with NULL score_to_par for this user's rounds
+    const { data: broken, error } = await supabase
+      .from('scores')
+      .select('id, round_id, hole_number, strokes, par, score_to_par, rounds!inner(user_id, course_id)')
+      .eq('rounds.user_id', user.id)
+      .is('score_to_par', null);
+
+    if (error || !broken || broken.length === 0) return 0;
+
+    let repaired = 0;
+
+    for (const score of broken) {
+      let par = score.par;
+
+      // If par is also NULL, try to get it from the holes table
+      if (par == null) {
+        const courseId = (score.rounds as any)?.course_id;
+        if (courseId) {
+          const { data: hole } = await supabase
+            .from('holes')
+            .select('par')
+            .eq('course_id', courseId)
+            .eq('hole_number', score.hole_number)
+            .maybeSingle();
+          if (hole?.par) par = hole.par;
+        }
+      }
+
+      // Still no par? Default to 4
+      if (par == null) par = 4;
+
+      const score_to_par = score.strokes - par;
+
+      const { error: updateError } = await supabase
+        .from('scores')
+        .update({ par, score_to_par })
+        .eq('id', score.id);
+
+      if (!updateError) repaired++;
+    }
+
+    if (repaired > 0) {
+      console.log(`[API] repairScoresParData: fixed ${repaired} scores`);
+    }
+    return repaired;
+  } catch (err) {
+    console.log('[API] repairScoresParData error:', err);
+    return 0;
+  }
+}
+
+export async function saveScoreToSupabase(score: {
+  round_id: string;
+  hole_number: number;
+  strokes: number;
+  par: number;
+  putts?: number;
+  penalty_strokes?: number;
+}) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+
+  const score_to_par = score.strokes - score.par;
+
+  const { error } = await supabase
+    .from('scores')
+    .upsert({
+      round_id: score.round_id,
+      hole_number: score.hole_number,
+      strokes: score.strokes,
+      par: score.par,
+      score_to_par,
+      putts: score.putts ?? 0,
+      penalty_strokes: score.penalty_strokes ?? 0,
+    }, { onConflict: 'round_id,hole_number' });
+
+  if (error) {
+    console.log('[API] saveScoreToSupabase error:', error);
   }
 }
 
@@ -248,7 +347,7 @@ export async function getProcessingJob(roundId: string) {
 
 // ============ Courses ============
 
-export async function searchCourses(query: string) {
+export async function searchCourses(query: string, enableFallback = false) {
   try {
     const { data, error } = await supabase
       .from('courses')
@@ -261,9 +360,84 @@ export async function searchCourses(query: string) {
       console.log('[API] searchCourses skipped:', error.message);
       return [];
     }
-    return data ?? [];
+
+    const results = data ?? [];
+
+    // If local results are sparse and fallback enabled, try external API
+    if (results.length < 2 && enableFallback && query.trim().length >= 3) {
+      const apiResults = await syncCourseFromAPI(query);
+      if (apiResults.length > 0) {
+        // Merge, deduplicate by id
+        const ids = new Set(results.map(r => r.id));
+        for (const r of apiResults) {
+          if (!ids.has(r.id)) {
+            results.push(r);
+            ids.add(r.id);
+          }
+        }
+      }
+    }
+
+    return results;
   } catch {
     return [];
+  }
+}
+
+/**
+ * Falls back to external golf API (via edge function) when local search is empty.
+ * Calls the sync-courses edge function which searches GolfCourseAPI.com,
+ * upserts the course + holes into Supabase, then we re-query locally.
+ */
+export async function syncCourseFromAPI(courseName: string): Promise<any[]> {
+  try {
+    const { data, error } = await supabase.functions.invoke('sync-courses', {
+      body: { action: 'sync_single', name: courseName },
+    });
+
+    if (error || !data?.success) {
+      console.log('[API] syncCourseFromAPI: no result from edge function');
+      return [];
+    }
+
+    // Re-query local table now that the course was upserted
+    if (data.course_id) {
+      const { data: course } = await supabase
+        .from('courses')
+        .select('*')
+        .eq('id', data.course_id);
+      return course ?? [];
+    }
+
+    // If no specific course_id, re-search locally
+    return await searchCourses(courseName);
+  } catch (err) {
+    console.log('[API] syncCourseFromAPI error:', err);
+    return [];
+  }
+}
+
+/**
+ * Bulk-sync courses for a region via the edge function.
+ * Useful for pre-populating courses in a given area.
+ */
+export async function syncRegionCourses(
+  searchTerms: string[],
+  country = 'AU',
+  state = 'QLD'
+) {
+  try {
+    const { data, error } = await supabase.functions.invoke('sync-courses', {
+      body: { action: 'sync_region', country, state, search_terms: searchTerms },
+    });
+    if (error) {
+      console.log('[API] syncRegionCourses error:', error);
+      return null;
+    }
+    return data;
+  } catch (err) {
+    console.log('[API] syncRegionCourses error:', err);
+    return null;
   }
 }
 
@@ -742,10 +916,15 @@ export async function getSignedClipUrls(
   // Batch sign in parallel (Supabase doesn't have batch sign, so we do them individually)
   const promises = clipPaths.map(async (path) => {
     try {
+      // clip_url is stored as "clips/{roundId}/{filename}" but the bucket is already "clips",
+      // so we must strip the "clips/" prefix to avoid double-prefixing the path.
+      const pathInBucket = path.startsWith('clips/') ? path.slice(6) : path;
+
       const { data, error } = await supabase.storage
         .from('clips')
-        .createSignedUrl(path, expiresIn);
+        .createSignedUrl(pathInBucket, expiresIn);
       if (!error && data?.signedUrl) {
+        // Key by the ORIGINAL path so lookups from shot.clipUrl still match
         result[path] = data.signedUrl;
       }
     } catch {
@@ -799,6 +978,122 @@ export async function getFirstClipSignedUrl(
     if (error || !data?.signedUrl) return null;
     return data.signedUrl;
   } catch {
+    return null;
+  }
+}
+
+// ============ Course Upsert from Live API ============
+
+/**
+ * Upsert a course from the live Golf Course API into Supabase for caching.
+ * Takes a GolfCourseSearchResult-shaped object and optional hole data,
+ * then inserts or updates the local courses + holes tables.
+ * Returns the Supabase course row (with its UUID id).
+ */
+export async function upsertCourseFromLiveApi(
+  course: {
+    id: string;
+    name: string;
+    city?: string;
+    state?: string;
+    country: string;
+    holes?: number;
+    latitude?: number;
+    longitude?: number;
+  },
+  holesData?: { number: number; par: number; handicap?: number; metres?: number }[],
+): Promise<any | null> {
+  try {
+    // Check if course already exists by source + source_id
+    const { data: existing } = await supabase
+      .from('courses')
+      .select('*')
+      .eq('source', 'golfcourseapi')
+      .eq('source_id', course.id)
+      .maybeSingle();
+
+    let courseRow = existing;
+
+    if (!courseRow) {
+      // Also check by name + country
+      const { data: byName } = await supabase
+        .from('courses')
+        .select('*')
+        .ilike('name', course.name)
+        .eq('country', course.country || 'AU')
+        .maybeSingle();
+
+      courseRow = byName;
+    }
+
+    const parTotal = holesData?.reduce((sum, h) => sum + h.par, 0) ?? null;
+
+    if (courseRow) {
+      // Update existing row
+      const { data: updated } = await supabase
+        .from('courses')
+        .update({
+          location_name: course.city || courseRow.location_name,
+          state: course.state || courseRow.state,
+          latitude: course.latitude ?? courseRow.latitude,
+          longitude: course.longitude ?? courseRow.longitude,
+          holes_count: course.holes || courseRow.holes_count,
+          par_total: parTotal || courseRow.par_total,
+          source: 'golfcourseapi',
+          source_id: course.id,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', courseRow.id)
+        .select('*')
+        .single();
+      courseRow = updated || courseRow;
+    } else {
+      // Insert new course
+      const { data: inserted, error } = await supabase
+        .from('courses')
+        .insert({
+          name: course.name,
+          location_name: course.city || null,
+          state: course.state || null,
+          country: course.country || 'AU',
+          latitude: course.latitude || null,
+          longitude: course.longitude || null,
+          holes_count: course.holes || 18,
+          par_total: parTotal,
+          source: 'golfcourseapi',
+          source_id: course.id,
+        })
+        .select('*')
+        .single();
+
+      if (error) {
+        console.log('[API] upsertCourseFromLiveApi insert error:', error.message);
+        return null;
+      }
+      courseRow = inserted;
+    }
+
+    // Upsert holes if provided
+    if (holesData && holesData.length > 0 && courseRow?.id) {
+      for (const hole of holesData) {
+        await supabase
+          .from('holes')
+          .upsert(
+            {
+              course_id: courseRow.id,
+              hole_number: hole.number,
+              par: hole.par,
+              stroke_index: hole.handicap ?? null,
+              length_meters: hole.metres ?? null,
+            },
+            { onConflict: 'course_id,hole_number' }
+          );
+      }
+    }
+
+    return courseRow;
+  } catch (err) {
+    console.log('[API] upsertCourseFromLiveApi error:', err);
     return null;
   }
 }

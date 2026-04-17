@@ -61,26 +61,33 @@ async function initTables() {
 // Migrate existing databases to add new columns
 async function migrateEditorColumns() {
   if (!db) return;
-  try {
-    await db.execAsync(`
-      ALTER TABLE local_clips ADD COLUMN trim_start_ms INTEGER DEFAULT 0;
-    `);
-  } catch {} // column already exists
-  try {
-    await db.execAsync(`
-      ALTER TABLE local_clips ADD COLUMN trim_end_ms INTEGER DEFAULT -1;
-    `);
-  } catch {}
-  try {
-    await db.execAsync(`
-      ALTER TABLE local_clips ADD COLUMN is_excluded INTEGER DEFAULT 0;
-    `);
-  } catch {}
-  try {
-    await db.execAsync(`
-      ALTER TABLE local_clips ADD COLUMN sort_order INTEGER DEFAULT 0;
-    `);
-  } catch {}
+  const migrations = [
+    'ALTER TABLE local_clips ADD COLUMN trim_start_ms INTEGER DEFAULT 0',
+    'ALTER TABLE local_clips ADD COLUMN trim_end_ms INTEGER DEFAULT -1',
+    'ALTER TABLE local_clips ADD COLUMN is_excluded INTEGER DEFAULT 0',
+    'ALTER TABLE local_clips ADD COLUMN sort_order INTEGER DEFAULT 0',
+    // Auto-trim columns (Phase 1)
+    'ALTER TABLE local_clips ADD COLUMN trimmed_file_uri TEXT',
+    'ALTER TABLE local_clips ADD COLUMN original_file_uri TEXT',
+    'ALTER TABLE local_clips ADD COLUMN auto_trimmed INTEGER DEFAULT 0',
+    'ALTER TABLE local_clips ADD COLUMN trim_confidence REAL',
+    'ALTER TABLE local_clips ADD COLUMN impact_time_ms REAL',
+    // Lazy-trim flag (Phase 2: import saves URI only, editor trims later)
+    'ALTER TABLE local_clips ADD COLUMN needs_trim INTEGER DEFAULT 0',
+    // Auto-trim boundaries relative to original video (for full-timeline trimmer)
+    'ALTER TABLE local_clips ADD COLUMN auto_trim_start_ms INTEGER',
+    'ALTER TABLE local_clips ADD COLUMN auto_trim_end_ms INTEGER',
+    // Shot type classification: 'swing' | 'putt' | null (unknown)
+    "ALTER TABLE local_clips ADD COLUMN shot_type TEXT",
+    // Settings table
+    `CREATE TABLE IF NOT EXISTS local_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    )`,
+  ];
+  for (const sql of migrations) {
+    try { await db.execAsync(sql + ';'); } catch {} // column/table already exists
+  }
 }
 
 export async function updateClipEditorState(
@@ -90,11 +97,14 @@ export async function updateClipEditorState(
     trim_end_ms?: number;
     is_excluded?: boolean;
     sort_order?: number;
+    file_uri?: string;
+    duration_seconds?: number;
+    shot_type?: string;
   }
 ) {
   const database = await getDatabase();
   const fields: string[] = [];
-  const values: (number)[] = [];
+  const values: (number | string)[] = [];
 
   if (updates.trim_start_ms !== undefined) {
     fields.push('trim_start_ms = ?');
@@ -111,6 +121,18 @@ export async function updateClipEditorState(
   if (updates.sort_order !== undefined) {
     fields.push('sort_order = ?');
     values.push(updates.sort_order);
+  }
+  if (updates.file_uri !== undefined) {
+    fields.push('file_uri = ?');
+    values.push(updates.file_uri);
+  }
+  if (updates.duration_seconds !== undefined) {
+    fields.push('duration_seconds = ?');
+    values.push(updates.duration_seconds);
+  }
+  if (updates.shot_type !== undefined) {
+    fields.push('shot_type = ?');
+    values.push(updates.shot_type);
   }
 
   if (fields.length === 0) return;
@@ -130,11 +152,20 @@ export async function saveLocalClip(clip: {
   gps_latitude?: number;
   gps_longitude?: number;
   duration_seconds?: number;
-}) {
+  // Auto-trim metadata
+  trimmed_file_uri?: string;
+  original_file_uri?: string;
+  auto_trimmed?: number;
+  trim_confidence?: number;
+  impact_time_ms?: number;
+  trim_start_ms?: number;
+  trim_end_ms?: number;
+  needs_trim?: number;
+}): Promise<number> {
   const database = await getDatabase();
-  await database.runAsync(
-    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  const result = await database.runAsync(
+    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     clip.round_id,
     clip.hole_number,
     clip.shot_number,
@@ -142,7 +173,35 @@ export async function saveLocalClip(clip: {
     clip.gps_latitude ?? null,
     clip.gps_longitude ?? null,
     clip.duration_seconds ?? null,
-    new Date().toISOString()
+    new Date().toISOString(),
+    clip.trimmed_file_uri ?? null,
+    clip.original_file_uri ?? null,
+    clip.auto_trimmed ?? 0,
+    clip.trim_confidence ?? null,
+    clip.impact_time_ms ?? null,
+    clip.trim_start_ms ?? 0,
+    clip.trim_end_ms ?? -1,
+    clip.needs_trim ?? 0,
+  );
+  return result.lastInsertRowId;
+}
+
+// Settings helpers
+export async function getSetting(key: string): Promise<string | null> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ value: string }>(
+    'SELECT value FROM local_settings WHERE key = ?',
+    key
+  );
+  return row?.value ?? null;
+}
+
+export async function setSetting(key: string, value: string): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    'INSERT OR REPLACE INTO local_settings (key, value) VALUES (?, ?)',
+    key,
+    value
   );
 }
 
@@ -172,6 +231,52 @@ export async function markClipUploaded(clipId: number, remoteClipId: string) {
   );
 }
 
+export async function getUnprocessedClips(roundId: string) {
+  const database = await getDatabase();
+  return database.getAllAsync<{
+    id: number;
+    round_id: string;
+    hole_number: number;
+    shot_number: number;
+    file_uri: string;
+    original_file_uri: string | null;
+    duration_seconds: number | null;
+  }>(
+    'SELECT * FROM local_clips WHERE round_id = ? AND needs_trim = 1 AND auto_trimmed = 0 ORDER BY hole_number, shot_number',
+    roundId
+  );
+}
+
+export async function markClipTrimmed(
+  clipId: number,
+  trimmedFileUri: string,
+  impactTimeMs: number | null,
+  trimConfidence: number | null,
+  autoTrimStartMs: number | null = null,
+  autoTrimEndMs: number | null = null,
+) {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE local_clips SET
+      file_uri = ?,
+      trimmed_file_uri = ?,
+      auto_trimmed = 1,
+      needs_trim = 0,
+      impact_time_ms = ?,
+      trim_confidence = ?,
+      auto_trim_start_ms = ?,
+      auto_trim_end_ms = ?
+    WHERE id = ?`,
+    trimmedFileUri,
+    trimmedFileUri,
+    impactTimeMs ?? null,
+    trimConfidence ?? null,
+    autoTrimStartMs ?? null,
+    autoTrimEndMs ?? null,
+    clipId
+  );
+}
+
 export async function getClipsForRound(roundId: string) {
   const database = await getDatabase();
   return database.getAllAsync<{
@@ -187,6 +292,11 @@ export async function getClipsForRound(roundId: string) {
     is_excluded: number;
     sort_order: number;
     duration_seconds: number | null;
+    auto_trimmed: number;
+    original_file_uri: string | null;
+    needs_trim: number;
+    auto_trim_start_ms: number | null;
+    auto_trim_end_ms: number | null;
   }>(
     'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, sort_order, shot_number',
     roundId
@@ -322,6 +432,29 @@ export async function incrementClipRetryCount(clipId: number) {
   await database.runAsync(
     'UPDATE local_clips SET upload_retry_count = upload_retry_count + 1 WHERE id = ?',
     clipId
+  );
+}
+
+export async function getClipsForMultipleRounds(roundIds: string[]) {
+  if (roundIds.length === 0) return [];
+  const database = await getDatabase();
+  const placeholders = roundIds.map(() => '?').join(',');
+  return database.getAllAsync<{
+    id: number;
+    round_id: string;
+    hole_number: number;
+    shot_number: number;
+    file_uri: string;
+    trim_start_ms: number;
+    trim_end_ms: number;
+    duration_seconds: number | null;
+    auto_trimmed: number;
+    original_file_uri: string | null;
+    auto_trim_start_ms: number | null;
+    auto_trim_end_ms: number | null;
+  }>(
+    `SELECT * FROM local_clips WHERE round_id IN (${placeholders}) ORDER BY round_id, hole_number, shot_number`,
+    ...roundIds
   );
 }
 

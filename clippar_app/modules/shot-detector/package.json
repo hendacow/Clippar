@@ -1,0 +1,12 @@
+{
+  "name": "shot-detector",
+  "version": "0.1.0",
+  "description": "Native iOS golf swing detection using Vision framework pose estimation and audio transient analysis",
+  "main": "index.ts",
+  "author": "Clippar",
+  "license": "MIT",
+  "homepage": "https://clippar.com",
+  "peerDependencies": {
+    "expo": "*"
+  }
+}

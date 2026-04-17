@@ -1,5 +1,6 @@
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import { Platform } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import type { ReactNode } from 'react';
 
 let NetInfo: any = null;
@@ -22,6 +23,8 @@ type UploadStage =
   | 'completed'
   | 'error';
 
+export type UploadMode = 'local-only' | 'highlight-reel';
+
 export interface UploadState {
   stage: UploadStage;
   roundId: string | null;
@@ -36,7 +39,7 @@ export interface UploadState {
 
 interface UploadContextType {
   upload: UploadState;
-  startUpload: (roundId: string, courseName: string) => void;
+  startUpload: (roundId: string, courseName: string, mode?: UploadMode) => void;
   cancelUpload: () => void;
   retryUpload: () => void;
   dismissUpload: () => void;
@@ -222,10 +225,13 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     }, 10_000); // Poll every 10s for more responsive updates
   }, [update]);
 
-  const runUpload = useCallback(async (roundId: string, courseName: string) => {
+  const lastModeRef = useRef<UploadMode>('highlight-reel');
+
+  const runUpload = useCallback(async (roundId: string, courseName: string, mode: UploadMode = 'highlight-reel') => {
     cancelledRef.current = false;
     lastRoundIdRef.current = roundId;
     lastCourseNameRef.current = courseName;
+    lastModeRef.current = mode;
 
     update({
       stage: 'preparing',
@@ -289,24 +295,53 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
             const filename = `hole${clip.hole_number}_shot${clip.shot_number}_${clip.id}.mp4`;
 
+            // Skip compression for locally-trimmed clips (preserves original 4K quality)
+            const skipCompression = mode === 'local-only';
             await uploadClipToStorage(roundId, filename, clip.file_uri, (clipProgress) => {
               const overall = ((i + clipProgress) / clips.length) * 38; // 0-38% for uploads
               update({ progress: Math.round(overall) });
-            });
+            }, skipCompression);
 
             await markClipUploaded(clip.id, filename);
 
             if (user) {
+              // Store path WITHOUT the redundant "clips/" prefix so createSignedUrl
+              // works without needing the stripping shim.  Old rows with the
+              // prefix are handled by the shim in getSignedClipUrls/getClipUrl.
+              const storagePath = `${roundId}/${filename}`;
+
+              // Prefer UPDATE on the existing shot row (import.tsx pre-creates a
+              // row with an empty clip_url).  Fall back to INSERT if no row yet.
               try {
-                await createShot({
-                  round_id: roundId,
-                  user_id: user.id,
-                  hole_number: clip.hole_number,
-                  shot_number: clip.shot_number,
-                  clip_url: `clips/${roundId}/${filename}`,
-                  gps_latitude: clip.gps_latitude ?? undefined,
-                  gps_longitude: clip.gps_longitude ?? undefined,
-                });
+                const { data: existing } = await supabase
+                  .from('shots')
+                  .select('id')
+                  .eq('round_id', roundId)
+                  .eq('hole_number', clip.hole_number)
+                  .eq('shot_number', clip.shot_number)
+                  .limit(1)
+                  .maybeSingle();
+
+                if (existing?.id) {
+                  await supabase
+                    .from('shots')
+                    .update({
+                      clip_url: storagePath,
+                      gps_latitude: clip.gps_latitude ?? null,
+                      gps_longitude: clip.gps_longitude ?? null,
+                    })
+                    .eq('id', existing.id);
+                } else {
+                  await createShot({
+                    round_id: roundId,
+                    user_id: user.id,
+                    hole_number: clip.hole_number,
+                    shot_number: clip.shot_number,
+                    clip_url: storagePath,
+                    gps_latitude: clip.gps_latitude ?? undefined,
+                    gps_longitude: clip.gps_longitude ?? undefined,
+                  });
+                }
               } catch {}
             }
 
@@ -329,7 +364,26 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
       if (cancelledRef.current) return;
 
-      // Submit processing job
+      // LOCAL-ONLY MODE: clips are already trimmed on-device, just upload and mark done
+      if (mode === 'local-only') {
+        try {
+          await updateRound(roundId, {
+            status: 'ready',
+            clips_count: clips.length,
+          } as any);
+        } catch {}
+
+        update({
+          stage: 'completed',
+          progress: 100,
+          stageLabel: 'Clips uploaded!',
+          reelUrl: null, // No reel in local-only mode — clips available in editor
+        });
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        return;
+      }
+
+      // HIGHLIGHT-REEL MODE: submit to Modal GPU pipeline for compilation
       update({ stage: 'submitting', progress: 39, stageLabel: 'Submitting for processing...' });
 
       try {
@@ -346,22 +400,16 @@ export function UploadProvider({ children }: { children: ReactNode }) {
         } as any);
       } catch {}
 
-      // Submit for processing: try Edge Function, then Modal direct, then Render, then concat
+      // Submit for processing — call Modal GPU pipeline directly
+      // Modal uses its own stored Supabase credentials (supabase-credentials secret)
       let processingSubmitted = false;
 
-      // Try Supabase Edge Function → Modal GPU pipeline
-      if (!processingSubmitted && clips.length > 0) {
+      if (clips.length > 0) {
+        // Primary: Modal GPU pipeline (fire-and-forget with 15s timeout)
         try {
-          const { data, error } = await supabase.functions.invoke('process-round', {
-            body: { round_id: roundId },
-          });
-          processingSubmitted = !error && (data?.ok || data?.note);
-        } catch {}
-      }
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 15_000);
 
-      // Fallback: call Modal GPU pipeline directly (uses its own stored secrets)
-      if (!processingSubmitted && clips.length > 0) {
-        try {
           const response = await fetch(
             'https://hendacow--clippar-shot-detector-run-full-pipeline.modal.run',
             {
@@ -371,63 +419,20 @@ export function UploadProvider({ children }: { children: ReactNode }) {
                 job_id: roundId,
                 supabase_url: config.supabase.url,
               }),
+              signal: controller.signal,
             }
           );
+          clearTimeout(timeout);
+
           if (response.ok) {
             const data = await response.json();
             processingSubmitted = !!data?.ok;
           }
-        } catch {}
-      }
-
-      // Fallback: try Render pipeline
-      if (!processingSubmitted && config.pipeline.url && clips.length > 0) {
-        try {
-          const response = await fetch(`${config.pipeline.url}/api/mobile/submit-job`, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${config.pipeline.apiKey}`,
-            },
-            body: JSON.stringify({
-              round_id: roundId,
-              clip_count: clips.length,
-              user_name: user?.user_metadata?.full_name ?? 'App User',
-              user_email: user?.email ?? '',
-            }),
-          });
-          processingSubmitted = response.ok;
-        } catch {}
-      }
-
-      // Fallback: try concat service (simple stitching, no CV)
-      if (!processingSubmitted && config.concat.url && clips.length > 0) {
-        try {
-          // Read trim values from local DB (clips may already be marked uploaded)
-          let allLocalClips: Awaited<ReturnType<typeof getClipsForRound>> = [];
-          try {
-            allLocalClips = await getClipsForRound(roundId);
-          } catch {}
-
-          const response = await fetch(`${config.concat.url}/api/concat`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              roundId,
-              clips: clips.map((c) => {
-                const local = allLocalClips.find(
-                  (lc) => lc.hole_number === c.hole_number && lc.shot_number === c.shot_number
-                );
-                return {
-                  storagePath: `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`,
-                  trimStartMs: local?.trim_start_ms ?? 0,
-                  trimEndMs: local?.trim_end_ms ?? -1,
-                };
-              }),
-            }),
-          });
-          processingSubmitted = response.ok;
-        } catch {}
+        } catch {
+          // Modal may still be processing even if we timed out — that's fine
+          // The pipeline updates Supabase directly when done
+          processingSubmitted = true; // Optimistic — polling will catch the real status
+        }
       }
 
       if (processingSubmitted) {
@@ -448,8 +453,8 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     }
   }, [update, startPolling]);
 
-  const startUpload = useCallback((roundId: string, courseName: string) => {
-    runUpload(roundId, courseName);
+  const startUpload = useCallback((roundId: string, courseName: string, mode?: UploadMode) => {
+    runUpload(roundId, courseName, mode ?? 'highlight-reel');
   }, [runUpload]);
 
   const cancelUpload = useCallback(() => {
@@ -463,7 +468,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
 
   const retryUpload = useCallback(() => {
     if (lastRoundIdRef.current && lastCourseNameRef.current) {
-      runUpload(lastRoundIdRef.current, lastCourseNameRef.current);
+      runUpload(lastRoundIdRef.current, lastCourseNameRef.current, lastModeRef.current);
     }
   }, [runUpload]);
 
