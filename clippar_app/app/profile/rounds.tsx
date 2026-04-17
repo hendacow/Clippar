@@ -284,16 +284,18 @@ export default function MyRoundsScreen() {
     fetchRounds();
   }, [fetchRounds]);
 
-  // Refresh processing rounds periodically
+  // Refresh processing rounds periodically.  We derive the boolean flag
+  // explicitly so the interval is only torn down / recreated when the
+  // presence of active jobs flips, not every time rounds re-fetches (which
+  // would cause leaked back-to-back intervals on each poll tick).
+  const hasActiveJobs = rounds.some(
+    (r) => r.status === 'processing' || r.status === 'uploading'
+  );
   useEffect(() => {
-    const hasActiveJobs = rounds.some(
-      (r) => r.status === 'processing' || r.status === 'uploading'
-    );
     if (!hasActiveJobs) return;
-
     const interval = setInterval(fetchRounds, 10000);
     return () => clearInterval(interval);
-  }, [rounds, fetchRounds]);
+  }, [hasActiveJobs, fetchRounds]);
 
   const handleDelete = useCallback(
     async (roundId: string) => {

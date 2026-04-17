@@ -70,6 +70,9 @@ function ProgressBars({
 
 // ---- Native video clip player ----
 
+// ExpoVideo is guaranteed to be non-null when this component is rendered
+// because the caller gates on `isNative && ExpoVideo` before using it.
+// We call hooks unconditionally to respect the Rules of Hooks.
 function NativeClipPlayer({
   clip,
   onEnd,
@@ -77,9 +80,7 @@ function NativeClipPlayer({
   clip: PreviewClip;
   onEnd: () => void;
 }) {
-  if (!ExpoVideo) return null;
-
-  const { useVideoPlayer, VideoView } = ExpoVideo;
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
 
   const player = useVideoPlayer(clip.uri, (p) => {
     // If startMs is set, seek to it before playing
@@ -95,8 +96,12 @@ function NativeClipPlayer({
 
     if (clip.endMs && clip.endMs > 0) {
       interval = setInterval(() => {
-        if (player.currentTime >= clip.endMs! / 1000) {
-          onEnd();
+        try {
+          if (player && player.currentTime >= clip.endMs! / 1000) {
+            onEnd();
+          }
+        } catch {
+          // Player may have been disposed during cleanup race — ignore
         }
       }, 100);
     }

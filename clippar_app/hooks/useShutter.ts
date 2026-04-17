@@ -21,17 +21,24 @@ import { Platform } from 'react-native';
 import { useBLE } from '@/hooks/useBLE';
 
 // Try loading expo-key-event (requires dev build + config plugin)
-let useKeyEvent: any = null;
+let realUseKeyEvent: any = null;
 let keyEventAvailable = false;
 try {
   if (Platform.OS !== 'web') {
     const mod = require('expo-key-event');
-    useKeyEvent = mod.useKeyEvent;
+    realUseKeyEvent = mod.useKeyEvent;
     keyEventAvailable = true;
   }
 } catch {
   // Not installed
 }
+
+// Stable hook wrapper that always calls a hook-like function in the same
+// position, whether the native module is available or not. This preserves
+// React's hook ordering invariant (Rules of Hooks).
+const noopKeyEvent = () => ({ keyEvent: null });
+const useStableKeyEvent: () => { keyEvent: any } =
+  keyEventAvailable && realUseKeyEvent ? realUseKeyEvent : noopKeyEvent;
 
 // Try loading react-native-volume-manager (requires dev build)
 let VolumeManager: any = null;
@@ -84,8 +91,10 @@ export function useShutter(): ShutterState {
   }, []);
 
   // --- Method 1: expo-key-event ---
-  // useKeyEvent is a hook, so we always call it (or a stub) to satisfy rules of hooks
-  const keyEventResult = keyEventAvailable ? useKeyEvent() : { keyEvent: null };
+  // Always call the wrapper hook unconditionally — it's either the real hook
+  // or a stable no-op, selected at module load.  This is the only way to
+  // respect the Rules of Hooks (consistent hook order on every render).
+  const keyEventResult = useStableKeyEvent();
   const keyEvent = keyEventResult?.keyEvent;
 
   useEffect(() => {

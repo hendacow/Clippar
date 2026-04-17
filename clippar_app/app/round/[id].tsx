@@ -463,7 +463,7 @@ export default function RoundViewer() {
             )}
 
             {/* ===== SCORE STRIP ===== */}
-            {round.total_score !== null && (
+            {typeof round.total_score === 'number' && (
               <View style={styles.scoreStrip}>
                 <View style={styles.scoreStat}>
                   <Text style={styles.scoreLabel}>Score</Text>
@@ -485,23 +485,27 @@ export default function RoundViewer() {
                       },
                     ]}
                   >
-                    {round.score_to_par === 0
-                      ? 'E'
-                      : (round.score_to_par ?? 0) > 0
-                        ? `+${round.score_to_par}`
-                        : round.score_to_par}
+                    {typeof round.score_to_par !== 'number'
+                      ? '—'
+                      : round.score_to_par === 0
+                        ? 'E'
+                        : round.score_to_par > 0
+                          ? `+${round.score_to_par}`
+                          : round.score_to_par}
                   </Text>
                 </View>
                 <View style={styles.scoreDivider} />
                 <View style={styles.scoreStat}>
                   <Text style={styles.scoreLabel}>Holes</Text>
-                  <Text style={styles.scoreValue}>{round.holes_played}</Text>
+                  <Text style={styles.scoreValue}>{round.holes_played ?? '—'}</Text>
                 </View>
                 <View style={styles.scoreDivider} />
                 <View style={styles.scoreStat}>
                   <Text style={styles.scoreLabel}>Date</Text>
                   <Text style={[styles.scoreValue, { fontSize: 14 }]}>
-                    {new Date(round.date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })}
+                    {round.date
+                      ? new Date(round.date).toLocaleDateString('en-AU', { day: 'numeric', month: 'short' })
+                      : '—'}
                   </Text>
                 </View>
               </View>

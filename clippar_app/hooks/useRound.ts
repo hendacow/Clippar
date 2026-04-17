@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import * as Haptics from 'expo-haptics';
 import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from '@/types/round';
 import { PENALTY_STROKES } from '@/types/round';
@@ -252,24 +252,31 @@ export function useRound() {
     });
   }, []);
 
-  const endRound = useCallback(async () => {
-    if (!state) return;
+  // Ref mirrors state so endRound always reads the latest value without
+  // capturing a stale closure (a tap fired from an older render would
+  // otherwise submit stale totals).
+  const stateRef = useRef<RoundState | null>(null);
+  stateRef.current = state;
 
-    const totalScore = state.scores.reduce((sum, s) => sum + s.strokes, 0);
-    const totalPar = state.scores.reduce((sum, s) => sum + s.par, 0);
-    const totalPutts = state.scores.reduce((sum, s) => sum + s.putts, 0);
+  const endRound = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current) return;
+
+    const totalScore = current.scores.reduce((sum, s) => sum + s.strokes, 0);
+    const totalPar = current.scores.reduce((sum, s) => sum + s.par, 0);
+    const totalPutts = current.scores.reduce((sum, s) => sum + s.putts, 0);
 
     try {
-      await updateRound(state.roundId, {
+      await updateRound(current.roundId, {
         total_score: totalScore,
         total_par: totalPar,
         score_to_par: totalScore - totalPar,
         total_putts: totalPutts,
-        holes_played: state.scores.length,
+        holes_played: current.scores.length,
         status: 'uploading',
       });
 
-      await updateLocalRound(state.roundId, {
+      await updateLocalRound(current.roundId, {
         status: 'finished',
         finished_at: new Date().toISOString(),
       });
@@ -277,13 +284,13 @@ export function useRound() {
       setState((prev) => (prev ? { ...prev, status: 'finished' } : prev));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     } catch {
-      await updateLocalRound(state.roundId, {
+      await updateLocalRound(current.roundId, {
         status: 'finished',
         finished_at: new Date().toISOString(),
       });
       setState((prev) => (prev ? { ...prev, status: 'finished' } : prev));
     }
-  }, [state]);
+  }, []);
 
   const recoverRound = useCallback(async (roundId: string) => {
     try {

@@ -58,6 +58,8 @@ function ProgressDots({
 }
 
 // ---- Native video clip player ----
+// ExpoVideo is guaranteed to be non-null because the caller gates on `isNative`.
+// Hooks are called unconditionally to respect the Rules of Hooks.
 function NativeClipPlayer({
   uri,
   onEnd,
@@ -65,9 +67,7 @@ function NativeClipPlayer({
   uri: string;
   onEnd: () => void;
 }) {
-  if (!ExpoVideo) return null;
-
-  const { useVideoPlayer, VideoView } = ExpoVideo;
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
   const player = useVideoPlayer(uri, (p) => {
     p.play();
   });
@@ -120,9 +120,10 @@ export default function PreviewScreen() {
   }>();
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
-  const [currentIndex, setCurrentIndex] = useState(
-    parseInt(startIndex ?? '0', 10)
-  );
+  const [currentIndex, setCurrentIndex] = useState(() => {
+    const parsed = parseInt(startIndex ?? '0', 10);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  });
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const allClips = editor.getAllClipsInOrder();

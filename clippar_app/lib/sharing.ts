@@ -43,7 +43,10 @@ export async function getLocalVideoUri(
   );
 
   const result = await download.downloadAsync();
-  return result?.uri ?? localUri;
+  if (!result?.uri) {
+    throw new Error('Video download failed. Please check your connection and try again.');
+  }
+  return result.uri;
 }
 
 /**
