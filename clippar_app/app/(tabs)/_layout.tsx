@@ -11,11 +11,22 @@ import Animated, {
 } from 'react-native-reanimated';
 import { useEffect } from 'react';
 import { theme } from '@/constants/theme';
+import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
+
+function LibraryTabIcon({ color, size }: { color: string; size: number }) {
+  const { ref, onLayout } = useOnboardingTarget('rounds-list');
+  return (
+    <View ref={ref} onLayout={onLayout} style={{ padding: 2 }}>
+      <Home size={size} color={color} />
+    </View>
+  );
+}
 
 function RecordTabButton({ onPress, accessibilityState }: any) {
   const focused = accessibilityState?.selected;
   const pulseScale = useSharedValue(1);
   const pulseOpacity = useSharedValue(0);
+  const { ref: onboardRef, onLayout: onboardOnLayout } = useOnboardingTarget('record-button');
 
   useEffect(() => {
     if (focused) {
@@ -69,6 +80,8 @@ function RecordTabButton({ onPress, accessibilityState }: any) {
         ]}
       />
       <View
+        ref={onboardRef}
+        onLayout={onboardOnLayout}
         style={{
           width: 64,
           height: 64,
@@ -110,7 +123,7 @@ export default function TabLayout() {
         name="index"
         options={{
           title: 'Library',
-          tabBarIcon: ({ color, size }) => <Home size={size} color={color} />,
+          tabBarIcon: ({ color, size }) => <LibraryTabIcon color={color} size={size} />,
         }}
       />
       <Tabs.Screen

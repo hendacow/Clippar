@@ -9,6 +9,8 @@ import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
+import { OnboardingProvider } from '@/contexts/OnboardingContext';
+import { OnboardingHost } from '@/components/onboarding/OnboardingHost';
 import {
   getBiometricPreference,
   authenticateWithBiometrics,
@@ -63,6 +65,7 @@ export default function RootLayout() {
   return (
     <StripeWrapper>
       <UploadProvider>
+      <OnboardingProvider>
       <GestureHandlerRootView style={{ flex: 1 }}>
         <BottomSheetModalProvider>
           <StatusBar style="light" />
@@ -81,8 +84,10 @@ export default function RootLayout() {
             />
             <Stack.Screen name="profile" />
           </Stack>
+          <OnboardingHost />
         </BottomSheetModalProvider>
       </GestureHandlerRootView>
+      </OnboardingProvider>
       </UploadProvider>
     </StripeWrapper>
   );

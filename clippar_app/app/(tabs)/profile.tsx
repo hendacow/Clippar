@@ -29,6 +29,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
+import { useOnboarding } from '@/contexts/OnboardingContext';
 import { getProfile, getRounds } from '@/lib/api';
 
 interface ProfileRow {
@@ -110,6 +111,7 @@ export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const { user, signOut } = useAuth();
   const { status: subscriptionStatus } = useSubscription();
+  const { replayOnboarding } = useOnboarding();
   const [profile, setProfile] = useState<ProfileRow | null>(null);
   const [useMeters, setUseMeters] = useState(true);
   const [roundsCount, setRoundsCount] = useState(0);
@@ -458,9 +460,13 @@ export default function ProfileScreen() {
           {/* ---- SUPPORT ---- */}
           <Card style={{ marginBottom: 24, paddingVertical: 4, paddingHorizontal: 0 }}>
             <SettingsRow
-              icon={<HelpCircle size={18} color={theme.colors.textTertiary} />}
-              title="Tutorials"
-              onPress={() => Haptics.selectionAsync()}
+              icon={<HelpCircle size={18} color={theme.colors.primary} />}
+              title="Show me around again"
+              subtitle="Replay the welcome tour"
+              onPress={async () => {
+                Haptics.selectionAsync();
+                await replayOnboarding();
+              }}
             />
             <Divider />
             <SettingsRow

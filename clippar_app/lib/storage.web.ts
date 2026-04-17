@@ -70,3 +70,26 @@ export async function getLocalScores(_roundId: string) {
 export async function incrementClipRetryCount(_clipId: number) {}
 
 export async function deleteLocalRound(_roundId: string) {}
+
+// Generic key/value settings — backed by localStorage on web
+export async function getSetting(key: string): Promise<string | null> {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      return window.localStorage.getItem(`clippar.${key}`);
+    }
+  } catch {}
+  return null;
+}
+
+export async function setSetting(key: string, value: string | null): Promise<void> {
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      if (value === null) {
+        window.localStorage.removeItem(`clippar.${key}`);
+      } else {
+        window.localStorage.setItem(`clippar.${key}`, value);
+      }
+    }
+  } catch {}
+}
+
