@@ -207,6 +207,10 @@ function Callout({
       )
     : CALLOUT_WIDTH / 2 - ARROW_SIZE;
 
+  // Approximate callout height — used to shift it up when placing above the target.
+  const APPROX_CALLOUT_HEIGHT = 160;
+  const anchoredTop = placeBelow ? calloutTop : calloutTop - APPROX_CALLOUT_HEIGHT;
+
   const animStyle = useAnimatedStyle(() => ({
     opacity: opacity.value,
     transform: [
@@ -219,19 +223,11 @@ function Callout({
       style={[
         {
           position: 'absolute',
-          top: calloutTop,
+          top: anchoredTop,
           left: calloutLeft,
           width: CALLOUT_WIDTH,
-          transform: !placeBelow ? [{ translateY: -9999 * 0 }] : undefined,
         },
         animStyle,
-        !placeBelow && {
-          // when above, shift up by its own height — approximated via padding
-          // (we anchor by top + margin above cutout; use translateY to pull it above)
-          // Use a negative margin-top trick by placing anchor at cutoutTop-margin and pulling up
-          // We'll rely on approximate height: 160px
-          marginTop: -160,
-        },
       ]}
       pointerEvents="box-none"
     >
