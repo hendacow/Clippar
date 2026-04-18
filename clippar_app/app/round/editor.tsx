@@ -22,7 +22,7 @@ import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
-import { updateRound } from '@/lib/api';
+import { updateRound, getSignedClipUrls } from '@/lib/api';
 import { uploadReelToStorage } from '@/lib/r2';
 import { resolveTrackToLocalUri } from '@/lib/music';
 
@@ -480,41 +480,125 @@ export default function EditorScreen() {
       setComposing(true);
       setComposeProgress('Checking clip files...');
 
-      // Verify clip files exist on disk AND actually filter missing ones.
-      // Passing a ph:// or evicted tmp URI to composeReel throws mid-export
-      // with an opaque "Export Failed" alert — this pre-flight prevents that.
+      // Verify clip files exist on disk; for any that are missing, try to
+      // recover by downloading from Supabase Storage. iOS routinely evicts
+      // files from the app's tmp directory (especially after reinstall or
+      // background purges), so clips that were uploaded remain recoverable
+      // even though the local path is gone. Only clips that never uploaded
+      // AND are missing locally are dropped.
       let validClipUris = clipUris;
       if (isNative) {
-        const FileSystem = require('expo-file-system') as typeof import('expo-file-system');
-        const missing: string[] = [];
-        const checked = await Promise.all(
-          clipUris.map(async (uri) => {
+        // `expo-file-system`'s new top-level module no longer exports
+        // `cacheDirectory` / `downloadAsync`. Pull those from the legacy
+        // entry (same pattern as lib/media.ts).
+        const FileSystem = require('expo-file-system/legacy') as typeof import('expo-file-system/legacy');
+
+        // Build ordered list of clips-with-metadata so we can fall back to
+        // storagePath for missing ones without losing playback order.
+        const orderedForCompose = allClips.filter((c) => c.sourceUri);
+
+        // First pass: check local disk existence.
+        const existence = await Promise.all(
+          orderedForCompose.map(async (c) => {
             try {
-              const info = await FileSystem.getInfoAsync(uri);
-              if (info.exists) return uri;
-              missing.push(uri);
-              return null;
+              const info = await FileSystem.getInfoAsync(c.sourceUri!);
+              return info.exists;
             } catch {
-              missing.push(uri);
-              return null;
+              return false;
             }
           })
         );
-        validClipUris = checked.filter((u): u is string => u !== null);
 
-        if (missing.length > 0) {
-          console.warn(`[Editor] ${missing.length} clip(s) missing on disk:`, missing);
-          if (validClipUris.length === 0) {
-            Alert.alert(
-              'No Playable Clips',
-              'All clips are missing from this device. Try re-importing or re-recording the round.'
-            );
-            setComposing(false);
-            return;
+        // Collect storage paths for missing clips that can be re-downloaded.
+        const missingRecoverable: { index: number; clip: EditorClip }[] = [];
+        const missingUnrecoverable: EditorClip[] = [];
+        existence.forEach((exists, idx) => {
+          if (exists) return;
+          const clip = orderedForCompose[idx];
+          if (clip.storagePath) {
+            missingRecoverable.push({ index: idx, clip });
+          } else {
+            missingUnrecoverable.push(clip);
           }
-          // Non-blocking note — proceed with what we have
+        });
+
+        if (missingRecoverable.length > 0) {
+          console.warn(
+            `[Editor] ${missingRecoverable.length} clip(s) missing locally — re-downloading from Supabase`
+          );
           setComposeProgress(
-            `${missing.length} clip${missing.length > 1 ? 's' : ''} missing — skipping...`
+            `Recovering ${missingRecoverable.length} missing clip${missingRecoverable.length > 1 ? 's' : ''}...`
+          );
+
+          const paths = missingRecoverable.map(({ clip }) => clip.storagePath!);
+          const signed = await getSignedClipUrls(paths);
+
+          const cacheDir = `${FileSystem.cacheDirectory}recovered-clips/`;
+          try {
+            const dirInfo = await FileSystem.getInfoAsync(cacheDir);
+            if (!dirInfo.exists) {
+              await FileSystem.makeDirectoryAsync(cacheDir, { intermediates: true });
+            }
+          } catch {}
+
+          // Download each missing clip to the cache dir and patch the uri.
+          const recoveredUris = new Map<number, string>();
+          await Promise.all(
+            missingRecoverable.map(async ({ index, clip }) => {
+              const url = signed[clip.storagePath!];
+              if (!url) {
+                console.warn(`[Editor] No signed URL for ${clip.storagePath}`);
+                return;
+              }
+              try {
+                const dest = `${cacheDir}${clip.id}.mp4`;
+                const result = await FileSystem.downloadAsync(url, dest);
+                if (result.status === 200) {
+                  recoveredUris.set(index, result.uri);
+                } else {
+                  console.warn(`[Editor] Download failed (status=${result.status}) for clip ${clip.id}`);
+                }
+              } catch (err) {
+                console.warn(`[Editor] Download errored for clip ${clip.id}:`, err);
+              }
+            })
+          );
+
+          // Rebuild validClipUris preserving order.
+          validClipUris = orderedForCompose.map((c, idx) => {
+            if (existence[idx]) return c.sourceUri!;
+            const recovered = recoveredUris.get(idx);
+            return recovered ?? null;
+          }).filter((u): u is string => u !== null);
+        } else {
+          validClipUris = existence
+            .map((exists, idx) => (exists ? orderedForCompose[idx].sourceUri! : null))
+            .filter((u): u is string => u !== null);
+        }
+
+        const totalMissing = missingUnrecoverable.length +
+          (missingRecoverable.length - (validClipUris.length - existence.filter(Boolean).length));
+
+        if (missingUnrecoverable.length > 0) {
+          console.warn(
+            `[Editor] ${missingUnrecoverable.length} clip(s) missing on disk and never uploaded:`,
+            missingUnrecoverable.map((c) => c.id)
+          );
+        }
+
+        if (validClipUris.length === 0) {
+          Alert.alert(
+            'No Playable Clips',
+            'All clips are missing from this device and could not be recovered. Try re-importing or re-recording the round.'
+          );
+          setComposing(false);
+          return;
+        }
+
+        if (totalMissing > 0 && validClipUris.length < clipUris.length) {
+          const dropped = clipUris.length - validClipUris.length;
+          setComposeProgress(
+            `${dropped} clip${dropped > 1 ? 's' : ''} unrecoverable — skipping...`
           );
         }
       }

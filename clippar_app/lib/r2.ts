@@ -68,8 +68,8 @@ export async function uploadClipToStorage(
         maxSize: 720,
         bitrate: 2_000_000, // 2 Mbps — ~3.5MB per 15s
       }, (progress) => {
-        // Compression is 0-50% of total progress
-        onProgress?.(progress * 0.5);
+        // Compression is 0-40% of total progress (leave 10% for potential re-compress)
+        onProgress?.(progress * 0.4);
       });
       uploadUri = compressed;
 
@@ -84,13 +84,41 @@ export async function uploadClipToStorage(
   }
 
   // Check final size
-  const uploadFile = new ExpoFS.File(uploadUri);
-  const fileSize = uploadFile.size ?? originalSize;
+  let uploadFile = new ExpoFS.File(uploadUri);
+  let fileSize = uploadFile.size ?? originalSize;
+
+  // Second-pass re-compress if the first pass didn't get under the ceiling.
+  // Long clips at 1080p can still exceed 50MB after one 720p/2Mbps pass — try
+  // 540p/1Mbps before giving up so the user doesn't get blocked at the queue.
+  if (fileSize > MAX_FILE_SIZE && Compressor && !skipCompression) {
+    console.log(
+      `[Upload] Still ${Math.round(fileSize / 1024 / 1024)}MB after first pass — re-compressing harder (540p/1Mbps)`
+    );
+    try {
+      const recompressed = await Compressor.Video.compress(uploadUri, {
+        compressionMethod: 'auto',
+        maxSize: 540,
+        bitrate: 1_000_000, // 1 Mbps — ~1.8MB per 15s
+      }, (progress) => {
+        onProgress?.(0.4 + progress * 0.1);
+      });
+      const recompFile = new ExpoFS.File(recompressed);
+      const recompSize = recompFile.size ?? fileSize;
+      console.log(
+        `[Upload] Re-compressed ${Math.round(fileSize / 1024 / 1024)}MB → ${Math.round(recompSize / 1024 / 1024)}MB`
+      );
+      uploadUri = recompressed;
+      uploadFile = recompFile;
+      fileSize = recompSize;
+    } catch (err) {
+      console.log('[Upload] Second-pass compression failed:', err);
+    }
+  }
 
   if (fileSize > MAX_FILE_SIZE) {
     const sizeMB = Math.round(fileSize / 1024 / 1024);
     throw new Error(
-      `Clip is ${sizeMB}MB after compression — max is 50MB. Try recording at a shorter duration.`
+      `Clip is ${sizeMB}MB after two compression passes — max is 50MB. Try recording at a shorter duration.`
     );
   }
 
