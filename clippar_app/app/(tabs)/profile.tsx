@@ -527,7 +527,16 @@ export default function ProfileScreen() {
               subtitle="Replay the welcome tour"
               onPress={async () => {
                 Haptics.selectionAsync();
-                await replayOnboarding();
+                // Navigate to home BEFORE resetting flags — the tour's
+                // spotlight targets (record-button, import-card, rounds-list)
+                // all live on the Home tab, not Profile. Otherwise the tour
+                // opens on an empty Profile screen with no targets registered.
+                router.replace('/(tabs)');
+                // Give the Home tab a frame to mount + register its targets
+                // before we flip the flags that trigger the tour.
+                requestAnimationFrame(() => {
+                  void replayOnboarding();
+                });
               }}
             />
             <Divider />

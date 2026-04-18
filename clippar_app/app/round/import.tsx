@@ -8,6 +8,7 @@ import {
   Platform,
   Image,
   ActionSheetIOS,
+  Keyboard,
 } from 'react-native';
 import { router } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -1007,6 +1008,9 @@ export default function ImportRoundScreen() {
           <ScrollView
             style={{ flex: 1 }}
             contentContainerStyle={{ padding: 16, paddingBottom: 32 }}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="on-drag"
+            onScrollBeginDrag={() => Keyboard.dismiss()}
           >
             <Text
               style={{

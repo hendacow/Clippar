@@ -1,5 +1,5 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, Pressable, ScrollView, ActivityIndicator, Keyboard } from 'react-native';
 import { MapPin, Plus, Globe } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { searchCourses, searchCoursesNearby, getCourseHoles, upsertCourseFromLiveApi } from '@/lib/api';
@@ -27,7 +27,26 @@ export function CourseSearch({
   const [nearbyCourses, setNearbyCourses] = useState<any[]>([]);
   const [showResults, setShowResults] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Track keyboard height so the results dropdown can expand/shrink
+  // to stay visible (and scrollable) even when the keyboard is up. Without
+  // this, a fixed maxHeight=260 combined with the keyboard + input + form
+  // padding meant the results area couldn't be scrolled on iPhones where
+  // the keyboard eats ~300px.
+  useEffect(() => {
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setKeyboardHeight(e.endCoordinates?.height ?? 0);
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
   // Guard: after a course is selected, ignore onChangeText events for 500ms.
   // React Native on iOS can fire the callback multiple times when the controlled
   // `value` prop changes, and a simple boolean flag gets reset too early.
@@ -251,7 +270,9 @@ export function CourseSearch({
             borderColor: theme.colors.surfaceBorder,
             borderRadius: theme.radius.md,
             marginTop: 4,
-            maxHeight: 260,
+            // When keyboard is open, keep the list short enough to fit above it
+            // so the ScrollView's bottom edge is actually reachable.
+            maxHeight: keyboardHeight > 0 ? 220 : 320,
             overflow: 'hidden',
           }}
         >
@@ -288,7 +309,12 @@ export function CourseSearch({
               )}
             </View>
           ) : (
-            <ScrollView keyboardShouldPersistTaps="handled" nestedScrollEnabled>
+            <ScrollView
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="on-drag"
+              nestedScrollEnabled
+              showsVerticalScrollIndicator
+            >
               {isShowingNearby && (
                 <View style={{ paddingHorizontal: 12, paddingTop: 8, paddingBottom: 4 }}>
                   <Text style={{ color: theme.colors.textTertiary, fontSize: 11, fontWeight: '600', textTransform: 'uppercase', letterSpacing: 0.5 }}>
