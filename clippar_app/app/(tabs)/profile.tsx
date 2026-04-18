@@ -23,6 +23,7 @@ import {
   Hash,
   Ruler,
   ShieldCheck,
+  Activity,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -537,6 +538,16 @@ export default function ProfileScreen() {
                 requestAnimationFrame(() => {
                   void replayOnboarding();
                 });
+              }}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<Activity size={18} color={theme.colors.primary} />}
+              title="Diagnostics"
+              subtitle="Data integrity, upload queue, reachability"
+              onPress={() => {
+                Haptics.selectionAsync();
+                router.push('/profile/diagnostics');
               }}
             />
             <Divider />
