@@ -683,7 +683,17 @@ export default function HomeScreen() {
           </View>
         )}
 
-        {/* ---- STATS FILTER BAR (hero filters) ---- */}
+        {/* ---- HERO REEL (latest highlight — top of page) ---- */}
+        <HeroReel
+          round={latestRound}
+          onPress={() => router.push(`/round/${latestRound.id}`)}
+          reelSignedUrl={reelSignedUrls[latestRound.id]}
+        />
+
+        {/* ---- UPLOAD PROGRESS (shown when active) ---- */}
+        <UploadProgressCard />
+
+        {/* ---- STATS FILTER BAR (hero filters, after HeroReel per spec) ---- */}
         <StatsFilterBar
           filters={filters}
           courses={availableCourses}
@@ -693,7 +703,7 @@ export default function HomeScreen() {
           onClipsOnly={setClipsOnly}
         />
 
-        {/* ---- STATS HERO (tiles + chart) ---- */}
+        {/* ---- STATS HERO (chart above tiles per spec) ---- */}
         <StatsHero
           breakdown={breakdown}
           trend={trend}
@@ -702,16 +712,6 @@ export default function HomeScreen() {
           totalRounds={statsFilteredRounds.length}
           avgScoreToPar={avgScoreToPar}
         />
-
-        {/* ---- HERO REEL ---- */}
-        <HeroReel
-          round={latestRound}
-          onPress={() => router.push(`/round/${latestRound.id}`)}
-          reelSignedUrl={reelSignedUrls[latestRound.id]}
-        />
-
-        {/* ---- UPLOAD PROGRESS (shown when active) ---- */}
-        <UploadProgressCard />
 
         {activeStatCategory == null ? (
           <>

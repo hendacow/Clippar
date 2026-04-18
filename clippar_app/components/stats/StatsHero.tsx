@@ -303,7 +303,16 @@ export function StatsHero({
         </View>
       </View>
 
-      {/* ---- Stat tiles ---- */}
+      {/* ---- Trend chart (above tiles per design spec) ---- */}
+      <View style={styles.chartCard}>
+        <View style={styles.chartHeader}>
+          <Text style={styles.chartTitle}>Score Trend</Text>
+          <Text style={styles.chartSub}>Score to par over time</Text>
+        </View>
+        <TrendChart data={trend} width={chartW - 24} height={chartH} />
+      </View>
+
+      {/* ---- Stat tiles (below chart per design spec) ---- */}
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
@@ -322,15 +331,6 @@ export function StatsHero({
           />
         ))}
       </ScrollView>
-
-      {/* ---- Trend chart ---- */}
-      <View style={styles.chartCard}>
-        <View style={styles.chartHeader}>
-          <Text style={styles.chartTitle}>Score Trend</Text>
-          <Text style={styles.chartSub}>Score to par over time</Text>
-        </View>
-        <TrendChart data={trend} width={chartW - 24} height={chartH} />
-      </View>
     </View>
   );
 }
