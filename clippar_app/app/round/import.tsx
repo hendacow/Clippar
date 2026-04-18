@@ -384,8 +384,24 @@ export default function ImportRoundScreen() {
           reason = `gap=${(gapMs / 60000).toFixed(1)}min (same hole)`;
         }
 
-        if (newHole && holeIdx + 1 < groupedHoles.length) {
+        if (newHole) {
           holeIdx += 1;
+          // Dynamic resize: if the picker gave us more holes than the user
+          // selected (e.g. holesCount=9 but they filmed 18), append a new
+          // HoleImport row instead of clamping onto the last hole. The old
+          // `Math.min(holeIdx+1, length-1)` behavior was pinning every
+          // overflow clip onto hole 9, producing "27 shots on hole 9."
+          if (holeIdx >= groupedHoles.length) {
+            const lastHoleNum = groupedHoles[groupedHoles.length - 1]?.holeNumber ?? 0;
+            const nextHoleNum = lastHoleNum + 1;
+            const courseHole = courseHoles.find((h) => h.holeNumber === nextHoleNum);
+            groupedHoles.push({
+              holeNumber: nextHoleNum,
+              par: courseHole?.par ?? 4,
+              clips: [],
+              expanded: false,
+            });
+          }
         }
 
         console.log(
@@ -411,10 +427,21 @@ export default function ImportRoundScreen() {
         // putt → swing means the swing belongs to the NEXT hole
         if (
           prevShotType === 'putt' &&
-          c.shotType === 'swing' &&
-          holeIdx + 1 < groupedHoles.length
+          c.shotType === 'swing'
         ) {
           holeIdx += 1;
+          // Dynamic resize (see timestamp-strategy branch for rationale).
+          if (holeIdx >= groupedHoles.length) {
+            const lastHoleNum = groupedHoles[groupedHoles.length - 1]?.holeNumber ?? 0;
+            const nextHoleNum = lastHoleNum + 1;
+            const courseHole = courseHoles.find((h) => h.holeNumber === nextHoleNum);
+            groupedHoles.push({
+              holeNumber: nextHoleNum,
+              par: courseHole?.par ?? 4,
+              clips: [],
+              expanded: false,
+            });
+          }
           console.log(
             `[AutoDetect] Clip ${i + 1}: putt→swing → new hole ` +
               `(hole ${groupedHoles[holeIdx].holeNumber})`
