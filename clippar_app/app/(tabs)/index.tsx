@@ -36,6 +36,7 @@ import { supabase } from '@/lib/supabase';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
 import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
 import { StatsHero } from '@/components/stats/StatsHero';
+import { CompilationPlayer } from '@/components/stats/CompilationPlayer';
 import { useStatsFilter, type StatCategoryKey } from '@/hooks/useStatsFilter';
 import { processUploadQueue } from '@/lib/uploadQueue';
 
@@ -329,6 +330,7 @@ export default function HomeScreen() {
   const [reelSignedUrls, setReelSignedUrls] = useState<Record<string, string>>({});
   const [displayName, setDisplayName] = useState<string | null>(null);
   const [activeStatCategory, setActiveStatCategory] = useState<StatCategoryKey | null>(null);
+  const [compilingCategory, setCompilingCategory] = useState<StatCategoryKey | null>(null);
 
   // Always try real data first; only show mock if user has zero rounds
   const fetchRounds = useCallback(async () => {
@@ -711,6 +713,7 @@ export default function HomeScreen() {
           onSelectCategory={setActiveStatCategory}
           totalRounds={statsFilteredRounds.length}
           avgScoreToPar={avgScoreToPar}
+          onCompileCategory={setCompilingCategory}
         />
 
         {activeStatCategory == null ? (
@@ -833,6 +836,21 @@ export default function HomeScreen() {
         {/* ---- SCORE HIGHLIGHTS (Birdies, Eagles, Bogeys collections) ---- */}
         {!useMock && <ScoreCollection />}
       </ScrollView>
+
+      {/* ---- STITCHED COMPILATION (long-press on a stat tile) ---- */}
+      <CompilationPlayer
+        visible={compilingCategory != null}
+        category={compilingCategory}
+        courseId={filters.courseId}
+        hole={filters.hole}
+        timeframe={filters.timeframe}
+        courseName={
+          filters.courseId
+            ? (availableCourses.find((c) => c.id === filters.courseId)?.name ?? null)
+            : null
+        }
+        onClose={() => setCompilingCategory(null)}
+      />
     </View>
   );
 }

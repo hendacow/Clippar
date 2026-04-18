@@ -936,6 +936,138 @@ export async function getSignedClipUrls(
   return result;
 }
 
+// ============ Highlight Compilation ============
+
+export type HighlightCompilationCategory =
+  | 'eagle'
+  | 'birdie'
+  | 'par'
+  | 'bogey'
+  | 'double'
+  | 'triple';
+
+export type HighlightCompilationTimeframe = '7d' | '30d' | '90d' | '1y' | 'all';
+
+const COMPILATION_FILTER: Record<
+  HighlightCompilationCategory,
+  (scoreToPar: number) => boolean
+> = {
+  eagle: (s) => s <= -2,
+  birdie: (s) => s === -1,
+  par: (s) => s === 0,
+  bogey: (s) => s === 1,
+  double: (s) => s === 2,
+  triple: (s) => s >= 3,
+};
+
+function compilationTimeframeCutoff(t: HighlightCompilationTimeframe): Date | null {
+  const d = new Date();
+  switch (t) {
+    case '7d': d.setDate(d.getDate() - 7); return d;
+    case '30d': d.setDate(d.getDate() - 30); return d;
+    case '90d': d.setDate(d.getDate() - 90); return d;
+    case '1y': d.setFullYear(d.getFullYear() - 1); return d;
+    case 'all': return null;
+  }
+}
+
+/**
+ * Fetch clip URLs for a highlight compilation filtered by category
+ * (birdies, bogeys, etc.) and optional course/hole/timeframe. Returns the
+ * paths (shots.clip_url) in chronological-desc order along with pre-signed
+ * URLs ready to hand to `stitchClips`.
+ *
+ * Ordering: most recent round first, then by hole number, then shot_number.
+ */
+export async function getHighlightCompilationClips(
+  category: HighlightCompilationCategory,
+  opts: {
+    courseId?: string | null;
+    hole?: number | null;
+    timeframe?: HighlightCompilationTimeframe;
+  } = {},
+): Promise<{ clipPaths: string[]; signedUrls: string[] }> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not authenticated');
+
+  // 1. Rounds scoped to user + optional course + timeframe
+  let roundsQuery = supabase
+    .from('rounds')
+    .select('id, date, course_id')
+    .eq('user_id', user.id)
+    .order('date', { ascending: false });
+
+  if (opts.courseId) {
+    roundsQuery = roundsQuery.eq('course_id', opts.courseId);
+  }
+  const cutoff = compilationTimeframeCutoff(opts.timeframe ?? 'all');
+  if (cutoff) {
+    roundsQuery = roundsQuery.gte('date', cutoff.toISOString().split('T')[0]);
+  }
+
+  const { data: rounds, error: roundsError } = await roundsQuery;
+  if (roundsError || !rounds || rounds.length === 0) {
+    return { clipPaths: [], signedUrls: [] };
+  }
+
+  const roundIds = rounds.map((r) => r.id);
+  const roundDate = new Map(rounds.map((r) => [r.id, r.date as string]));
+  const filterFn = COMPILATION_FILTER[category];
+
+  // 2. Scores matching category (+ optional hole filter)
+  let scoresQuery = supabase
+    .from('scores')
+    .select('round_id, hole_number, score_to_par')
+    .in('round_id', roundIds)
+    .not('score_to_par', 'is', null);
+  if (opts.hole != null) {
+    scoresQuery = scoresQuery.eq('hole_number', opts.hole);
+  }
+
+  const { data: scores, error: scoresError } = await scoresQuery;
+  if (scoresError || !scores) return { clipPaths: [], signedUrls: [] };
+
+  const matching = scores.filter(
+    (s) => s.score_to_par != null && filterFn(s.score_to_par),
+  );
+  if (matching.length === 0) return { clipPaths: [], signedUrls: [] };
+
+  // 3. Look up shots for matching (round_id, hole_number) pairs
+  const pairs = new Set(matching.map((s) => `${s.round_id}:${s.hole_number}`));
+  const targetRoundIds = Array.from(new Set(matching.map((s) => s.round_id)));
+
+  const { data: shots, error: shotsError } = await supabase
+    .from('shots')
+    .select('round_id, hole_number, shot_number, clip_url')
+    .in('round_id', targetRoundIds)
+    .not('clip_url', 'is', null);
+  if (shotsError || !shots) return { clipPaths: [], signedUrls: [] };
+
+  const validShots = shots
+    .filter((s) => s.clip_url && pairs.has(`${s.round_id}:${s.hole_number}`))
+    .sort((a, b) => {
+      const da = roundDate.get(a.round_id) ?? '';
+      const db = roundDate.get(b.round_id) ?? '';
+      if (da !== db) return db.localeCompare(da); // newest first
+      if (a.hole_number !== b.hole_number) return a.hole_number - b.hole_number;
+      return a.shot_number - b.shot_number;
+    });
+
+  const clipPaths = validShots
+    .map((s) => s.clip_url as string | null)
+    .filter((p): p is string => !!p);
+
+  if (clipPaths.length === 0) return { clipPaths: [], signedUrls: [] };
+
+  // 4. Sign URLs (reuses existing helper)
+  const signedMap = await getSignedClipUrls(clipPaths);
+  const signedUrls = clipPaths
+    .map((p) => signedMap[p])
+    .filter((u): u is string => !!u);
+
+  return { clipPaths, signedUrls };
+}
+
 /**
  * Generate a signed URL for a reel in the reels bucket.
  */

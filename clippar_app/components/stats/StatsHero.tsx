@@ -84,9 +84,10 @@ interface StatTileProps {
   count: number;
   active: boolean;
   onPress: () => void;
+  onLongPress?: () => void;
 }
 
-function StatTile({ def, count, active, onPress }: StatTileProps) {
+function StatTile({ def, count, active, onPress, onLongPress }: StatTileProps) {
   const { Icon } = def;
   return (
     <Pressable
@@ -94,6 +95,14 @@ function StatTile({ def, count, active, onPress }: StatTileProps) {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         onPress();
       }}
+      onLongPress={
+        onLongPress
+          ? () => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              onLongPress();
+            }
+          : undefined
+      }
       style={[
         styles.tile,
         active && { borderColor: def.accent, borderWidth: 1.5 },
@@ -239,6 +248,12 @@ interface StatsHeroProps {
   onSelectCategory: (key: StatCategoryKey | null) => void;
   totalRounds: number;
   avgScoreToPar: number | null;
+  /**
+   * Long-press handler on a stat tile — signal to compile a stitched
+   * highlight reel for that category (honoring current filters).
+   * Tap still toggles the category filter (drill-down to rounds list).
+   */
+  onCompileCategory?: (key: StatCategoryKey) => void;
 }
 
 export function StatsHero({
@@ -248,6 +263,7 @@ export function StatsHero({
   onSelectCategory,
   totalRounds,
   avgScoreToPar,
+  onCompileCategory,
 }: StatsHeroProps) {
   const screenW = Dimensions.get('window').width;
   const chartW = screenW - 32; // 16 side padding each
@@ -328,9 +344,17 @@ export function StatsHero({
             onPress={() =>
               onSelectCategory(activeCategory === def.key ? null : def.key)
             }
+            onLongPress={
+              onCompileCategory && count > 0
+                ? () => onCompileCategory(def.key)
+                : undefined
+            }
           />
         ))}
       </ScrollView>
+      {onCompileCategory && (
+        <Text style={styles.tilesHint}>Hold a tile to play a highlight reel</Text>
+      )}
     </View>
   );
 }
@@ -381,11 +405,18 @@ const styles = StyleSheet.create({
 
   // Tiles
   tilesScroll: {
-    marginBottom: 16,
+    marginBottom: 6,
   },
   tilesContent: {
     paddingHorizontal: 16,
     gap: 10,
+  },
+  tilesHint: {
+    color: theme.colors.textTertiary,
+    fontSize: 11,
+    textAlign: 'center',
+    marginBottom: 10,
+    letterSpacing: 0.2,
   },
   tile: {
     width: TILE_WIDTH,
