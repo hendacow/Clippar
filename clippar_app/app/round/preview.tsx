@@ -507,7 +507,14 @@ function InlineTrimPanel({
   const [activeUri, setActiveUri] = useState<string | null>(clip.sourceUri);
   const [savingTrim, setSavingTrim] = useState(false);
 
-  // Auto-probe original for full-timeline
+  // Auto-probe original for full-timeline.
+  // Dep must be `clip.id` (stable primitive), NOT the `clip` object — the
+  // parent re-renders whenever the live trim bounds update, and each render
+  // creates a fresh `currentClip` reference. Depending on `clip` refired this
+  // effect on every parent tick, which called setStartMs(clip.trimStartMs)
+  // mid-drag — reverting the user's drag and triggering the bounds-change
+  // effect below, which pushed new bounds back to the parent, which
+  // re-rendered, repeating until React threw "Maximum update depth exceeded."
   useEffect(() => {
     if (clip.autoTrimmed && clip.originalUri && clip.originalUri !== clip.sourceUri && ExpoAV) {
       let cancelled = false;
@@ -528,7 +535,8 @@ function InlineTrimPanel({
       })();
       return () => { cancelled = true; };
     }
-  }, [clip]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [clip.id]);
 
   const effectiveEndMs = endMs === -1 ? durationMs : endMs;
   const trimmedDuration = effectiveEndMs - startMs;
