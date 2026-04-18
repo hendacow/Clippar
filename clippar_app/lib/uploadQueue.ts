@@ -127,6 +127,33 @@ async function uploadRoundClips(roundId: string, userId: string): Promise<void> 
   const clips = await getUnuploadedClips(roundId);
   if (clips.length === 0) return;
 
+  // Guard: do NOT push shots for a round that doesn't exist in Supabase.
+  // Historically `useRound` would fall back to a `local_${Date.now()}` ID
+  // when createRound failed, and the queue would then try to createShot()
+  // against that ID — producing `shots_round_id_fkey` violations and the
+  // "no video on every round" bug. The fallback is now removed, but older
+  // rounds recorded under the fallback may still be lurking in SQLite.
+  if (roundId.startsWith('local_')) {
+    throw new Error(
+      `Round ${roundId} is local-only (never reached Supabase); skipping upload. ` +
+      `Delete the round or re-record with a live connection.`
+    );
+  }
+
+  const { data: roundRow, error: roundErr } = await supabase
+    .from('rounds')
+    .select('id')
+    .eq('id', roundId)
+    .maybeSingle();
+  if (roundErr) {
+    throw new Error(`Round lookup failed: ${toErrorMessage(roundErr)}`);
+  }
+  if (!roundRow?.id) {
+    throw new Error(
+      `Round ${roundId} not found in Supabase — cannot upload clips (would violate shots.round_id FK).`
+    );
+  }
+
   for (const clip of clips) {
     // Basic per-clip retry throttle — cap attempts so a single bad file
     // doesn't spin forever.

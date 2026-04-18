@@ -1,4 +1,5 @@
 import { useState, useCallback, useRef } from 'react';
+import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from '@/types/round';
 import { PENALTY_STROKES } from '@/types/round';
@@ -72,15 +73,23 @@ export function useRound() {
 
       setState(createInitialState(round.id, courseName, courseId, courseHoles));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    } catch {
-      // Fallback: create with local-only ID if offline
-      const localId = `local_${Date.now()}`;
-      await saveLocalRound({
-        id: localId,
-        course_name: courseName,
-        course_id: courseId,
-      });
-      setState(createInitialState(localId, courseName, courseId, courseHoles));
+      return true;
+    } catch (err) {
+      // NO local-ID fallback. The previous behavior created rounds with
+      // `local_${Date.now()}` IDs that were never recognized by Supabase,
+      // so every downstream upsertScore / createShot failed with
+      // `scores_round_id_fkey` / `shots_round_id_fkey` violations and the
+      // clips never landed in Storage. Result: library showed "no video"
+      // for every round. We'd rather surface the error and let the user
+      // retry than silently create an unsyncable round.
+      console.error('[useRound] startRound failed:', err);
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert(
+        'Could not start round',
+        'Failed to create round on the server. Check your connection and try again.',
+        [{ text: 'OK' }]
+      );
+      return false;
     }
   }, []);
 

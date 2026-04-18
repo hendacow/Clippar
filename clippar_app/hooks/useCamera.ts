@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { Platform } from 'react-native';
+import { Platform, InteractionManager } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
@@ -157,7 +157,13 @@ export function useCamera({
         // Run the SAME native detect+trim pipeline as imports in background.
         // This produces a trimmed passthrough file, persists boundaries relative
         // to the original, and classifies the shot for hole auto-advance.
-        loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
+        //
+        // Defer off the gesture-handler/recordAsync resolution so the JS thread
+        // can finish updating React state (isRecording=false, button resets)
+        // before we kick off heavy detection + file I/O. Without this the stop
+        // tap can visibly "lag" by a second or more on lower-end devices.
+        InteractionManager.runAfterInteractions(() => {
+          loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
           try {
             const result = await detectAndTrim(finalUri, preRollMs, postRollMs);
             if (!clipId) return;
@@ -211,6 +217,7 @@ export function useCamera({
           } catch (err) {
             console.log('[ShotDetector] Detection error (non-fatal):', err);
           }
+          });
         });
 
         const clip: ClipMetadata = {
@@ -229,8 +236,11 @@ export function useCamera({
 
         // Auto-upload in background so the clip reaches Supabase Storage
         // without waiting for the user to hit "Finish round". The queue is
-        // idempotent — calling it once per clip is fine.
-        void enqueueClipUpload(rid, null);
+        // idempotent — calling it once per clip is fine. Defer this too so
+        // it doesn't race detection or block the stop gesture.
+        InteractionManager.runAfterInteractions(() => {
+          void enqueueClipUpload(rid, null);
+        });
       }
     } catch (error) {
       console.error('[useCamera] Recording error:', error);
@@ -256,9 +266,11 @@ export function useCamera({
   }, []);
 
   const toggleRecording = useCallback(async () => {
-    // Debounce — ignore rapid double-fires from shutter (volume + key event)
+    // Debounce — ignore rapid double-fires from shutter (volume + key event).
+    // 200ms is enough to swallow the doubled event without making a genuine
+    // "start, wait ~300ms, try stop" interaction feel unresponsive.
     const now = Date.now();
-    if (now - lastToggleTime.current < 500) return;
+    if (now - lastToggleTime.current < 200) return;
     lastToggleTime.current = now;
 
     if (isRecordingRef.current) {
