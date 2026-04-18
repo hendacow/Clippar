@@ -76,7 +76,7 @@ type ShotDetectorEvents = {
 type NativeModuleType = {
   detectSwing(videoUri: string): Promise<SwingDetectionResult>;
   trimVideo(videoUri: string, startMs: number, endMs: number): Promise<TrimResult>;
-  detectAndTrim(videoUri: string, preRollMs: number, postRollMs: number): Promise<DetectAndTrimResult>;
+  detectAndTrim(videoUri: string, preRollMs: number, postRollMs: number, recentShotTypes: string[]): Promise<DetectAndTrimResult>;
   stitchClips(clipUris: string[]): Promise<StitchResult>;
   composeReel(clipUris: string[], scorecardJson: string, musicUri: string): Promise<ComposeReelResult>;
   clearTrimCache(): Promise<ClearTrimCacheResult>;
@@ -168,6 +168,8 @@ export async function trimVideo(
  * @param videoUri - Path to the video file
  * @param preRollMs - Milliseconds before impact to include (default 3000)
  * @param postRollMs - Milliseconds after impact to include (default 2000)
+ * @param recentShotTypes - Last few classifications on this hole (inter-clip context
+ *   for the 3-tier classifier). Pass [] if no context is available.
  *
  * Returns detection result + trimmedUri (null if no swing found or trim failed).
  * Falls back gracefully when the native module is unavailable.
@@ -175,7 +177,8 @@ export async function trimVideo(
 export async function detectAndTrim(
   videoUri: string,
   preRollMs: number = 3000,
-  postRollMs: number = 2000
+  postRollMs: number = 2000,
+  recentShotTypes: ShotTypeClassification[] = []
 ): Promise<DetectAndTrimResult> {
   if (!nativeModule) {
     console.warn(
@@ -192,7 +195,7 @@ export async function detectAndTrim(
     };
   }
 
-  const result = await nativeModule.detectAndTrim(videoUri, preRollMs, postRollMs);
+  const result = await nativeModule.detectAndTrim(videoUri, preRollMs, postRollMs, recentShotTypes);
   return {
     ...result,
     // NSNull from Swift becomes null in JS, but just be safe

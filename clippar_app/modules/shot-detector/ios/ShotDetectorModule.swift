@@ -63,8 +63,8 @@ public class ShotDetectorModule: Module {
 
         // Combined detect + passthrough trim in one call.
         // Returns detection result plus trimmedUri (null if no swing found).
-        AsyncFunction("detectAndTrim") { (videoUri: String, preRollMs: Double, postRollMs: Double, promise: Promise) in
-            self.detectAndTrimVideo(uri: videoUri, preRollMs: preRollMs, postRollMs: postRollMs, promise: promise)
+        AsyncFunction("detectAndTrim") { (videoUri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], promise: Promise) in
+            self.detectAndTrimVideo(uri: videoUri, preRollMs: preRollMs, postRollMs: postRollMs, recentShotTypes: recentShotTypes, promise: promise)
         }
 
         // Stitch multiple clips into a single video using AVMutableComposition.
@@ -227,7 +227,7 @@ public class ShotDetectorModule: Module {
 
     // MARK: - Combined Detect + Trim
 
-    private func detectAndTrimVideo(uri: String, preRollMs: Double, postRollMs: Double, promise: Promise) {
+    private func detectAndTrimVideo(uri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], promise: Promise) {
         DispatchQueue.global(qos: .userInitiated).async {
             // Wrap entire operation in autoreleasepool to ensure AVAsset, AVAssetReader,
             // VNImageRequestHandler, pixel buffers, and AVAssetExportSession are freed
@@ -253,7 +253,8 @@ public class ShotDetectorModule: Module {
                 let result = self.detectSwingEvent(
                     poseFrames: poseFrames,
                     audioTransients: audioTransients,
-                    asset: asset
+                    asset: asset,
+                    recentShotTypes: recentShotTypes
                 )
 
                 let detectionElapsed = CACurrentMediaTime() - startTime
@@ -405,7 +406,8 @@ public class ShotDetectorModule: Module {
                 let result = self.detectSwingEvent(
                     poseFrames: poseFrames,
                     audioTransients: audioTransients,
-                    asset: asset
+                    asset: asset,
+                    recentShotTypes: []
                 )
 
                 let elapsed = CACurrentMediaTime() - startTime
@@ -665,13 +667,18 @@ public class ShotDetectorModule: Module {
     private func detectSwingEvent(
         poseFrames: [PoseFrame],
         audioTransients: [Double],
-        asset: AVURLAsset
+        asset: AVURLAsset,
+        recentShotTypes: [String]
     ) -> SwingResult {
+        // Pre-compute scene signal (green hue + VNClassifyImageRequest on 3 sampled frames)
+        // so we can pass it to both the pose classifier and the fallback path.
+        let sceneSignal = self.sceneGreenSignal(from: asset)
+
         guard poseFrames.count >= 5 else {
             // Not enough pose data — use duration/audio fallback so every clip
             // still gets a usable shotType for hole grouping.
             let durationMs = CMTimeGetSeconds(asset.duration) * 1000.0
-            let fallback = fallbackClassify(durationMs: durationMs, audioTransients: audioTransients)
+            let fallback = fallbackClassify(durationMs: durationMs, audioTransients: audioTransients, sceneSignal: sceneSignal, recentShotTypes: recentShotTypes)
             let midTimeMs = durationMs * 0.5
             let impactTimeMs = audioTransients.isEmpty
                 ? midTimeMs
@@ -828,7 +835,9 @@ public class ShotDetectorModule: Module {
                 impactFrameIndex: impact.frameIndex,
                 backswingPeakY: impact.peakY,
                 audioTransients: audioTransients,
-                impactTimeMs: impact.timeMs
+                impactTimeMs: impact.timeMs,
+                sceneSignal: sceneSignal,
+                recentShotTypes: recentShotTypes
             )
             return SwingResult(
                 found: true,
@@ -844,7 +853,7 @@ public class ShotDetectorModule: Module {
         // clip and collapse all clips into one hole), classify by duration +
         // audio transient count so every clip gets a usable shotType.
         let durationMs = CMTimeGetSeconds(asset.duration) * 1000.0
-        let fallback = fallbackClassify(durationMs: durationMs, audioTransients: audioTransients)
+        let fallback = fallbackClassify(durationMs: durationMs, audioTransients: audioTransients, sceneSignal: sceneSignal, recentShotTypes: recentShotTypes)
 
         // Pick an impact time: closest audio transient if any, else clip midpoint.
         let midTimeMs = durationMs * 0.5
@@ -905,27 +914,182 @@ public class ShotDetectorModule: Module {
         return false
     }
 
-    // MARK: - Putt vs Swing Classifier (angle-independent)
+    // MARK: - Scene / Green Signal
     //
-    // Uses signals that work regardless of camera angle:
-    // 1. Total body displacement — putts barely move, swings move everything
-    // 2. Skeleton bounding box stability — minimal change = putt
-    // 3. Backswing arc height — putts have tiny arcs
-    // 4. Audio transient energy — putts are soft ticks, swings are loud cracks
-    // 5. Movement duration — putts are quick, short movements
-    // 6. Pose height ratio — person small in frame = likely on green = putt
+    // Samples 3 frames from the asset, runs VNClassifyImageRequest for a
+    // "golf course / green / grass" signal, and computes dominant-green hue ratio.
+    // Returns nil if sampling fails (rare). Designed to be cheap — uses
+    // AVAssetImageGenerator which decodes only the requested times.
+    private struct SceneSignal {
+        let classifierHit: Bool   // VNClassifyImageRequest matched a golf/grass/green label >=0.3
+        let greenHueRatio: Float  // 0..1 ratio of pixels with dominant green hue across sampled frames
+    }
+
+    private func sceneGreenSignal(from asset: AVURLAsset) -> SceneSignal? {
+        let durationSec = CMTimeGetSeconds(asset.duration)
+        guard durationSec.isFinite && durationSec > 0 else { return nil }
+
+        // Sample 3 timestamps evenly across the clip
+        let sampleSecs = [durationSec * 0.2, durationSec * 0.5, durationSec * 0.8]
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: 320, height: 320) // small — we only need hue + scene
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.25, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.25, preferredTimescale: 600)
+
+        // Labels we treat as "green scene" — VNClassifyImageRequest uses these names in its taxonomy.
+        let greenLabels: Set<String> = [
+            "grass", "lawn", "field", "meadow", "golf_course", "golf_green",
+            "putting_green", "fairway", "turf",
+        ]
+
+        var hits = 0
+        var hueSamples: [Float] = []
+
+        for secs in sampleSecs {
+            autoreleasepool {
+                let time = CMTimeMakeWithSeconds(secs, preferredTimescale: 600)
+                guard let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) else { return }
+
+                // --- Scene classifier ---
+                let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+                let sceneRequest = VNClassifyImageRequest()
+                if (try? handler.perform([sceneRequest])) != nil,
+                   let observations = sceneRequest.results {
+                    for obs in observations {
+                        if obs.confidence >= 0.3 && greenLabels.contains(obs.identifier.lowercased()) {
+                            hits += 1
+                            break
+                        }
+                    }
+                }
+
+                // --- Dominant-green hue analysis (cheap downsample) ---
+                let ratio = self.greenPixelRatio(cgImage: cgImage)
+                hueSamples.append(ratio)
+            }
+        }
+
+        let classifierHit = hits >= 1
+        let greenHueRatio = hueSamples.isEmpty ? 0 : hueSamples.reduce(0, +) / Float(hueSamples.count)
+        print("[Classifier] sceneSignal classifierHit=\(classifierHit) greenHueRatio=\(String(format: "%.2f", greenHueRatio))")
+        return SceneSignal(classifierHit: classifierHit, greenHueRatio: greenHueRatio)
+    }
+
+    /// Fraction of pixels in the CGImage whose hue falls in the green range (~80°..160°) and
+    /// are reasonably saturated/bright. Cheap — downsamples to ~80x80 before iterating.
+    private func greenPixelRatio(cgImage: CGImage) -> Float {
+        let targetW = 80
+        let targetH = 80
+        let colorSpace = CGColorSpaceCreateDeviceRGB()
+        let bytesPerPixel = 4
+        let bytesPerRow = targetW * bytesPerPixel
+        var pixelData = [UInt8](repeating: 0, count: targetW * targetH * bytesPerPixel)
+
+        guard let ctx = CGContext(
+            data: &pixelData,
+            width: targetW,
+            height: targetH,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: colorSpace,
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return 0 }
+        ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: targetW, height: targetH))
+
+        var greenCount = 0
+        let total = targetW * targetH
+        for i in 0..<total {
+            let offset = i * bytesPerPixel
+            let r = Float(pixelData[offset]) / 255.0
+            let g = Float(pixelData[offset + 1]) / 255.0
+            let b = Float(pixelData[offset + 2]) / 255.0
+
+            // Green-dominant test: G is clearly the largest channel and saturation is meaningful.
+            let maxC = max(r, g, b)
+            let minC = min(r, g, b)
+            let delta = maxC - minC
+            // Require g to be largest, meaningful saturation, and not too dark.
+            if g > r && g > b && delta > 0.08 && maxC > 0.25 {
+                // Hue roughly 80°..160° is "grass green" — with g dominant this is already close.
+                // Filter out yellowish (r close to g) and teal (b close to g).
+                if g - r > 0.04 && g - b > 0.02 {
+                    greenCount += 1
+                }
+            }
+        }
+        return Float(greenCount) / Float(total)
+    }
+
+    // MARK: - Putt vs Swing Classifier (3-tier)
+    //
+    // Tier 1 — Wrist-relative zones (heavy weight):
+    //   Avg wrist Y across backswing peak frames, compared to avg shoulder/hip Y.
+    //   • wrist consistently above shoulder → +3 swing
+    //   • wrist consistently below hip → +3 putt
+    //   • wrist mid-waist → +2 "chip-like" → fold into swing for trim purposes
+    //
+    // Tier 2 — Legacy body/audio signals (supporting evidence, reduced weights):
+    //   Body displacement, bbox stability, backswing arc, audio transients, pose height ratio.
+    //
+    // Tier 3 — Scene classification:
+    //   VNClassifyImageRequest scene hit + dominant-green hue ratio → putt bias.
+    //
+    // Inter-clip context (recentShotTypes): last 3 classifications on this hole
+    //   nudge the score when signals are ambiguous.
 
     private func classifyShotType(
         poseFrames: [PoseFrame],
         impactFrameIndex: Int,
         backswingPeakY: CGFloat,
         audioTransients: [Double],
-        impactTimeMs: Double
+        impactTimeMs: Double,
+        sceneSignal: SceneSignal?,
+        recentShotTypes: [String]
     ) -> ShotType {
         var puttScore: Double = 0.0
         var swingScore: Double = 0.0
 
-        // --- Signal 1: Total body displacement across all joints ---
+        // --- Tier 1: Wrist zones across backswing peak window ---
+        // Average wrist Y across a small window around the impact frame (peak happens
+        // just before impact). Compare to shoulder/hip Y in the same window.
+        let peakStart = max(0, impactFrameIndex - 4)
+        let peakEnd = min(poseFrames.count - 1, impactFrameIndex + 1)
+        var wristYs: [CGFloat] = []
+        var shoulderYs: [CGFloat] = []
+        var hipYs: [CGFloat] = []
+        if peakEnd >= peakStart {
+            for i in peakStart...peakEnd {
+                if let w = avgWristY(poseFrames[i]) { wristYs.append(w) }
+                if let s = avgShoulderY(poseFrames[i]) { shoulderYs.append(s) }
+                if let h = avgHipY(poseFrames[i]) { hipYs.append(h) }
+            }
+        }
+
+        if !wristYs.isEmpty && !shoulderYs.isEmpty && !hipYs.isEmpty {
+            let avgWrist = wristYs.reduce(0, +) / CGFloat(wristYs.count)
+            let avgShoulder = shoulderYs.reduce(0, +) / CGFloat(shoulderYs.count)
+            let avgHip = hipYs.reduce(0, +) / CGFloat(hipYs.count)
+            // Use backswingPeakY too — the single highest wrist point tracked by the state machine.
+            let peakY = max(backswingPeakY, wristYs.max() ?? 0)
+
+            if peakY > avgShoulder + 0.02 {
+                swingScore += 3.0
+                print("[Classifier] tier1=wristAboveShoulder +3 swing peakY=\(String(format: "%.3f", peakY)) shoulderY=\(String(format: "%.3f", avgShoulder))")
+            } else if avgWrist < avgHip - 0.02 && peakY < avgHip + 0.05 {
+                puttScore += 3.0
+                print("[Classifier] tier1=wristBelowHip +3 putt avgWrist=\(String(format: "%.3f", avgWrist)) hipY=\(String(format: "%.3f", avgHip))")
+            } else if avgWrist >= avgHip && avgWrist <= avgShoulder {
+                // Mid-waist: chip-like. Plan folds chip into swing for trim purposes.
+                swingScore += 2.0
+                print("[Classifier] tier1=wristMidWaist +2 swing(chip-like) avgWrist=\(String(format: "%.3f", avgWrist)) hip=\(String(format: "%.3f", avgHip)) shoulder=\(String(format: "%.3f", avgShoulder))")
+            }
+        } else {
+            print("[Classifier] tier1=insufficientPoseAtPeak window=\(peakStart)..\(peakEnd) poseFrames=\(poseFrames.count)")
+        }
+
+        // --- Tier 2: Legacy body/audio signals (reduced weights) ---
+        // Signal 1: Total body displacement across all joints ---
         // Sum displacement of ALL tracked joints across a window around impact.
         // This works from any angle because a full swing moves the entire body.
         let windowStart = max(0, impactFrameIndex - 5)
@@ -940,16 +1104,15 @@ public class ShotDetectorModule: Module {
             }
             let avgDisplacement = totalDisplacement / CGFloat(windowEnd - windowStart)
 
-            // Relaxed: putts get credit up to 0.10 (was 0.06) for higher recall.
-            // Full swings produce avg displacement > 0.15, putts typically < 0.10.
+            // Tier-2 weights halved vs legacy — Tier 1 (wrist zones) is the primary signal.
             if avgDisplacement < 0.10 {
-                puttScore += 2.0
-            } else if avgDisplacement < 0.14 {
                 puttScore += 1.0
+            } else if avgDisplacement < 0.14 {
+                puttScore += 0.5
             } else if avgDisplacement > 0.15 {
-                swingScore += 2.0
-            } else {
                 swingScore += 1.0
+            } else {
+                swingScore += 0.5
             }
 
             print("[Classifier] signal=bodyDisplacement value=\(String(format: "%.3f", avgDisplacement))")
@@ -969,12 +1132,11 @@ public class ShotDetectorModule: Module {
                 }
             }
 
-            // Relaxed: putt threshold 0.05 -> 0.08 for higher recall.
-            // Putts: bounding box barely changes. Swings: large changes (> 0.12).
+            // Tier-2 weights halved.
             if maxBBoxChange < 0.08 {
-                puttScore += 1.5
+                puttScore += 0.75
             } else if maxBBoxChange > 0.12 {
-                swingScore += 1.5
+                swingScore += 0.75
             }
 
             print("[Classifier] signal=bboxChange value=\(String(format: "%.3f", maxBBoxChange))")
@@ -991,15 +1153,15 @@ public class ShotDetectorModule: Module {
             : 0.35
         let arcRelativeToBody = backswingPeakY - hipY
 
-        // Relaxed: putt arc threshold 0.08 -> 0.12 for higher recall.
+        // Tier-2 weights halved — arc is supporting evidence for wrist-zone tier 1.
         if arcRelativeToBody < 0.12 {
-            puttScore += 2.0
-        } else if arcRelativeToBody < 0.18 {
             puttScore += 1.0
+        } else if arcRelativeToBody < 0.18 {
+            puttScore += 0.5
         } else if arcRelativeToBody > 0.25 {
-            swingScore += 2.0
-        } else {
             swingScore += 1.0
+        } else {
+            swingScore += 0.5
         }
 
         print("[Classifier] signal=backswingArc value=\(String(format: "%.3f", arcRelativeToBody)) peakY=\(String(format: "%.3f", backswingPeakY))")
@@ -1014,15 +1176,15 @@ public class ShotDetectorModule: Module {
         //   1 transient near impact -> classic swing (loud crack)
         //   2+ transients -> swing with club waggle / multiple hits
         if totalTransients == 0 {
-            puttScore += 1.5
+            puttScore += 0.75
         } else if totalTransients == 1 && !nearbyTransients.isEmpty {
-            swingScore += 1.0
-        } else if totalTransients >= 2 {
             swingScore += 0.5
+        } else if totalTransients >= 2 {
+            swingScore += 0.25
         }
         if nearbyTransients.isEmpty && totalTransients > 0 {
             // Transients exist elsewhere but not near impact — soft sound at impact
-            puttScore += 0.5
+            puttScore += 0.25
         }
         print("[Classifier] signal=audioTransients total=\(totalTransients) nearby=\(nearbyTransients.count)")
 
@@ -1031,15 +1193,50 @@ public class ShotDetectorModule: Module {
         let poseHeight = poseHeightRatio(poseFrames, near: impactFrameIndex)
         if let ph = poseHeight {
             if ph < 0.20 {
-                puttScore += 1.5  // Small in frame = far away = green
+                puttScore += 0.75  // Small in frame = far away = green
             } else if ph > 0.45 {
-                swingScore += 1.0  // Large in frame = close = tee/fairway
+                swingScore += 0.5  // Large in frame = close = tee/fairway
             }
             print("[Classifier] signal=poseHeightRatio value=\(String(format: "%.3f", ph))")
         }
 
+        // --- Tier 3: Scene classification + green hue ---
+        if let scene = sceneSignal {
+            // If the VNClassifyImageRequest matched a golf/grass label AND the dominant
+            // green hue is >60% of pixels, this is almost certainly a putt on a green.
+            if scene.classifierHit && scene.greenHueRatio > 0.60 {
+                puttScore += 1.5
+                print("[Classifier] tier3=sceneClassifier+greenHue +1.5 putt")
+            } else if scene.greenHueRatio > 0.70 {
+                // Very high green ratio alone (strong grass dominance) leans putt
+                puttScore += 1.0
+                print("[Classifier] tier3=greenHueHeavy +1.0 putt ratio=\(String(format: "%.2f", scene.greenHueRatio))")
+            } else if scene.classifierHit {
+                puttScore += 0.5
+                print("[Classifier] tier3=sceneClassifierOnly +0.5 putt")
+            }
+        }
+
+        // --- Inter-clip context: recent shot types on the same hole ---
+        // Only applied when Tier 1 wasn't decisive (score gap < 2).
+        if !recentShotTypes.isEmpty {
+            let gap = abs(puttScore - swingScore)
+            if gap < 2.0 {
+                let recent = recentShotTypes.suffix(3)
+                let swingCount = recent.filter { $0 == "swing" }.count
+                let puttCount = recent.filter { $0 == "putt" }.count
+                if recent.count >= 3 && swingCount == recent.count {
+                    swingScore += 1.0
+                    print("[Classifier] context=last3AllSwings +1 swing")
+                } else if puttCount > swingCount && recent.last == "putt" {
+                    puttScore += 1.0
+                    print("[Classifier] context=recentPutts +1 putt")
+                }
+            }
+        }
+
         let shotType: ShotType = puttScore > swingScore ? .putt : .swing
-        print("[Classifier] poseClassification result=\(shotType.rawValue) puttScore=\(String(format: "%.1f", puttScore)) swingScore=\(String(format: "%.1f", swingScore))")
+        print("[Classifier] poseClassification result=\(shotType.rawValue) puttScore=\(String(format: "%.1f", puttScore)) swingScore=\(String(format: "%.1f", swingScore)) recent=\(recentShotTypes.joined(separator: ","))")
         return shotType
     }
 
@@ -1052,10 +1249,15 @@ public class ShotDetectorModule: Module {
     // into one hole.
     private func fallbackClassify(
         durationMs: Double,
-        audioTransients: [Double]
+        audioTransients: [Double],
+        sceneSignal: SceneSignal? = nil,
+        recentShotTypes: [String] = []
     ) -> (shotType: ShotType, confidence: Double, reason: String) {
         let durationSec = durationMs / 1000.0
         let transientCount = audioTransients.count
+
+        // Strong scene signal can override duration-only guesses when pose is absent.
+        let strongGreenScene = (sceneSignal?.classifierHit ?? false) && (sceneSignal?.greenHueRatio ?? 0) > 0.60
 
         // Strong putt signals: no audio + long clip, or very long clip.
         if durationSec > 30.0 {
@@ -1070,13 +1272,26 @@ public class ShotDetectorModule: Module {
 
         // Strong swing signals: short clip or 1 sharp transient.
         if durationSec < 6.0 {
+            // Scene override: short but clearly on a green → putt.
+            if strongGreenScene {
+                return (.putt, 0.35, "shortClipButGreenScene")
+            }
             return (.swing, 0.30, "durationShort(\(String(format: "%.1f", durationSec))s)")
         }
         if transientCount == 1 {
+            if strongGreenScene {
+                return (.putt, 0.30, "singleTransientButGreenScene")
+            }
             return (.swing, 0.35, "singleTransient")
         }
 
-        // Ambiguous 6-12s range — default to swing (more common).
+        // Ambiguous 6-12s range — scene + inter-clip context tip the default.
+        if strongGreenScene {
+            return (.putt, 0.30, "ambiguousDurationButGreenScene")
+        }
+        if let last = recentShotTypes.last, last == "putt" {
+            return (.putt, 0.22, "ambiguousFollowingPutt")
+        }
         return (.swing, 0.20, "durationMid(\(String(format: "%.1f", durationSec))s)")
     }
 

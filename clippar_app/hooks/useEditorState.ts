@@ -2,7 +2,7 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getClipUrl } from '@/lib/r2';
-import { detectAndTrim, deleteFile, getMemoryStats } from 'shot-detector';
+import { detectAndTrim, deleteFile, getMemoryStats, type ShotTypeClassification } from 'shot-detector';
 import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
@@ -576,6 +576,10 @@ export function useEditorState(roundId: string | undefined) {
       );
     } catch {}
 
+    // Track the last few shot classifications per-hole so the 3-tier classifier
+    // gets inter-clip context (e.g. recent putts → lean the next ambiguous clip putt).
+    const recentByHole = new Map<number, ShotTypeClassification[]>();
+
     for (let clipIdx = 0; clipIdx < untrimmedClips.length; clipIdx++) {
       const clip = untrimmedClips[clipIdx];
 
@@ -598,11 +602,19 @@ export function useEditorState(roundId: string | undefined) {
           }
         } catch {}
 
+        const recentForHole = recentByHole.get(clip.holeNumber) ?? [];
         const result = await detectAndTrim(
           clip.sourceUri!,
           preRollMs,
-          postRollMs
+          postRollMs,
+          recentForHole
         );
+
+        // Record this clip's classification for future siblings on the same hole (keep last 3).
+        if (result.found) {
+          const next = [...recentForHole, result.shotType].slice(-3);
+          recentByHole.set(clip.holeNumber, next);
+        }
 
         // Check cancellation again after the async call
         if (trimCancelledRef.current) return;

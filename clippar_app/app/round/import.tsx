@@ -98,6 +98,7 @@ export default function ImportRoundScreen() {
   const [selectedScoreCell, setSelectedScoreCell] = useState<number | null>(null);
   const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number }[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
+  const [sanityWarning, setSanityWarning] = useState<{ oversizedHoles: number[] } | null>(null);
 
   const handleCourseSelect = (course: { id: string; name: string }, holeData: HoleData[]) => {
     setSelectedCourseId(course.id);
@@ -456,6 +457,22 @@ export default function ImportRoundScreen() {
         groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
         prevShotType = c.shotType;
       }
+    }
+
+    // Sanity pass — if any hole ends up with >8 shots it's a statistical outlier
+    // (even terrible golfers rarely exceed 8 on a par-5). Flag them for the user
+    // to review grouping on the Review Clips screen. We don't auto-split yet —
+    // just surface the anomaly so they can drag clips between holes.
+    const oversizedHoles = groupedHoles
+      .filter((h) => h.clips.length > 8)
+      .map((h) => h.holeNumber);
+    if (oversizedHoles.length > 0) {
+      console.warn(
+        `[AutoDetect] Sanity pass: ${oversizedHoles.length} hole(s) with >8 shots: ${oversizedHoles.join(', ')}`
+      );
+      setSanityWarning({ oversizedHoles });
+    } else {
+      setSanityWarning(null);
     }
 
     // Expand holes that have clips
@@ -2430,6 +2447,37 @@ export default function ImportRoundScreen() {
                 }}
               >
                 Long-press any clip to move it to a different hole.
+              </Text>
+            </View>
+          )}
+          {sanityWarning && sanityWarning.oversizedHoles.length > 0 && (
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 8,
+                padding: 10,
+                marginBottom: 12,
+                borderRadius: 10,
+                backgroundColor: 'rgba(255, 176, 0, 0.12)',
+                borderWidth: 1,
+                borderColor: 'rgba(255, 176, 0, 0.35)',
+              }}
+            >
+              <Info size={14} color="#FFB000" style={{ marginTop: 2 }} />
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: 12,
+                  flex: 1,
+                  lineHeight: 17,
+                }}
+              >
+                We detected {sanityWarning.oversizedHoles.length} hole
+                {sanityWarning.oversizedHoles.length === 1 ? '' : 's'} with more
+                than 8 clips (hole{sanityWarning.oversizedHoles.length === 1 ? '' : 's'}{' '}
+                {sanityWarning.oversizedHoles.join(', ')}). Double-check grouping —
+                you can long-press a clip to move it to a different hole.
               </Text>
             </View>
           )}
