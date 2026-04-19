@@ -34,7 +34,7 @@ import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
 import { saveLocalClip, saveLocalRound, saveLocalScore } from '@/lib/storage';
-import { resolveAssetUri } from '@/lib/media';
+import { resolveAssetUri, persistAsset } from '@/lib/media';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { supabase } from '@/lib/supabase';
 import type { HoleData } from '@/types/round';
@@ -849,11 +849,23 @@ export default function ImportRoundScreen() {
           const clip = hole.clips[shotIdx];
           const shotNumber = shotIdx + 1;
 
-          // Normalize ph:// / assets-library:// URIs to a durable file:// path
-          // BEFORE persisting. Without this, iOS evicts the tmp copy on reinstall
-          // and AVFoundation/ExpoFS both fail on the raw PhotoKit reference,
-          // which surfaces as "videos don't load" and "File not found: ph://...".
-          const durableUri = await resolveAssetUri(clip.uri);
+          // `resolveAssetUri` alone returns the MediaLibrary localUri which
+          // on iOS lives under `Library/Caches/ImagePicker/…` — the system
+          // cache, which iOS is free to purge at any time. Under memory
+          // pressure or after an OS cleanup the file disappears and the
+          // upload queue/editor report "File not found" for that URI.
+          //
+          // `persistAsset` copies into `documentDirectory/clips/` which is
+          // durable (only cleared on app uninstall) so downstream code has
+          // a stable path. We still fall back to `resolveAssetUri` if the
+          // persist step fails.
+          const filename = `imported_${roundId}_h${hole.holeNumber}_s${shotNumber}_${Date.now()}.mp4`;
+          let durableUri: string;
+          try {
+            durableUri = await persistAsset(clip.uri, filename);
+          } catch {
+            durableUri = await resolveAssetUri(clip.uri);
+          }
 
           await saveLocalClip({
             round_id: roundId,

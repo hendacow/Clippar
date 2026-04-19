@@ -271,19 +271,81 @@ export async function uploadReelToStorage(
   if (!token) throw new Error('Not authenticated');
 
   const resolvedReelUri = await resolveAssetUri(fileUri);
-  const file = new ExpoFS.File(resolvedReelUri);
-  if (!file.exists) throw new Error(`Reel file not found: ${resolvedReelUri}`);
-  const fileSize = file.size ?? 0;
-  if (!fileSize) throw new Error('Cannot determine reel file size');
+  const origFile = new ExpoFS.File(resolvedReelUri);
+  if (!origFile.exists) throw new Error(`Reel file not found: ${resolvedReelUri}`);
+  const origSize = origFile.size ?? 0;
+  if (!origSize) throw new Error('Cannot determine reel file size');
+
+  // Stitched reels from 12+ trimmed clips routinely exceed the 50MB Supabase
+  // free-tier ceiling even at 720p, and the TUS endpoint returns a hard
+  // 413 "Maximum size exceeded" before the first chunk lands. Pre-compress
+  // so the upload actually succeeds. Reels are viewing-only output so the
+  // quality drop from compression is acceptable.
+  let uploadUri = resolvedReelUri;
+  let uploadFile = origFile;
+  let fileSize = origSize;
+
+  if (origSize > COMPRESS_THRESHOLD && Compressor) {
+    try {
+      const compressed = await Compressor.Video.compress(resolvedReelUri, {
+        compressionMethod: 'auto',
+        maxSize: 720,
+        bitrate: 2_000_000,
+      }, (progress) => {
+        onProgress?.(progress * 0.4);
+      });
+      const cFile = new ExpoFS.File(compressed);
+      const cSize = cFile.size ?? origSize;
+      console.log(`[Upload] Reel compressed ${Math.round(origSize / 1024 / 1024)}MB → ${Math.round(cSize / 1024 / 1024)}MB`);
+      uploadUri = compressed;
+      uploadFile = cFile;
+      fileSize = cSize;
+    } catch (err) {
+      console.log('[Upload] Reel compression failed, uploading original:', err);
+    }
+  }
+
+  // Second harsher pass if still too big for the 50MB ceiling.
+  if (fileSize > MAX_FILE_SIZE && Compressor) {
+    console.log(`[Upload] Reel still ${Math.round(fileSize / 1024 / 1024)}MB — re-compressing at 540p/1Mbps`);
+    try {
+      const recompressed = await Compressor.Video.compress(uploadUri, {
+        compressionMethod: 'auto',
+        maxSize: 540,
+        bitrate: 1_000_000,
+      }, (progress) => {
+        onProgress?.(0.4 + progress * 0.1);
+      });
+      const rFile = new ExpoFS.File(recompressed);
+      const rSize = rFile.size ?? fileSize;
+      console.log(`[Upload] Reel re-compressed → ${Math.round(rSize / 1024 / 1024)}MB`);
+      uploadUri = recompressed;
+      uploadFile = rFile;
+      fileSize = rSize;
+    } catch (err) {
+      console.log('[Upload] Reel second-pass compression failed:', err);
+    }
+  }
+
+  if (fileSize > MAX_FILE_SIZE) {
+    const sizeMB = Math.round(fileSize / 1024 / 1024);
+    throw new Error(
+      `Reel is ${sizeMB}MB after two compression passes — max is 50MB. ` +
+      `Try excluding some clips or shortening the round.`
+    );
+  }
 
   const storagePath = `reels/${roundId}.mp4`;
+  const uploadProgress = origSize > COMPRESS_THRESHOLD && Compressor
+    ? (p: number) => onProgress?.(0.5 + p * 0.5)
+    : onProgress;
 
   // Small reel → simple POST.  Large reel → TUS resumable upload.
   if (fileSize < SIMPLE_UPLOAD_LIMIT) {
-    return _simpleUpload(storagePath, resolvedReelUri, `${roundId}.mp4`, token, onProgress);
+    return _simpleUpload(storagePath, uploadUri, `${roundId}.mp4`, token, uploadProgress);
   }
 
-  return _tusUpload(storagePath, file, fileSize, token, onProgress);
+  return _tusUpload(storagePath, uploadFile, fileSize, token, uploadProgress);
 }
 
 /**

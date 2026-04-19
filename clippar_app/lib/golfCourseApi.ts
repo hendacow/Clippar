@@ -81,7 +81,9 @@ export async function searchGolfCoursesLive(
     const url = `${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}&country_code=${countryCode}`;
     const res = await fetch(url, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        // GolfCourseAPI uses the `Key` scheme, NOT `Bearer`. Passing
+        // `Bearer <key>` returns 401 "API Key is missing or invalid".
+        Authorization: `Key ${apiKey}`,
         Accept: 'application/json',
       },
     });
@@ -127,7 +129,9 @@ export async function getGolfCourseDetailLive(
   try {
     const res = await fetch(`${GOLF_API_BASE}/courses/${courseId}`, {
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        // GolfCourseAPI uses the `Key` scheme, NOT `Bearer`. Passing
+        // `Bearer <key>` returns 401 "API Key is missing or invalid".
+        Authorization: `Key ${apiKey}`,
         Accept: 'application/json',
       },
     });
