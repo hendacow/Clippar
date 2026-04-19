@@ -629,14 +629,19 @@ export async function getClipsWithLegacyUris() {
     file_uri: string;
     original_file_uri: string | null;
   }>(
+    // `Library/Caches/ImagePicker/…` is the default expo-image-picker
+    // output path — iOS purges that dir on memory pressure, so treat it
+    // as legacy/evictable and migrate into documentDirectory.
     `SELECT id, round_id, file_uri, original_file_uri
      FROM local_clips
      WHERE file_uri LIKE 'ph://%'
         OR file_uri LIKE 'assets-library://%'
         OR file_uri LIKE '%/tmp/%'
+        OR file_uri LIKE '%/Library/Caches/ImagePicker/%'
         OR original_file_uri LIKE 'ph://%'
         OR original_file_uri LIKE 'assets-library://%'
-        OR original_file_uri LIKE '%/tmp/%'`
+        OR original_file_uri LIKE '%/tmp/%'
+        OR original_file_uri LIKE '%/Library/Caches/ImagePicker/%'`
   );
 }
 

@@ -32,33 +32,37 @@ export async function migrateLegacyUris(): Promise<{ scanned: number; migrated: 
 
     for (const row of rows) {
       try {
-        const needsFileUri =
-          row.file_uri.startsWith('ph://') ||
-          row.file_uri.startsWith('assets-library://') ||
-          row.file_uri.includes('/tmp/');
+        const isEvictable = (uri: string) =>
+          uri.startsWith('ph://') ||
+          uri.startsWith('assets-library://') ||
+          uri.includes('/tmp/') ||
+          uri.includes('/Library/Caches/ImagePicker/');
+
+        const needsFileUri = isEvictable(row.file_uri);
 
         const needsOriginal =
-          !!row.original_file_uri &&
-          (row.original_file_uri.startsWith('ph://') ||
-            row.original_file_uri.startsWith('assets-library://') ||
-            row.original_file_uri.includes('/tmp/'));
+          !!row.original_file_uri && isEvictable(row.original_file_uri);
 
         let nextFileUri = row.file_uri;
         let nextOriginalUri: string | null | undefined = row.original_file_uri;
 
+        // For purgeable on-disk paths (tmp/ or Library/Caches/ImagePicker/)
+        // we want to COPY into documentDirectory so we're not at iOS's
+        // mercy. ph:// is stable once resolved to localUri so plain
+        // resolveAssetUri is enough (localUri is in the PhotoKit sandbox
+        // which iOS doesn't purge on memory pressure).
+        const needsCopy = (uri: string) =>
+          uri.includes('/tmp/') || uri.includes('/Library/Caches/ImagePicker/');
+
         if (needsFileUri) {
-          // For tmp/ paths we want to COPY into documentDirectory so we're not
-          // at iOS's mercy. ph:// is stable once resolved to localUri so a
-          // plain resolveAssetUri is enough (localUri is in the PhotoKit sandbox
-          // which iOS doesn't purge).
-          const resolved = row.file_uri.includes('/tmp/')
+          const resolved = needsCopy(row.file_uri)
             ? await persistAsset(row.file_uri, `clip_${row.id}_${Date.now()}.mp4`)
             : await resolveAssetUri(row.file_uri);
           if (resolved && resolved !== row.file_uri) nextFileUri = resolved;
         }
 
         if (needsOriginal && row.original_file_uri) {
-          const resolved = row.original_file_uri.includes('/tmp/')
+          const resolved = needsCopy(row.original_file_uri)
             ? await persistAsset(row.original_file_uri, `orig_${row.id}_${Date.now()}.mp4`)
             : await resolveAssetUri(row.original_file_uri);
           if (resolved && resolved !== row.original_file_uri) nextOriginalUri = resolved;
