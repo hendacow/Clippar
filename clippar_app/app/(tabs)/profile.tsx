@@ -430,6 +430,13 @@ export default function ProfileScreen() {
               subtitle="Photos mirroring, cloud backup, cache"
               onPress={() => router.push('/profile/storage-settings')}
             />
+            <Divider />
+            <SettingsRow
+              icon={<Activity size={18} color={theme.colors.textSecondary} />}
+              title="Trim Sandbox (debug)"
+              subtitle="Pick a video, see auto-trim output instantly"
+              onPress={() => router.push('/profile/trim-sandbox')}
+            />
           </Card>
 
           {/* ---- UNITS ---- */}

@@ -694,6 +694,26 @@ export function useEditorState(roundId: string | undefined) {
             ` | ${result.found ? 'TRIMMED' : 'no swing'} (hole ${clip.holeNumber}, shot ${clip.shotNumber})`
           );
         } catch {}
+
+        // VERBOSE TRIM DETAIL — exposes what detectAndTrim actually returned
+        // and what got persisted, so we can diagnose why durations look wrong.
+        // Shows: shot type, swing window (in original timeline), confidence,
+        // whether a trim file was actually created, and the final URI.
+        const trimWindowMs =
+          result.found && typeof result.trimEndMs === 'number' && typeof result.trimStartMs === 'number'
+            ? result.trimEndMs - result.trimStartMs
+            : null;
+        console.log(
+          `[TRIM] hole=${clip.holeNumber} shot=${clip.shotNumber} ` +
+          `found=${result.found} ` +
+          `shotType=${result.shotType ?? 'unknown'} ` +
+          `confidence=${result.confidence ?? 'n/a'} ` +
+          `impactMs=${result.impactTimeMs ?? 'n/a'} ` +
+          `window=${result.trimStartMs ?? '?'}..${result.trimEndMs ?? '?'} ` +
+          `(${trimWindowMs ?? '?'}ms) ` +
+          `trimmedFileCreated=${!!result.trimmedUri} ` +
+          `finalUri=${(result.trimmedUri ?? originalSourceUri).slice(-40)}`,
+        );
       } catch (err) {
         console.warn(
           `[useEditorState] Failed to process clip ${clip.id}:`,
