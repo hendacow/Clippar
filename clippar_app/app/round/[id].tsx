@@ -433,7 +433,10 @@ export default function RoundViewer() {
               <Pressable
                 onPress={() => {
                   Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  router.push(`/round/editor?roundId=${id}`);
+                  // ?recompose=1 tells the editor to auto-open the export
+                  // modal, so the user lands on the compose flow without
+                  // an extra tap.
+                  router.push(`/round/editor?roundId=${id}&recompose=1`);
                 }}
                 style={{
                   marginHorizontal: 16,

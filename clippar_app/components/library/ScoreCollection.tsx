@@ -24,6 +24,7 @@ import {
   type PreviewClip,
   type RoundGroupMeta,
 } from '@/components/editor/PreviewPlayer';
+import { trimVideo } from 'shot-detector';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -627,24 +628,70 @@ export function ScoreCollection() {
     }
   }, [groups, signedUrls]);
 
-  // Handle trim save from the player modal
+  // Handle trim save from the player modal.
+  //
+  // Behavioural parity with the main editor (preview.tsx): when the user
+  // adjusts the trim, we also re-cut the source video to a new file so
+  // sourceUri actually plays the trimmed range — otherwise the saved trim
+  // values would only affect future playback and the user would notice
+  // "nothing changed" because the player still plays the old file. We
+  // also flag the round as stale so the round detail page surfaces a
+  // "Re-compose reel" banner.
   const handleTrimSave = useCallback(async (clipIndex: number, trimStartMs: number, trimEndMs: number) => {
     const clip = playerClips?.[clipIndex];
     if (!clip?.localClipId || !storage) return;
 
-    await storage.updateClipEditorState(clip.localClipId, {
+    // Determine the source to trim: prefer original_file_uri if present
+    // (auto-trimmed clip has originalUri == full untrimmed video), else
+    // fall back to current uri.
+    const trimSource = clip.originalUri ?? clip.uri;
+    let newUri: string | null = null;
+    let newDurationMs: number | null = null;
+    try {
+      const result = await trimVideo(trimSource, trimStartMs, trimEndMs);
+      newUri = result.trimmedUri ?? null;
+      newDurationMs = trimEndMs - trimStartMs;
+    } catch (err) {
+      console.warn('[ScoreCollection] trimVideo failed:', err);
+    }
+
+    // Persist whatever we got — even if the re-cut failed, the trim
+    // numbers are still valid and the main editor can re-render with them.
+    const dbUpdates: Parameters<typeof storage.updateClipEditorState>[1] = {
       trim_start_ms: trimStartMs,
       trim_end_ms: trimEndMs,
-    });
+    };
+    if (newUri && newDurationMs !== null) {
+      dbUpdates.file_uri = newUri;
+      dbUpdates.duration_seconds = newDurationMs / 1000;
+    }
+    await storage.updateClipEditorState(clip.localClipId, dbUpdates);
 
-    // Update the clip in state too
+    // Mark the reel as stale on every round whose clip we might've
+    // touched in this player session. Cheap (one SQL update per round)
+    // and avoids us having to thread the per-clip roundId through the
+    // PreviewClip type. Round detail page will show the "re-compose"
+    // banner the next time the user visits.
+    if (playerRoundGroups) {
+      for (const rg of playerRoundGroups) {
+        await storage.markReelStale(rg.roundId).catch(() => {});
+      }
+    }
+
+    // Update local state so the player picks up the new uri immediately.
     setPlayerClips(prev => {
       if (!prev) return prev;
       const updated = [...prev];
-      updated[clipIndex] = { ...updated[clipIndex], trimStartMs, trimEndMs };
+      updated[clipIndex] = {
+        ...updated[clipIndex],
+        trimStartMs,
+        trimEndMs,
+        ...(newUri ? { uri: newUri } : {}),
+        ...(newDurationMs !== null ? { durationMs: newDurationMs } : {}),
+      };
       return updated;
     });
-  }, [playerClips]);
+  }, [playerClips, playerRoundGroups, groups]);
 
   const handleDismiss = useCallback(() => {
     setPlayerClips(null);

@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check } from 'lucide-react-native';
+import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -24,6 +24,7 @@ import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
 import { markReelFresh } from '@/lib/storage';
+import { saveClipToPhotos, saveHoleToPhotos, shareHole } from '@/lib/clipShare';
 // `uploadReelToStorage` is now invoked lazily by the share-link flow rather
 // than at compose time. Imported there, not here.
 import { resolveTrackToLocalUri } from '@/lib/music';
@@ -54,11 +55,13 @@ function ClipCard({
   onEdit,
   onRemove,
   onToggleExclude,
+  onDownload,
 }: {
   clip: EditorClip;
   onEdit: () => void;
   onRemove: () => void;
   onToggleExclude: () => void;
+  onDownload: () => void;
 }) {
   const [thumbnail, setThumbnail] = useState<string | null>(clip.thumbnailUri ?? null);
 
@@ -193,6 +196,33 @@ function ClipCard({
             <XCircle size={18} color="rgba(255,255,255,0.8)" fill="rgba(0,0,0,0.5)" />
           </Pressable>
 
+          {/* Download button (top-right, below the X) — saves this single
+              clip to the user's Photos library. Hidden while clip is
+              waiting for auto-trim or has no playable file. */}
+          {!clip.needsTrim && clip.sourceUri && (
+            <Pressable
+              onPress={(e) => {
+                e.stopPropagation?.();
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                onDownload();
+              }}
+              hitSlop={6}
+              style={{
+                position: 'absolute',
+                top: 26,
+                right: 3,
+                width: 22,
+                height: 22,
+                borderRadius: 11,
+                backgroundColor: 'rgba(0,0,0,0.55)',
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <Download size={12} color="rgba(255,255,255,0.95)" />
+            </Pressable>
+          )}
+
           {/* Bottom label: "Edit", "Excluded", or "Trimmed" badge */}
           <View
             style={{
@@ -238,12 +268,23 @@ function HoleSection({
   onClipEdit,
   onRemoveClip,
   onToggleExclude,
+  onClipDownload,
+  onHoleSave,
+  onHoleShare,
+  busyHoleNumber,
 }: {
   hole: EditorHoleSection;
   onClipEdit: (clip: EditorClip) => void;
   onRemoveClip: (clipId: string) => void;
   onToggleExclude: (clipId: string) => void;
+  onClipDownload: (clip: EditorClip) => void;
+  onHoleSave: (hole: EditorHoleSection) => void;
+  onHoleShare: (hole: EditorHoleSection) => void;
+  busyHoleNumber: number | null;
 }) {
+  const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+  const canStitchHole = usableClips.length > 0;
+  const isBusy = busyHoleNumber === hole.holeNumber;
   return (
     <View style={{ marginBottom: 24 }}>
       {/* Hole header — bold left-aligned like GolfCam */}
@@ -283,6 +324,66 @@ function HoleSection({
         >
           Score {hole.strokes}
         </Text>
+
+        {/* Per-hole stitch + share / save actions. Hidden when there's
+            nothing usable on this hole (excluded clips / waiting for
+            auto-trim). Disabled while another hole is mid-stitch. */}
+        {canStitchHole && (
+          <View
+            style={{
+              flexDirection: 'row',
+              gap: 6,
+              marginLeft: 'auto',
+            }}
+          >
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                onHoleSave(hole);
+              }}
+              disabled={isBusy}
+              hitSlop={8}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+                backgroundColor: theme.colors.surfaceElevated,
+                justifyContent: 'center',
+                alignItems: 'center',
+                opacity: isBusy ? 0.5 : 1,
+              }}
+            >
+              {isBusy ? (
+                <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+              ) : (
+                <Download size={14} color={theme.colors.textPrimary} />
+              )}
+            </Pressable>
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                onHoleShare(hole);
+              }}
+              disabled={isBusy}
+              hitSlop={8}
+              style={{
+                width: 28,
+                height: 28,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+                backgroundColor: theme.colors.surfaceElevated,
+                justifyContent: 'center',
+                alignItems: 'center',
+                opacity: isBusy ? 0.5 : 1,
+              }}
+            >
+              <Share2 size={14} color={theme.colors.textPrimary} />
+            </Pressable>
+          </View>
+        )}
       </View>
 
       {/* Clip cards row */}
@@ -298,6 +399,7 @@ function HoleSection({
             onEdit={() => onClipEdit(clip)}
             onRemove={() => onRemoveClip(clip.id)}
             onToggleExclude={() => onToggleExclude(clip.id)}
+            onDownload={() => onClipDownload(clip)}
           />
         ))}
 
@@ -359,7 +461,7 @@ function SlotCard({ label }: { label: string }) {
 // MAIN EDITOR SCREEN
 // ============================================================
 export default function EditorScreen() {
-  const { roundId } = useLocalSearchParams<{ roundId: string }>();
+  const { roundId, recompose } = useLocalSearchParams<{ roundId: string; recompose?: string }>();
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
   const { state } = editor;
@@ -426,6 +528,60 @@ export default function EditorScreen() {
     setTrimClip(clip);
   }, []);
 
+  // Per-clip download — saves the trimmed file directly to the user's
+  // Photos library. Trimmed files live in cacheDirectory or document
+  // directory; saveToLibraryAsync takes either.
+  const handleClipDownload = useCallback(async (clip: EditorClip) => {
+    if (!clip.sourceUri) {
+      Alert.alert('Not Ready', 'This clip is still processing. Try again in a moment.');
+      return;
+    }
+    const ok = await saveClipToPhotos(clip.sourceUri);
+    if (ok) {
+      Alert.alert('Saved', `Hole ${clip.holeNumber} · Stroke ${clip.shotNumber} saved to Photos.`);
+    } else {
+      Alert.alert('Save Failed', 'Could not save to Photos. Check that Clippar has Photos access in Settings.');
+    }
+  }, []);
+
+  // Per-hole stitch + save — runs the native stitcher on this hole's
+  // (non-excluded, non-pending) clips, saves the result to Photos.
+  const [busyHoleNumber, setBusyHoleNumber] = useState<number | null>(null);
+  const handleHoleSave = useCallback(async (hole: EditorHoleSection) => {
+    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    if (usableClips.length === 0) return;
+    setBusyHoleNumber(hole.holeNumber);
+    try {
+      const ok = await saveHoleToPhotos(usableClips.map((c) => c.sourceUri!));
+      if (ok) {
+        Alert.alert(
+          'Saved',
+          `Hole ${hole.holeNumber} highlight saved to Photos (${usableClips.length} clip${usableClips.length > 1 ? 's' : ''}).`,
+        );
+      } else {
+        Alert.alert('Save Failed', 'Could not stitch + save this hole. Try again.');
+      }
+    } finally {
+      setBusyHoleNumber(null);
+    }
+  }, []);
+
+  // Per-hole share — stitches and opens the iOS share sheet.
+  const handleHoleShare = useCallback(async (hole: EditorHoleSection) => {
+    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    if (usableClips.length === 0) return;
+    setBusyHoleNumber(hole.holeNumber);
+    try {
+      await shareHole(
+        usableClips.map((c) => c.sourceUri!),
+        hole.holeNumber,
+        state.courseName || 'Round',
+      );
+    } finally {
+      setBusyHoleNumber(null);
+    }
+  }, [state.courseName]);
+
   const handlePreviewAll = useCallback(() => {
     if (hasUntrimmedClips) {
       Alert.alert(
@@ -460,6 +616,20 @@ export default function EditorScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setExportModalVisible(true);
   }, [editor, hasUntrimmedClips]);
+
+  // Auto-open the export modal when arriving with `?recompose=1` (the
+  // round detail page's "Reel out of date" banner deep-links here when
+  // clips have been edited after the last compose). Wait for loading
+  // and auto-trim to settle so the user doesn't see the alert.
+  const recomposeAutoTriggeredRef = useRef(false);
+  useEffect(() => {
+    if (recompose !== '1') return;
+    if (recomposeAutoTriggeredRef.current) return;
+    if (state.loading || hasUntrimmedClips) return;
+    if (totalClips === 0) return;
+    recomposeAutoTriggeredRef.current = true;
+    setExportModalVisible(true);
+  }, [recompose, state.loading, hasUntrimmedClips, totalClips]);
 
   const handleExportConfirm = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -1068,6 +1238,10 @@ export default function EditorScreen() {
             onClipEdit={handleClipEdit}
             onRemoveClip={editor.removeClip}
             onToggleExclude={editor.toggleExclude}
+            onClipDownload={handleClipDownload}
+            onHoleSave={handleHoleSave}
+            onHoleShare={handleHoleShare}
+            busyHoleNumber={busyHoleNumber}
           />
         ))}
 
