@@ -286,26 +286,22 @@ public class ShotDetectorModule: Module {
 
                 print("[Classifier] clip=\(fileURL.lastPathComponent) shotType=\(result.shotType.rawValue) confidence=\(String(format: "%.2f", result.confidence)) durationMs=\(Int(durationMs)) impactMs=\(Int(result.impactTimeMs)) poseFrames=\(poseFrames.count) audioTransients=\(audioTransients.count)")
 
-                // Putts: keep full clip (no trimming) — the ball roll is the interesting part
-                if result.shotType == .putt {
-                    print("[ShotDetector] Putt detected — keeping full clip (no trim)")
-                    let availableMBAfter = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
-                    print("[ShotDetector] Available memory: \(String(format: "%.0f", availableMBAfter))MB after processing (delta: \(String(format: "%.0f", availableMBAfter - availableMB))MB)")
-                    promise.resolve([
-                        "found": true,
-                        "impactTimeMs": result.impactTimeMs,
-                        "trimStartMs": 0.0,
-                        "trimEndMs": durationMs,
-                        "confidence": result.confidence,
-                        "shotType": result.shotType.rawValue,
-                        "trimmedUri": NSNull(),
-                    ] as [String: Any])
-                    return
-                }
+                // Always trim around the detected impact, regardless of
+                // shotType. Previously putts kept the full clip — but the
+                // classifier sometimes misidentifies driver swings as putts
+                // with low confidence (e.g. 0.25), and skipping trim leaves
+                // the user staring at a 16+ second untrimmed clip.
+                //
+                // Putts get a slightly longer post-roll to capture the ball
+                // rolling toward the cup, but use the same trim flow as
+                // swings so the file_uri is the trimmed clip and downstream
+                // duration / playback work correctly.
+                let effectivePreRoll = preRollMs
+                let effectivePostRoll = result.shotType == .putt ? max(postRollMs, 4000.0) : postRollMs
 
-                // Step 2: Calculate trim window with configurable pre/post roll (swings only)
-                let trimStart = max(0.0, result.impactTimeMs - preRollMs)
-                let trimEnd = min(durationMs, result.impactTimeMs + postRollMs)
+                // Step 2: Calculate trim window with configurable pre/post roll
+                let trimStart = max(0.0, result.impactTimeMs - effectivePreRoll)
+                let trimEnd = min(durationMs, result.impactTimeMs + effectivePostRoll)
 
                 // Step 3: Passthrough trim (zero re-encode)
                 let ext = fileURL.pathExtension.lowercased()
