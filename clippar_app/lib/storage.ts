@@ -90,6 +90,12 @@ async function migrateEditorColumns() {
     // saveToLibraryAsync). Used by photosRecovery on reinstall to re-hydrate
     // clip files from the user's Photos library when they're missing on disk.
     'ALTER TABLE local_clips ADD COLUMN photos_asset_id TEXT',
+    // Reel staleness flag — set to 1 whenever a clip in a round is edited
+    // after the last successful compose. The round detail page shows a
+    // "Re-compose reel" button when this is 1, so the user knows their
+    // trim / reorder / exclude changes haven't been applied to the saved
+    // reel yet.
+    'ALTER TABLE local_rounds ADD COLUMN reel_stale INTEGER DEFAULT 0',
     // Settings table
     `CREATE TABLE IF NOT EXISTS local_settings (
       key TEXT PRIMARY KEY,
@@ -263,6 +269,56 @@ export async function getCloudBackupEnabled(): Promise<boolean> {
 
 export async function setCloudBackupEnabled(enabled: boolean): Promise<void> {
   await setSetting(SETTING_CLOUD_BACKUP, enabled ? '1' : '0');
+}
+
+// ────────────────────────────────────────────────────────────
+// Reel staleness — set when clips change after last compose
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Mark this round's reel as stale (clips were edited after last compose).
+ * The round detail page reads this to show a "Re-compose reel" button.
+ */
+export async function markReelStale(roundId: string): Promise<void> {
+  if (!roundId) return;
+  const database = await getDatabase();
+  try {
+    await database.runAsync(
+      'UPDATE local_rounds SET reel_stale = 1 WHERE id = ?',
+      roundId,
+    );
+  } catch {
+    // local_rounds row may not exist for older rounds; not a real failure.
+  }
+}
+
+/**
+ * Clear the stale flag — call this after a successful compose so the
+ * "Re-compose" button stops showing until the next clip edit.
+ */
+export async function markReelFresh(roundId: string): Promise<void> {
+  if (!roundId) return;
+  const database = await getDatabase();
+  try {
+    await database.runAsync(
+      'UPDATE local_rounds SET reel_stale = 0 WHERE id = ?',
+      roundId,
+    );
+  } catch {}
+}
+
+export async function isReelStale(roundId: string): Promise<boolean> {
+  if (!roundId) return false;
+  const database = await getDatabase();
+  try {
+    const row = await database.getFirstAsync<{ reel_stale: number | null }>(
+      'SELECT reel_stale FROM local_rounds WHERE id = ?',
+      roundId,
+    );
+    return (row?.reel_stale ?? 0) === 1;
+  } catch {
+    return false;
+  }
 }
 
 // Settings helpers

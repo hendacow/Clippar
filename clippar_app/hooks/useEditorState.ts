@@ -292,8 +292,12 @@ export function useEditorState(roundId: string | undefined) {
           h.holeNumber === holeNumber ? { ...h, clips: reorderedClips } : h
         ),
       }));
+      // Reordering changes the composed reel's clip sequence — mark stale.
+      if (storage && state.roundId) {
+        storage.markReelStale(state.roundId).catch(() => {});
+      }
     },
-    []
+    [state.roundId]
   );
 
   const removeClip = useCallback((clipId: string) => {
@@ -340,9 +344,13 @@ export function useEditorState(roundId: string | undefined) {
           dbUpdates.duration_seconds = sourceOverride.durationMs / 1000;
         }
         storage.updateClipEditorState(numId, dbUpdates).catch(() => {});
+        // Mark this round's reel as stale so the round detail page
+        // surfaces a "Re-compose reel" button — the user's trim
+        // edits won't be in the saved reel until they re-compose.
+        storage.markReelStale(state.roundId).catch(() => {});
       }
     },
-    []
+    [state.roundId]
   );
 
   const updateClipDuration = useCallback(
@@ -392,9 +400,10 @@ export function useEditorState(roundId: string | undefined) {
       // Use setTimeout to ensure state has settled
       setTimeout(() => {
         storage!.updateClipEditorState(numId, { is_excluded: newExcluded }).catch(() => {});
+        storage!.markReelStale(state.roundId).catch(() => {});
       }, 0);
     }
-  }, []);
+  }, [state.roundId]);
 
   // ---- Lazy trim processing ----
 

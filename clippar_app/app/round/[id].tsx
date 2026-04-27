@@ -39,6 +39,7 @@ import { ShareSheet } from '@/components/shared/ShareSheet';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
+import { isReelStale } from '@/lib/storage';
 import { saveToGallery } from '@/lib/sharing';
 import { useUploadContext } from '@/contexts/UploadContext';
 import { useEditorState } from '@/hooks/useEditorState';
@@ -248,6 +249,14 @@ export default function RoundViewer() {
   const [clipsExpanded, setClipsExpanded] = useState(false);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'done'>('idle');
+  const [reelStale, setReelStale] = useState<boolean>(false);
+
+  // Refresh stale flag whenever the round id changes or the editor state
+  // loads — the user may have trimmed clips since the last visit.
+  useEffect(() => {
+    if (!id) return;
+    isReelStale(id).then(setReelStale).catch(() => {});
+  }, [id, editor.state.holes]);
 
   const hasActiveUpload = upload.roundId === id &&
     ['preparing', 'uploading', 'submitting', 'processing'].includes(upload.stage);
@@ -417,6 +426,57 @@ export default function RoundViewer() {
           </View>
         ) : (
           <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
+            {/* ===== Stale-reel banner — shown when clips were edited
+                 after the last compose. Tapping navigates to the editor
+                 where the user can re-export. ===== */}
+            {reelStale && reelSignedUrl && (
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  router.push(`/round/editor?roundId=${id}`);
+                }}
+                style={{
+                  marginHorizontal: 16,
+                  marginTop: 12,
+                  marginBottom: 4,
+                  paddingHorizontal: 14,
+                  paddingVertical: 12,
+                  borderRadius: theme.radius.lg,
+                  borderWidth: 1,
+                  borderColor: theme.colors.primary + '60',
+                  backgroundColor: theme.colors.primary + '15',
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 12,
+                }}
+              >
+                <RefreshCw size={18} color={theme.colors.primary} />
+                <View style={{ flex: 1 }}>
+                  <Text
+                    style={{
+                      color: theme.colors.textPrimary,
+                      fontWeight: '700',
+                      fontSize: 14,
+                    }}
+                  >
+                    Reel out of date
+                  </Text>
+                  <Text
+                    style={{
+                      color: theme.colors.textSecondary,
+                      fontSize: 12,
+                      marginTop: 2,
+                    }}
+                  >
+                    Trims have been changed. Tap to open the editor and re-compose.
+                  </Text>
+                </View>
+                <Text style={{ color: theme.colors.primary, fontWeight: '700', fontSize: 13 }}>
+                  Edit
+                </Text>
+              </Pressable>
+            )}
+
             {/* ===== VIDEO PLAYER (near fullscreen) ===== */}
             {reelSignedUrl ? (
               <View style={{ height: videoHeight, backgroundColor: '#000' }}>

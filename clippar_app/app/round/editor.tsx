@@ -23,6 +23,7 @@ import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
+import { markReelFresh } from '@/lib/storage';
 // `uploadReelToStorage` is now invoked lazily by the share-link flow rather
 // than at compose time. Imported there, not here.
 import { resolveTrackToLocalUri } from '@/lib/music';
@@ -773,6 +774,11 @@ export default function EditorScreen() {
           } catch (e) {
             console.log('[Editor] Failed to save reel_url:', e);
           }
+
+          // The freshly-composed reel reflects the current clip state, so
+          // clear the stale flag — round detail page will hide the
+          // "Re-compose reel" button.
+          markReelFresh(state.roundId).catch(() => {});
 
           setTimeout(() => {
             setComposing(false);
