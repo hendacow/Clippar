@@ -1463,11 +1463,13 @@ public class ShotDetectorModule: Module {
                 .appendingPathComponent("stitch_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
 
-            // MediumQuality re-encodes ~3-5x faster than HighestQuality with
-            // no perceptible difference at 1080p — clips were already encoded
-            // by the device camera, so pumping bitrate higher here just
-            // doubles compose time without improving the visual result.
-            let presetName = AVAssetExportPresetMediumQuality
+            // Reverted to HighestQuality after user feedback that
+            // MediumQuality output looked noticeably worse. With the
+            // detected swing window typically being 5-7s of 1080p content
+            // and ~12 shots per round, a few extra seconds of compose
+            // time is the right trade for keeping the exported reel
+            // visually identical to the source captures.
+            let presetName = AVAssetExportPresetHighestQuality
             guard let exportSession = AVAssetExportSession(asset: composition, presetName: presetName) else {
                 promise.reject(Exception(name: "ERR_EXPORT_SESSION", description: "Could not create export session for stitched composition"))
                 return
@@ -1694,42 +1696,97 @@ public class ShotDetectorModule: Module {
                 let overlayContainer = CALayer()
                 overlayContainer.frame = CGRect(origin: .zero, size: renderSize)
 
-                // Persistent background card — visible for entire video
-                let cardHeight: CGFloat = renderSize.height * 0.12
-                let cardWidth: CGFloat = renderSize.width * 0.92
+                // Match in-app preview scorecard (app/round/preview.tsx):
+                //   row 1: course (left) + TOTAL N + score-to-par badge (right)
+                //   row 2: hole strip (one cell per hole, current highlighted)
+                //   row 3: Hole N (left) + Par M (center) + hole strokes (right)
+                let scale = UIScreen.main.scale
+                let cardWidth: CGFloat = renderSize.width * 0.94
                 let cardX: CGFloat = (renderSize.width - cardWidth) / 2
-                let cardY: CGFloat = renderSize.height * 0.05
+                // Bottom anchor — sit 4% up from the bottom edge.
+                let cardHeight: CGFloat = renderSize.height * 0.18
+                let cardY: CGFloat = renderSize.height * 0.04
+                let inset: CGFloat = renderSize.width * 0.018
+                let rowGap: CGFloat = cardHeight * 0.05
 
+                // Three logical rows inside the card.
+                let row1Height: CGFloat = cardHeight * 0.20
+                let row2Height: CGFloat = cardHeight * 0.42
+                let row3Height: CGFloat = cardHeight * 0.30
+                let row1Y: CGFloat = cardY + cardHeight - row1Height - inset
+                let row2Y: CGFloat = row1Y - row2Height - rowGap
+                let row3Y: CGFloat = row2Y - row3Height - rowGap
+
+                // Background card
                 let bgLayer = CALayer()
                 bgLayer.frame = CGRect(x: cardX, y: cardY, width: cardWidth, height: cardHeight)
-                bgLayer.backgroundColor = UIColor(white: 0, alpha: 0.75).cgColor
-                bgLayer.cornerRadius = 16
+                bgLayer.backgroundColor = UIColor(white: 0, alpha: 0.78).cgColor
+                bgLayer.cornerRadius = 18
                 bgLayer.borderWidth = 1
                 bgLayer.borderColor = UIColor(white: 1, alpha: 0.1).cgColor
                 overlayContainer.addSublayer(bgLayer)
 
-                // Persistent course name
-                let scale = UIScreen.main.scale
-                let inset: CGFloat = 16
+                // ------ Row 1: course + TOTAL ------
                 let courseText = CATextLayer()
                 courseText.string = sc.courseName
                 courseText.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
-                courseText.fontSize = renderSize.width * 0.024
-                courseText.foregroundColor = UIColor(white: 1, alpha: 0.5).cgColor
+                courseText.fontSize = renderSize.width * 0.022
+                courseText.foregroundColor = UIColor(white: 1, alpha: 0.55).cgColor
                 courseText.alignmentMode = .left
+                courseText.truncationMode = .end
                 courseText.contentsScale = scale
                 courseText.frame = CGRect(
-                    x: cardX + inset,
-                    y: cardY + cardHeight * 0.6,
-                    width: cardWidth * 0.5,
-                    height: cardHeight * 0.25
+                    x: cardX + inset, y: row1Y,
+                    width: cardWidth * 0.55, height: row1Height,
                 )
                 overlayContainer.addSublayer(courseText)
 
-                // Per-hole text layers — each visible only during its hole
+                // ------ Row 2: hole strip (always visible, current highlighted via per-hole layers below) ------
+                let stripX = cardX + inset
+                let stripWidth = cardWidth - inset * 2
+                let cellWidth = stripWidth / CGFloat(max(1, sc.holes.count))
+                // Pre-render each cell's static "background" container (hole# + par)
+                // and create the score / highlight inside per-hole containers
+                // so they can fade in with the right state.
+                for (cellIdx, hole) in sc.holes.enumerated() {
+                    let cellX = stripX + cellWidth * CGFloat(cellIdx)
+                    // Static hole number (always dim until that hole is current)
+                    let holeNumLayer = CATextLayer()
+                    holeNumLayer.string = "\(hole.holeNumber)"
+                    holeNumLayer.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
+                    holeNumLayer.fontSize = renderSize.width * 0.018
+                    holeNumLayer.foregroundColor = UIColor(white: 1, alpha: 0.4).cgColor
+                    holeNumLayer.alignmentMode = .center
+                    holeNumLayer.contentsScale = scale
+                    holeNumLayer.frame = CGRect(
+                        x: cellX, y: row2Y + row2Height * 0.65,
+                        width: cellWidth, height: row2Height * 0.30,
+                    )
+                    overlayContainer.addSublayer(holeNumLayer)
+
+                    // Static par
+                    let parLabel = CATextLayer()
+                    parLabel.string = "\(hole.par)"
+                    parLabel.font = UIFont.systemFont(ofSize: 1, weight: .regular) as CTFont
+                    parLabel.fontSize = renderSize.width * 0.014
+                    parLabel.foregroundColor = UIColor(white: 1, alpha: 0.25).cgColor
+                    parLabel.alignmentMode = .center
+                    parLabel.contentsScale = scale
+                    parLabel.frame = CGRect(
+                        x: cellX, y: row2Y + row2Height * 0.05,
+                        width: cellWidth, height: row2Height * 0.25,
+                    )
+                    overlayContainer.addSublayer(parLabel)
+                }
+
+                // Per-hole layers: TOTAL+badge (row 1 right), strip score reveal
+                // for played holes, current-hole highlight, big hole/par/strokes (row 3).
                 var runningScore = 0
+                var runningPar = 0
                 for (index, hole) in sc.holes.enumerated() {
                     let cumulativeScore = runningScore + hole.strokes
+                    let cumulativePar = runningPar + hole.par
+                    let cumulativeStp = cumulativeScore - cumulativePar
 
                     let holeContainer = CALayer()
                     holeContainer.frame = CGRect(origin: .zero, size: renderSize)
@@ -1738,7 +1795,6 @@ public class ShotDetectorModule: Module {
                     let beginTime = hole.startMs / 1000.0
                     let holeDuration = (hole.endMs - hole.startMs) / 1000.0
 
-                    // Fade in
                     let fadeIn = CABasicAnimation(keyPath: "opacity")
                     fadeIn.fromValue = 0
                     fadeIn.toValue = 1
@@ -1747,8 +1803,6 @@ public class ShotDetectorModule: Module {
                     fadeIn.fillMode = .forwards
                     fadeIn.isRemovedOnCompletion = false
                     holeContainer.add(fadeIn, forKey: "fadeIn")
-
-                    // Fade out — only if NOT the last hole (last hole stays visible)
                     if index < sc.holes.count - 1 {
                         let fadeOut = CABasicAnimation(keyPath: "opacity")
                         fadeOut.fromValue = 1
@@ -1760,85 +1814,171 @@ public class ShotDetectorModule: Module {
                         holeContainer.add(fadeOut, forKey: "fadeOut")
                     }
 
-                    // Running total text (right-aligned, top)
-                    let runningText = CATextLayer()
-                    runningText.string = "TOTAL  \(cumulativeScore)"
-                    runningText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
-                    runningText.fontSize = renderSize.width * 0.026
-                    runningText.foregroundColor = UIColor.white.cgColor
-                    runningText.alignmentMode = .right
-                    runningText.contentsScale = scale
-                    runningText.frame = CGRect(
-                        x: cardX + cardWidth * 0.5,
-                        y: cardY + cardHeight * 0.6,
-                        width: cardWidth * 0.5 - inset,
-                        height: cardHeight * 0.25
-                    )
-                    holeContainer.addSublayer(runningText)
-
-                    // Hole number (bottom left)
-                    let holeText = CATextLayer()
-                    holeText.string = "Hole \(hole.holeNumber)"
-                    holeText.font = UIFont.systemFont(ofSize: 1, weight: .bold) as CTFont
-                    holeText.fontSize = renderSize.width * 0.038
-                    holeText.foregroundColor = UIColor.white.cgColor
-                    holeText.alignmentMode = .left
-                    holeText.contentsScale = scale
-                    holeText.frame = CGRect(
-                        x: cardX + inset,
-                        y: cardY + cardHeight * 0.15,
-                        width: cardWidth * 0.3,
-                        height: cardHeight * 0.35
-                    )
-                    holeContainer.addSublayer(holeText)
-
-                    // Par text (center bottom)
-                    let parText = CATextLayer()
-                    parText.string = "Par \(hole.par)"
-                    parText.font = UIFont.systemFont(ofSize: 1, weight: .medium) as CTFont
-                    parText.fontSize = renderSize.width * 0.03
-                    parText.foregroundColor = UIColor(white: 1, alpha: 0.6).cgColor
-                    parText.alignmentMode = .center
-                    parText.contentsScale = scale
-                    parText.frame = CGRect(
-                        x: cardX + cardWidth * 0.3,
-                        y: cardY + cardHeight * 0.18,
-                        width: cardWidth * 0.2,
-                        height: cardHeight * 0.3
-                    )
-                    holeContainer.addSublayer(parText)
-
-                    // Score with color coding (bottom right)
-                    let scoreToPar = hole.strokes - hole.par
-                    let scoreColor: UIColor
-                    if scoreToPar < 0 {
-                        scoreColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
-                    } else if scoreToPar == 0 {
-                        scoreColor = UIColor.white
+                    // Score-to-par color (used by TOTAL badge AND big strokes)
+                    let stpColor: UIColor
+                    if cumulativeStp < 0 {
+                        stpColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+                    } else if cumulativeStp == 0 {
+                        stpColor = UIColor.white
                     } else {
-                        scoreColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+                        stpColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
                     }
 
-                    let scoreText = CATextLayer()
-                    scoreText.string = "\(hole.strokes)"
-                    scoreText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
-                    scoreText.fontSize = renderSize.width * 0.042
-                    scoreText.foregroundColor = scoreColor.cgColor
-                    scoreText.alignmentMode = .right
-                    scoreText.contentsScale = scale
-                    scoreText.frame = CGRect(
-                        x: cardX + cardWidth * 0.5,
-                        y: cardY + cardHeight * 0.15,
-                        width: cardWidth * 0.5 - inset,
-                        height: cardHeight * 0.35
+                    // ---- Row 1 right: TOTAL X + STP badge ----
+                    let totalLabel = CATextLayer()
+                    totalLabel.string = "TOTAL"
+                    totalLabel.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
+                    totalLabel.fontSize = renderSize.width * 0.018
+                    totalLabel.foregroundColor = UIColor(white: 1, alpha: 0.5).cgColor
+                    totalLabel.alignmentMode = .right
+                    totalLabel.contentsScale = scale
+                    totalLabel.frame = CGRect(
+                        x: cardX + cardWidth * 0.55, y: row1Y + row1Height * 0.15,
+                        width: cardWidth * 0.18, height: row1Height * 0.7,
                     )
-                    holeContainer.addSublayer(scoreText)
+                    holeContainer.addSublayer(totalLabel)
+
+                    let totalNumber = CATextLayer()
+                    totalNumber.string = "\(cumulativeScore)"
+                    totalNumber.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+                    totalNumber.fontSize = renderSize.width * 0.024
+                    totalNumber.foregroundColor = UIColor.white.cgColor
+                    totalNumber.alignmentMode = .right
+                    totalNumber.contentsScale = scale
+                    totalNumber.frame = CGRect(
+                        x: cardX + cardWidth * 0.74, y: row1Y + row1Height * 0.10,
+                        width: cardWidth * 0.10, height: row1Height * 0.85,
+                    )
+                    holeContainer.addSublayer(totalNumber)
+
+                    // STP badge — pill-shaped background + signed number
+                    let stpString: String
+                    if cumulativeStp < 0 { stpString = "\(cumulativeStp)" }
+                    else if cumulativeStp == 0 { stpString = "E" }
+                    else { stpString = "+\(cumulativeStp)" }
+
+                    let badgeWidth: CGFloat = cardWidth * 0.10
+                    let badgeHeight: CGFloat = row1Height * 0.85
+                    let badgeBG = CALayer()
+                    badgeBG.frame = CGRect(
+                        x: cardX + cardWidth - inset - badgeWidth, y: row1Y + row1Height * 0.075,
+                        width: badgeWidth, height: badgeHeight,
+                    )
+                    badgeBG.backgroundColor = stpColor.withAlphaComponent(0.22).cgColor
+                    badgeBG.cornerRadius = badgeHeight / 2
+                    holeContainer.addSublayer(badgeBG)
+
+                    let badgeText = CATextLayer()
+                    badgeText.string = stpString
+                    badgeText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+                    badgeText.fontSize = renderSize.width * 0.018
+                    badgeText.foregroundColor = stpColor.cgColor
+                    badgeText.alignmentMode = .center
+                    badgeText.contentsScale = scale
+                    badgeText.frame = CGRect(
+                        x: badgeBG.frame.minX, y: badgeBG.frame.minY + badgeHeight * 0.18,
+                        width: badgeWidth, height: badgeHeight * 0.7,
+                    )
+                    holeContainer.addSublayer(badgeText)
+
+                    // ---- Row 2: scores already played show in their cells ----
+                    for (cellIdx, h) in sc.holes.enumerated() {
+                        let isPlayed = cellIdx <= index
+                        let cellX = stripX + cellWidth * CGFloat(cellIdx)
+                        let isCurrent = cellIdx == index
+                        if isCurrent {
+                            // Highlight cell
+                            let highlight = CALayer()
+                            highlight.frame = CGRect(
+                                x: cellX + cellWidth * 0.06, y: row2Y,
+                                width: cellWidth * 0.88, height: row2Height,
+                            )
+                            highlight.backgroundColor = UIColor(white: 1, alpha: 0.10).cgColor
+                            highlight.cornerRadius = 8
+                            holeContainer.addSublayer(highlight)
+                        }
+                        // Score for this cell (only if played)
+                        let cellSTP = h.strokes - h.par
+                        let cellColor: UIColor
+                        if !isPlayed {
+                            cellColor = UIColor(white: 1, alpha: 0.25)
+                        } else if cellSTP < 0 {
+                            cellColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+                        } else if cellSTP == 0 {
+                            cellColor = UIColor.white
+                        } else {
+                            cellColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+                        }
+                        let cellScore = CATextLayer()
+                        cellScore.string = isPlayed ? "\(h.strokes)" : "-"
+                        cellScore.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+                        cellScore.fontSize = renderSize.width * 0.022
+                        cellScore.foregroundColor = cellColor.cgColor
+                        cellScore.alignmentMode = .center
+                        cellScore.contentsScale = scale
+                        cellScore.frame = CGRect(
+                            x: cellX, y: row2Y + row2Height * 0.30,
+                            width: cellWidth, height: row2Height * 0.40,
+                        )
+                        holeContainer.addSublayer(cellScore)
+                    }
+
+                    // ---- Row 3: Hole N · Par M (left) ----
+                    let holeBigText = CATextLayer()
+                    holeBigText.string = "Hole \(hole.holeNumber)"
+                    holeBigText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+                    holeBigText.fontSize = renderSize.width * 0.030
+                    holeBigText.foregroundColor = UIColor.white.cgColor
+                    holeBigText.alignmentMode = .left
+                    holeBigText.contentsScale = scale
+                    holeBigText.frame = CGRect(
+                        x: cardX + inset, y: row3Y + row3Height * 0.10,
+                        width: cardWidth * 0.30, height: row3Height * 0.85,
+                    )
+                    holeContainer.addSublayer(holeBigText)
+
+                    let holeParBigText = CATextLayer()
+                    holeParBigText.string = "Par \(hole.par)"
+                    holeParBigText.font = UIFont.systemFont(ofSize: 1, weight: .medium) as CTFont
+                    holeParBigText.fontSize = renderSize.width * 0.020
+                    holeParBigText.foregroundColor = UIColor(white: 1, alpha: 0.5).cgColor
+                    holeParBigText.alignmentMode = .left
+                    holeParBigText.contentsScale = scale
+                    holeParBigText.frame = CGRect(
+                        x: cardX + cardWidth * 0.32, y: row3Y + row3Height * 0.20,
+                        width: cardWidth * 0.20, height: row3Height * 0.7,
+                    )
+                    holeContainer.addSublayer(holeParBigText)
+
+                    // Strokes (right)
+                    let holeStpColor: UIColor
+                    let holeStp = hole.strokes - hole.par
+                    if holeStp < 0 {
+                        holeStpColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+                    } else if holeStp == 0 {
+                        holeStpColor = UIColor.white
+                    } else {
+                        holeStpColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+                    }
+                    let holeStrokesText = CATextLayer()
+                    holeStrokesText.string = "\(hole.strokes)"
+                    holeStrokesText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+                    holeStrokesText.fontSize = renderSize.width * 0.034
+                    holeStrokesText.foregroundColor = holeStpColor.cgColor
+                    holeStrokesText.alignmentMode = .right
+                    holeStrokesText.contentsScale = scale
+                    holeStrokesText.frame = CGRect(
+                        x: cardX + cardWidth * 0.6, y: row3Y + row3Height * 0.05,
+                        width: cardWidth * 0.4 - inset, height: row3Height * 0.9,
+                    )
+                    holeContainer.addSublayer(holeStrokesText)
 
                     overlayContainer.addSublayer(holeContainer)
                     runningScore = cumulativeScore
+                    runningPar = cumulativePar
                 }
 
-                // Fade the entire background + course name in at the start
+                // Fade entire card + course name in at start
                 let overallFadeIn = CABasicAnimation(keyPath: "opacity")
                 overallFadeIn.fromValue = 0
                 overallFadeIn.toValue = 1
@@ -1922,10 +2062,10 @@ public class ShotDetectorModule: Module {
                 .appendingPathComponent("reel_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
 
-            // MediumQuality cuts reel compose time roughly in half vs
-            // HighestQuality with no visible quality drop at 1080p. See
-            // matching note in stitchClips above.
-            guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetMediumQuality) else {
+            // HighestQuality preset — keeps the reel visually identical to
+            // the source captures. See note in stitchClips above for why
+            // the earlier MediumQuality experiment was reverted.
+            guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
                 promise.reject(Exception(name: "ERR_EXPORT_SESSION", description: "Could not create export session for reel"))
                 return
             }
