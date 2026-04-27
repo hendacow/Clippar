@@ -10,7 +10,7 @@
 -- Helper: allow users to suggest corrections / missing courses
 -- (community-contributed data model)
 CREATE TABLE IF NOT EXISTS course_suggestions (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES profiles(id),
   course_name TEXT NOT NULL,
   location_name TEXT,

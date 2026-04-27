@@ -56,6 +56,17 @@ export async function enqueueRoundUpload(
   mode: 'local-only' | 'highlight-reel' = 'local-only'
 ): Promise<void> {
   if (!roundId) return;
+  // Hard gate at enqueue time too — there's no point persisting queue rows
+  // we'll never drain. Callers that want the row in case the user enables
+  // backup later should call enqueueRoundForUpload directly.
+  try {
+    const { getCloudBackupEnabled } = await import('@/lib/storage');
+    const cloudBackupOn = await getCloudBackupEnabled();
+    if (!cloudBackupOn) return;
+  } catch {
+    // If reading the setting fails, fall through and treat as "off".
+    return;
+  }
   try {
     await enqueueRoundForUpload(roundId, courseName, mode);
   } catch (err) {
@@ -77,6 +88,21 @@ export async function processUploadQueue(): Promise<void> {
 
   inFlight = (async () => {
     try {
+      // Cloud backup is opt-in (Pro tier). When the toggle is off we leave
+      // any queued rows untouched (they'll drain if the user re-enables)
+      // and skip the network entirely so free-tier users never hit
+      // Supabase Storage.
+      const { getCloudBackupEnabled } = await import('@/lib/storage');
+      const { checkSubscription } = await import('@/lib/subscription');
+      const cloudBackupOn = await getCloudBackupEnabled();
+      if (!cloudBackupOn) {
+        return;
+      }
+      const subscribed = await checkSubscription();
+      if (!subscribed) {
+        return;
+      }
+
       // Connectivity gate — avoid burning retries when offline.
       const online = await isConnected();
       if (!online) {

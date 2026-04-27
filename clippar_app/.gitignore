@@ -39,3 +39,9 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Supabase CLI local scratch
+supabase/.temp/
+
+# Local backups
+*.bak

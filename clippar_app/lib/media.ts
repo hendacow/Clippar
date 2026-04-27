@@ -89,6 +89,22 @@ export async function persistAsset(uri: string, filename: string): Promise<strin
     const destInfo = await FileSystemLegacy.getInfoAsync(dest);
     if (destInfo.exists) return dest;
     await FileSystemLegacy.copyAsync({ from: resolved, to: dest });
+
+    // Best-effort cleanup of the ImagePicker cache copy. Without this iOS
+    // hangs onto a duplicate of every imported video under
+    // `Library/Caches/ImagePicker/` until the OS decides to purge — which
+    // in practice can take days. We just copied the bytes into
+    // documentDirectory, so the cache copy is dead weight.
+    if (
+      resolved.includes('/Library/Caches/ImagePicker/') ||
+      resolved.includes('/tmp/')
+    ) {
+      try {
+        await FileSystemLegacy.deleteAsync(resolved, { idempotent: true });
+      } catch {
+        // Cache file may already be gone — ignore.
+      }
+    }
     return dest;
   } catch (err) {
     console.warn('[media] persistAsset failed for', uri, err);

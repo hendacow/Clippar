@@ -1,33 +1,45 @@
 {
-  "cli": { "version": ">= 12.0.0" },
+  "cli": { "version": ">= 12.0.0", "appVersionSource": "remote" },
   "build": {
     "development": {
       "developmentClient": true,
       "distribution": "internal",
+      "channel": "development",
+      "environment": "development",
       "ios": {
         "simulator": false
+      },
+      "env": {
+        "APP_VARIANT": "development"
       }
     },
     "development-simulator": {
       "developmentClient": true,
       "distribution": "internal",
+      "channel": "development",
+      "environment": "development",
       "ios": {
         "simulator": true
+      },
+      "env": {
+        "APP_VARIANT": "development"
       }
     },
     "preview": {
       "distribution": "internal",
-      "ios": { "simulator": false }
+      "channel": "development",
+      "environment": "development",
+      "ios": { "simulator": false },
+      "env": {
+        "APP_VARIANT": "development"
+      }
     },
     "production": {
       "distribution": "store",
+      "channel": "production",
+      "environment": "production",
       "ios": { "buildConfiguration": "Release" },
       "android": { "buildType": "app-bundle" },
-      "env": {
-        "EXPO_PUBLIC_SUPABASE_URL": "@SUPABASE_URL",
-        "EXPO_PUBLIC_SUPABASE_ANON_KEY": "@SUPABASE_ANON_KEY",
-        "EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY": "@STRIPE_PK"
-      },
       "autoIncrement": true
     }
   },

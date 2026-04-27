@@ -17,6 +17,7 @@ import {
 } from '@/lib/biometrics';
 import { repairScoresParData } from '@/lib/api';
 import { migrateLegacyUris } from '@/lib/uriMigration';
+import { hydrateMissingClipsFromPhotos } from '@/lib/photosRecovery';
 import { initializeUploadQueueProcessor } from '@/lib/uploadQueue';
 import '@/global.css';
 
@@ -69,6 +70,18 @@ export default function RootLayout() {
           }
         })
         .catch((e) => console.log('[Startup] migrateLegacyUris skipped:', e));
+
+      // After a reinstall, documentDirectory is empty but clips with a
+      // photos_asset_id can be re-imported from the user's Photos library.
+      hydrateMissingClipsFromPhotos()
+        .then(({ scanned, recovered }) => {
+          if (recovered > 0) {
+            console.log(
+              `[Startup] hydrateMissingClipsFromPhotos: ${recovered}/${scanned} clips re-imported`
+            );
+          }
+        })
+        .catch((e) => console.log('[Startup] hydrateMissingClipsFromPhotos skipped:', e));
 
       // Drain the persistent upload queue + subscribe to NetInfo so queued
       // rounds upload automatically whenever connectivity returns.

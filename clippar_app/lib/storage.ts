@@ -85,6 +85,11 @@ async function migrateEditorColumns() {
     // Timestamp of most recent upload attempt (ISO string). Used to throttle
     // auto-retry so we don't burn battery on a clip that keeps failing.
     'ALTER TABLE local_clips ADD COLUMN last_upload_attempt_at TEXT',
+    // Photos library asset id (iOS localIdentifier / Android uri). Captured
+    // at import time (from picker) or at mirror time (from MediaLibrary
+    // saveToLibraryAsync). Used by photosRecovery on reinstall to re-hydrate
+    // clip files from the user's Photos library when they're missing on disk.
+    'ALTER TABLE local_clips ADD COLUMN photos_asset_id TEXT',
     // Settings table
     `CREATE TABLE IF NOT EXISTS local_settings (
       key TEXT PRIMARY KEY,
@@ -180,11 +185,12 @@ export async function saveLocalClip(clip: {
   trim_start_ms?: number;
   trim_end_ms?: number;
   needs_trim?: number;
+  photos_asset_id?: string | null;
 }): Promise<number> {
   const database = await getDatabase();
   const result = await database.runAsync(
-    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     clip.round_id,
     clip.hole_number,
     clip.shot_number,
@@ -201,8 +207,62 @@ export async function saveLocalClip(clip: {
     clip.trim_start_ms ?? 0,
     clip.trim_end_ms ?? -1,
     clip.needs_trim ?? 0,
+    clip.photos_asset_id ?? null,
   );
   return result.lastInsertRowId;
+}
+
+/**
+ * Update a clip's photos_asset_id (after MediaLibrary.saveToLibraryAsync).
+ */
+export async function setClipPhotosAssetId(clipId: number, photosAssetId: string | null) {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_clips SET photos_asset_id = ? WHERE id = ?',
+    photosAssetId,
+    clipId,
+  );
+}
+
+/**
+ * Return clips whose local file_uri is missing on disk but have a
+ * photos_asset_id we can re-import from. Used by photosRecovery on launch.
+ */
+export async function getClipsWithPhotosAssetId() {
+  const database = await getDatabase();
+  return database.getAllAsync<{
+    id: number;
+    round_id: string;
+    file_uri: string;
+    photos_asset_id: string | null;
+  }>(
+    `SELECT id, round_id, file_uri, photos_asset_id
+     FROM local_clips
+     WHERE photos_asset_id IS NOT NULL AND photos_asset_id != ''`
+  );
+}
+
+// ────────────────────────────────────────────────────────────
+// Storage-policy settings (mirror to Photos / cloud backup)
+// ────────────────────────────────────────────────────────────
+
+const SETTING_MIRROR_CLIPS = 'mirror_raw_clips_to_photos';
+const SETTING_CLOUD_BACKUP = 'cloud_backup_enabled';
+
+export async function getMirrorClipsToPhotos(): Promise<boolean> {
+  return (await getSetting(SETTING_MIRROR_CLIPS)) === '1';
+}
+
+export async function setMirrorClipsToPhotos(enabled: boolean): Promise<void> {
+  await setSetting(SETTING_MIRROR_CLIPS, enabled ? '1' : '0');
+}
+
+export async function getCloudBackupEnabled(): Promise<boolean> {
+  return (await getSetting(SETTING_CLOUD_BACKUP)) === '1';
+}
+
+export async function setCloudBackupEnabled(enabled: boolean): Promise<void> {
+  await setSetting(SETTING_CLOUD_BACKUP, enabled ? '1' : '0');
 }
 
 // Settings helpers

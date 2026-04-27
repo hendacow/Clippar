@@ -23,7 +23,8 @@ import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
-import { uploadReelToStorage } from '@/lib/r2';
+// `uploadReelToStorage` is now invoked lazily by the share-link flow rather
+// than at compose time. Imported there, not here.
 import { resolveTrackToLocalUri } from '@/lib/music';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -683,30 +684,15 @@ export default function EditorScreen() {
             }
           }
 
-          // Upload the reel to Supabase Storage so it survives an app rebuild.
-          // On-device stitching produces a `file://` path in Library/Caches which
-          // is wiped whenever the app is reinstalled — without this upload the
-          // highlight reel disappears after every Xcode rebuild.
-          let reelStoragePath: string | null = null;
-          try {
-            setComposeProgress('Uploading reel to cloud...');
-            reelStoragePath = await uploadReelToStorage(
-              state.roundId,
-              result.reelUri,
-              (p) => setComposeProgress(`Uploading reel: ${Math.round(p * 100)}%`),
-            );
-            setComposeProgress('Reel uploaded!');
-          } catch (e) {
-            console.log('[Editor] Reel upload failed, keeping local path:', e);
-            // Fall through — we still save the file:// path as a best-effort
-            // fallback so the reel plays in the current session.
-          }
-
-          // Save reel URI to round record so the detail page can find it.
-          // Prefer the Storage path (survives rebuilds) over the local file:// path.
+          // Reel upload is now opt-in — handled by the "Get share link" /
+          // "Share" flow rather than running automatically on every compose.
+          // The reel always lives in Photos (above) so it survives a
+          // reinstall regardless. We persist the local path for in-session
+          // playback; the share flow will lazily upload + replace this with
+          // a storage path the first time the user requests a public link.
           try {
             await updateRound(state.roundId, {
-              reel_url: reelStoragePath ?? result.reelUri,
+              reel_url: result.reelUri,
               status: 'ready',
             });
           } catch (e) {

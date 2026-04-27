@@ -55,7 +55,7 @@ CREATE TRIGGER on_auth_user_created
 -- COURSES
 -- ============================
 CREATE TABLE courses (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL,
   location_name TEXT,
   state TEXT,
@@ -81,7 +81,7 @@ CREATE INDEX idx_courses_location ON courses USING GIST(location);
 -- HOLES (per course)
 -- ============================
 CREATE TABLE holes (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   course_id UUID NOT NULL REFERENCES courses(id) ON DELETE CASCADE,
   hole_number INTEGER NOT NULL CHECK (hole_number >= 1 AND hole_number <= 18),
   par INTEGER NOT NULL CHECK (par >= 3 AND par <= 6),
@@ -104,7 +104,7 @@ CREATE POLICY "Holes are publicly readable" ON holes FOR SELECT TO authenticated
 -- ROUNDS
 -- ============================
 CREATE TABLE rounds (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
   course_id UUID REFERENCES courses(id),
   course_name TEXT NOT NULL,
@@ -138,7 +138,7 @@ CREATE INDEX idx_rounds_status ON rounds(user_id, status);
 -- SCORES (per hole per round)
 -- ============================
 CREATE TABLE scores (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   round_id UUID NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
   hole_number INTEGER NOT NULL CHECK (hole_number >= 1 AND hole_number <= 18),
   strokes INTEGER NOT NULL CHECK (strokes >= 1),
@@ -161,7 +161,7 @@ CREATE POLICY "Users can manage own scores" ON scores FOR ALL
 -- SHOTS (individual clips)
 -- ============================
 CREATE TABLE shots (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   round_id UUID NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES profiles(id),
   hole_number INTEGER NOT NULL,
@@ -189,7 +189,7 @@ CREATE INDEX idx_shots_round ON shots(round_id, hole_number, shot_number);
 -- PROCESSING JOBS
 -- ============================
 CREATE TABLE processing_jobs (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   round_id UUID NOT NULL REFERENCES rounds(id) ON DELETE CASCADE,
   user_id UUID NOT NULL REFERENCES profiles(id),
   status TEXT DEFAULT 'queued' CHECK (status IN ('queued', 'processing', 'noise_reduction', 'detection', 'stitching', 'uploading', 'completed', 'failed')),
@@ -210,7 +210,7 @@ CREATE POLICY "Users can view own jobs" ON processing_jobs FOR SELECT USING (aut
 -- HARDWARE ORDERS
 -- ============================
 CREATE TABLE hardware_orders (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES profiles(id),
   stripe_payment_intent_id TEXT UNIQUE,
   stripe_customer_id TEXT,
@@ -260,7 +260,7 @@ CREATE POLICY "Music tracks are publicly readable" ON music_tracks FOR SELECT TO
 -- DAILY USAGE TRACKING
 -- ============================
 CREATE TABLE daily_usage (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL REFERENCES profiles(id),
   date DATE NOT NULL DEFAULT CURRENT_DATE,
   rounds_processed INTEGER DEFAULT 0,
@@ -275,7 +275,7 @@ CREATE POLICY "Users can view own usage" ON daily_usage FOR SELECT USING (auth.u
 -- ADMIN USERS
 -- ============================
 CREATE TABLE admin_users (
-  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id UUID REFERENCES auth.users,
   email TEXT UNIQUE NOT NULL,
   role TEXT DEFAULT 'admin' CHECK (role IN ('admin', 'super_admin')),

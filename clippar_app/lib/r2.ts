@@ -127,11 +127,24 @@ export async function uploadClipToStorage(
     ? (p: number) => onProgress?.(0.5 + p * 0.5)
     : onProgress;
 
-  if (fileSize < SIMPLE_UPLOAD_LIMIT) {
-    return _simpleUpload(storagePath, uploadUri, filename, token, uploadProgress);
+  const result =
+    fileSize < SIMPLE_UPLOAD_LIMIT
+      ? await _simpleUpload(storagePath, uploadUri, filename, token, uploadProgress)
+      : await _tusUpload(storagePath, uploadFile, fileSize, token, uploadProgress);
+
+  // Compressor wrote a temp file we no longer need — delete to keep the
+  // app's "Documents & Data" footprint honest. Skip if uploadUri is the
+  // user's original path (no compression happened).
+  if (uploadUri !== resolvedUri && ExpoFS) {
+    try {
+      const tmp = new ExpoFS.File(uploadUri);
+      if (tmp.exists) tmp.delete();
+    } catch {
+      // best-effort
+    }
   }
 
-  return _tusUpload(storagePath, uploadFile, fileSize, token, uploadProgress);
+  return result;
 }
 
 /** Simple single-request upload for small files. */
@@ -341,11 +354,22 @@ export async function uploadReelToStorage(
     : onProgress;
 
   // Small reel → simple POST.  Large reel → TUS resumable upload.
-  if (fileSize < SIMPLE_UPLOAD_LIMIT) {
-    return _simpleUpload(storagePath, uploadUri, `${roundId}.mp4`, token, uploadProgress);
+  const result =
+    fileSize < SIMPLE_UPLOAD_LIMIT
+      ? await _simpleUpload(storagePath, uploadUri, `${roundId}.mp4`, token, uploadProgress)
+      : await _tusUpload(storagePath, uploadFile, fileSize, token, uploadProgress);
+
+  // Drop the compressed reel temp once it's safely uploaded.
+  if (uploadUri !== resolvedReelUri && ExpoFS) {
+    try {
+      const tmp = new ExpoFS.File(uploadUri);
+      if (tmp.exists) tmp.delete();
+    } catch {
+      // best-effort
+    }
   }
 
-  return _tusUpload(storagePath, uploadFile, fileSize, token, uploadProgress);
+  return result;
 }
 
 /**

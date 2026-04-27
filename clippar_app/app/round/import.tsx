@@ -33,7 +33,14 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
-import { saveLocalClip, saveLocalRound, saveLocalScore } from '@/lib/storage';
+import {
+  saveLocalClip,
+  saveLocalRound,
+  saveLocalScore,
+  setClipPhotosAssetId,
+  getMirrorClipsToPhotos,
+  getCloudBackupEnabled,
+} from '@/lib/storage';
 import { resolveAssetUri, persistAsset } from '@/lib/media';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { supabase } from '@/lib/supabase';
@@ -63,6 +70,9 @@ interface ImportedClip {
   uri: string;         // the picker URI (this IS the original video)
   durationMs?: number; // from expo-image-picker asset.duration
   thumbnailUri?: string;
+  // PhotoKit localIdentifier (iOS) / MediaStore uri (Android). Stored on the
+  // clip so we can re-import the source video from Photos after a reinstall.
+  assetId?: string;
 }
 
 interface HoleImport {
@@ -96,7 +106,7 @@ export default function ImportRoundScreen() {
   const [scores, setScores] = useState<Record<number, number>>({});
   const [pars, setPars] = useState<Record<number, number>>({});
   const [selectedScoreCell, setSelectedScoreCell] = useState<number | null>(null);
-  const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number }[]>([]);
+  const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number; assetId?: string }[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [sanityWarning, setSanityWarning] = useState<{ oversizedHoles: number[] } | null>(null);
 
@@ -411,7 +421,7 @@ export default function ImportRoundScreen() {
             `(hole ${groupedHoles[holeIdx].holeNumber}, shotType=${c.shotType})`
         );
 
-        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
+        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration, assetId: c.assetId });
         prevTime = curTime ?? prevTime;
         prevShotType = c.shotType;
       }
@@ -454,7 +464,7 @@ export default function ImportRoundScreen() {
               `(hole ${groupedHoles[holeIdx].holeNumber})`
           );
         }
-        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration });
+        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration, assetId: c.assetId });
         prevShotType = c.shotType;
       }
     }
@@ -584,6 +594,7 @@ export default function ImportRoundScreen() {
       result.assets.map((a) => ({
         uri: a.uri,
         duration: a.duration ?? undefined,
+        assetId: a.assetId ?? undefined,
       }))
     );
   };
@@ -603,7 +614,7 @@ export default function ImportRoundScreen() {
 
       for (let s = 0; s < holeScore && videoIdx < bulkVideos.length; s++) {
         const video = bulkVideos[videoIdx];
-        clips.push({ uri: video.uri, durationMs: video.duration });
+        clips.push({ uri: video.uri, durationMs: video.duration, assetId: video.assetId });
         videoIdx++;
       }
 
@@ -662,6 +673,7 @@ export default function ImportRoundScreen() {
     const newClips: ImportedClip[] = result.assets.map((asset) => ({
       uri: asset.uri,
       durationMs: asset.duration ? asset.duration : undefined,
+      assetId: asset.assetId ?? undefined,
     }));
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -844,6 +856,14 @@ export default function ImportRoundScreen() {
         });
       } catch {}
 
+      // Read storage policy once for the whole import. Mirror toggle controls
+      // whether we push every imported clip to the user's Photos library
+      // (off by default — Photos is ~free storage from the user's POV but
+      // duplicates the on-disk footprint). Cloud-backup toggle gates the
+      // Supabase upload queue at the bottom of this function.
+      const mirrorToPhotos = await getMirrorClipsToPhotos();
+      const cloudBackupOn = await getCloudBackupEnabled();
+
       for (const hole of holes) {
         for (let shotIdx = 0; shotIdx < hole.clips.length; shotIdx++) {
           const clip = hole.clips[shotIdx];
@@ -867,7 +887,25 @@ export default function ImportRoundScreen() {
             durableUri = await resolveAssetUri(clip.uri);
           }
 
-          await saveLocalClip({
+          // Photos mirroring: clip.assetId is set iff the user picked the
+          // video from Photos (so it's already there — free recovery hint).
+          // If the toggle is on AND we don't already have an assetId (e.g.
+          // an in-app recording, or some Android paths), save a fresh copy
+          // to the library and capture the new asset id.
+          let photosAssetId: string | undefined = clip.assetId;
+          if (mirrorToPhotos && !photosAssetId && MediaLibrary && isNative) {
+            try {
+              const perm = await MediaLibrary.requestPermissionsAsync();
+              if (perm.status === 'granted') {
+                const asset = await MediaLibrary.createAssetAsync(durableUri);
+                photosAssetId = asset.id;
+              }
+            } catch (err) {
+              console.warn('[Import] Mirror to Photos failed:', err);
+            }
+          }
+
+          const clipId = await saveLocalClip({
             round_id: roundId,
             hole_number: hole.holeNumber,
             shot_number: shotNumber,
@@ -880,7 +918,15 @@ export default function ImportRoundScreen() {
             impact_time_ms: undefined,
             trim_start_ms: 0,
             trim_end_ms: -1,
+            photos_asset_id: photosAssetId ?? null,
           });
+          // (saveLocalClip persists photos_asset_id directly; the helper
+          //  call below is a no-op when the column is already set, but kept
+          //  for symmetry with the record/in-app save flow which mirrors
+          //  AFTER the clip row is inserted.)
+          if (photosAssetId) {
+            void setClipPhotosAssetId(clipId, photosAssetId);
+          }
 
           try {
             await createShot({
@@ -955,9 +1001,12 @@ export default function ImportRoundScreen() {
         } as any);
       } catch {}
 
-      // Fire-and-forget background upload so every imported clip reaches
-      // Supabase Storage — the reel-export flow no longer gates durability.
-      void enqueueRoundUpload(roundId, courseName.trim(), 'local-only');
+      // Cloud backup is opt-in (Pro tier). When the toggle is off we keep
+      // everything local — no Supabase Storage cost, no upload retries.
+      // Recovery on reinstall instead leans on photos_asset_id (above).
+      if (cloudBackupOn) {
+        void enqueueRoundUpload(roundId, courseName.trim(), 'local-only');
+      }
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       router.replace(`/round/editor?roundId=${roundId}`);

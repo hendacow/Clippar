@@ -24,6 +24,7 @@ import {
   Ruler,
   ShieldCheck,
   Activity,
+  HardDrive,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -421,6 +422,13 @@ export default function ProfileScreen() {
               title="Trim Settings"
               subtitle="Auto-trim, timing, quality"
               onPress={() => router.push('/profile/trim-settings')}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<HardDrive size={18} color={theme.colors.textSecondary} />}
+              title="Storage & Backup"
+              subtitle="Photos mirroring, cloud backup, cache"
+              onPress={() => router.push('/profile/storage-settings')}
             />
           </Card>
 

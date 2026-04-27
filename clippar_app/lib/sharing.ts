@@ -148,9 +148,54 @@ export async function shareToInstagramStories(
 }
 
 /**
- * Generate a shareable link for a round.
+ * Ensure the round's reel is uploaded to Supabase Storage, returning the
+ * storage path. Cloud upload is opt-in (Pro tier) for raw clips, but a
+ * shareable public link inherently requires the reel to live in the cloud,
+ * so we lazily upload here regardless of the cloud-backup toggle — the
+ * user explicitly asked to share. No-op if the reel is already in storage.
+ */
+export async function ensureReelUploaded(roundId: string): Promise<string | null> {
+  const { data: round } = await supabase
+    .from('rounds')
+    .select('reel_url')
+    .eq('id', roundId)
+    .single();
+  const current = (round as any)?.reel_url as string | null | undefined;
+
+  // Already a cloud path (relative, no scheme) — done.
+  if (current && !current.startsWith('file://') && !current.startsWith('/')) {
+    return current;
+  }
+
+  // Need to upload. The local file:// URI lives in cacheDirectory; if the
+  // app was reinstalled or the cache was purged, we can't recover the reel
+  // here — caller should handle the null return by re-composing.
+  if (!current || (!current.startsWith('file://') && !current.startsWith('/'))) {
+    return null;
+  }
+
+  const info = await FileSystem.getInfoAsync(current);
+  if (!info.exists) return null;
+
+  const { uploadReelToStorage } = await import('@/lib/r2');
+  try {
+    const storagePath = await uploadReelToStorage(roundId, current);
+    await supabase.from('rounds').update({ reel_url: storagePath }).eq('id', roundId);
+    return storagePath;
+  } catch (err) {
+    console.warn('[sharing] ensureReelUploaded failed:', err);
+    return null;
+  }
+}
+
+/**
+ * Generate a shareable link for a round. Lazily uploads the reel to
+ * Supabase Storage if it's only local — public links require a cloud URL.
  */
 export async function getShareUrl(roundId: string): Promise<string | null> {
+  // Make sure the reel actually exists in the cloud before asking the
+  // edge function to mint a share link.
+  await ensureReelUploaded(roundId);
   try {
     const { data, error } = await supabase.functions.invoke('create-share-link', {
       body: { round_id: roundId },
