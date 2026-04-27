@@ -631,7 +631,15 @@ export default function EditorScreen() {
         const scorecardHoles = state.holes.map((hole) => {
           const holeClips = hole.clips.filter((c) => !c.isExcluded);
           const holeDurationMs = holeClips.reduce((sum, c) => {
-            const dur = c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs);
+            // Pre-trimmed clips: sourceUri IS the trim file, so its
+            // durationMs (now correctly written by markClipTrimmed) is
+            // the right number. trimEndMs - trimStartMs would give the
+            // same value but in original-timeline coords, which are
+            // duplicate info — use durationMs as the source of truth.
+            const isPreTrimmed = !!(c.autoTrimmed && c.originalUri);
+            const dur = isPreTrimmed
+              ? c.durationMs
+              : (c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs));
             return sum + dur;
           }, 0);
           const startMs = cumulativeMs;
@@ -708,10 +716,16 @@ export default function EditorScreen() {
             orderedIdx++;
             clip = orderedForCompose[orderedIdx];
           }
+          // When a clip has been auto-trimmed (or the user re-trimmed),
+          // sourceUri IS the trim file already and trimStartMs/trimEndMs
+          // are bounds in the ORIGINAL video's timeline — out-of-range
+          // for the trim file. Pass full range so the native composer
+          // uses the entire pre-trimmed clip.
+          const isPreTrimmed = !!(clip?.autoTrimmed && clip?.originalUri);
           composeClips.push({
             uri,
-            trimStartMs: clip?.trimStartMs ?? 0,
-            trimEndMs: clip?.trimEndMs ?? -1,
+            trimStartMs: isPreTrimmed ? 0 : (clip?.trimStartMs ?? 0),
+            trimEndMs: isPreTrimmed ? -1 : (clip?.trimEndMs ?? -1),
           });
           orderedIdx++;
         }

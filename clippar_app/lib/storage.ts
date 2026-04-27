@@ -339,6 +339,14 @@ export async function markClipTrimmed(
   autoTrimEndMs: number | null = null,
 ) {
   const database = await getDatabase();
+  // Compute the trimmed file's duration so the editor's badge + compose
+  // logic uses the right value. Without this update, duration_seconds
+  // stays at the original (pre-trim) length and downstream code thinks
+  // the clip is much longer than it actually is.
+  const durationSeconds =
+    autoTrimStartMs !== null && autoTrimEndMs !== null
+      ? Math.max(0, (autoTrimEndMs - autoTrimStartMs) / 1000)
+      : null;
   await database.runAsync(
     `UPDATE local_clips SET
       file_uri = ?,
@@ -348,7 +356,8 @@ export async function markClipTrimmed(
       impact_time_ms = ?,
       trim_confidence = ?,
       auto_trim_start_ms = ?,
-      auto_trim_end_ms = ?
+      auto_trim_end_ms = ?,
+      duration_seconds = COALESCE(?, duration_seconds)
     WHERE id = ?`,
     trimmedFileUri,
     trimmedFileUri,
@@ -356,6 +365,7 @@ export async function markClipTrimmed(
     trimConfidence ?? null,
     autoTrimStartMs ?? null,
     autoTrimEndMs ?? null,
+    durationSeconds,
     clipId
   );
 }
