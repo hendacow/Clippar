@@ -13,22 +13,76 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 let MediaLibrary: typeof import('expo-media-library') | null = null;
 let RNShare: any = null;
+let FileSystemLegacy: typeof import('expo-file-system/legacy') | null = null;
 if (isNative) {
   try { MediaLibrary = require('expo-media-library'); } catch {}
   try { RNShare = require('react-native-share').default; } catch {}
+  try { FileSystemLegacy = require('expo-file-system/legacy'); } catch {}
 }
 
 /**
  * Save a single clip's video file to the user's Photos library.
- * Returns true on success, false if permission was denied or save failed.
+ *
+ * Trim files written by detectAndTrim live in cachesDirectory which iOS
+ * may evict at any time. Earlier versions of this function called
+ * MediaLibrary.saveToLibraryAsync directly — when the cache file had
+ * been purged, the call resolved successfully (no exception) but
+ * nothing actually appeared in Photos. The user only saw a fake
+ * "Saved" alert.
+ *
+ * Fix: explicitly check the file exists, and if it's in cachesDirectory
+ * copy it into documentDirectory (durable) before handing off to
+ * MediaLibrary. The Photos save then has a stable path even if iOS
+ * decides to evict the original cache copy mid-save.
+ *
+ * Returns true on success, false on any failure (permission, file
+ * missing, copy failed, save failed).
  */
 export async function saveClipToPhotos(uri: string): Promise<boolean> {
-  if (!isNative || !MediaLibrary) return false;
+  if (!isNative || !MediaLibrary || !FileSystemLegacy) return false;
   try {
     const perm = await MediaLibrary.requestPermissionsAsync();
-    if (perm.status !== 'granted') return false;
-    await MediaLibrary.saveToLibraryAsync(uri);
+    if (perm.status !== 'granted') {
+      console.warn('[clipShare] saveClipToPhotos: Photos permission not granted');
+      return false;
+    }
+
+    // 1. Confirm the file actually exists.
+    const info = await FileSystemLegacy.getInfoAsync(uri);
+    if (!info.exists) {
+      console.warn(
+        `[clipShare] saveClipToPhotos: file does not exist at ${uri.slice(-60)} — likely evicted from iOS cache`,
+      );
+      return false;
+    }
+
+    // 2. If the file is in cachesDirectory or tmp, copy to documentDirectory
+    //    so the save has a stable path. Saves done from cache directly can
+    //    silently fail if iOS evicts mid-save.
+    let saveUri = uri;
+    const isPurgeable = uri.includes('/Library/Caches/') || uri.includes('/tmp/');
+    if (isPurgeable) {
+      const filename = uri.split('/').pop() ?? `clip_${Date.now()}.mp4`;
+      const destDir = `${FileSystemLegacy.documentDirectory}exports/`;
+      const destInfo = await FileSystemLegacy.getInfoAsync(destDir);
+      if (!destInfo.exists) {
+        await FileSystemLegacy.makeDirectoryAsync(destDir, { intermediates: true });
+      }
+      const dest = `${destDir}${filename}`;
+      try {
+        await FileSystemLegacy.copyAsync({ from: uri, to: dest });
+        saveUri = dest;
+      } catch (copyErr) {
+        console.warn('[clipShare] copy-to-documents failed, falling back to original uri:', copyErr);
+      }
+    }
+
+    // 3. Hand off to Photos. saveToLibraryAsync resolves once the asset
+    //    has been added to the Photos database — at that point the file
+    //    is independent of our app sandbox.
+    await MediaLibrary.saveToLibraryAsync(saveUri);
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    console.log(`[clipShare] saveClipToPhotos: saved ${saveUri.slice(-60)}`);
     return true;
   } catch (err) {
     console.warn('[clipShare] saveClipToPhotos failed:', err);

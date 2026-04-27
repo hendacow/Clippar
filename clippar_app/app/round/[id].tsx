@@ -40,6 +40,7 @@ import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
 import { isReelStale } from '@/lib/storage';
+import { saveClipToPhotos, saveHoleToPhotos, shareHole } from '@/lib/clipShare';
 import { saveToGallery } from '@/lib/sharing';
 import { useUploadContext } from '@/contexts/UploadContext';
 import { useEditorState } from '@/hooks/useEditorState';
@@ -148,10 +149,12 @@ function ClipThumb({
   clip,
   onPress,
   onLongPress,
+  onDownload,
 }: {
   clip: EditorClip;
   onPress: () => void;
   onLongPress: () => void;
+  onDownload: () => void;
 }) {
   const [thumb, setThumb] = useState<string | null>(clip.thumbnailUri ?? null);
 
@@ -213,6 +216,32 @@ function ClipThumb({
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>{durationLabel}</Text>
           </View>
         ) : null}
+        {/* Download button (top-right) — saves this clip's trim file
+            to the Photos library. Hidden if the clip isn't playable. */}
+        {clip.sourceUri && !clip.needsTrim && !clip.isExcluded && (
+          <Pressable
+            onPress={(e) => {
+              e.stopPropagation?.();
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onDownload();
+            }}
+            hitSlop={6}
+            style={{
+              position: 'absolute',
+              top: 3,
+              right: 3,
+              width: 22,
+              height: 22,
+              borderRadius: 11,
+              backgroundColor: 'rgba(0,0,0,0.55)',
+              justifyContent: 'center',
+              alignItems: 'center',
+            }}
+          >
+            <Download size={11} color="rgba(255,255,255,0.95)" />
+          </Pressable>
+        )}
+
         {/* Shot label */}
         <View
           style={{
@@ -250,6 +279,58 @@ export default function RoundViewer() {
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'done'>('idle');
   const [reelStale, setReelStale] = useState<boolean>(false);
+  const [busyHoleNumber, setBusyHoleNumber] = useState<number | null>(null);
+
+  // Per-clip download — saves the trimmed file directly to Photos.
+  const handleClipDownload = useCallback(async (clip: EditorClip) => {
+    if (!clip.sourceUri) {
+      Alert.alert('Not Ready', 'This clip is still processing. Try again in a moment.');
+      return;
+    }
+    const ok = await saveClipToPhotos(clip.sourceUri);
+    if (ok) {
+      Alert.alert('Saved', `Hole ${clip.holeNumber} · Stroke ${clip.shotNumber} saved to Photos.`);
+    } else {
+      Alert.alert(
+        'Save Failed',
+        'Could not save to Photos. The trim file may have been evicted from cache — re-render the reel to regenerate it.',
+      );
+    }
+  }, []);
+
+  const handleHoleSave = useCallback(async (hole: typeof editor.state.holes[number]) => {
+    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    if (usableClips.length === 0) return;
+    setBusyHoleNumber(hole.holeNumber);
+    try {
+      const ok = await saveHoleToPhotos(usableClips.map((c) => c.sourceUri!));
+      if (ok) {
+        Alert.alert(
+          'Saved',
+          `Hole ${hole.holeNumber} highlight saved to Photos (${usableClips.length} clip${usableClips.length > 1 ? 's' : ''}).`,
+        );
+      } else {
+        Alert.alert('Save Failed', 'Could not stitch + save this hole. Try again.');
+      }
+    } finally {
+      setBusyHoleNumber(null);
+    }
+  }, [editor.state.holes]);
+
+  const handleHoleShare = useCallback(async (hole: typeof editor.state.holes[number]) => {
+    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    if (usableClips.length === 0) return;
+    setBusyHoleNumber(hole.holeNumber);
+    try {
+      await shareHole(
+        usableClips.map((c) => c.sourceUri!),
+        hole.holeNumber,
+        round?.course_name ?? 'Round',
+      );
+    } finally {
+      setBusyHoleNumber(null);
+    }
+  }, [editor.state.holes, round?.course_name]);
 
   // Refresh stale flag whenever the round id changes or the editor state
   // loads — the user may have trimmed clips since the last visit.
@@ -619,38 +700,90 @@ export default function RoundViewer() {
 
                 {clipsExpanded && (
                   <View style={{ paddingBottom: 16 }}>
-                    {editor.state.holes.map((hole) => (
-                      <View key={hole.holeNumber} style={{ marginBottom: 16 }}>
-                        {/* Hole label */}
-                        <View style={styles.holeHeader}>
-                          <Text style={styles.holeLabel}>Hole {hole.holeNumber}</Text>
-                          <Text style={styles.holeInfo}>Par {hole.par}</Text>
-                          {hole.strokes > 0 && (
-                            <Text style={styles.holeInfo}>Score {hole.strokes}</Text>
-                          )}
+                    {editor.state.holes.map((hole) => {
+                      const usableClips = hole.clips.filter(
+                        (c) => !c.isExcluded && c.sourceUri && !c.needsTrim,
+                      );
+                      const canStitchHole = usableClips.length > 0;
+                      const isBusy = busyHoleNumber === hole.holeNumber;
+                      return (
+                        <View key={hole.holeNumber} style={{ marginBottom: 16 }}>
+                          {/* Hole label + per-hole download/share */}
+                          <View style={styles.holeHeader}>
+                            <Text style={styles.holeLabel}>Hole {hole.holeNumber}</Text>
+                            <Text style={styles.holeInfo}>Par {hole.par}</Text>
+                            {hole.strokes > 0 && (
+                              <Text style={styles.holeInfo}>Score {hole.strokes}</Text>
+                            )}
+                            {canStitchHole && (
+                              <View style={{ flexDirection: 'row', gap: 6, marginLeft: 'auto' }}>
+                                <Pressable
+                                  onPress={() => handleHoleSave(hole)}
+                                  disabled={isBusy}
+                                  hitSlop={8}
+                                  style={{
+                                    width: 26,
+                                    height: 26,
+                                    borderRadius: 8,
+                                    borderWidth: 1,
+                                    borderColor: theme.colors.surfaceBorder,
+                                    backgroundColor: theme.colors.surfaceElevated,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    opacity: isBusy ? 0.5 : 1,
+                                  }}
+                                >
+                                  {isBusy ? (
+                                    <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+                                  ) : (
+                                    <Download size={12} color={theme.colors.textPrimary} />
+                                  )}
+                                </Pressable>
+                                <Pressable
+                                  onPress={() => handleHoleShare(hole)}
+                                  disabled={isBusy}
+                                  hitSlop={8}
+                                  style={{
+                                    width: 26,
+                                    height: 26,
+                                    borderRadius: 8,
+                                    borderWidth: 1,
+                                    borderColor: theme.colors.surfaceBorder,
+                                    backgroundColor: theme.colors.surfaceElevated,
+                                    justifyContent: 'center',
+                                    alignItems: 'center',
+                                    opacity: isBusy ? 0.5 : 1,
+                                  }}
+                                >
+                                  <Share2 size={12} color={theme.colors.textPrimary} />
+                                </Pressable>
+                              </View>
+                            )}
+                          </View>
+                          {/* Clips row */}
+                          <ScrollView
+                            horizontal
+                            showsHorizontalScrollIndicator={false}
+                            contentContainerStyle={{ paddingHorizontal: 16 }}
+                          >
+                            {hole.clips.map((clip) => (
+                              <ClipThumb
+                                key={clip.id}
+                                clip={clip}
+                                onPress={() => setTrimClip(clip)}
+                                onLongPress={() => editor.toggleExclude(clip.id)}
+                                onDownload={() => handleClipDownload(clip)}
+                              />
+                            ))}
+                            {hole.clips.length === 0 && (
+                              <View style={styles.emptyClipSlot}>
+                                <Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>No clips</Text>
+                              </View>
+                            )}
+                          </ScrollView>
                         </View>
-                        {/* Clips row */}
-                        <ScrollView
-                          horizontal
-                          showsHorizontalScrollIndicator={false}
-                          contentContainerStyle={{ paddingHorizontal: 16 }}
-                        >
-                          {hole.clips.map((clip) => (
-                            <ClipThumb
-                              key={clip.id}
-                              clip={clip}
-                              onPress={() => setTrimClip(clip)}
-                              onLongPress={() => editor.toggleExclude(clip.id)}
-                            />
-                          ))}
-                          {hole.clips.length === 0 && (
-                            <View style={styles.emptyClipSlot}>
-                              <Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>No clips</Text>
-                            </View>
-                          )}
-                        </ScrollView>
-                      </View>
-                    ))}
+                      );
+                    })}
 
                     {/* Re-render button */}
                     <View style={{ paddingHorizontal: 16, marginTop: 8 }}>
