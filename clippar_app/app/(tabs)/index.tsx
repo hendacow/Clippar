@@ -757,8 +757,11 @@ export default function HomeScreen() {
           </>
         ) : null}
 
+        {/* ---- SCORE HIGHLIGHTS (Birdies, Eagles, Bogeys) — moved above All Rounds ---- */}
+        {!useMock && <ScoreCollection />}
+
         {/* ---- FILTERED / ALL ROUNDS (vertical list) ---- */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, marginBottom: 14 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, marginTop: 8, marginBottom: 14 }}>
           <Text
             style={{
               color: theme.colors.textPrimary,
@@ -833,8 +836,7 @@ export default function HomeScreen() {
           ))
         )}
 
-        {/* ---- SCORE HIGHLIGHTS (Birdies, Eagles, Bogeys collections) ---- */}
-        {!useMock && <ScoreCollection />}
+        {/* (Score Highlights moved above All Rounds — see top of ScrollView) */}
       </ScrollView>
 
       {/* ---- STITCHED COMPILATION (long-press on a stat tile) ---- */}

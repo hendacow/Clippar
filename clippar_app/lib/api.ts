@@ -57,11 +57,14 @@ export async function getRounds() {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) throw new Error('Not authenticated');
 
+  // Sort by created_at (TIMESTAMPTZ) so multiple rounds on the same date
+  // are ordered correctly. Falling back to `date` (DATE column, no time)
+  // groups same-day rounds together with no defined order.
   const { data, error } = await supabase
     .from('rounds')
     .select('*')
     .eq('user_id', user.id)
-    .order('date', { ascending: false });
+    .order('created_at', { ascending: false });
 
   if (error) throw error;
   return data;

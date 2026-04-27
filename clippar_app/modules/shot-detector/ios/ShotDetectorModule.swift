@@ -1700,12 +1700,16 @@ public class ShotDetectorModule: Module {
                 //   row 1: course (left) + TOTAL N + score-to-par badge (right)
                 //   row 2: hole strip (one cell per hole, current highlighted)
                 //   row 3: Hole N (left) + Par M (center) + hole strokes (right)
+                //
+                // AVVideoCompositionCoreAnimationTool uses bottom-left origin
+                // (Y goes up), so a top-anchored card means cardY = renderSize.height
+                // - cardHeight - topPadding.
                 let scale = UIScreen.main.scale
                 let cardWidth: CGFloat = renderSize.width * 0.94
                 let cardX: CGFloat = (renderSize.width - cardWidth) / 2
-                // Bottom anchor — sit 4% up from the bottom edge.
                 let cardHeight: CGFloat = renderSize.height * 0.18
-                let cardY: CGFloat = renderSize.height * 0.04
+                let topPadding: CGFloat = renderSize.height * 0.04
+                let cardY: CGFloat = renderSize.height - cardHeight - topPadding
                 let inset: CGFloat = renderSize.width * 0.018
                 let rowGap: CGFloat = cardHeight * 0.05
 
@@ -1717,13 +1721,13 @@ public class ShotDetectorModule: Module {
                 let row2Y: CGFloat = row1Y - row2Height - rowGap
                 let row3Y: CGFloat = row2Y - row3Height - rowGap
 
-                // Background card
+                // Background card — more transparent so the video shows through
                 let bgLayer = CALayer()
                 bgLayer.frame = CGRect(x: cardX, y: cardY, width: cardWidth, height: cardHeight)
-                bgLayer.backgroundColor = UIColor(white: 0, alpha: 0.78).cgColor
+                bgLayer.backgroundColor = UIColor(white: 0, alpha: 0.45).cgColor
                 bgLayer.cornerRadius = 18
                 bgLayer.borderWidth = 1
-                bgLayer.borderColor = UIColor(white: 1, alpha: 0.1).cgColor
+                bgLayer.borderColor = UIColor(white: 1, alpha: 0.12).cgColor
                 overlayContainer.addSublayer(bgLayer)
 
                 // ------ Row 1: course + TOTAL ------
