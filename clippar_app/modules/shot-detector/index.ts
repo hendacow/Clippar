@@ -31,6 +31,18 @@ export type ComposeReelResult = {
   hasMusic: boolean;
 };
 
+/**
+ * One clip's worth of input to `composeReel`. The native side uses
+ * `trimStartMs` / `trimEndMs` to call AVMutableComposition.insertTimeRange
+ * with a sub-range of the source asset, so user trim edits are honoured at
+ * compose time. `trimEndMs = -1` (or omitted) means "use full duration".
+ */
+export type ComposeClipInput = {
+  uri: string;
+  trimStartMs?: number;
+  trimEndMs?: number;
+};
+
 export type StitchProgressEvent = {
   phase: 'composing' | 'exporting';
   current: number;
@@ -78,7 +90,7 @@ type NativeModuleType = {
   trimVideo(videoUri: string, startMs: number, endMs: number): Promise<TrimResult>;
   detectAndTrim(videoUri: string, preRollMs: number, postRollMs: number, recentShotTypes: string[]): Promise<DetectAndTrimResult>;
   stitchClips(clipUris: string[]): Promise<StitchResult>;
-  composeReel(clipUris: string[], scorecardJson: string, musicUri: string): Promise<ComposeReelResult>;
+  composeReel(clips: ComposeClipInput[], scorecardJson: string, musicUri: string): Promise<ComposeReelResult>;
   clearTrimCache(): Promise<ClearTrimCacheResult>;
   deleteFile(fileUri: string): Promise<DeleteFileResult>;
   getMemoryStats(): Promise<MemoryStats>;
@@ -228,17 +240,18 @@ export async function stitchClips(
 
 /**
  * Compose a full highlight reel on-device:
- * - Stitches clips in order using AVMutableComposition
+ * - Stitches clips in order using AVMutableComposition, honouring per-clip
+ *   trimStartMs / trimEndMs so user trim edits are applied at compose time
  * - Adds scorecard overlay (hole/par/score) via AVVideoComposition + CALayer
  * - Mixes background music via AVAudioMix (clip audio 80%, music 30%, fade out)
  *
- * @param clipUris - Array of file URIs to concatenate
+ * @param clips - Array of clip inputs (uri + optional trim range)
  * @param scorecard - Scorecard data with per-hole timing for overlays
  * @param musicUri - Optional local file URI for background music track
  * @returns Object with reelUri, durationMs, clipCount, hasOverlay, hasMusic
  */
 export async function composeReel(
-  clipUris: string[],
+  clips: ComposeClipInput[],
   scorecard: ScorecardData,
   musicUri?: string | null
 ): Promise<ComposeReelResult> {
@@ -252,7 +265,7 @@ export async function composeReel(
   }
 
   const scorecardJson = JSON.stringify(scorecard);
-  return nativeModule.composeReel(clipUris, scorecardJson, musicUri ?? "");
+  return nativeModule.composeReel(clips, scorecardJson, musicUri ?? "");
 }
 
 /**

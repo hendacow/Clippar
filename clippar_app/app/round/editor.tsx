@@ -475,8 +475,27 @@ export default function EditorScreen() {
         return;
       }
 
-      // Log clip URIs for debugging
-      console.log('[Editor] Composing with', clipUris.length, 'clips:', clipUris);
+      // DIAGNOSTIC: log per-clip exclusion + classification state to track
+      // down the "par-hole clips skipped from reel" bug. If clips are vanishing
+      // we want to know whether they were filtered by isExcluded, were classified
+      // as putts, or have suspicious trim bounds. Remove once the bug is found.
+      console.log('[Editor:Compose] allClips by hole/score/exclusion:');
+      const allClipsRaw = state.holes.flatMap((h) => h.clips);
+      allClipsRaw.forEach((c) => {
+        console.log(
+          `[Editor:Compose]   hole=${c.holeNumber} shot=${c.shotNumber} ` +
+          `isExcluded=${!!c.isExcluded} ` +
+          `trim=${c.trimStartMs}..${c.trimEndMs} ` +
+          `dur=${c.durationMs} sourceUri=${c.sourceUri ? 'yes' : 'NO'} ` +
+          `id=${c.id}`,
+        );
+      });
+      const excludedCount = allClipsRaw.filter((c) => c.isExcluded).length;
+      const includedCount = allClipsRaw.length - excludedCount;
+      console.log(
+        `[Editor:Compose] passing ${includedCount} of ${allClipsRaw.length} clips ` +
+        `(${excludedCount} excluded, ${allClipsRaw.length - clipUris.length - excludedCount} missing sourceUri)`,
+      );
 
       setComposing(true);
       setComposeProgress('Checking clip files...');
@@ -659,9 +678,51 @@ export default function EditorScreen() {
           }
         });
 
+        // Build per-clip compose inputs that carry trim metadata into the
+        // native composer. Without this, trim edits made in the trim modal
+        // are saved to SQLite but ignored on stitch — the reel plays full
+        // source clips even though the user trimmed them.
+        //
+        // Map each entry in `validClipUris` (which may include recovered
+        // URIs that differ from clip.sourceUri) back to its EditorClip so
+        // we can attach trim bounds. Walk both lists in order and skip
+        // any orderedForCompose entry whose URI didn't make it into
+        // validClipUris (i.e. dropped during recovery as unrecoverable).
+        const orderedForCompose = allClips.filter((c) => c.sourceUri);
+        const composeClips: { uri: string; trimStartMs: number; trimEndMs: number }[] = [];
+        let orderedIdx = 0;
+        for (const uri of validClipUris) {
+          // Advance the source pointer to the next clip whose original
+          // sourceUri matches OR whose id is implicitly recovered. Since
+          // both arrays preserve order and the recovery flow keeps clips
+          // in their original positions (just rewriting URIs), aligning
+          // by index is correct as long as we step orderedIdx forward.
+          let clip: EditorClip | undefined = orderedForCompose[orderedIdx];
+          // Skip past any clips that were dropped (unrecoverable) so we
+          // land on the one that produced this URI.
+          while (
+            clip &&
+            clip.sourceUri !== uri &&
+            !uri.includes(`${clip.id}.mp4`)
+          ) {
+            orderedIdx++;
+            clip = orderedForCompose[orderedIdx];
+          }
+          composeClips.push({
+            uri,
+            trimStartMs: clip?.trimStartMs ?? 0,
+            trimEndMs: clip?.trimEndMs ?? -1,
+          });
+          orderedIdx++;
+        }
+        console.log(
+          `[Editor:Compose] composeClips trim ranges:`,
+          composeClips.map((c, i) => `[${i}] ${c.trimStartMs}..${c.trimEndMs}`).join(', '),
+        );
+
         let result;
         try {
-          result = await composeReel(clipUris, scorecardData, musicFileUri);
+          result = await composeReel(composeClips, scorecardData, musicFileUri);
         } finally {
           progressSub.remove();
         }

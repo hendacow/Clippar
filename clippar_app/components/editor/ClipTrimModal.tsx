@@ -12,7 +12,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Check, RotateCcw } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
-import type { EditorClip } from '@/types/editor';
+import { type EditorClip, getInitialTrimBounds } from '@/types/editor';
 import { trimVideo } from 'shot-detector';
 
 const VideoThumbnails = Platform.OS !== 'web'
@@ -105,21 +105,26 @@ export function ClipTrimModal({
     let cancelled = false;
 
     const init = async () => {
-      // If auto-trimmed and original exists, use original as the timeline source
+      // If auto-trimmed and original exists, use original as the timeline source.
+      // Default the handles to the detected swing window (auto_trim_start_ms /
+      // auto_trim_end_ms) when the user hasn't customized yet — they can drag
+      // outward to include more of the original.
       if (clip.autoTrimmed && clip.originalUri && clip.originalUri !== clip.sourceUri) {
         const origDur = await probeDuration(clip.originalUri);
         if (cancelled) return;
         setDurationMs(origDur);
         setActiveUri(clip.originalUri);
-        setStartMs(clip.trimStartMs);
-        setEndMs(clip.trimEndMs === -1 ? origDur : clip.trimEndMs);
+        const bounds = getInitialTrimBounds(clip, origDur);
+        setStartMs(bounds.startMs);
+        setEndMs(bounds.endMs);
       } else {
         // Non-auto-trimmed: use sourceUri directly
         const dur = clip.durationMs || 5000;
         setDurationMs(dur);
         setActiveUri(clip.sourceUri);
-        setStartMs(clip.trimStartMs);
-        setEndMs(clip.trimEndMs === -1 ? dur : clip.trimEndMs);
+        const bounds = getInitialTrimBounds(clip, dur);
+        setStartMs(bounds.startMs);
+        setEndMs(bounds.endMs);
       }
       if (!cancelled) setSeekGeneration((g) => g + 1);
     };

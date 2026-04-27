@@ -16,7 +16,7 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { useEditorState } from '@/hooks/useEditorState';
 import { trimVideo } from 'shot-detector';
-import type { EditorClip, EditorHoleSection } from '@/types/editor';
+import { type EditorClip, type EditorHoleSection, getInitialTrimBounds } from '@/types/editor';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -501,9 +501,10 @@ function InlineTrimPanel({
   onSeekTarget?: (target: 'start' | 'end') => void;
   onDraggingHandle?: (handle: 'none' | 'start' | 'end') => void;
 }) {
+  const initialBounds = getInitialTrimBounds(clip, clip.durationMs || 5000);
   const [durationMs, setDurationMs] = useState(clip.durationMs || 5000);
-  const [startMs, setStartMs] = useState(clip.trimStartMs);
-  const [endMs, setEndMs] = useState(clip.trimEndMs === -1 ? (clip.durationMs || 5000) : clip.trimEndMs);
+  const [startMs, setStartMs] = useState(initialBounds.startMs);
+  const [endMs, setEndMs] = useState(initialBounds.endMs);
   const [activeUri, setActiveUri] = useState<string | null>(clip.sourceUri);
   const [savingTrim, setSavingTrim] = useState(false);
 
@@ -528,8 +529,11 @@ function InlineTrimPanel({
           if (!cancelled) {
             setDurationMs(dur);
             setActiveUri(clip.originalUri!);
-            setStartMs(clip.trimStartMs);
-            setEndMs(clip.trimEndMs === -1 ? dur : clip.trimEndMs);
+            // Default to detected swing window when user hasn't customized;
+            // user can drag handles outward to include more of the original.
+            const bounds = getInitialTrimBounds(clip, dur);
+            setStartMs(bounds.startMs);
+            setEndMs(bounds.endMs);
           }
         } catch {}
       })();
@@ -886,10 +890,12 @@ export default function PreviewScreen() {
   // When entering trim mode, initialize live bounds and URI
   useEffect(() => {
     if (trimMode && currentClip) {
-      setLiveTrimStart(currentClip.trimStartMs);
-      setLiveTrimEnd(
-        currentClip.trimEndMs === -1 ? currentClip.durationMs : currentClip.trimEndMs
-      );
+      // Default trim bounds to the detected swing window when the user
+      // hasn't customized — InlineTrimPanel re-runs the same calculation
+      // against the actual probed duration once it loads.
+      const initialBounds = getInitialTrimBounds(currentClip, currentClip.durationMs);
+      setLiveTrimStart(initialBounds.startMs);
+      setLiveTrimEnd(initialBounds.endMs);
       // Use original URI for auto-trimmed clips so the trimmer shows full video
       if (currentClip.autoTrimmed && currentClip.originalUri && currentClip.originalUri !== currentClip.sourceUri) {
         setTrimModeUri(currentClip.originalUri);
