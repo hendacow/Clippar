@@ -399,8 +399,8 @@ export default function EditorScreen() {
 
   // Export settings
   const [exportModalVisible, setExportModalVisible] = useState(false);
-  const [exportResolution, setExportResolution] = useState<string>(config.export.defaultResolution);
-  const [exportFps, setExportFps] = useState<number>(config.export.defaultFrameRate);
+  // Export resolution/frame-rate UI was removed — clips render at their
+  // captured quality. See the export-settings JSX comment below.
   const exportMode: UploadMode = 'highlight-reel';
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState('');
@@ -1150,62 +1150,10 @@ export default function EditorScreen() {
               Export Settings
             </Text>
 
-            {/* Resolution */}
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 8 }}>
-              Resolution
-            </Text>
-            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 16 }}>
-              {config.export.resolutionOptions.map((res) => {
-                const active = exportResolution === res;
-                return (
-                  <Pressable
-                    key={res}
-                    onPress={() => { Haptics.selectionAsync(); setExportResolution(res); }}
-                    style={{
-                      flex: 1,
-                      paddingVertical: 10,
-                      borderRadius: theme.radius.md,
-                      backgroundColor: active ? theme.colors.textPrimary : theme.colors.surfaceElevated,
-                      borderWidth: 1,
-                      borderColor: active ? theme.colors.textPrimary : theme.colors.surfaceBorder,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{ color: active ? theme.colors.background : theme.colors.textPrimary, fontWeight: '700', fontSize: 13 }}>
-                      {res.toUpperCase()}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 8 }}>
-              Frame Rate
-            </Text>
-            <View style={{ flexDirection: 'row', gap: 6, marginBottom: 20 }}>
-              {config.export.frameRateOptions.map((fps) => {
-                const active = exportFps === fps;
-                return (
-                  <Pressable
-                    key={fps}
-                    onPress={() => { Haptics.selectionAsync(); setExportFps(fps); }}
-                    style={{
-                      flex: 1,
-                      paddingVertical: 10,
-                      borderRadius: theme.radius.md,
-                      backgroundColor: active ? theme.colors.textPrimary : theme.colors.surfaceElevated,
-                      borderWidth: 1,
-                      borderColor: active ? theme.colors.textPrimary : theme.colors.surfaceBorder,
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Text style={{ color: active ? theme.colors.background : theme.colors.textPrimary, fontWeight: '700', fontSize: 13 }}>
-                      {fps} FPS
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
+            {/* Resolution & frame-rate pickers removed — never wired into the
+                native composer. The reel inherits the source clips' resolution
+                and frame rate (1080p / 30fps from the iPhone camera by
+                default), so exposing a "4K vs 720p" choice was misleading. */}
 
             <View
               style={{

@@ -1075,6 +1075,14 @@ export async function getSignedReelUrl(
   reelPath: string,
   expiresIn = 3600,
 ): Promise<string | null> {
+  if (!reelPath) return null;
+  // Reels saved locally (cloud backup off) keep a file:// URI in rounds.reel_url.
+  // Pass them straight through — there's no signed URL to mint, the player can
+  // play the local file directly. Without this, the homescreen reel preview
+  // shows nothing for any round composed without cloud backup.
+  if (reelPath.startsWith('file://') || reelPath.startsWith('/')) {
+    return reelPath;
+  }
   try {
     const { data, error } = await supabase.storage
       .from('reels')

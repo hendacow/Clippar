@@ -464,11 +464,20 @@ async function buildClipsWithLocalData(
           shotNumber: shot.shotNumber,
         };
 
-        // Add trim metadata from local SQLite
+        // Add trim metadata from local SQLite.
         if (localClip) {
           clip.localClipId = localClip.id;
-          clip.trimStartMs = localClip.trim_start_ms;
-          clip.trimEndMs = localClip.trim_end_ms;
+          // For pre-trimmed clips (auto-trim or user re-trim), file_uri IS
+          // the trim file already and trim_start_ms/trim_end_ms are bounds
+          // in the ORIGINAL video's timeline — out-of-range when applied
+          // against the trim file. Pass 0..-1 so the player plays the
+          // whole pre-trimmed clip. Same fix pattern as preview.tsx.
+          const isPreTrimmed =
+            localClip.auto_trimmed === 1 &&
+            !!localClip.original_file_uri &&
+            localClip.original_file_uri !== uri;
+          clip.trimStartMs = isPreTrimmed ? 0 : localClip.trim_start_ms;
+          clip.trimEndMs = isPreTrimmed ? -1 : localClip.trim_end_ms;
           clip.durationMs = localClip.duration_seconds != null
             ? localClip.duration_seconds * 1000
             : undefined;
