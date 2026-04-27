@@ -555,8 +555,20 @@ function InlineTrimPanel({
   const startHandleOriginRef = useRef(0);
   const endHandleOriginRef = useRef(0);
 
-  // Notify parent of bounds changes so the video player can seek
+  // Notify parent of bounds changes so the video player can seek.
+  // Ref-guarded: skip when the values haven't actually moved. Without
+  // this, edge cases (auto-trim completing while the trim modal is open,
+  // re-renders that happen to recompute effectiveEndMs to the same number,
+  // etc.) can fire onBoundsChange with no real change, which then sets
+  // parent state, which re-renders this child — and depending on render
+  // timing React can flag it as a max-update-depth loop.
+  const lastReportedBoundsRef = useRef<{ startMs: number; endMs: number } | null>(null);
   useEffect(() => {
+    const last = lastReportedBoundsRef.current;
+    if (last && last.startMs === startMs && last.endMs === effectiveEndMs) {
+      return;
+    }
+    lastReportedBoundsRef.current = { startMs, endMs: effectiveEndMs };
     onBoundsChange(startMs, effectiveEndMs);
   }, [startMs, effectiveEndMs]);
 
@@ -992,7 +1004,17 @@ export default function PreviewScreen() {
     }
   }, [currentIndex, allClips.length, trimMode]);
 
+  // Ref-guarded handler — drops calls where nothing changed. The
+  // setState calls below would normally short-circuit on identical
+  // values, but the ref check also prevents the React reconciler
+  // from queueing a (no-op) update in the first place, which is
+  // what was triggering "Maximum update depth" during rapid drag
+  // events compounded with auto-trim state updates.
+  const lastBoundsAppliedRef = useRef<{ startMs: number; endMs: number } | null>(null);
   const handleTrimBoundsChange = useCallback((startMs: number, endMs: number) => {
+    const last = lastBoundsAppliedRef.current;
+    if (last && last.startMs === startMs && last.endMs === endMs) return;
+    lastBoundsAppliedRef.current = { startMs, endMs };
     setLiveTrimStart(startMs);
     setLiveTrimEnd(endMs);
   }, []);
