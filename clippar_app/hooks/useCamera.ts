@@ -91,12 +91,42 @@ export function useCamera({
   // Check permission on mount (native only)
   useEffect(() => {
     if (isNative) {
-      // Unique marker so we can verify which OTA bundle is loaded.
-      // bundle-id: cam-mute-v1
-      console.log('[useCamera] mounted — bundle cam-mute-v1');
+      // Unique marker so we can verify which bundle is loaded.
+      // bundle-id: cam-fix-v2
+      console.log('[useCamera] mounted — bundle cam-fix-v2');
       requestPermission();
     }
   }, [requestPermission]);
+
+  // Configure iOS audio session for recording BEFORE the camera attempts
+  // to attach the mic. The editor's expo-av playback puts the session in
+  // playback-only mode; without resetting to PlayAndRecord-compatible state,
+  // AVCaptureSession dies with -10868 (kAudioUnitErr_FormatNotSupported)
+  // ~2s after recordAsync starts. MixWithOthers (default) avoids exclusive
+  // ownership which itself breaks format negotiation.
+  useEffect(() => {
+    if (!isNative) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const ExpoAV = require('expo-av') as typeof import('expo-av');
+        if (cancelled) return;
+        await ExpoAV.Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
+          shouldDuckAndroid: false,
+          interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
+          playThroughEarpieceAndroid: false,
+        });
+        console.log('[useCamera] audio mode set for recording');
+      } catch (err) {
+        console.log('[useCamera] setAudioMode failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const startRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || isRecordingRef.current) return;
