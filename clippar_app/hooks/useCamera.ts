@@ -108,11 +108,15 @@ export function useCamera({
       try {
         const ExpoAV = require('expo-av') as typeof import('expo-av');
         if (cancelled) return;
+        // MixWithOthers (default) lets AVCaptureSession negotiate audio
+        // format freely. DoNotMix forces exclusive ownership which causes
+        // kAudioUnitErr_FormatNotSupported (-10868) when MovieFileOutput
+        // tries to attach the mic.
         await ExpoAV.Audio.setAudioModeAsync({
           allowsRecordingIOS: true,
           playsInSilentModeIOS: true,
           staysActiveInBackground: false,
-          interruptionModeIOS: ExpoAV.InterruptionModeIOS.DoNotMix,
+          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
           shouldDuckAndroid: false,
           interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
           playThroughEarpieceAndroid: false,
