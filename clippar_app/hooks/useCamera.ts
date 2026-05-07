@@ -91,6 +91,9 @@ export function useCamera({
   // Check permission on mount (native only)
   useEffect(() => {
     if (isNative) {
+      // Unique marker so we can verify which OTA bundle is loaded.
+      // bundle-id: cam-mute-v1
+      console.log('[useCamera] mounted — bundle cam-mute-v1');
       requestPermission();
     }
   }, [requestPermission]);
