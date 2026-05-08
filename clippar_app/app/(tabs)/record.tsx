@@ -309,6 +309,7 @@ export default function RecordScreen() {
           <Button
             title="End Round"
             onPress={async () => {
+              console.log('[EndRound] tapped — bundle endround-v1, navigating to editor');
               const roundId = roundState.roundId;
               const courseNameSnapshot = roundState.courseName;
               round.endRound();
