@@ -98,7 +98,15 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
+          # Restrict to iOS for now. Default --platform=all bundles web too,
+          # which triggers static rendering of expo-router routes — that loads
+          # lib/supabase.ts and fails with "supabaseUrl is required" because
+          # EXPO_PUBLIC_SUPABASE_URL isn't in GitHub Actions env. We don't
+          # deploy web anywhere yet, so skipping it is fine. When we add web
+          # or android targets, change to `--platform=all` AND add the
+          # required EXPO_PUBLIC_* secrets to the repo.
           eas update \
             --branch "${{ steps.params.outputs.branch }}" \
+            --platform=ios \
             --message "${{ steps.params.outputs.message }}" \
             --non-interactive
