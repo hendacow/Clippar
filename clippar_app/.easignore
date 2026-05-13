@@ -1,0 +1,47 @@
+# Files NOT to upload to EAS Build.
+# EAS regenerates these on the build server, so uploading them is wasted bytes.
+# Drops project archive from ~186 MB to ~30 MB (typical) → faster builds.
+# See: https://expo.fyi/eas-build-archive
+
+# CocoaPods install output — EAS runs `pod install` itself
+ios/Pods/
+ios/build/
+
+# Xcode derived data + per-developer state
+ios/**/xcuserdata/
+ios/**/*.xcuserstate
+ios/DerivedData/
+
+# Android build artifacts — EAS runs `./gradlew` itself
+android/.gradle/
+android/build/
+android/app/build/
+android/app/.cxx/
+
+# Documentation (not needed at build time)
+*.md
+!README.md
+
+# Test files (not needed at build time)
+**/*.test.ts
+**/*.test.tsx
+**/*.spec.ts
+**/*.spec.tsx
+coverage/
+__tests__/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Local env files — EAS uses repo secrets / env vars, not these
+.env*.local
+.env*.local.example
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Already not tracked but be defensive
+node_modules/

@@ -1,0 +1,72 @@
+# Full EAS builds (binary, ~10-15 min) — for native changes that can't be
+# OTA'd. Most JS-only fixes go through eas-update.yml instead.
+#
+# DISABLED FOR NOW: the auto-triggers (push to main / staging) are commented
+# out because:
+#   1. Native changes are infrequent enough that manual dispatch is fine
+#   2. Free-tier EAS builds are slow (~15-30 min queue + 10 min build)
+#   3. We're still validating the preview tier; don't want to burn quota
+# Re-enable the `push:` block when you're ready for fully auto preview/prod
+# builds on every push.
+
+name: CI/CD (Full EAS Build)
+
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'EAS build profile'
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - production
+  # Re-enable when ready:
+  # push:
+  #   branches: [main, staging]
+  #   paths:
+  #     - 'clippar_app/**'
+  #     - '!clippar_app/**.md'
+  # pull_request:
+  #   branches: [main]
+
+jobs:
+  lint-and-typecheck:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clippar_app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clippar_app/package-lock.json
+      - run: npm ci
+      - name: Type check
+        run: npx tsc --noEmit
+
+  build:
+    name: Build (${{ github.event.inputs.profile }})
+    needs: lint-and-typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clippar_app
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: clippar_app/package-lock.json
+      - run: npm ci
+      - uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+      - name: Build ${{ github.event.inputs.profile }}
+        run: eas build --profile ${{ github.event.inputs.profile }} --platform ios --non-interactive --no-wait

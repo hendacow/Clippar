@@ -58,16 +58,16 @@ jobs:
         working-directory: clippar_app
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           # Need parent commit so we can build a meaningful release message
           # from `git log` — depth 2 is enough.
           fetch-depth: 2
 
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: clippar_app/package-lock.json
 
@@ -95,6 +95,7 @@ jobs:
           echo "Message: $MESSAGE"
 
       - name: Publish update
+        id: publish
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
@@ -110,3 +111,20 @@ jobs:
             --platform=ios \
             --message "${{ steps.params.outputs.message }}" \
             --non-interactive
+
+      # Ping Slack so we know the moment a fix actually goes live. Skipped
+      # gracefully if SLACK_WEBHOOK_URL secret isn't set yet (e.g. first
+      # workflow run before the user wires up the webhook).
+      - name: Notify Slack
+        if: success() && env.SLACK_WEBHOOK_URL != ''
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA:0:7}"
+          PAYLOAD=$(cat <<JSON
+          {
+            "text": ":rocket: *OTA update published* — \`${{ steps.params.outputs.branch }}\` channel\n• Commit: \`${SHORT_SHA}\`\n• Message: ${{ steps.params.outputs.message }}\n• Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nApp will fetch this on next launch."
+          }
+          JSON
+          )
+          curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
