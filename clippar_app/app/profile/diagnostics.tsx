@@ -38,6 +38,7 @@ import { searchGolfCoursesLive } from '@/lib/golfCourseApi';
 import { getQueuedRoundUploads, getDatabase } from '@/lib/storage';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import * as Sentry from '@sentry/react-native';
+import * as Updates from 'expo-updates';
 
 // Small status badge
 function Status({ ok, warn, text }: { ok?: boolean; warn?: boolean; text: string }) {
@@ -382,6 +383,72 @@ export default function DiagnosticsScreen() {
               <Button title="Verify all rounds" onPress={runReachability} variant="secondary" />
             </View>
           </Section>
+
+          {/* OTA update status — shows which JS bundle the app is running.
+              `Updates.isEmbeddedLaunch === true` means the app is on the
+              bundle that shipped with the build (no OTA applied yet).
+              `updateId` is the unique ID of the running update (null if
+              embedded). Useful for debugging "is my OTA actually applying?" */}
+          <View style={{ marginHorizontal: 16, marginBottom: 16, gap: 8 }}>
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600' }}>
+              OTA update status
+            </Text>
+            <Card style={{ padding: 14, gap: 6 }}>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Source: </Text>
+                {Updates.isEmbeddedLaunch ? '📦 Embedded (build-time bundle)' : '☁️ OTA update'}
+              </Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Update ID: </Text>
+                {Updates.updateId ?? '(embedded — no OTA)'}
+              </Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Created: </Text>
+                {Updates.createdAt ? Updates.createdAt.toISOString() : '(embedded)'}
+              </Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Channel: </Text>
+                {Updates.channel || '(none)'}
+              </Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Runtime: </Text>
+                {Updates.runtimeVersion || '(unknown)'}
+              </Text>
+            </Card>
+            <Button
+              title="Check for update now"
+              variant="secondary"
+              onPress={async () => {
+                try {
+                  const res = await Updates.checkForUpdateAsync();
+                  if (res.isAvailable) {
+                    Alert.alert(
+                      'Update available',
+                      `A new update is available (manifest ID: ${res.manifest?.id ?? 'unknown'}).\n\nDownload + apply now?`,
+                      [
+                        { text: 'Cancel', style: 'cancel' },
+                        {
+                          text: 'Apply',
+                          onPress: async () => {
+                            try {
+                              await Updates.fetchUpdateAsync();
+                              await Updates.reloadAsync();
+                            } catch (e) {
+                              Alert.alert('Fetch/apply failed', String(e));
+                            }
+                          },
+                        },
+                      ],
+                    );
+                  } else {
+                    Alert.alert('No update available', 'You are already on the latest bundle for this channel/runtime.');
+                  }
+                } catch (e) {
+                  Alert.alert('Check failed', `${e}\n\nThis usually means expo-updates is disabled in this build, or the server is unreachable.`);
+                }
+              }}
+            />
+          </View>
 
           {/* Sentry test buttons. Used once to verify the error-reporting
               pipeline is wired up. Safe to leave here — these only fire on
