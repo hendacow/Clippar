@@ -96,6 +96,18 @@ module.exports = () => ({
           savePhotosPermission: 'Clippar saves your highlight reels to your photo library.',
         },
       ],
+      // Sentry — error tracking. The config plugin wires up the iOS/Android
+      // SDKs and source-map upload during EAS builds (needs SENTRY_AUTH_TOKEN
+      // EAS secret). DSN + environment are passed at Sentry.init() time in
+      // app/_layout.tsx so we can tag dev vs preview vs production correctly.
+      [
+        '@sentry/react-native/expo',
+        {
+          organization: 'clippar',
+          project: 'clippar',
+          // url defaults to https://sentry.io for SaaS; no need to set.
+        },
+      ],
     ],
     experiments: {
       typedRoutes: true,

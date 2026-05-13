@@ -1,8 +1,12 @@
 const path = require('path');
-const { getDefaultConfig } = require('expo/metro-config');
+// Use Sentry's `getSentryExpoConfig` instead of Expo's `getDefaultConfig` so
+// the bundler emits source maps Sentry can symbolicate. Drop-in replacement
+// that wraps `getDefaultConfig` and adds the source-map upload hook.
+// See https://docs.sentry.io/platforms/react-native/manual-setup/expo/
+const { getSentryExpoConfig } = require('@sentry/react-native/metro');
 const { withNativeWind } = require('nativewind/metro');
 
-const config = getDefaultConfig(__dirname);
+const config = getSentryExpoConfig(__dirname);
 
 // Exclude heavy directories from Metro's file watcher to speed up hot reload.
 // Uses Watchman under the hood when available (brew install watchman) — the

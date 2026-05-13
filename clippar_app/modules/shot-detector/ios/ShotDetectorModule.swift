@@ -1371,11 +1371,17 @@ public class ShotDetectorModule: Module {
             }
 
             let composition = AVMutableComposition()
-            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-                  let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 promise.reject(Exception(name: "ERR_COMPOSITION", description: "Could not create composition tracks"))
                 return
             }
+            // Audio track is created lazily only if at least one clip has audio.
+            // An empty audio track in a composition causes AVAssetExportSession
+            // to fail with AVErrorOperationNotSupportedForAsset (-11838) when a
+            // custom AVVideoComposition is also set. The CameraView records
+            // `mute` so source clips have no audio — keeping an empty audio
+            // track in the composition is what was breaking export.
+            var audioTrack: AVMutableCompositionTrack? = nil
 
             var insertTime = CMTime.zero
             var renderSize = CGSize(width: 1080, height: 1920) // Default portrait 1080p
@@ -1419,10 +1425,15 @@ public class ShotDetectorModule: Module {
                     }
                 }
 
-                // Insert audio track (if present)
+                // Insert audio track (if present). Lazily create the
+                // composition's audio track on first clip that has audio so
+                // we never end up with an empty audio track (see -11838 note).
                 if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                    if audioTrack == nil {
+                        audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
                     do {
-                        try audioTrack.insertTimeRange(
+                        try audioTrack?.insertTimeRange(
                             CMTimeRange(start: .zero, duration: duration),
                             of: assetAudioTrack,
                             at: insertTime
@@ -1605,11 +1616,17 @@ public class ShotDetectorModule: Module {
 
             // Build the composition
             let composition = AVMutableComposition()
-            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-                  let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 promise.reject(Exception(name: "ERR_COMPOSITION", description: "Could not create composition tracks"))
                 return
             }
+            // Audio track is created lazily only if at least one clip has audio
+            // OR music is provided. An empty audio track in a composition causes
+            // AVAssetExportSession to fail with AVErrorOperationNotSupportedForAsset
+            // (-11838) when a custom AVVideoComposition is also set. CameraView
+            // records `mute` by default so source clips have no audio.
+            var audioTrack: AVMutableCompositionTrack? = nil
+
 
             var insertTime = CMTime.zero
             var renderSize = CGSize(width: 1080, height: 1920) // Default portrait 1080p
@@ -1680,7 +1697,10 @@ public class ShotDetectorModule: Module {
                 }
 
                 if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
-                    try? audioTrack.insertTimeRange(
+                    if audioTrack == nil {
+                        audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
+                    try? audioTrack?.insertTimeRange(
                         sourceRange,
                         of: assetAudioTrack,
                         at: insertTime
@@ -2060,16 +2080,23 @@ public class ShotDetectorModule: Module {
                                 musicInsert = CMTimeAdd(musicInsert, insertDuration)
                             }
 
-                            // Mix: clip audio at 80% volume, music at 30%
+                            // Mix: clip audio at 80% volume (only if any clip
+                            // had audio), music at 30%. audioTrack is nil when
+                            // every source clip was muted (CameraView default).
                             let mix = AVMutableAudioMix()
-                            let clipAudioParam = AVMutableAudioMixInputParameters(track: audioTrack)
-                            clipAudioParam.setVolume(0.8, at: .zero)
+                            var inputParams: [AVMutableAudioMixInputParameters] = []
+                            if let clipAudio = audioTrack {
+                                let clipAudioParam = AVMutableAudioMixInputParameters(track: clipAudio)
+                                clipAudioParam.setVolume(0.8, at: .zero)
+                                inputParams.append(clipAudioParam)
+                            }
                             let musicAudioParam = AVMutableAudioMixInputParameters(track: musicTrack)
                             musicAudioParam.setVolume(0.3, at: .zero)
                             // Fade out music in last 2 seconds
                             let fadeStart = CMTimeSubtract(totalDuration, CMTime(seconds: 2.0, preferredTimescale: 600))
                             musicAudioParam.setVolumeRamp(fromStartVolume: 0.3, toEndVolume: 0.0, timeRange: CMTimeRange(start: fadeStart, duration: CMTime(seconds: 2.0, preferredTimescale: 600)))
-                            mix.inputParameters = [clipAudioParam, musicAudioParam]
+                            inputParams.append(musicAudioParam)
+                            mix.inputParameters = inputParams
                             audioMix = mix
                         }
                     }

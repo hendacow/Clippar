@@ -37,6 +37,7 @@ import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { searchGolfCoursesLive } from '@/lib/golfCourseApi';
 import { getQueuedRoundUploads, getDatabase } from '@/lib/storage';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import * as Sentry from '@sentry/react-native';
 
 // Small status badge
 function Status({ ok, warn, text }: { ok?: boolean; warn?: boolean; text: string }) {
@@ -381,6 +382,36 @@ export default function DiagnosticsScreen() {
               <Button title="Verify all rounds" onPress={runReachability} variant="secondary" />
             </View>
           </Section>
+
+          {/* Sentry test buttons. Used once to verify the error-reporting
+              pipeline is wired up. Safe to leave here — these only fire on
+              explicit tap. Remove if you don't want them visible. */}
+          <View style={{ marginHorizontal: 16, marginBottom: 24, gap: 8 }}>
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600' }}>
+              Sentry test
+            </Text>
+            <Button
+              title="Send test event to Sentry"
+              variant="secondary"
+              onPress={() => {
+                Sentry.captureMessage('Sentry test message from Clippar diagnostics', 'info');
+                Alert.alert('Sent', 'Check sentry.io/issues — should appear within ~10s.');
+              }}
+            />
+            <Button
+              title="Throw test exception"
+              variant="secondary"
+              onPress={() => {
+                try {
+                  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                  const _ = (null as unknown as { x: number }).x; // typed null deref
+                } catch (e) {
+                  Sentry.captureException(e);
+                  Alert.alert('Captured', 'Exception sent to Sentry. Check sentry.io/issues.');
+                }
+              }}
+            />
+          </View>
         </ScrollView>
       </View>
     </GradientBackground>
