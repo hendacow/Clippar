@@ -63,6 +63,7 @@ const storageAdapter = Platform.OS === 'web'
     })();
 
 // Database types will be generated from Supabase CLI after schema deployment
+console.log('[Boot] Supabase URL:', config.supabase.url);
 export const supabase = createClient(
   config.supabase.url,
   config.supabase.anonKey,

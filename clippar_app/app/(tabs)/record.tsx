@@ -28,8 +28,8 @@ import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
-import { getOrphanedRounds } from '@/lib/storage';
-import { useUploadContext } from '@/contexts/UploadContext';
+import { getOrphanedRounds, getCloudBackupEnabled } from '@/lib/storage';
+import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 
@@ -47,7 +47,6 @@ export default function RecordScreen() {
   const ble = useBLE();
   const shutter = useShutter();
   const round = useRound();
-  const { startUpload } = useUploadContext();
   const { getCurrentLocation } = useLocation();
   const [courseName, setCourseName] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | undefined>();
@@ -308,13 +307,26 @@ export default function RecordScreen() {
             </Text>
           )}
           <Button
-            title="Upload & Process"
-            onPress={() => {
+            title="End Round"
+            onPress={async () => {
+              console.log('[EndRound] tapped — bundle endround-v1, navigating to editor');
+              const roundId = roundState.roundId;
+              const courseNameSnapshot = roundState.courseName;
               round.endRound();
-              startUpload(roundState.roundId, roundState.courseName);
+              // Mirror import flow: silent background upload only if cloud
+              // backup is on, then drop the user on the editor (trim/preview)
+              // page so they can review their clips. No "Submitting for
+              // processing" banner — trimming already happened per-clip
+              // during recording, this is just background backup.
+              try {
+                const cloudBackupOn = await getCloudBackupEnabled();
+                if (cloudBackupOn) {
+                  void enqueueRoundUpload(roundId, courseNameSnapshot, 'local-only');
+                }
+              } catch {}
               round.resetRound();
               setCourseName('');
-              router.replace('/(tabs)');
+              router.replace(`/round/editor?roundId=${roundId}`);
             }}
             style={{ marginTop: 32, width: '100%' }}
           />
@@ -352,6 +364,11 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
+      {/* mute={true} avoids AVCaptureSession audio format negotiation, which
+          was failing with kAudioUnitErr_FormatNotSupported (-10868) and
+          killing the session 2s after recordAsync. Golf swing clips don't
+          rely on audio, so the trade-off is acceptable until the underlying
+          audio session config is fixed. */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
@@ -359,6 +376,7 @@ export default function RecordScreen() {
           facing="back"
           mode="video"
           videoQuality="1080p"
+          mute
         />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }]}>

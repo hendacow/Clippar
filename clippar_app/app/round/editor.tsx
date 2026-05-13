@@ -509,9 +509,23 @@ export default function EditorScreen() {
   const [composeProgress, setComposeProgress] = useState('');
   const [exportProgress, setExportProgress] = useState<StitchProgressEvent | null>(null);
 
+  // Navigate back if there's a screen to go back to, otherwise drop to the
+  // library tab. The editor is reachable via `router.replace`
+  // (e.g. straight from the upload flow after recording), in which case the
+  // navigation stack is empty and `router.back()` is a silent no-op that
+  // emits "The action 'GO_BACK' was not handled by any navigator" — the
+  // user-visible effect is "tap Leave does nothing".
+  const leaveEditor = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  }, []);
+
   const handleClose = useCallback(() => {
     if (totalClips === 0) {
-      router.back();
+      leaveEditor();
       return;
     }
     Alert.alert(
@@ -519,10 +533,10 @@ export default function EditorScreen() {
       'Your edits are saved as a draft. You can come back to finish later.',
       [
         { text: 'Stay', style: 'cancel' },
-        { text: 'Leave', style: 'default', onPress: () => router.back() },
+        { text: 'Leave', style: 'default', onPress: leaveEditor },
       ]
     );
-  }, [totalClips]);
+  }, [totalClips, leaveEditor]);
 
   const handleClipEdit = useCallback((clip: EditorClip) => {
     setTrimClip(clip);

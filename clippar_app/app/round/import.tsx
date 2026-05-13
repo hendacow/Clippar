@@ -864,85 +864,95 @@ export default function ImportRoundScreen() {
       const mirrorToPhotos = await getMirrorClipsToPhotos();
       const cloudBackupOn = await getCloudBackupEnabled();
 
+      // Per-clip work is independent across holes/shots — parallelize with
+      // Promise.all so the slowest clip (not the sum) sets the wall time.
+      // Production Supabase RTT + iOS sandbox checks add ~600-800ms per clip
+      // serially; in parallel a 12-clip import drops from ~10s to ~2-3s.
+      const clipTasks: Promise<void>[] = [];
       for (const hole of holes) {
         for (let shotIdx = 0; shotIdx < hole.clips.length; shotIdx++) {
           const clip = hole.clips[shotIdx];
           const shotNumber = shotIdx + 1;
+          const holeNumber = hole.holeNumber;
 
-          // `resolveAssetUri` alone returns the MediaLibrary localUri which
-          // on iOS lives under `Library/Caches/ImagePicker/…` — the system
-          // cache, which iOS is free to purge at any time. Under memory
-          // pressure or after an OS cleanup the file disappears and the
-          // upload queue/editor report "File not found" for that URI.
-          //
-          // `persistAsset` copies into `documentDirectory/clips/` which is
-          // durable (only cleared on app uninstall) so downstream code has
-          // a stable path. We still fall back to `resolveAssetUri` if the
-          // persist step fails.
-          const filename = `imported_${roundId}_h${hole.holeNumber}_s${shotNumber}_${Date.now()}.mp4`;
-          let durableUri: string;
-          try {
-            durableUri = await persistAsset(clip.uri, filename);
-          } catch {
-            durableUri = await resolveAssetUri(clip.uri);
-          }
-
-          // Photos mirroring: clip.assetId is set iff the user picked the
-          // video from Photos (so it's already there — free recovery hint).
-          // If the toggle is on AND we don't already have an assetId (e.g.
-          // an in-app recording, or some Android paths), save a fresh copy
-          // to the library and capture the new asset id.
-          let photosAssetId: string | undefined = clip.assetId;
-          if (mirrorToPhotos && !photosAssetId && MediaLibrary && isNative) {
+          clipTasks.push((async () => {
+            // `resolveAssetUri` alone returns the MediaLibrary localUri which
+            // on iOS lives under `Library/Caches/ImagePicker/…` — the system
+            // cache, which iOS is free to purge at any time. Under memory
+            // pressure or after an OS cleanup the file disappears and the
+            // upload queue/editor report "File not found" for that URI.
+            //
+            // `persistAsset` copies into `documentDirectory/clips/` which is
+            // durable (only cleared on app uninstall) so downstream code has
+            // a stable path. We still fall back to `resolveAssetUri` if the
+            // persist step fails.
+            const filename = `imported_${roundId}_h${holeNumber}_s${shotNumber}_${Date.now()}.mp4`;
+            let durableUri: string;
             try {
-              const perm = await MediaLibrary.requestPermissionsAsync();
-              if (perm.status === 'granted') {
-                const asset = await MediaLibrary.createAssetAsync(durableUri);
-                photosAssetId = asset.id;
-              }
-            } catch (err) {
-              console.warn('[Import] Mirror to Photos failed:', err);
+              durableUri = await persistAsset(clip.uri, filename);
+            } catch {
+              durableUri = await resolveAssetUri(clip.uri);
             }
-          }
 
-          const clipId = await saveLocalClip({
-            round_id: roundId,
-            hole_number: hole.holeNumber,
-            shot_number: shotNumber,
-            file_uri: durableUri,          // resolved file:// path
-            original_file_uri: durableUri, // same — original video
-            duration_seconds: clip.durationMs ? clip.durationMs / 1000 : undefined,
-            auto_trimmed: 0,             // NOT trimmed yet — editor will process lazily
-            needs_trim: 1,               // Flag for editor to auto-trim on load
-            trim_confidence: undefined,
-            impact_time_ms: undefined,
-            trim_start_ms: 0,
-            trim_end_ms: -1,
-            photos_asset_id: photosAssetId ?? null,
-          });
-          // (saveLocalClip persists photos_asset_id directly; the helper
-          //  call below is a no-op when the column is already set, but kept
-          //  for symmetry with the record/in-app save flow which mirrors
-          //  AFTER the clip row is inserted.)
-          if (photosAssetId) {
-            void setClipPhotosAssetId(clipId, photosAssetId);
-          }
+            // Photos mirroring: clip.assetId is set iff the user picked the
+            // video from Photos (so it's already there — free recovery hint).
+            // If the toggle is on AND we don't already have an assetId (e.g.
+            // an in-app recording, or some Android paths), save a fresh copy
+            // to the library and capture the new asset id.
+            let photosAssetId: string | undefined = clip.assetId;
+            if (mirrorToPhotos && !photosAssetId && MediaLibrary && isNative) {
+              try {
+                const perm = await MediaLibrary.requestPermissionsAsync();
+                if (perm.status === 'granted') {
+                  const asset = await MediaLibrary.createAssetAsync(durableUri);
+                  photosAssetId = asset.id;
+                }
+              } catch (err) {
+                console.warn('[Import] Mirror to Photos failed:', err);
+              }
+            }
 
-          try {
-            await createShot({
+            const clipId = await saveLocalClip({
               round_id: roundId,
-              user_id: user.id,
-              hole_number: hole.holeNumber,
+              hole_number: holeNumber,
               shot_number: shotNumber,
-              clip_url: '',
+              file_uri: durableUri,          // resolved file:// path
+              original_file_uri: durableUri, // same — original video
+              duration_seconds: clip.durationMs ? clip.durationMs / 1000 : undefined,
+              auto_trimmed: 0,             // NOT trimmed yet — editor will process lazily
+              needs_trim: 1,               // Flag for editor to auto-trim on load
+              trim_confidence: undefined,
+              impact_time_ms: undefined,
+              trim_start_ms: 0,
+              trim_end_ms: -1,
+              photos_asset_id: photosAssetId ?? null,
             });
-          } catch {}
+            // (saveLocalClip persists photos_asset_id directly; the helper
+            //  call below is a no-op when the column is already set, but kept
+            //  for symmetry with the record/in-app save flow which mirrors
+            //  AFTER the clip row is inserted.)
+            if (photosAssetId) {
+              void setClipPhotosAssetId(clipId, photosAssetId);
+            }
+
+            try {
+              await createShot({
+                round_id: roundId,
+                user_id: user.id,
+                hole_number: holeNumber,
+                shot_number: shotNumber,
+                clip_url: '',
+              });
+            } catch {}
+          })());
         }
       }
+      await Promise.all(clipTasks);
 
       // Save scores per hole — use scorecard scores for quick & auto imports, clip count for manual
       const usesScorecard = importMode === 'quick' || importMode === 'auto';
-      for (const hole of holes) {
+      // Score-save per hole is also independent — parallelize.
+      await Promise.all(holes.map(async (hole) => {
         const holeStrokes =
           usesScorecard && scores[hole.holeNumber]
             ? scores[hole.holeNumber]
@@ -974,7 +984,7 @@ export default function ImportRoundScreen() {
             });
           } catch {}
         }
-      }
+      }));
 
       const holesWithData = holes.filter(
         (h) =>

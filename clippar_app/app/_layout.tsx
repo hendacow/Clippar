@@ -5,6 +5,8 @@ import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
 import * as SplashScreen from 'expo-splash-screen';
+import * as Sentry from '@sentry/react-native';
+import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
@@ -23,6 +25,26 @@ import '@/global.css';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
+// Sentry — error tracking. Init must happen synchronously at module load,
+// BEFORE the first React render, so uncaught errors during boot are captured.
+// `environment` tag is read from APP_VARIANT (set in app.config.js) so we
+// can filter dev noise out of the prod dashboard. DSN is the public Sentry
+// ingest URL — safe to hardcode (it identifies the project, not a secret).
+Sentry.init({
+  dsn: 'https://e55b7e7e2dcc843babf891db909ceb59@o4511382424518656.ingest.us.sentry.io/4511382491365376',
+  // 'development' | 'production' (from APP_VARIANT in app.config.js)
+  environment: (Constants.expoConfig?.extra?.variant as string) ?? 'development',
+  // Capture 10% of perf traces — keeps event budget low while still giving
+  // useful timing signal. Bump if we need more visibility later.
+  tracesSampleRate: 0.1,
+  // In Expo dev builds RN's console.error already surfaces the LogBox red
+  // screen. Sentry's debug=true would double-log every event to console —
+  // helpful when first wiring up; can flip to false once verified.
+  debug: __DEV__,
+  // Auto-attach stack traces for console.error too, not just thrown errors.
+  attachStacktrace: true,
+});
+
 export { ErrorBoundary } from 'expo-router';
 
 export const unstable_settings = {
@@ -32,7 +54,7 @@ export const unstable_settings = {
 
 SplashScreen.preventAutoHideAsync();
 
-export default function RootLayout() {
+function RootLayout() {
   const { loading } = useAuth();
   const [biometricChecked, setBiometricChecked] = useState(false);
 
@@ -125,3 +147,7 @@ export default function RootLayout() {
     </StripeWrapper>
   );
 }
+
+// Wrap with Sentry so React render errors and unhandled promise rejections
+// inside the tree are captured and shipped to the dashboard with breadcrumbs.
+export default Sentry.wrap(RootLayout);

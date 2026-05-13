@@ -225,9 +225,13 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     }, 10_000); // Poll every 10s for more responsive updates
   }, [update]);
 
-  const lastModeRef = useRef<UploadMode>('highlight-reel');
+  // Default to local-only so the upload flow stops at "ready" and the user
+  // composes/previews/exports through the on-device editor. The cloud Modal
+  // pipeline ('highlight-reel' mode) is still available but must be opted in
+  // explicitly by the caller — no path triggers it by default.
+  const lastModeRef = useRef<UploadMode>('local-only');
 
-  const runUpload = useCallback(async (roundId: string, courseName: string, mode: UploadMode = 'highlight-reel') => {
+  const runUpload = useCallback(async (roundId: string, courseName: string, mode: UploadMode = 'local-only') => {
     cancelledRef.current = false;
     lastRoundIdRef.current = roundId;
     lastCourseNameRef.current = courseName;
@@ -407,6 +411,14 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       if (clips.length > 0) {
         // Primary: Modal GPU pipeline (fire-and-forget with 15s timeout)
         try {
+          // Diagnostic: tag every cloud-pipeline submission so we can see in
+          // device logs whether trim/compose is leaking to the cloud when
+          // the user expects a local-only flow.
+          // Filter with: `idevicesyslog | grep --line-buffered -iE 'Clippar\\.Cloud'`
+          console.log(
+            `[Clippar.Cloud] POSTing modal.run pipeline — roundId=${roundId} clipCount=${clips.length} mode=${mode}`,
+          );
+
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 15_000);
 
@@ -454,7 +466,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   }, [update, startPolling]);
 
   const startUpload = useCallback((roundId: string, courseName: string, mode?: UploadMode) => {
-    runUpload(roundId, courseName, mode ?? 'highlight-reel');
+    runUpload(roundId, courseName, mode ?? 'local-only');
   }, [runUpload]);
 
   const cancelUpload = useCallback(() => {

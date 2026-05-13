@@ -167,10 +167,12 @@ public class ShotDetectorModule: Module {
     private func trimVideoPassthrough(uri: String, startMs: Double, endMs: Double, promise: Promise) {
         DispatchQueue.global(qos: .userInitiated).async {
             autoreleasepool {
+            print("[Clippar.Trim] enter LOCAL passthrough trim — startMs=\(startMs) endMs=\(endMs) uri=\(uri)")
             do {
                 let fileURL = self.resolveFileURL(uri)
 
                 guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                    print("[Clippar.Trim] FAIL file-not-found path=\(fileURL.path)")
                     promise.reject(Exception(name: "ERR_FILE_NOT_FOUND", description: "Video file not found: \(fileURL.path)"))
                     return
                 }
@@ -184,6 +186,7 @@ public class ShotDetectorModule: Module {
                 let outputExt = (ext == "mov") ? "mov" : "mp4"
 
                 guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+                    print("[Clippar.Trim] FAIL could-not-create AVAssetExportSession")
                     promise.reject(Exception(name: "ERR_EXPORT_SESSION", description: "Could not create AVAssetExportSession"))
                     return
                 }
@@ -215,17 +218,19 @@ public class ShotDetectorModule: Module {
                 semaphore.wait()
 
                 if let error = exportError {
+                    print("[Clippar.Trim] FAIL export error=\(error.localizedDescription)")
                     promise.reject(Exception(name: "ERR_TRIM_FAILED", description: "Trim export failed: \(error.localizedDescription)"))
                     return
                 }
 
                 let elapsed = CACurrentMediaTime() - startTime
-                print("[ShotDetector] Passthrough trim took \(String(format: "%.2f", elapsed))s — zero re-encode")
+                print("[Clippar.Trim] OK passthrough — \(String(format: "%.2f", elapsed))s out=\(outputURL.lastPathComponent)")
 
                 promise.resolve([
                     "trimmedUri": outputURL.absoluteString,
                 ] as [String: Any])
             } catch {
+                print("[Clippar.Trim] FAIL exception=\(error.localizedDescription)")
                 promise.reject(Exception(name: "ERR_TRIM_FAILED", description: error.localizedDescription))
             }
             } // autoreleasepool
@@ -240,6 +245,7 @@ public class ShotDetectorModule: Module {
             // VNImageRequestHandler, pixel buffers, and AVAssetExportSession are freed
             // immediately after each call — critical for batch processing 60-100+ clips.
             autoreleasepool {
+            print("[Clippar.Trim] enter LOCAL detectAndTrim — preRollMs=\(preRollMs) postRollMs=\(postRollMs) uri=\(uri)")
             let availableMB = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
             print("[ShotDetector] Available memory: \(String(format: "%.0f", availableMB))MB before processing \(uri.suffix(20))")
 
@@ -363,6 +369,7 @@ public class ShotDetectorModule: Module {
                 }
 
                 print("[ShotDetector] Detect+trim total: \(String(format: "%.2f", totalElapsed))s (detection: \(String(format: "%.1f", detectionElapsed))s, trim: \(String(format: "%.2f", totalElapsed - detectionElapsed))s)")
+                print("[Clippar.Trim] OK detectAndTrim — totalSec=\(String(format: "%.2f", totalElapsed)) trimRange=\(trimStart)..\(trimEnd) out=\(outputURL.lastPathComponent)")
 
                 let availableMBAfter = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
                 print("[ShotDetector] Available memory: \(String(format: "%.0f", availableMBAfter))MB after processing (delta: \(String(format: "%.0f", availableMBAfter - availableMB))MB)")
@@ -1364,11 +1371,17 @@ public class ShotDetectorModule: Module {
             }
 
             let composition = AVMutableComposition()
-            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-                  let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 promise.reject(Exception(name: "ERR_COMPOSITION", description: "Could not create composition tracks"))
                 return
             }
+            // Audio track is created lazily only if at least one clip has audio.
+            // An empty audio track in a composition causes AVAssetExportSession
+            // to fail with AVErrorOperationNotSupportedForAsset (-11838) when a
+            // custom AVVideoComposition is also set. The CameraView records
+            // `mute` so source clips have no audio — keeping an empty audio
+            // track in the composition is what was breaking export.
+            var audioTrack: AVMutableCompositionTrack? = nil
 
             var insertTime = CMTime.zero
             var renderSize = CGSize(width: 1080, height: 1920) // Default portrait 1080p
@@ -1412,10 +1425,15 @@ public class ShotDetectorModule: Module {
                     }
                 }
 
-                // Insert audio track (if present)
+                // Insert audio track (if present). Lazily create the
+                // composition's audio track on first clip that has audio so
+                // we never end up with an empty audio track (see -11838 note).
                 if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
+                    if audioTrack == nil {
+                        audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
                     do {
-                        try audioTrack.insertTimeRange(
+                        try audioTrack?.insertTimeRange(
                             CMTimeRange(start: .zero, duration: duration),
                             of: assetAudioTrack,
                             at: insertTime
@@ -1463,13 +1481,14 @@ public class ShotDetectorModule: Module {
                 .appendingPathComponent("stitch_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
 
-            // Reverted to HighestQuality after user feedback that
-            // MediumQuality output looked noticeably worse. With the
-            // detected swing window typically being 5-7s of 1080p content
-            // and ~12 shots per round, a few extra seconds of compose
-            // time is the right trade for keeping the exported reel
-            // visually identical to the source captures.
-            let presetName = AVAssetExportPresetHighestQuality
+            // Use size-specific preset (forces H.264 1080p SDR) instead of
+            // HighestQuality. With a custom AVVideoComposition on HEVC/HDR/
+            // Dolby Vision source (the iPhone camera default since iOS 17+),
+            // HighestQuality returns AVErrorOperationNotSupportedForAsset
+            // (-11838) at export time because it can't pick an output format.
+            // 1920x1080 forces a known good codec/colorspace combo and matches
+            // the camera's recording resolution, so there's no visible loss.
+            let presetName = AVAssetExportPreset1920x1080
             guard let exportSession = AVAssetExportSession(asset: composition, presetName: presetName) else {
                 promise.reject(Exception(name: "ERR_EXPORT_SESSION", description: "Could not create export session for stitched composition"))
                 return
@@ -1505,7 +1524,11 @@ public class ShotDetectorModule: Module {
             semaphore.wait()
 
             if let error = exportError {
-                promise.reject(Exception(name: "ERR_STITCH_FAILED", description: "Stitch export failed: \(error.localizedDescription)"))
+                let nsErr = error as NSError
+                let underlying = (nsErr.userInfo[NSUnderlyingErrorKey] as? NSError).map { "code=\($0.code) domain=\($0.domain)" } ?? "none"
+                print("[Clippar.Stitch] FAIL exportSession.status=\(exportSession.status.rawValue) error=\(error.localizedDescription) code=\(nsErr.code) domain=\(nsErr.domain) underlying=\(underlying) userInfo=\(nsErr.userInfo)")
+                print("[Clippar.Stitch] context: clipCount=\(clipUris.count) renderSize=\(renderSize) videoCompositionInstructions=\(videoComposition.instructions.count)")
+                promise.reject(Exception(name: "ERR_STITCH_FAILED", description: "Stitch export failed: \(error.localizedDescription) (code \(nsErr.code))"))
                 return
             }
 
@@ -1577,7 +1600,10 @@ public class ShotDetectorModule: Module {
         DispatchQueue.global(qos: .userInitiated).async {
             let startTime = CACurrentMediaTime()
 
+            print("[Clippar.Compose] enter LOCAL composeReel — clips=\(clips.count) hasMusic=\(musicUri != nil)")
+
             guard !clips.isEmpty else {
+                print("[Clippar.Compose] FAIL no clips")
                 promise.reject(Exception(name: "ERR_NO_CLIPS", description: "No clips provided"))
                 return
             }
@@ -1590,11 +1616,17 @@ public class ShotDetectorModule: Module {
 
             // Build the composition
             let composition = AVMutableComposition()
-            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-                  let audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
                 promise.reject(Exception(name: "ERR_COMPOSITION", description: "Could not create composition tracks"))
                 return
             }
+            // Audio track is created lazily only if at least one clip has audio
+            // OR music is provided. An empty audio track in a composition causes
+            // AVAssetExportSession to fail with AVErrorOperationNotSupportedForAsset
+            // (-11838) when a custom AVVideoComposition is also set. CameraView
+            // records `mute` by default so source clips have no audio.
+            var audioTrack: AVMutableCompositionTrack? = nil
+
 
             var insertTime = CMTime.zero
             var renderSize = CGSize(width: 1080, height: 1920) // Default portrait 1080p
@@ -1665,7 +1697,10 @@ public class ShotDetectorModule: Module {
                 }
 
                 if let assetAudioTrack = asset.tracks(withMediaType: .audio).first {
-                    try? audioTrack.insertTimeRange(
+                    if audioTrack == nil {
+                        audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                    }
+                    try? audioTrack?.insertTimeRange(
                         sourceRange,
                         of: assetAudioTrack,
                         at: insertTime
@@ -2045,16 +2080,23 @@ public class ShotDetectorModule: Module {
                                 musicInsert = CMTimeAdd(musicInsert, insertDuration)
                             }
 
-                            // Mix: clip audio at 80% volume, music at 30%
+                            // Mix: clip audio at 80% volume (only if any clip
+                            // had audio), music at 30%. audioTrack is nil when
+                            // every source clip was muted (CameraView default).
                             let mix = AVMutableAudioMix()
-                            let clipAudioParam = AVMutableAudioMixInputParameters(track: audioTrack)
-                            clipAudioParam.setVolume(0.8, at: .zero)
+                            var inputParams: [AVMutableAudioMixInputParameters] = []
+                            if let clipAudio = audioTrack {
+                                let clipAudioParam = AVMutableAudioMixInputParameters(track: clipAudio)
+                                clipAudioParam.setVolume(0.8, at: .zero)
+                                inputParams.append(clipAudioParam)
+                            }
                             let musicAudioParam = AVMutableAudioMixInputParameters(track: musicTrack)
                             musicAudioParam.setVolume(0.3, at: .zero)
                             // Fade out music in last 2 seconds
                             let fadeStart = CMTimeSubtract(totalDuration, CMTime(seconds: 2.0, preferredTimescale: 600))
                             musicAudioParam.setVolumeRamp(fromStartVolume: 0.3, toEndVolume: 0.0, timeRange: CMTimeRange(start: fadeStart, duration: CMTime(seconds: 2.0, preferredTimescale: 600)))
-                            mix.inputParameters = [clipAudioParam, musicAudioParam]
+                            inputParams.append(musicAudioParam)
+                            mix.inputParameters = inputParams
                             audioMix = mix
                         }
                     }
@@ -2066,10 +2108,13 @@ public class ShotDetectorModule: Module {
                 .appendingPathComponent("reel_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
 
-            // HighestQuality preset — keeps the reel visually identical to
-            // the source captures. See note in stitchClips above for why
-            // the earlier MediumQuality experiment was reverted.
-            guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            // Use size-specific preset (forces H.264 1080p SDR) instead of
+            // HighestQuality. With a custom AVVideoComposition + Core Animation
+            // overlay on HEVC/HDR/Dolby Vision source (iPhone default since
+            // iOS 17+), HighestQuality returns AVErrorOperationNotSupportedForAsset
+            // (-11838) at export time. 1920x1080 forces a known good codec
+            // combo and matches the camera's recording resolution.
+            guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPreset1920x1080) else {
                 promise.reject(Exception(name: "ERR_EXPORT_SESSION", description: "Could not create export session for reel"))
                 return
             }
@@ -2107,13 +2152,17 @@ public class ShotDetectorModule: Module {
             semaphore.wait()
 
             if let error = exportError {
-                promise.reject(Exception(name: "ERR_COMPOSE_FAILED", description: "Reel compose failed: \(error.localizedDescription)"))
+                let nsErr = error as NSError
+                let underlying = (nsErr.userInfo[NSUnderlyingErrorKey] as? NSError).map { "code=\($0.code) domain=\($0.domain)" } ?? "none"
+                print("[Clippar.Compose] FAIL exportSession.status=\(exportSession.status.rawValue) error=\(error.localizedDescription) code=\(nsErr.code) domain=\(nsErr.domain) underlying=\(underlying) userInfo=\(nsErr.userInfo)")
+                print("[Clippar.Compose] context: clips=\(clips.count) totalDurationSec=\(CMTimeGetSeconds(totalDuration)) renderSize=\(renderSize) hasOverlay=\(scorecard != nil) hasMusic=\(musicUri != nil) videoCompositionInstructions=\(videoComposition.instructions.count)")
+                promise.reject(Exception(name: "ERR_COMPOSE_FAILED", description: "Reel compose failed: \(error.localizedDescription) (code \(nsErr.code))"))
                 return
             }
 
             let elapsed = CACurrentMediaTime() - startTime
             let durationSec = CMTimeGetSeconds(totalDuration)
-            print("[ShotDetector] Composed reel (\(clips.count) clips, \(String(format: "%.1f", durationSec))s, overlay: \(scorecard != nil), music: \(musicUri != nil)) in \(String(format: "%.1f", elapsed))s")
+            print("[Clippar.Compose] OK clips=\(clips.count) durationSec=\(String(format: "%.1f", durationSec)) overlay=\(scorecard != nil) music=\(musicUri != nil) elapsedSec=\(String(format: "%.1f", elapsed)) out=\(outputURL.lastPathComponent)")
 
             promise.resolve([
                 "reelUri": outputURL.absoluteString,
