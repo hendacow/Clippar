@@ -75,6 +75,10 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
   const insets = useSafeAreaInsets();
   const { ref: roundsRef, onLayout: roundsOnLayout } = useOnboardingTarget('rounds-list');
 
+  const currentRoute = state.routes[state.index];
+  const currentOptions = descriptors[currentRoute.key]?.options;
+  if ((currentOptions?.tabBarStyle as any)?.display === 'none') return null;
+
   const getRoute = (name: string) => state.routes.find((r) => r.name === name);
   const isFocused = (name: string) => state.routes[state.index].name === name;
 
