@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { View, Text, Pressable, Alert, Platform, StyleSheet } from 'react-native';
-import { router, useNavigation } from 'expo-router';
+import { router } from 'expo-router';
+import { useRecordingContext } from '@/contexts/RecordingContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import {
@@ -43,7 +44,6 @@ const CameraView = isNative
 
 export default function RecordScreen() {
   const insets = useSafeAreaInsets();
-  const navigation = useNavigation();
   const ble = useBLE();
   const shutter = useShutter();
   const round = useRound();
@@ -55,6 +55,7 @@ export default function RecordScreen() {
   const [orphanedRound, setOrphanedRound] = useState<{ id: string; course_name: string } | null>(null);
   const importTarget = useOnboardingTarget('import-card');
 
+  const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
   const isActive = roundState?.status === 'in_progress';
 
@@ -80,12 +81,9 @@ export default function RecordScreen() {
 
   // Hide tab bar during active recording
   useEffect(() => {
-    if (isActive) {
-      navigation.setOptions({ tabBarStyle: { display: 'none' } });
-    } else {
-      navigation.setOptions({ tabBarStyle: undefined });
-    }
-  }, [isActive, navigation]);
+    setRecordingActive(isActive);
+    return () => { setRecordingActive(false); };
+  }, [isActive, setRecordingActive]);
 
   // Subscribe shutter press (BLE or volume button) to camera toggle
   useEffect(() => {
