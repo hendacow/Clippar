@@ -237,7 +237,7 @@ export default function DiagnosticsScreen() {
           </Pressable>
           <Text
             style={{
-              color: theme.colors.textPrimary,
+              color: theme.colors.accentRed,
               fontWeight: '700',
               fontSize: 18,
               flex: 1,
