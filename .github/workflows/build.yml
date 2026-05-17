@@ -5,8 +5,8 @@
 # out because:
 #   1. Native changes are infrequent enough that manual dispatch is fine
 #   2. Free-tier EAS builds are slow (~15-30 min queue + 10 min build)
-#   3. We're still validating the preview tier; don't want to burn quota
-# Re-enable the `push:` block when you're ready for fully auto preview/prod
+#   3. We're still validating the staging tier; don't want to burn quota
+# Re-enable the `push:` block when you're ready for fully auto staging/prod
 # builds on every push.
 
 name: CI/CD (Full EAS Build)
@@ -20,7 +20,9 @@ on:
         default: preview
         type: choice
         options:
+          - development
           - preview
+          - staging
           - production
   # Re-enable when ready:
   # push:

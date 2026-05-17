@@ -1,24 +1,37 @@
 /**
  * Dynamic Expo config — selects bundle id, name, and Supabase project
- * based on `APP_VARIANT` so we can run a Dev build alongside Production
- * on the same device. Picked up by EAS Build via the `env` block in each
- * eas.json profile, and by `expo start` via `APP_VARIANT=development npx expo start`.
+ * based on `APP_VARIANT` so we can run Dev / Staging / Production builds
+ * side-by-side on the same device. Picked up by EAS Build via the `env`
+ * block in each eas.json profile, and by `expo start` via
+ * `APP_VARIANT=development npx expo start`.
  *
  * Variants:
- *   APP_VARIANT=development → com.clippar.app.dev / "Clippar Dev"
- *   default                 → com.clippar.app     / "Clippar"
+ *   APP_VARIANT=development → com.clippar.app.dev     / "Clippar Dev"
+ *   APP_VARIANT=staging     → com.clippar.app.staging / "Clippar Staging"
+ *   default                 → com.clippar.app         / "Clippar"
  */
 
-const IS_DEV = process.env.APP_VARIANT === 'development';
+const APP_VARIANT = process.env.APP_VARIANT;
+const IS_DEV = APP_VARIANT === 'development';
+const IS_STAGING = APP_VARIANT === 'staging';
+
+const NAME = IS_DEV ? 'Clippar Dev' : IS_STAGING ? 'Clippar Staging' : 'Clippar';
+const BUNDLE_ID = IS_DEV
+  ? 'com.clippar.app.dev'
+  : IS_STAGING
+    ? 'com.clippar.app.staging'
+    : 'com.clippar.app';
+const SCHEME = IS_DEV ? 'clippar-dev' : IS_STAGING ? 'clippar-staging' : 'clippar';
+const VARIANT = IS_DEV ? 'development' : IS_STAGING ? 'staging' : 'production';
 
 module.exports = () => ({
   expo: {
-    name: IS_DEV ? 'Clippar Dev' : 'Clippar',
+    name: NAME,
     slug: 'clippar',
     version: '1.0.0',
     orientation: 'portrait',
     icon: './assets/images/icon.png',
-    scheme: IS_DEV ? 'clippar-dev' : 'clippar',
+    scheme: SCHEME,
     userInterfaceStyle: 'dark',
     newArchEnabled: true,
     splash: {
@@ -28,7 +41,7 @@ module.exports = () => ({
     },
     ios: {
       supportsTablet: false,
-      bundleIdentifier: IS_DEV ? 'com.clippar.app.dev' : 'com.clippar.app',
+      bundleIdentifier: BUNDLE_ID,
       infoPlist: {
         NSBluetoothAlwaysUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
         NSBluetoothPeripheralUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
@@ -41,7 +54,7 @@ module.exports = () => ({
         foregroundImage: './assets/images/adaptive-icon.png',
         backgroundColor: '#0A0A0F',
       },
-      package: IS_DEV ? 'com.clippar.app.dev' : 'com.clippar.app',
+      package: BUNDLE_ID,
       edgeToEdgeEnabled: true,
       permissions: [
         'android.permission.CAMERA',
@@ -117,7 +130,7 @@ module.exports = () => ({
         projectId: '2c16b1a5-b169-4d92-b4fc-913067dd4fc6',
       },
       router: {},
-      variant: IS_DEV ? 'development' : 'production',
+      variant: VARIANT,
     },
     owner: 'clippar',
     runtimeVersion: {
