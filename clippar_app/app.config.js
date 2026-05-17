@@ -138,6 +138,14 @@ module.exports = () => ({
     },
     updates: {
       url: 'https://u.expo.dev/2c16b1a5-b169-4d92-b4fc-913067dd4fc6',
+      // Wait up to 5 seconds at cold start for a downloaded OTA bundle to
+      // be ready before falling back to the embedded one. Without this
+      // (default 0), the app launches with embedded immediately and any
+      // already-downloaded OTA never gets loaded — confirmed by iOS
+      // Console.app showing zero EXUpdates logs at cold start.
+      // Cost: ~0ms when no update is pending (fast path); up to 5s when
+      // a freshly-downloaded bundle is being applied.
+      fallbackToCacheTimeout: 5000,
     },
   },
 });
