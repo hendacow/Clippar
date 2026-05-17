@@ -380,7 +380,7 @@ export default function DiagnosticsScreen() {
               }
             />
             <View style={{ marginTop: 10 }}>
-              <Button title="Verify all rounds" onPress={runReachability} variant="secondary" />
+              <Button title="Verify rounds now" onPress={runReachability} variant="secondary" />
             </View>
           </Section>
 
