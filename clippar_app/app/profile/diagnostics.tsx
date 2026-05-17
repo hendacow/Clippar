@@ -391,7 +391,7 @@ export default function DiagnosticsScreen() {
               embedded). Useful for debugging "is my OTA actually applying?" */}
           <View style={{ marginHorizontal: 16, marginBottom: 16, gap: 8 }}>
             <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600' }}>
-              OTA update status
+              OTA status
             </Text>
             <Card style={{ padding: 14, gap: 6 }}>
               <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
