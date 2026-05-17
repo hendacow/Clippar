@@ -1,3 +1,4 @@
+console.log("OTA test 2026-05-17");
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { Stack } from 'expo-router';
