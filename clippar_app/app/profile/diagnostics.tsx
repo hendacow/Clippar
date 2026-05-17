@@ -329,7 +329,7 @@ export default function DiagnosticsScreen() {
             />
             <View style={{ marginTop: 10 }}>
               <Button
-                title="Replay intro + tour"
+                title="Replay onboarding"
                 onPress={() => {
                   router.replace('/(tabs)');
                   requestAnimationFrame(() => void replayOnboarding());
