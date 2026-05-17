@@ -41,6 +41,19 @@
         "APP_VARIANT": "staging"
       }
     },
+    "internal": {
+      "distribution": "internal",
+      "channel": "production",
+      "environment": "production",
+      "ios": {
+        "simulator": false,
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "autoIncrement": true
+    },
     "production": {
       "distribution": "store",
       "channel": "production",
