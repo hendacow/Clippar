@@ -361,7 +361,7 @@ export default function DiagnosticsScreen() {
           </Section>
 
           {/* 6. VIDEO REACHABILITY */}
-          <Section title="Video reachability">
+          <Section title="Video reach">
             <Row
               label="Last check"
               status={
