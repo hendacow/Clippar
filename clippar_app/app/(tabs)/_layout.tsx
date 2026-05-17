@@ -13,6 +13,7 @@ import { useEffect } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '@/constants/theme';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
+import { RecordingProvider, useRecordingContext } from '@/contexts/RecordingContext';
 
 const RECORD_SIZE = 64;
 const PILL_HEIGHT = 68;
@@ -74,6 +75,9 @@ function RecordCTAButton({
 function FloatingTabBar({ state, descriptors, navigation }: any) {
   const insets = useSafeAreaInsets();
   const { ref: roundsRef, onLayout: roundsOnLayout } = useOnboardingTarget('rounds-list');
+  const { isRecordingActive } = useRecordingContext();
+
+  if (isRecordingActive) return null;
 
   const currentRoute = state.routes[state.index];
   const currentOptions = descriptors[currentRoute.key]?.options;
@@ -218,18 +222,20 @@ const styles = StyleSheet.create({
 
 export default function TabLayout() {
   return (
-    <Tabs
-      tabBar={(props) => <FloatingTabBar {...props} />}
-      screenOptions={{
-        headerShown: false,
-        // absolute so screen content extends behind the floating bar
-        tabBarStyle: { position: 'absolute' },
-      }}
-    >
-      <Tabs.Screen name="index" options={{ title: 'Rounds' }} />
-      <Tabs.Screen name="record" options={{ title: 'Record' }} />
-      <Tabs.Screen name="shop" options={{ title: 'Shop' }} />
-      <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
-    </Tabs>
+    <RecordingProvider>
+      <Tabs
+        tabBar={(props) => <FloatingTabBar {...props} />}
+        screenOptions={{
+          headerShown: false,
+          // absolute so screen content extends behind the floating bar
+          tabBarStyle: { position: 'absolute' },
+        }}
+      >
+        <Tabs.Screen name="index" options={{ title: 'Rounds' }} />
+        <Tabs.Screen name="record" options={{ title: 'Record' }} />
+        <Tabs.Screen name="shop" options={{ title: 'Shop' }} />
+        <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
+      </Tabs>
+    </RecordingProvider>
   );
 }
