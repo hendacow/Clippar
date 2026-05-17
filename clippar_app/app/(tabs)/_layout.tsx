@@ -15,7 +15,7 @@ import { theme } from '@/constants/theme';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import { RecordingProvider, useRecordingContext } from '@/contexts/RecordingContext';
 
-const RECORD_SIZE = 64;
+const RECORD_SIZE = 58;
 const PILL_HEIGHT = 68;
 
 function RecordCTAButton({
