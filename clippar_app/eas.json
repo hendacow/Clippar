@@ -25,6 +25,19 @@
         "APP_VARIANT": "development"
       }
     },
+    "preview": {
+      "distribution": "internal",
+      "channel": "preview",
+      "environment": "production",
+      "ios": {
+        "simulator": false,
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "autoIncrement": true
+    },
     "staging": {
       "distribution": "internal",
       "channel": "staging",
@@ -40,19 +53,6 @@
       "env": {
         "APP_VARIANT": "staging"
       }
-    },
-    "internal": {
-      "distribution": "internal",
-      "channel": "production",
-      "environment": "production",
-      "ios": {
-        "simulator": false,
-        "buildConfiguration": "Release"
-      },
-      "android": {
-        "buildType": "app-bundle"
-      },
-      "autoIncrement": true
     },
     "production": {
       "distribution": "store",

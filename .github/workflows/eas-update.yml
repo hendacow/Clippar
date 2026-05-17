@@ -6,10 +6,13 @@
 # code — those still need a full `eas build`.
 #
 # Promotion model (matches `eas.json` channels):
-#   default push to main → staging channel  → updates "Clippar Staging" build
-#                                              (TestFlight beta testers)
+#   default push to main → preview channel  → updates your daily "Clippar"
+#                                              internal install (built from
+#                                              `preview` profile)
 #   workflow_dispatch with branch=development → updates "Clippar Dev" build
-#                                              (your internal dev install)
+#                                              (your dev client install)
+#   workflow_dispatch with branch=staging → updates "Clippar Staging" build
+#                                              (TestFlight beta, when set up)
 #   workflow_dispatch with branch=production → updates "Clippar" App Store build
 #                                              (PUBLIC users — only run when intentional)
 #
@@ -38,10 +41,11 @@ on:
       branch:
         description: 'EAS Update branch (matches eas.json channel)'
         required: true
-        default: staging
+        default: preview
         type: choice
         options:
           - development
+          - preview
           - staging
           - production
       message:
@@ -85,9 +89,11 @@ jobs:
       - name: Resolve update parameters
         id: params
         run: |
-          # Default to "staging" for automatic push-to-main runs.
-          # workflow_dispatch supplies its own value via inputs.branch.
-          BRANCH="${{ github.event.inputs.branch || 'staging' }}"
+          # Default to "preview" for automatic push-to-main runs — this matches
+          # the channel that the existing "Clippar" internal install on Henry's
+          # phone listens to. Switch to "staging" once a staging build/Supabase
+          # is installed and ready to receive beta updates.
+          BRANCH="${{ github.event.inputs.branch || 'preview' }}"
           # Prefer the manual input message; otherwise use the commit subject.
           MESSAGE="${{ github.event.inputs.message }}"
           if [ -z "$MESSAGE" ]; then

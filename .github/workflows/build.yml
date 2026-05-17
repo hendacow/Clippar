@@ -17,10 +17,11 @@ on:
       profile:
         description: 'EAS build profile'
         required: true
-        default: staging
+        default: preview
         type: choice
         options:
           - development
+          - preview
           - staging
           - production
   # Re-enable when ready:
