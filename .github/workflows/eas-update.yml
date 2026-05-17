@@ -6,10 +6,12 @@
 # code — those still need a full `eas build`.
 #
 # Promotion model (matches `eas.json` channels):
-#   default push → preview branch  → updates the standalone "Clippar" preview
-#                                    install on your phone
-#   workflow_dispatch with branch=production → updates the App Store build
-#                                              (only run when intentional)
+#   default push to main → staging channel  → updates "Clippar Staging" build
+#                                              (TestFlight beta testers)
+#   workflow_dispatch with branch=development → updates "Clippar Dev" build
+#                                              (your internal dev install)
+#   workflow_dispatch with branch=production → updates "Clippar" App Store build
+#                                              (PUBLIC users — only run when intentional)
 #
 # Required repo secret: EXPO_TOKEN
 #   Create at https://expo.dev/settings/access-tokens (or `eas account:create-access-token`)
@@ -36,11 +38,11 @@ on:
       branch:
         description: 'EAS Update branch (matches eas.json channel)'
         required: true
-        default: preview
+        default: staging
         type: choice
         options:
           - development
-          - preview
+          - staging
           - production
       message:
         description: 'Optional release notes for this update'
@@ -83,7 +85,9 @@ jobs:
       - name: Resolve update parameters
         id: params
         run: |
-          BRANCH="${{ github.event.inputs.branch || 'preview' }}"
+          # Default to "staging" for automatic push-to-main runs.
+          # workflow_dispatch supplies its own value via inputs.branch.
+          BRANCH="${{ github.event.inputs.branch || 'staging' }}"
           # Prefer the manual input message; otherwise use the commit subject.
           MESSAGE="${{ github.event.inputs.message }}"
           if [ -z "$MESSAGE" ]; then

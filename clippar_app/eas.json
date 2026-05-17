@@ -25,19 +25,20 @@
         "APP_VARIANT": "development"
       }
     },
-    "preview": {
+    "staging": {
       "distribution": "internal",
-      "channel": "preview",
-      "environment": "production",
-      "ios": { "simulator": false }
-    },
-    "preview-dev": {
-      "distribution": "internal",
-      "channel": "development",
-      "environment": "development",
-      "ios": { "simulator": false },
+      "channel": "staging",
+      "environment": "preview",
+      "ios": {
+        "simulator": false,
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "autoIncrement": true,
       "env": {
-        "APP_VARIANT": "development"
+        "APP_VARIANT": "staging"
       }
     },
     "production": {
@@ -50,11 +51,18 @@
     }
   },
   "submit": {
+    "staging": {
+      "ios": {
+        "appleId": "henrycoward@icloud.com",
+        "ascAppId": "PLACEHOLDER_STAGING_ASC_APP_ID",
+        "appleTeamId": "LBJUXXPJ6H"
+      }
+    },
     "production": {
       "ios": {
-        "appleId": "PLACEHOLDER_REPLACE_ME",
-        "ascAppId": "PLACEHOLDER_REPLACE_ME",
-        "appleTeamId": "PLACEHOLDER_REPLACE_ME"
+        "appleId": "henrycoward@icloud.com",
+        "ascAppId": "PLACEHOLDER_PRODUCTION_ASC_APP_ID",
+        "appleTeamId": "LBJUXXPJ6H"
       }
     }
   }

@@ -1,0 +1,71 @@
+# Claude Security Review — AI-powered security analysis on every PR, using
+# the existing CLAUDE_CODE_OAUTH_TOKEN (Claude subscription) so it doesn't
+# cost API tokens.
+#
+# Mirrors the dedicated anthropics/claude-code-security-review action but
+# routes through the general claude-code-action so we can use OAuth auth.
+#
+# Required secret: CLAUDE_CODE_OAUTH_TOKEN (already set up — same secret
+# used by claude.yml and claude-code-review.yml).
+
+name: Security Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+jobs:
+  security:
+    name: Claude security scan
+    # Skip drafts so we don't burn quota on WIP branches.
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write  # Post inline review comments
+      issues: read
+      id-token: write
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 2
+
+      - name: Run Claude security review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Security-focused prompt — narrower than general code review.
+          # Claude has gh CLI access to post inline review comments.
+          prompt: |
+            You are a security reviewer for PR ${{ github.repository }}#${{ github.event.pull_request.number }}.
+
+            ONLY flag SECURITY issues. Ignore style, performance, general code quality,
+            and architectural concerns — those are handled by a separate review.
+
+            Scan the diff for these categories (skip categories with no issues):
+              - Injection: SQL, command, NoSQL, LDAP, XPath, XXE
+              - Authentication & authorization: broken auth, privilege escalation, IDOR
+              - Secrets & data exposure: hardcoded keys, tokens in logs, PII leaks
+              - Cryptography: weak algorithms, hardcoded IVs, bad key management
+              - Input validation: missing sanitization, unsafe deserialization, path traversal
+              - XSS: reflected, stored, DOM-based
+              - Code execution: RCE via eval / dynamic require / pickle / etc.
+              - Race conditions: TOCTOU, unsafe concurrent state
+              - Configuration: insecure defaults, missing security headers, permissive CORS
+              - Mobile-specific: insecure storage (vs SecureStore), URL scheme hijacking,
+                deep link / universal link abuse, jailbreak/root bypass risks
+
+            For each finding, post an inline review comment via the gh CLI with:
+              1. Severity tag — [CRITICAL] / [HIGH] / [MEDIUM] / [LOW]
+              2. The vulnerable file:line
+              3. The attack vector (how an attacker exploits this)
+              4. A concrete code fix
+
+            If you find no issues, post ONE summary comment: "✅ No security issues found in this diff."
+
+            Be strict on CRITICAL/HIGH (real exploit paths). For MEDIUM/LOW (hardening,
+            defense in depth) be selective — flag only the most actionable items so
+            the PR author isn't drowning in noise.
+          claude_args: '--allowed-tools "Bash(gh pr *),Bash(gh api *),Read,Grep,Glob"'
