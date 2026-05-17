@@ -3,14 +3,19 @@
 # Drops project archive from ~186 MB to ~30 MB (typical) → faster builds.
 # See: https://expo.fyi/eas-build-archive
 
-# IMPORTANT: ignore the entire ios/ and android/ folders so EAS runs a clean
+# IMPORTANT: ignore the ROOT ios/ and android/ folders so EAS runs a clean
 # `expo prebuild` from app.config.js each build. Uploading a stale local
 # ios/ folder caused a real outage — the local Expo.plist had
 # EXUpdatesEnabled=false (generated before `updates.url` was added to
 # app.config.js) and EAS used that as-is, silently disabling all OTAs for
-# every build. Don't upload native folders — let EAS prebuild them.
-ios/
-android/
+# every build. Don't upload generated root native folders — let EAS prebuild them.
+#
+# IMPORTANT: leading slash anchors these to the project root so they only
+# match clippar_app/ios/ and clippar_app/android/. Without the slash, the
+# pattern would match nested directories like modules/shot-detector/ios/
+# which contains the custom Swift implementation of ShotDetectorModule.
+/ios/
+/android/
 
 # Documentation (not needed at build time)
 *.md
