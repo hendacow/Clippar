@@ -424,17 +424,26 @@ export default function DiagnosticsScreen() {
                   if (res.isAvailable) {
                     Alert.alert(
                       'Update available',
-                      `A new update is available (manifest ID: ${res.manifest?.id ?? 'unknown'}).\n\nDownload + apply now?`,
+                      `A new update is available (manifest ID: ${res.manifest?.id ?? 'unknown'}).\n\nDownload now? The update will apply the next time you fully quit and reopen the app.`,
                       [
                         { text: 'Cancel', style: 'cancel' },
                         {
-                          text: 'Apply',
+                          text: 'Download',
                           onPress: async () => {
                             try {
-                              await Updates.fetchUpdateAsync();
-                              await Updates.reloadAsync();
+                              // Fetch but don't reload. reloadAsync() in this build
+                              // triggers a JSI Pointer crash during teardown
+                              // (EXC_BAD_ACCESS in facebook::jsi::Pointer::~Pointer)
+                              // — a known RN new-architecture issue. Downloading
+                              // alone is safe — expo-updates picks up the new
+                              // bundle on the next cold start (force-quit + reopen).
+                              const fetchRes = await Updates.fetchUpdateAsync();
+                              Alert.alert(
+                                fetchRes.isNew ? 'Downloaded ✓' : 'Already downloaded',
+                                'To apply: force-quit Clippar (swipe up + swipe away), wait 5 seconds, then reopen. The new bundle will load on cold start.',
+                              );
                             } catch (e) {
-                              Alert.alert('Fetch/apply failed', String(e));
+                              Alert.alert('Download failed', String(e));
                             }
                           },
                         },
