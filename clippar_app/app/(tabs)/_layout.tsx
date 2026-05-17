@@ -108,12 +108,6 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
       style={[styles.container, { paddingBottom: Math.max(insets.bottom, 8) }]}
       pointerEvents="box-none"
     >
-      {/* Record button: floats above the pill, horizontally centered */}
-      <RecordCTAButton
-        focused={isFocused('record')}
-        onPress={() => handlePress('record')}
-      />
-
       {/* Floating pill */}
       <View style={styles.pill}>
         {/* Left group: Rounds + Shop (flex:2 so each tab matches the single
@@ -131,8 +125,11 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
           </Pressable>
         </View>
 
-        {/* Center gap reserved for the Record button */}
-        <View style={styles.recordSpacer} />
+        {/* Record button sits inside the pill, in the center slot */}
+        <RecordCTAButton
+          focused={isFocused('record')}
+          onPress={() => handlePress('record')}
+        />
 
         {/* Right group: Profile */}
         <View style={[styles.tabGroup, styles.tabGroupRight]}>
@@ -155,20 +152,19 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     // ensure touches pass through empty areas
   },
-  // Record button sits above the pill; negative marginBottom overlaps pill by half
+  // Record button sits inside the pill, in the reserved center slot
   recordButtonWrapper: {
     alignItems: 'center',
     justifyContent: 'center',
-    marginBottom: -(RECORD_SIZE / 2),
     zIndex: 10,
     width: RECORD_SIZE + 16,
-    height: RECORD_SIZE + 16,
+    height: RECORD_SIZE,
   },
   recordButtonPulse: {
     position: 'absolute',
-    width: 76,
-    height: 76,
-    borderRadius: 38,
+    width: RECORD_SIZE,
+    height: RECORD_SIZE,
+    borderRadius: RECORD_SIZE / 2,
     backgroundColor: theme.colors.primary,
   },
   recordButtonInner: {
@@ -220,10 +216,6 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     letterSpacing: 0.3,
-  },
-  // reserves horizontal space in the pill for the floating Record button
-  recordSpacer: {
-    width: RECORD_SIZE + 16,
   },
 });
 
