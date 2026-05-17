@@ -388,7 +388,11 @@ export default function DiagnosticsScreen() {
               `Updates.isEmbeddedLaunch === true` means the app is on the
               bundle that shipped with the build (no OTA applied yet).
               `updateId` is the unique ID of the running update (null if
-              embedded). Useful for debugging "is my OTA actually applying?" */}
+              embedded). Useful for debugging "is my OTA actually applying?"
+
+              This panel is intentionally verbose — when OTAs aren't applying
+              despite the server having a newer manifest, we need every piece
+              of state expo-updates exposes to pinpoint the cause. */}
           <View style={{ marginHorizontal: 16, marginBottom: 16, gap: 8 }}>
             <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600' }}>
               OTA update status
@@ -397,6 +401,10 @@ export default function DiagnosticsScreen() {
               <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
                 <Text style={{ color: theme.colors.textTertiary }}>Source: </Text>
                 {Updates.isEmbeddedLaunch ? '📦 Embedded (build-time bundle)' : '☁️ OTA update'}
+              </Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
+                <Text style={{ color: theme.colors.textTertiary }}>Enabled: </Text>
+                {String(Updates.isEnabled)}
               </Text>
               <Text style={{ color: theme.colors.textPrimary, fontSize: 13 }}>
                 <Text style={{ color: theme.colors.textTertiary }}>Update ID: </Text>
@@ -421,10 +429,45 @@ export default function DiagnosticsScreen() {
               onPress={async () => {
                 try {
                   const res = await Updates.checkForUpdateAsync();
+                  // Capture full response for offline diagnosis. The server's
+                  // raw response is in `res.manifest`; we surface its createdAt
+                  // and id so we can compare against the running update.
+                  const summary = [
+                    `isAvailable: ${res.isAvailable}`,
+                    `reason: ${(res as any).reason ?? '(n/a)'}`,
+                    `manifest.id: ${res.manifest?.id ?? '(none)'}`,
+                    `manifest.createdAt: ${(res.manifest as any)?.createdAt ?? '(none)'}`,
+                    `running.id: ${Updates.updateId ?? '(embedded)'}`,
+                    `running.createdAt: ${Updates.createdAt?.toISOString() ?? '(embedded)'}`,
+                    `running.isEmbeddedLaunch: ${Updates.isEmbeddedLaunch}`,
+                    `Updates.isEnabled: ${Updates.isEnabled}`,
+                    `Updates.channel: ${Updates.channel}`,
+                    `Updates.runtimeVersion: ${Updates.runtimeVersion}`,
+                  ].join('\n');
+
+                  // Always log to Sentry as a breadcrumb-rich event so we can
+                  // inspect from a laptop after the fact.
+                  Sentry.captureMessage('OTA check result', {
+                    level: 'info',
+                    extra: {
+                      isAvailable: res.isAvailable,
+                      manifest: res.manifest ?? null,
+                      reason: (res as any).reason ?? null,
+                      running: {
+                        updateId: Updates.updateId,
+                        createdAt: Updates.createdAt?.toISOString() ?? null,
+                        isEmbeddedLaunch: Updates.isEmbeddedLaunch,
+                        channel: Updates.channel,
+                        runtimeVersion: Updates.runtimeVersion,
+                        isEnabled: Updates.isEnabled,
+                      },
+                    },
+                  });
+
                   if (res.isAvailable) {
                     Alert.alert(
                       'Update available',
-                      `A new update is available (manifest ID: ${res.manifest?.id ?? 'unknown'}).\n\nDownload + apply now?`,
+                      `${summary}\n\nDownload + apply now?`,
                       [
                         { text: 'Cancel', style: 'cancel' },
                         {
@@ -435,17 +478,79 @@ export default function DiagnosticsScreen() {
                               await Updates.reloadAsync();
                             } catch (e) {
                               Alert.alert('Fetch/apply failed', String(e));
+                              Sentry.captureException(e, { tags: { phase: 'fetch-or-reload' } });
                             }
                           },
                         },
                       ],
                     );
                   } else {
-                    Alert.alert('No update available', 'You are already on the latest bundle for this channel/runtime.');
+                    Alert.alert('No update available', summary);
                   }
                 } catch (e) {
-                  Alert.alert('Check failed', `${e}\n\nThis usually means expo-updates is disabled in this build, or the server is unreachable.`);
+                  Alert.alert('Check failed', `${e}\n\nLogged to Sentry.`);
+                  Sentry.captureException(e, { tags: { phase: 'check-for-update' } });
                 }
+              }}
+            />
+            <Button
+              title="Force fetch + reload (bypass check)"
+              variant="secondary"
+              onPress={async () => {
+                Alert.alert(
+                  'Force fetch?',
+                  'Skips checkForUpdateAsync and goes straight to fetchUpdateAsync. If a newer OTA exists on the channel, this will download and apply it.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Fetch + reload',
+                      onPress: async () => {
+                        try {
+                          const fetchRes = await Updates.fetchUpdateAsync();
+                          Sentry.captureMessage('OTA force fetch result', {
+                            level: 'info',
+                            extra: {
+                              isNew: fetchRes.isNew,
+                              manifest: fetchRes.manifest ?? null,
+                            },
+                          });
+                          if (fetchRes.isNew) {
+                            await Updates.reloadAsync();
+                          } else {
+                            Alert.alert(
+                              'No new bundle fetched',
+                              `fetchUpdateAsync returned isNew=false.\nmanifest.id: ${(fetchRes.manifest as any)?.id ?? '(none)'}`,
+                            );
+                          }
+                        } catch (e) {
+                          Alert.alert('Force fetch failed', String(e));
+                          Sentry.captureException(e, { tags: { phase: 'force-fetch' } });
+                        }
+                      },
+                    },
+                  ],
+                );
+              }}
+            />
+            <Button
+              title="Dump full state to Sentry"
+              variant="secondary"
+              onPress={() => {
+                Sentry.captureMessage('OTA diagnostic state dump', {
+                  level: 'info',
+                  extra: {
+                    isEmbeddedLaunch: Updates.isEmbeddedLaunch,
+                    isEnabled: Updates.isEnabled,
+                    updateId: Updates.updateId,
+                    createdAt: Updates.createdAt?.toISOString() ?? null,
+                    channel: Updates.channel,
+                    runtimeVersion: Updates.runtimeVersion,
+                    manifest: (Updates as any).manifest ?? null,
+                    checkAutomatically: (Updates as any).checkAutomatically ?? null,
+                    launchDuration: (Updates as any).launchDuration ?? null,
+                  },
+                });
+                Alert.alert('Dumped', 'Full OTA state sent to Sentry. Check sentry.io/issues — should appear within ~10s.');
               }}
             />
           </View>
