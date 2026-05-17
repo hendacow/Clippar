@@ -1362,7 +1362,7 @@ export default function EditorScreen() {
             >
               <Monitor size={16} color={theme.colors.primary} />
               <Text style={{ color: theme.colors.textSecondary, fontSize: 12, flex: 1 }}>
-                Composed on your phone — stitches clips, adds scorecard overlay and background music. No cloud needed.
+                Composed on your phone — stitches clips, adds scorecard overlay and background music.
               </Text>
             </View>
 

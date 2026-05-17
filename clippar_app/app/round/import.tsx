@@ -93,6 +93,12 @@ export default function ImportRoundScreen() {
   const [holes, setHoles] = useState<HoleImport[]>([]);
   const [step, setStep] = useState<ImportStep>('setup');
   const [importing, setImporting] = useState(false);
+  // Per-clip import progress for the final import phase (button label uses this
+  // so the user sees "Importing N of M clips" instead of an unbounded spinner).
+  const [importProgress, setImportProgress] = useState<{ done: number; total: number }>({
+    done: 0,
+    total: 0,
+  });
 
   // Quick Import state
   const [importMode, setImportMode] = useState<'quick' | 'manual' | 'auto' | null>(null);
@@ -837,6 +843,7 @@ export default function ImportRoundScreen() {
     }
 
     setImporting(true);
+    setImportProgress({ done: 0, total: totalClips });
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     try {
@@ -944,6 +951,8 @@ export default function ImportRoundScreen() {
                 clip_url: '',
               });
             } catch {}
+
+            setImportProgress((prev) => ({ ...prev, done: prev.done + 1 }));
           })());
         }
       }
@@ -1027,6 +1036,7 @@ export default function ImportRoundScreen() {
       );
     } finally {
       setImporting(false);
+      setImportProgress({ done: 0, total: 0 });
     }
   };
 
@@ -2788,7 +2798,9 @@ export default function ImportRoundScreen() {
           <Button
             title={
               importing
-                ? 'Importing...'
+                ? importProgress.total > 0
+                  ? `Importing ${importProgress.done} of ${importProgress.total} clip${importProgress.total !== 1 ? 's' : ''}…`
+                  : 'Importing…'
                 : `Import ${totalClips} Clip${totalClips !== 1 ? 's' : ''}`
             }
             onPress={handleImport}

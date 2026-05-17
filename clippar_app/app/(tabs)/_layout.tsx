@@ -116,8 +116,9 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
 
       {/* Floating pill */}
       <View style={styles.pill}>
-        {/* Left group: Rounds + Shop */}
-        <View style={styles.tabGroup}>
+        {/* Left group: Rounds + Shop (flex:2 so each tab matches the single
+            right-side tab in width — keeps the bar visually symmetrical) */}
+        <View style={[styles.tabGroup, styles.tabGroupLeft]}>
           <Pressable style={styles.tabItem} onPress={() => handlePress('index')}>
             <View ref={roundsRef} onLayout={roundsOnLayout}>
               <Home size={22} color={tintColor('index')} />
@@ -134,7 +135,7 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
         <View style={styles.recordSpacer} />
 
         {/* Right group: Profile */}
-        <View style={styles.tabGroup}>
+        <View style={[styles.tabGroup, styles.tabGroupRight]}>
           <Pressable style={styles.tabItem} onPress={() => handlePress('profile')}>
             <User size={22} color={tintColor('profile')} />
             <Text style={[styles.tabLabel, { color: tintColor('profile') }]}>Profile</Text>
@@ -197,10 +198,16 @@ const styles = StyleSheet.create({
     elevation: 14,
   },
   tabGroup: {
-    flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-evenly',
+  },
+  // Weight groups by item count so every tab cell is the same width
+  tabGroupLeft: {
+    flex: 2,
+  },
+  tabGroupRight: {
+    flex: 1,
   },
   tabItem: {
     flex: 1,
