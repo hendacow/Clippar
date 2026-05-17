@@ -1,17 +1,23 @@
-# Full EAS builds (binary, ~10-15 min) — for native changes that can't be
-# OTA'd. Most JS-only fixes go through eas-update.yml instead.
+# Full EAS builds (binary, ~10-15 min). Triggered automatically on push to
+# main as the fallback for OTA delivery — OTAs have been unreliable, so
+# every merge fires a fresh preview build and you install via the EAS URL.
 #
-# DISABLED FOR NOW: the auto-triggers (push to main / staging) are commented
-# out because:
-#   1. Native changes are infrequent enough that manual dispatch is fine
-#   2. Free-tier EAS builds are slow (~15-30 min queue + 10 min build)
-#   3. We're still validating the staging tier; don't want to burn quota
-# Re-enable the `push:` block when you're ready for fully auto staging/prod
-# builds on every push.
+# Build quota note: EAS free tier allows ~30 builds/month. The path filter
+# only triggers on actual code changes (clippar_app/**) — docs, root-level
+# workflow edits, and config files don't burn a build.
+#
+# Manual override: skip auto-build by including `[skip build]` in the
+# commit message. Useful for trivial doc/config-only merges.
 
 name: CI/CD (Full EAS Build)
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - 'clippar_app/**'
+      - '!clippar_app/**.md'
+      - '!clippar_app/.github/**'
   workflow_dispatch:
     inputs:
       profile:
@@ -24,18 +30,12 @@ on:
           - preview
           - staging
           - production
-  # Re-enable when ready:
-  # push:
-  #   branches: [main, staging]
-  #   paths:
-  #     - 'clippar_app/**'
-  #     - '!clippar_app/**.md'
-  # pull_request:
-  #   branches: [main]
 
 jobs:
   lint-and-typecheck:
     name: Lint & Type Check
+    # Allow skipping via commit message — for trivial merges
+    if: "!contains(github.event.head_commit.message, '[skip build]')"
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -52,7 +52,8 @@ jobs:
         run: npx tsc --noEmit
 
   build:
-    name: Build (${{ github.event.inputs.profile }})
+    # Auto-builds (push) use `preview`. workflow_dispatch uses the input.
+    name: Build (${{ github.event.inputs.profile || 'preview' }})
     needs: lint-and-typecheck
     runs-on: ubuntu-latest
     defaults:
@@ -70,5 +71,5 @@ jobs:
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
-      - name: Build ${{ github.event.inputs.profile }}
-        run: eas build --profile ${{ github.event.inputs.profile }} --platform ios --non-interactive --no-wait
+      - name: Build ${{ github.event.inputs.profile || 'preview' }}
+        run: eas build --profile ${{ github.event.inputs.profile || 'preview' }} --platform ios --non-interactive --no-wait
