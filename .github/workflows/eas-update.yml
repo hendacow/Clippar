@@ -106,8 +106,15 @@ jobs:
 
       - name: Publish update
         id: publish
+        # Pass branch + message through env vars rather than ${{ ... }}
+        # interpolation. Direct interpolation of a commit subject that
+        # contains quote characters (e.g. PR title `Rename "X" to "Y"`)
+        # breaks the shell quoting and treats parts of the message as args.
+        # Env-var passthrough means the shell handles escaping correctly.
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          UPDATE_BRANCH: ${{ steps.params.outputs.branch }}
+          UPDATE_MESSAGE: ${{ steps.params.outputs.message }}
         run: |
           # Restrict to iOS for now. Default --platform=all bundles web too,
           # which triggers static rendering of expo-router routes — that loads
@@ -117,9 +124,9 @@ jobs:
           # or android targets, change to `--platform=all` AND add the
           # required EXPO_PUBLIC_* secrets to the repo.
           eas update \
-            --branch "${{ steps.params.outputs.branch }}" \
+            --branch "$UPDATE_BRANCH" \
             --platform=ios \
-            --message "${{ steps.params.outputs.message }}" \
+            --message "$UPDATE_MESSAGE" \
             --non-interactive
 
       # Ping Slack so we know the moment a fix actually goes live. Skipped
@@ -127,14 +134,21 @@ jobs:
       # workflow run before the user wires up the webhook).
       - name: Notify Slack
         if: success() && env.SLACK_WEBHOOK_URL != ''
+        # Same env-passthrough pattern as the Publish step so quote chars
+        # in the commit message don't break the JSON payload assembly.
         env:
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          UPDATE_BRANCH: ${{ steps.params.outputs.branch }}
+          UPDATE_MESSAGE: ${{ steps.params.outputs.message }}
+          WORKFLOW_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           SHORT_SHA="${GITHUB_SHA:0:7}"
-          PAYLOAD=$(cat <<JSON
-          {
-            "text": ":rocket: *OTA update published* — \`${{ steps.params.outputs.branch }}\` channel\n• Commit: \`${SHORT_SHA}\`\n• Message: ${{ steps.params.outputs.message }}\n• Workflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}\nApp will fetch this on next launch."
-          }
-          JSON
-          )
+          # Build the payload with jq so quote chars in $UPDATE_MESSAGE are
+          # JSON-escaped correctly instead of breaking the wire format.
+          PAYLOAD=$(jq -n \
+            --arg branch "$UPDATE_BRANCH" \
+            --arg sha "$SHORT_SHA" \
+            --arg message "$UPDATE_MESSAGE" \
+            --arg workflow "$WORKFLOW_URL" \
+            '{ text: ":rocket: *OTA update published* — `\($branch)` channel\n• Commit: `\($sha)`\n• Message: \($message)\n• Workflow: \($workflow)\nApp will fetch this on next launch." }')
           curl -X POST -H 'Content-type: application/json' --data "$PAYLOAD" "$SLACK_WEBHOOK_URL"
