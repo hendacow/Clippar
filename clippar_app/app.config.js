@@ -42,6 +42,7 @@ module.exports = () => ({
     ios: {
       supportsTablet: false,
       bundleIdentifier: BUNDLE_ID,
+      usesAppleSignIn: true,
       infoPlist: {
         NSBluetoothAlwaysUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
         NSBluetoothPeripheralUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
@@ -79,6 +80,10 @@ module.exports = () => ({
       'expo-video',
       'expo-sqlite',
       'expo-secure-store',
+      // Apple Sign-In — adds the entitlement and required iOS capability.
+      // Required for App Store Guideline 4.8 once any third-party login
+      // (Google etc.) is offered. iOS-only — no-op on Android/web.
+      'expo-apple-authentication',
       [
         'expo-build-properties',
         {
