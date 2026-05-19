@@ -7,7 +7,7 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
 import * as Linking from 'expo-linking';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -90,9 +90,18 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
 
-  // We also track the resolved state in a ref so the deadline timeout can
-  // read the latest value without re-creating the effect on every render
-  // (React closures would otherwise capture the initial 'pending').
+  // expo-router consumes the deep-link URL during routing, which is why
+  // Linking.getInitialURL() returns null on a fresh entry. The real source
+  // of truth for the query params (PKCE `?code=`) is useLocalSearchParams.
+  const params = useLocalSearchParams<{
+    code?: string;
+    error?: string;
+    error_code?: string;
+    error_description?: string;
+  }>();
+
+  // Track resolved state in a ref so async callbacks read the live value
+  // (closures otherwise capture 'pending' at effect-creation time).
   const stateRef = useRef<'pending' | 'ready' | 'invalid'>('pending');
 
   useEffect(() => {
@@ -112,22 +121,39 @@ export default function ResetPasswordScreen() {
       // 'not-recovery' → keep waiting; another url event may bring the real one.
     };
 
-    // Listen for url events first — on a warm app launch the deep link
-    // arrives via this event, not via getInitialURL.
+    // 1) Primary path: expo-router gave us the query params from the deep
+    //    link. For PKCE this is `?code=...`, for an error redirect it's
+    //    `?error=...&error_code=...`. Handle this synchronously on mount.
+    console.log('[reset-password] mount params=', JSON.stringify(params));
+    if (params.code) {
+      console.log('[reset-password] params.code present, exchanging…');
+      (async () => {
+        const { error } = await supabase.auth.exchangeCodeForSession(params.code!);
+        console.log('[reset-password] exchangeCodeForSession error=', error?.message ?? 'none');
+        if (error) resolve('invalid', 'This reset link is no longer valid.');
+        else resolve('ready');
+      })();
+    } else if (params.error || params.error_code) {
+      console.log('[reset-password] params has error:', params.error_code, params.error_description);
+      resolve('invalid', params.error_description || 'This reset link is no longer valid.');
+    }
+
+    // 2) Fallback path: implicit flow puts tokens in URL fragment, which
+    //    useLocalSearchParams doesn't expose. Parse those via Linking.
     const sub = Linking.addEventListener('url', (e) => {
       consume(e.url);
     });
-
-    // Then check the launch URL (cold-start path).
     Linking.getInitialURL().then((initial) => {
-      if (mounted) consume(initial);
+      if (mounted && initial && initial.includes('#')) consume(initial);
     });
 
-    // Safety net: if no recovery URL has been seen within 5s, mark invalid
-    // so the user isn't stuck on a blank screen. 5s is generous enough that
-    // a slow deep-link handoff doesn't false-trip.
+    // Safety net: if nothing resolves in 5s, surface invalid so the user
+    // isn't stuck on a blank screen.
     const deadlineId = setTimeout(() => {
-      if (mounted && stateRef.current === 'pending') resolve('invalid');
+      if (mounted && stateRef.current === 'pending') {
+        console.log('[reset-password] 5s deadline, marking invalid');
+        resolve('invalid');
+      }
     }, 5000);
 
     return () => {
@@ -135,6 +161,10 @@ export default function ResetPasswordScreen() {
       sub.remove();
       clearTimeout(deadlineId);
     };
+    // params is captured at mount; expo-router gives us a stable object for
+    // the initial route entry, so depending on it would re-run the effect
+    // on every render with no new info.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSubmit = async () => {
