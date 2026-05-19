@@ -25,7 +25,13 @@ import { supabase } from '@/lib/supabase';
 async function consumeRecoveryUrl(
   url: string | null
 ): Promise<'ready' | 'invalid' | 'not-recovery'> {
-  if (!url) return 'not-recovery';
+  // TEMP DEBUG (remove once reset flow is verified): log the URL the screen
+  // is parsing and which branch wins. Helps diagnose 'Link invalid' false-trips.
+  console.log('[reset-password] consumeRecoveryUrl url=', url);
+  if (!url) {
+    console.log('[reset-password] result=not-recovery (no url)');
+    return 'not-recovery';
+  }
 
   // 1) PKCE: ?code=<auth_code>
   const qIdx = url.indexOf('?');
@@ -35,13 +41,18 @@ async function consumeRecoveryUrl(
     const qp = new URLSearchParams(qStr);
     const code = qp.get('code');
     if (code) {
+      console.log('[reset-password] pkce code present, exchanging…');
       const { error } = await supabase.auth.exchangeCodeForSession(code);
+      console.log('[reset-password] exchangeCodeForSession error=', error?.message ?? 'none');
       return error ? 'invalid' : 'ready';
     }
     // Supabase sometimes redirects with an explicit error param when the
     // token is expired/used. Surface that as invalid so the user gets a
     // clear message.
-    if (qp.get('error') || qp.get('error_code')) return 'invalid';
+    if (qp.get('error') || qp.get('error_code')) {
+      console.log('[reset-password] query has error param:', qp.get('error_code'), qp.get('error_description'));
+      return 'invalid';
+    }
   }
 
   // 2) Implicit: #access_token=...&refresh_token=...&type=recovery
@@ -51,16 +62,23 @@ async function consumeRecoveryUrl(
     const type = hp.get('type');
     const access = hp.get('access_token');
     const refresh = hp.get('refresh_token');
+    console.log('[reset-password] hash params type=', type, 'access?', !!access, 'refresh?', !!refresh);
     if (type === 'recovery' && access && refresh) {
+      console.log('[reset-password] implicit flow, setting session…');
       const { error } = await supabase.auth.setSession({
         access_token: access,
         refresh_token: refresh,
       });
+      console.log('[reset-password] setSession error=', error?.message ?? 'none');
       return error ? 'invalid' : 'ready';
     }
-    if (hp.get('error') || hp.get('error_code')) return 'invalid';
+    if (hp.get('error') || hp.get('error_code')) {
+      console.log('[reset-password] hash has error param:', hp.get('error_code'), hp.get('error_description'));
+      return 'invalid';
+    }
   }
 
+  console.log('[reset-password] result=not-recovery (no recognized payload)');
   return 'not-recovery';
 }
 
