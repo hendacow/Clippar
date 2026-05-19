@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -14,19 +14,54 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { supabase } from '@/lib/supabase';
 
-// Parses tokens out of a Supabase recovery callback URL.
-// Supabase sends users back to <scheme>://reset-password with the recovery
-// session in the URL fragment: #access_token=...&refresh_token=...&type=recovery
-function parseRecoveryTokens(url: string | null): { access: string; refresh: string } | null {
-  if (!url) return null;
-  const hashIndex = url.indexOf('#');
-  if (hashIndex === -1) return null;
-  const params = new URLSearchParams(url.substring(hashIndex + 1));
-  if (params.get('type') !== 'recovery') return null;
-  const access = params.get('access_token');
-  const refresh = params.get('refresh_token');
-  if (!access || !refresh) return null;
-  return { access, refresh };
+// Handles both Supabase recovery callback flows on a single URL parse:
+//   - PKCE  (default in supabase-js v2.x): `<scheme>://reset-password?code=...`
+//     → call exchangeCodeForSession(code) to seed the recovery session.
+//   - Implicit (older): `<scheme>://reset-password#access_token=...&refresh_token=...&type=recovery`
+//     → call setSession({access, refresh}).
+// Returns: 'ready' on success, 'invalid' if a recovery payload was present
+// but couldn't be exchanged, or 'not-recovery' if the URL had no recovery
+// payload at all (so the caller can keep waiting for the real link).
+async function consumeRecoveryUrl(
+  url: string | null
+): Promise<'ready' | 'invalid' | 'not-recovery'> {
+  if (!url) return 'not-recovery';
+
+  // 1) PKCE: ?code=<auth_code>
+  const qIdx = url.indexOf('?');
+  if (qIdx !== -1) {
+    const hashIdx = url.indexOf('#', qIdx);
+    const qStr = hashIdx === -1 ? url.slice(qIdx + 1) : url.slice(qIdx + 1, hashIdx);
+    const qp = new URLSearchParams(qStr);
+    const code = qp.get('code');
+    if (code) {
+      const { error } = await supabase.auth.exchangeCodeForSession(code);
+      return error ? 'invalid' : 'ready';
+    }
+    // Supabase sometimes redirects with an explicit error param when the
+    // token is expired/used. Surface that as invalid so the user gets a
+    // clear message.
+    if (qp.get('error') || qp.get('error_code')) return 'invalid';
+  }
+
+  // 2) Implicit: #access_token=...&refresh_token=...&type=recovery
+  const hIdx = url.indexOf('#');
+  if (hIdx !== -1) {
+    const hp = new URLSearchParams(url.slice(hIdx + 1));
+    const type = hp.get('type');
+    const access = hp.get('access_token');
+    const refresh = hp.get('refresh_token');
+    if (type === 'recovery' && access && refresh) {
+      const { error } = await supabase.auth.setSession({
+        access_token: access,
+        refresh_token: refresh,
+      });
+      return error ? 'invalid' : 'ready';
+    }
+    if (hp.get('error') || hp.get('error_code')) return 'invalid';
+  }
+
+  return 'not-recovery';
 }
 
 export default function ResetPasswordScreen() {
@@ -37,52 +72,51 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
 
-  // On mount, grab the initial URL (the one that opened the app from the
-  // email tap) plus subscribe to subsequent url events in case the user is
-  // already in the app when the link fires. First valid recovery URL wins.
+  // We also track the resolved state in a ref so the deadline timeout can
+  // read the latest value without re-creating the effect on every render
+  // (React closures would otherwise capture the initial 'pending').
+  const stateRef = useRef<'pending' | 'ready' | 'invalid'>('pending');
+
   useEffect(() => {
     let mounted = true;
 
-    const consume = async (url: string | null) => {
-      const tokens = parseRecoveryTokens(url);
-      if (!tokens) return false;
-      const { error: setErr } = await supabase.auth.setSession({
-        access_token: tokens.access,
-        refresh_token: tokens.refresh,
-      });
-      if (!mounted) return true;
-      if (setErr) {
-        setLinkReady('invalid');
-        setError(setErr.message);
-      } else {
-        setLinkReady('ready');
-      }
-      return true;
+    const resolve = (next: 'ready' | 'invalid', message?: string) => {
+      if (!mounted || stateRef.current !== 'pending') return;
+      stateRef.current = next;
+      setLinkReady(next);
+      if (message) setError(message);
     };
 
-    (async () => {
-      const initial = await Linking.getInitialURL();
-      const consumed = await consume(initial);
-      if (!consumed && mounted) {
-        // Initial URL didn't have recovery tokens. Wait briefly for a url
-        // event in case the deep link is still in flight, then mark invalid.
-        const sub = Linking.addEventListener('url', (e) => {
-          consume(e.url);
-        });
-        setTimeout(() => {
-          if (mounted && linkReady === 'pending') setLinkReady('invalid');
-        }, 1500);
-        return () => sub.remove();
-      }
-    })();
+    const consume = async (url: string | null) => {
+      const result = await consumeRecoveryUrl(url);
+      if (result === 'ready') resolve('ready');
+      else if (result === 'invalid') resolve('invalid', 'This reset link is no longer valid.');
+      // 'not-recovery' → keep waiting; another url event may bring the real one.
+    };
+
+    // Listen for url events first — on a warm app launch the deep link
+    // arrives via this event, not via getInitialURL.
+    const sub = Linking.addEventListener('url', (e) => {
+      consume(e.url);
+    });
+
+    // Then check the launch URL (cold-start path).
+    Linking.getInitialURL().then((initial) => {
+      if (mounted) consume(initial);
+    });
+
+    // Safety net: if no recovery URL has been seen within 5s, mark invalid
+    // so the user isn't stuck on a blank screen. 5s is generous enough that
+    // a slow deep-link handoff doesn't false-trip.
+    const deadlineId = setTimeout(() => {
+      if (mounted && stateRef.current === 'pending') resolve('invalid');
+    }, 5000);
 
     return () => {
       mounted = false;
+      sub.remove();
+      clearTimeout(deadlineId);
     };
-    // linkReady intentionally omitted: we only want this effect to fire once
-    // on mount; updating linkReady from inside re-running the effect would
-    // bounce the timeout.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSubmit = async () => {
