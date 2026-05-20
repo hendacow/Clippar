@@ -83,11 +83,14 @@ export interface ShutterState {
 const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 
 // How long to wait after the last press before deciding a gesture is done.
-// 400ms is the spec — single-click waits 400ms before committing as a shot,
-// double/triple-click each get another 400ms grace. Felt right in user
-// testing where 300ms was demonstrably too tight (real 2nd presses landed
-// at +390ms and got read as two separate singles).
-const CLICK_WINDOW_MS = 400;
+// 1000ms — generous enough that a slow / nervous double or triple click is
+// never misread as separate gestures. The downside is a 1s latency on
+// single-click actions, but for golf this is invisible: pressing to start
+// a shot is followed by 5–20s of walking up to the ball anyway, and
+// pressing to stop happens after the swing has clearly finished. User
+// testing settled on this number after 300ms and 400ms both clipped real
+// gestures sometimes.
+const CLICK_WINDOW_MS = 1000;
 
 // Many cheap shutters fire BOTH a key-event (HID) AND a volume change for
 // the SAME physical press, with the two events landing within a few tens of
