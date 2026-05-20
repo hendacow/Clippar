@@ -83,15 +83,33 @@ export interface ShutterState {
 const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 
 // How long to wait after the last press before deciding a gesture is done.
-// 400ms catches a deliberate double-click without being so long that single
-// clicks feel laggy. Triple-click works within a 2× window via the natural
-// rhythm of pressing 3× in succession.
-const CLICK_WINDOW_MS = 400;
+// 300ms catches a deliberate double-click while keeping single-click
+// latency feeling snappy. Tunable — bump up to 400ms if double-clicks are
+// being misread as singles, down to 250ms if singles feel laggy.
+const CLICK_WINDOW_MS = 300;
+
+// Many cheap shutters fire BOTH a key-event (HID) AND a volume change for
+// the SAME physical press, with the two events landing within a few tens of
+// milliseconds. We use this window to dedupe — if a press from one source
+// lands within DUP_WINDOW_MS of a press from another source, we treat them
+// as the same physical press and only count it once.
+const DUP_WINDOW_MS = 120;
 
 // We cap the counted clicks at this number; further presses in the same
 // window collapse to a triple. Any reasonable golf-mid-round action maps
 // to 1, 2, or 3 clicks and we don't want to encourage four-click chords.
 const MAX_CLICKS = 3;
+
+// Verbose console logging gated to dev builds. Set to false in production
+// to keep the JS bridge quiet during recording.
+const DEBUG = __DEV__;
+
+const slog = (label: string, data?: Record<string, unknown>) => {
+  if (!DEBUG) return;
+  // Use a stable timestamp + label prefix so events sort and grep cleanly
+  // in the Metro log stream.
+  console.log(`[shutter ${Date.now() % 100000}] ${label}`, data ?? '');
+};
 
 export function useShutter(): ShutterState {
   const ble = useBLE();
@@ -104,6 +122,14 @@ export function useShutter(): ShutterState {
   const clickCountRef = useRef(0);
   const clickFlushTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
+  // Per-source last-emit timestamps. We use these to dedupe events from
+  // different sources that fire for the SAME physical press. Cheap shutters
+  // commonly emit both a HID key event and a volume change within ~10–80ms;
+  // counting both as separate presses produces phantom "double clicks" that
+  // randomly advance the hole. The fix is a time-windowed cross-source
+  // suppression — see emitPress.
+  const lastEmitBySourceRef = useRef<Partial<Record<ShutterSource, number>>>({});
+
   const [lastPressTime, setLastPressTime] = useState(0);
   const [activeSource, setActiveSource] = useState<ShutterSource>('none');
   const activeSourceRef = useRef<ShutterSource>('none');
@@ -111,13 +137,44 @@ export function useShutter(): ShutterState {
 
   // --- Helper: emit press to all listeners ---
   // Every physical press from every source (key-event, volume, ble,
-  // simulated) flows through here. It does three things:
-  //   1. Bumps the source / activity timestamp.
-  //   2. Fires immediate `onPress` listeners with no delay.
-  //   3. Feeds the click counter; the counter flushes to `onClick`
+  // simulated) flows through here. It does four things:
+  //   1. Cross-source dedup — if a press from any OTHER source fired within
+  //      DUP_WINDOW_MS, treat this as the same physical press and skip.
+  //   2. Bumps the source / activity timestamp.
+  //   3. Fires immediate `onPress` listeners with no delay.
+  //   4. Feeds the click counter; the counter flushes to `onClick`
   //      listeners CLICK_WINDOW_MS after the last press in a gesture.
   const emitPress = useCallback((source: ShutterSource) => {
-    setLastPressTime(Date.now());
+    const now = Date.now();
+
+    // (1) Cross-source dedup. Find the most recent emit time across all
+    //     other sources and check if it's within the dedup window.
+    let mostRecentOtherSource: ShutterSource | null = null;
+    let mostRecentOtherTs = 0;
+    for (const [src, ts] of Object.entries(lastEmitBySourceRef.current)) {
+      if (src === source || ts === undefined) continue;
+      if (ts > mostRecentOtherTs) {
+        mostRecentOtherTs = ts;
+        mostRecentOtherSource = src as ShutterSource;
+      }
+    }
+    const dupAge = now - mostRecentOtherTs;
+    if (mostRecentOtherSource && dupAge < DUP_WINDOW_MS) {
+      slog('emit SUPPRESSED (cross-source dup)', {
+        source,
+        suppressedBy: mostRecentOtherSource,
+        ageMs: dupAge,
+        dupWindowMs: DUP_WINDOW_MS,
+      });
+      // Still record this source's timestamp so subsequent dedup decisions
+      // see it — otherwise the SECOND of three duplicates would slip
+      // through if it's far from the first but close to nothing.
+      lastEmitBySourceRef.current[source] = now;
+      return;
+    }
+    lastEmitBySourceRef.current[source] = now;
+
+    setLastPressTime(now);
     setActiveSource(source);
     activeSourceRef.current = source;
 
@@ -128,14 +185,24 @@ export function useShutter(): ShutterState {
       activeSourceRef.current = 'none';
     }, 60_000);
 
-    // (2) immediate listeners
+    // (3) immediate listeners
     listenersRef.current.forEach((cb) => cb());
 
-    // (3) click counter + flush timer
+    // (4) click counter + flush timer
     clickCountRef.current = Math.min(clickCountRef.current + 1, MAX_CLICKS);
+    slog('emit ACCEPTED', {
+      source,
+      count: clickCountRef.current,
+      immediateListeners: listenersRef.current.size,
+      clickListeners: clickListenersRef.current.size,
+    });
     if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
     clickFlushTimerRef.current = setTimeout(() => {
       const count = clickCountRef.current as 1 | 2 | 3;
+      slog('click FLUSH', {
+        count,
+        listenerCount: clickListenersRef.current.size,
+      });
       clickCountRef.current = 0;
       clickFlushTimerRef.current = undefined;
       clickListenersRef.current.forEach((cb) => cb({ count }));
@@ -148,7 +215,10 @@ export function useShutter(): ShutterState {
   // counter. Now everything funnels through emitPress so click counting
   // works regardless of input source.
   useEffect(() => {
-    return ble.onPress(() => emitPress('ble'));
+    return ble.onPress(() => {
+      slog('source[ble] press');
+      emitPress('ble');
+    });
   }, [ble.onPress, emitPress]);
 
   // --- Method 1: expo-key-event ---
@@ -161,23 +231,39 @@ export function useShutter(): ShutterState {
   useEffect(() => {
     if (!keyEvent || !keyEventAvailable) return;
     if (SHUTTER_KEYS.has(keyEvent.key)) {
+      slog('source[key-event] press', { key: keyEvent.key });
       emitPress('key-event');
+    } else {
+      slog('source[key-event] ignored (not a shutter key)', { key: keyEvent.key });
     }
   }, [keyEvent, emitPress]);
 
   // --- Method 2: react-native-volume-manager ---
   useEffect(() => {
-    if (!volumeAvailable || !VolumeManager) return;
+    if (!volumeAvailable || !VolumeManager) {
+      slog('volume manager unavailable — HUD will show, no volume capture');
+      return;
+    }
 
-    // Suppress native volume HUD
-    try { VolumeManager.showNativeVolumeUI({ enabled: false }); } catch {}
+    // Suppress native volume HUD. If this throws or no-ops, the iOS volume
+    // slider will appear on every press — log so we know.
+    let hudSuppressed = false;
+    try {
+      VolumeManager.showNativeVolumeUI({ enabled: false });
+      hudSuppressed = true;
+    } catch (e) {
+      slog('VolumeManager.showNativeVolumeUI threw — HUD WILL APPEAR', {
+        error: (e as Error).message,
+      });
+    }
+    slog('volume manager init', { hudSuppressed });
 
-    const subscription = VolumeManager.addVolumeListener(() => {
-      // Only use volume as source if key-event didn't already fire
-      // (some shutters trigger both volume change AND key event)
-      if (activeSourceRef.current !== 'key-event') {
-        emitPress('volume');
-      }
+    const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
+      slog('source[volume] change', { volume: event?.volume });
+      // Dedup is handled inside emitPress now (cross-source time window),
+      // so we always feed the press through — emitPress decides whether to
+      // suppress.
+      emitPress('volume');
 
       // Reset volume to middle so it can trigger in both directions
       try { VolumeManager.setVolume(0.5, { showUI: false }); } catch {}
@@ -235,6 +321,7 @@ export function useShutter(): ShutterState {
   );
 
   const simulatePress = useCallback(() => {
+    slog('source[simulated] press');
     emitPress('simulated');
   }, [emitPress]);
 

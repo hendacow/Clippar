@@ -115,7 +115,9 @@ export default function RecordScreen() {
     if (!isActive) return;
 
     const unsubscribe = shutter.onClick(({ count }) => {
+      console.log(`[record] onClick count=${count} isRecording=${camera.isRecording} ts=${Date.now() % 100000}`);
       if (count === 1) {
+        console.log('[record] action: toggleRecording');
         if (isNative) {
           camera.toggleRecording();
         } else {
@@ -125,13 +127,19 @@ export default function RecordScreen() {
         // Skip if we're mid-shot — user probably double-clicked by
         // accident. End-hole only makes sense between shots.
         if (!camera.isRecording) {
+          console.log('[record] action: endHole');
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           round.endHole();
+        } else {
+          console.log('[record] action: SKIPPED (mid-clip double = no-op)');
         }
       } else if (count === 3) {
         if (!camera.isRecording) {
+          console.log('[record] action: addPenalty water_hazard');
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
           round.addPenalty('water_hazard');
+        } else {
+          console.log('[record] action: SKIPPED (mid-clip triple = no-op)');
         }
       }
     });
