@@ -75,6 +75,15 @@ export interface ShutterState {
    * cost is a ~CLICK_WINDOW_MS delay before the action fires.
    */
   onClick: (callback: (event: ShutterClickEvent) => void) => () => void;
+  /**
+   * Cancel the pending click-resolution timer and reset the count. Call
+   * from an `onPress` listener when you've handled the press immediately
+   * and don't want the debounced `onClick` to fire later. Example: a
+   * recording-screen press that means "stop recording right now" — we
+   * stop on the press and call this so the 1s onClick window doesn't
+   * resolve into "start recording again".
+   */
+  clearPendingClicks: () => void;
   simulatePress: () => void;
   ble: ReturnType<typeof useBLE>;
 }
@@ -189,10 +198,10 @@ export function useShutter(): ShutterState {
       activeSourceRef.current = 'none';
     }, 60_000);
 
-    // (3) immediate listeners
-    listenersRef.current.forEach((cb) => cb());
-
-    // (4) click counter + flush timer
+    // (3) click counter + flush timer. Set up BEFORE firing the immediate
+    // listeners so a listener can call clearPendingClicks() to cancel the
+    // flush in-flight (e.g. "stop recording now, don't trigger another
+    // onClick 1s later that would start a new recording").
     clickCountRef.current = Math.min(clickCountRef.current + 1, MAX_CLICKS);
     slog('emit ACCEPTED', {
       source,
@@ -211,6 +220,11 @@ export function useShutter(): ShutterState {
       clickFlushTimerRef.current = undefined;
       clickListenersRef.current.forEach((cb) => cb({ count }));
     }, CLICK_WINDOW_MS);
+
+    // (4) immediate listeners. Fire AFTER (3) so listeners that want to
+    // short-circuit the gesture (via clearPendingClicks) can actually
+    // cancel the flush we just scheduled.
+    listenersRef.current.forEach((cb) => cb());
   }, []);
 
   // --- Route BLE presses through the unified emit pipeline ---
@@ -385,6 +399,20 @@ export function useShutter(): ShutterState {
     []
   );
 
+  // Cancel any pending click-resolution timer + zero the count. Called
+  // from listeners that have handled the press immediately and don't
+  // want the debounced onClick to fire later for the same gesture.
+  const clearPendingClicks = useCallback(() => {
+    if (clickFlushTimerRef.current) {
+      clearTimeout(clickFlushTimerRef.current);
+      clickFlushTimerRef.current = undefined;
+    }
+    if (clickCountRef.current > 0) {
+      slog('click cleared by listener', { hadCount: clickCountRef.current });
+    }
+    clickCountRef.current = 0;
+  }, []);
+
   const simulatePress = useCallback(() => {
     slog('source[simulated] press');
     emitPress('simulated');
@@ -404,6 +432,7 @@ export function useShutter(): ShutterState {
     statusLabel,
     onPress,
     onClick,
+    clearPendingClicks,
     simulatePress,
     ble,
   };

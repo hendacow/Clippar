@@ -107,40 +107,43 @@ export default function RecordScreen() {
   //              common type; tap the on-screen penalty sheet to choose
   //              a different type)
   //
-  // The cost is a CLICK_WINDOW_MS (~400ms) delay on single-click actions
+  // The cost is a CLICK_WINDOW_MS (~1000ms) delay on single-click actions
   // because we have to wait to see whether more clicks are coming. For
   // golf this is invisible — pressing to start a shot is followed by
   // 5–20s of walking up to the ball anyway.
+  //
+  // EXCEPTION: while a clip is recording, double/triple clicks are no-op
+  // (end-hole / penalty only make sense between shots). So there's
+  // nothing to wait for — we stop on the very first press via onPress
+  // below, and use clearPendingClicks() to prevent the same press from
+  // re-triggering a "toggle" 1s later through this onClick path.
   useEffect(() => {
     if (!isActive) return;
 
     const unsubscribe = shutter.onClick(({ count }) => {
       console.log(`[record] onClick count=${count} isRecording=${camera.isRecording} ts=${Date.now() % 100000}`);
+      // count===1 while recording would mean the onPress fast-path failed
+      // to short-circuit (e.g. clearPendingClicks didn't run). Log so we
+      // catch regressions, then bail — onPress already toggled.
+      if (camera.isRecording) {
+        console.log('[record] onClick fired while recording — IGNORED (onPress should have handled)');
+        return;
+      }
       if (count === 1) {
-        console.log('[record] action: toggleRecording');
+        console.log('[record] action: toggleRecording (start)');
         if (isNative) {
           camera.toggleRecording();
         } else {
           camera.simulateRecording();
         }
       } else if (count === 2) {
-        // Skip if we're mid-shot — user probably double-clicked by
-        // accident. End-hole only makes sense between shots.
-        if (!camera.isRecording) {
-          console.log('[record] action: endHole');
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          round.endHole();
-        } else {
-          console.log('[record] action: SKIPPED (mid-clip double = no-op)');
-        }
+        console.log('[record] action: endHole');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        round.endHole();
       } else if (count === 3) {
-        if (!camera.isRecording) {
-          console.log('[record] action: addPenalty water_hazard');
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-          round.addPenalty('water_hazard');
-        } else {
-          console.log('[record] action: SKIPPED (mid-clip triple = no-op)');
-        }
+        console.log('[record] action: addPenalty water_hazard');
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        round.addPenalty('water_hazard');
       }
     });
 
@@ -155,16 +158,38 @@ export default function RecordScreen() {
     round.addPenalty,
   ]);
 
-  // Light haptic on EVERY physical press, fired immediately (before the
-  // click counter has decided what gesture it is). Gives the user a felt
-  // confirmation that the press registered even though the action is
-  // delayed by the debounce window.
+  // Immediate-press handler. Two jobs:
+  //   1. ALWAYS: light haptic so the user feels the press registered, even
+  //      though the gesture-resolution path is debounced by ~1s.
+  //   2. WHILE RECORDING: stop the clip instantly. We don't need to wait
+  //      for potential double/triple because those are no-ops mid-clip
+  //      anyway. We also call clearPendingClicks() so the same press
+  //      doesn't trigger an onClick 1s later that would start a NEW
+  //      recording.
   useEffect(() => {
     if (!isActive) return;
     return shutter.onPress(() => {
-      Haptics.selectionAsync();
+      if (camera.isRecording) {
+        console.log('[record] onPress: instant stop (was recording)');
+        shutter.clearPendingClicks();
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        if (isNative) {
+          camera.toggleRecording();
+        } else {
+          camera.simulateRecording();
+        }
+      } else {
+        Haptics.selectionAsync();
+      }
     });
-  }, [shutter.onPress, isActive]);
+  }, [
+    shutter.onPress,
+    shutter.clearPendingClicks,
+    isActive,
+    camera.isRecording,
+    camera.toggleRecording,
+    camera.simulateRecording,
+  ]);
 
   // Check for orphaned rounds on mount
   useEffect(() => {
