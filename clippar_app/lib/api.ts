@@ -1,5 +1,10 @@
 import { supabase } from './supabase';
 import type { Round } from '@/types/round';
+import {
+  type CoursePreset,
+  type CoursePresetInput,
+  defaultPresetName,
+} from '@/types/preset';
 
 // ============ Profiles ============
 
@@ -1252,4 +1257,107 @@ export async function getMusicTracks() {
 
   if (error) throw error;
   return data;
+}
+
+// ============ Course Presets (Wave 3) ============
+
+/**
+ * Returns the user's presets, most-recently-used first. Empty array when
+ * the user has none yet — never throws on no rows.
+ */
+export async function listCoursePresets(): Promise<CoursePreset[]> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not authenticated');
+
+  const { data, error } = await supabase
+    .from('course_presets')
+    .select('*')
+    .eq('user_id', user.id)
+    .order('last_used_at', { ascending: false });
+
+  if (error) throw error;
+  return (data ?? []) as CoursePreset[];
+}
+
+/**
+ * Insert a new preset. `name` defaults to `<course> — <holes> holes` when
+ * the caller doesn't supply one. The unique-per-user-name constraint will
+ * reject duplicates — callers should catch and ask the user to rename.
+ */
+export async function createCoursePreset(
+  input: CoursePresetInput
+): Promise<CoursePreset> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not authenticated');
+
+  const name = input.name?.trim() || defaultPresetName({
+    course_name: input.course_name,
+    holes_played: input.holes_played,
+  });
+
+  const { data, error } = await supabase
+    .from('course_presets')
+    .insert({
+      user_id: user.id,
+      course_id: input.course_id,
+      course_name: input.course_name,
+      holes_played: input.holes_played,
+      start_hole: input.start_hole,
+      trim_duration_ms: input.trim_duration_ms ?? null,
+      name,
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data as CoursePreset;
+}
+
+/**
+ * Mark a preset as just-used so it sorts to the top of the picker next
+ * time. Called when the user starts a round from a preset. Best-effort —
+ * we don't propagate errors here because failing to bump the timestamp
+ * shouldn't block the round from starting.
+ *
+ * Defence-in-depth: matches the auth check + explicit user_id filter the
+ * other helpers use. RLS is the actual guard, but if the supabase client
+ * is ever initialised with a service-role key (CI/admin path), the
+ * explicit filter still scopes the update to the caller's rows.
+ */
+export async function touchCoursePreset(id: string): Promise<void> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return;
+
+  // Supabase returns errors in-band via `{ error }`; they don't throw. Read
+  // and log so we don't silently mask RLS rejections / 401s. Still
+  // non-fatal — a failed touch shouldn't break the user's flow.
+  const { error } = await supabase
+    .from('course_presets')
+    .update({ last_used_at: new Date().toISOString() })
+    .eq('id', id)
+    .eq('user_id', user.id);
+
+  if (error) {
+    console.log('[touchCoursePreset] non-fatal:', error.message);
+  }
+}
+
+/**
+ * Permanently remove a preset. Doesn't touch any rounds that referenced
+ * it — presets are advisory, not relational from the round's side.
+ *
+ * Defence-in-depth: auth check + explicit user_id filter for the same
+ * reason as touchCoursePreset above.
+ */
+export async function deleteCoursePreset(id: string): Promise<void> {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) throw new Error('Not authenticated');
+
+  const { error } = await supabase
+    .from('course_presets')
+    .delete()
+    .eq('id', id)
+    .eq('user_id', user.id);
+
+  if (error) throw error;
 }
