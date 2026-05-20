@@ -13,6 +13,8 @@ import {
   AlertCircle,
   Flag,
   Film,
+  Video,
+  ArrowLeft,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -54,6 +56,13 @@ export default function RecordScreen() {
   const [showPenalty, setShowPenalty] = useState(false);
   const [orphanedRound, setOrphanedRound] = useState<{ id: string; course_name: string } | null>(null);
   const importTarget = useOnboardingTarget('import-card');
+
+  // Wave 3 mode chooser. The Record tab now shows two cards on entry —
+  // Import (clips from Photos) and Live (BLE-triggered camera recording).
+  // null = chooser visible; 'live' = course picker + camera flow visible.
+  // The Import path uses router.push to /round/import and never sets
+  // this to 'import' (no need — that flow lives on a different route).
+  const [mode, setMode] = useState<null | 'live'>(null);
 
   const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
@@ -145,19 +154,31 @@ export default function RecordScreen() {
     setCourseHoles(holes.length > 0 ? holes : undefined);
   };
 
-  // ---- IDLE STATE: Course Selection ----
+  // ---- IDLE STATES: either the chooser or the Live picker. ----
+  // Combined into a single guard so TypeScript narrows roundState
+  // correctly past the block. The two sub-renders are swapped via the
+  // `mode` state variable rather than two separate top-level branches.
   if (!roundState || roundState.status === 'not_started') {
-    return (
+    if (mode === null) {
+      // ---- IDLE STATE: Mode chooser ----
+      // First entry into the Record tab shows two cards: Import vs Live.
+      // The user picks one before we ask about course / preset (those
+      // come in Phase C). This keeps the entry point honest about which
+      // path they're starting rather than burying Import in a secondary
+      // button under the live-recording UI like before.
+      return (
       <GradientBackground>
         <View style={{ flex: 1, paddingTop: insets.top, padding: 24 }}>
           <Text style={{ ...theme.typography.h1, color: theme.colors.textPrimary, marginBottom: 8 }}>
             Record
           </Text>
-          <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
-            Pick your course and you're ready to go.
+          <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 32 }}>
+            How are you capturing this round?
           </Text>
 
-          {/* Orphaned round recovery */}
+          {/* Orphaned round recovery — stays visible on the chooser so the
+              user doesn't have to drill into Live to find an unfinished
+              session waiting to be resumed. */}
           {orphanedRound && (
             <Card style={{ marginBottom: 16, gap: 8 }}>
               <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
@@ -188,6 +209,125 @@ export default function RecordScreen() {
             </Card>
           )}
 
+          {/* Live recording card */}
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setMode('live');
+            }}
+            style={({ pressed }) => ({
+              borderRadius: theme.radius.lg,
+              padding: 20,
+              backgroundColor: theme.colors.surface,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              marginBottom: 12,
+              opacity: pressed ? 0.85 : 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 16,
+              ...theme.shadows.glow,
+            })}
+          >
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 28,
+                backgroundColor: theme.colors.primary,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Video size={28} color="#FFFFFF" strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ ...theme.typography.h3, color: theme.colors.textPrimary }}>
+                Live recording
+              </Text>
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
+                Record each shot as you play with the BLE clicker.
+              </Text>
+            </View>
+            <ChevronRight size={20} color={theme.colors.textTertiary} />
+          </Pressable>
+
+          {/* Import card */}
+          <Pressable
+            ref={importTarget.ref}
+            onLayout={importTarget.onLayout}
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              router.push('/round/import');
+            }}
+            style={({ pressed }) => ({
+              borderRadius: theme.radius.lg,
+              padding: 20,
+              backgroundColor: theme.colors.surface,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              opacity: pressed ? 0.85 : 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 16,
+            })}
+          >
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 28,
+                backgroundColor: theme.colors.surfaceElevated ?? theme.colors.surface,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Film size={28} color={theme.colors.primary} strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ ...theme.typography.h3, color: theme.colors.textPrimary }}>
+                Import clips
+              </Text>
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
+                Pick already-captured videos from your Photos library.
+              </Text>
+            </View>
+            <ChevronRight size={20} color={theme.colors.textTertiary} />
+          </Pressable>
+        </View>
+      </GradientBackground>
+    );
+  }
+
+    // ---- IDLE STATE: Live recording — course selection ----
+    // Reached when the user picked 'Live' on the chooser. Type narrowing
+    // means mode must be 'live' here since 'null' was handled above.
+    return (
+      <GradientBackground>
+        <View style={{ flex: 1, paddingTop: insets.top, padding: 24 }}>
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setMode(null);
+              setCourseName('');
+              setSelectedCourseId(undefined);
+              setCourseHoles(undefined);
+            }}
+            hitSlop={12}
+            style={{ marginBottom: 12, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6 }}
+          >
+            <ArrowLeft size={20} color={theme.colors.textSecondary} />
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>Back</Text>
+          </Pressable>
+          <Text style={{ ...theme.typography.h1, color: theme.colors.textPrimary, marginBottom: 8 }}>
+            Live recording
+          </Text>
+          <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
+            Pick your course and you're ready to go.
+          </Text>
+
           {/* Shutter Status */}
           <Pressable
             onPress={() => router.push('/profile/bluetooth')}
@@ -216,7 +356,9 @@ export default function RecordScreen() {
             </Card>
           </Pressable>
 
-          {/* Course Search */}
+          {/* Course Search — Phase C will replace this with a course-or-preset
+              picker. For now Phase B keeps the existing flow so Live recording
+              continues to work end-to-end. */}
           <CourseSearch
             value={courseName}
             onChangeText={setCourseName}
@@ -231,28 +373,6 @@ export default function RecordScreen() {
               ...(courseName.trim() ? theme.shadows.glow : {}),
             }}
           />
-
-          <Pressable
-            ref={importTarget.ref}
-            onLayout={importTarget.onLayout}
-            onPress={() => router.push('/round/import')}
-            style={{
-              marginTop: 16,
-              paddingVertical: 14,
-              borderRadius: theme.radius.md,
-              borderWidth: 1,
-              borderColor: theme.colors.surfaceBorder,
-              alignItems: 'center',
-              flexDirection: 'row',
-              justifyContent: 'center',
-              gap: 8,
-            }}
-          >
-            <Film size={18} color={theme.colors.primary} />
-            <Text style={{ color: theme.colors.primary, fontWeight: '600', fontSize: 15 }}>
-              Import Round from Camera Roll
-            </Text>
-          </Pressable>
 
           {/* Dev: Simulate BLE press */}
           {__DEV__ && (
@@ -269,6 +389,8 @@ export default function RecordScreen() {
   }
 
   // ---- FINISHED STATE ----
+  // From here roundState is guaranteed non-null because both null and
+  // 'not_started' were handled above.
   if (roundState.status === 'finished') {
     return (
       <GradientBackground>
@@ -324,6 +446,9 @@ export default function RecordScreen() {
               } catch {}
               round.resetRound();
               setCourseName('');
+              // Send the user back to the chooser next time they hit the
+              // Record tab — fresh start, not a stale 'live' selection.
+              setMode(null);
               router.replace(`/round/editor?roundId=${roundId}`);
             }}
             style={{ marginTop: 32, width: '100%' }}
@@ -339,6 +464,7 @@ export default function RecordScreen() {
                   onPress: () => {
                     round.discardRound(roundState.roundId);
                     setCourseName('');
+                    setMode(null);
                   },
                 },
               ]);
