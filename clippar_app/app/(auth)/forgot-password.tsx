@@ -90,7 +90,7 @@ export default function ForgotPasswordScreen() {
                 paddingHorizontal: 12,
               }}
             >
-              Enter the email on your account and we'll send you a 6-digit code to reset your password.
+              Enter the email on your account and we'll send you a code to reset your password.
             </Text>
           </View>
 

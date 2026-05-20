@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { ArrowLeft } from 'lucide-react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
@@ -28,6 +29,7 @@ import { supabase } from '@/lib/supabase';
 export default function ResetPasswordScreen() {
   const params = useLocalSearchParams<{ email?: string }>();
   const initialEmail = (params.email ?? '').trim();
+  const insets = useSafeAreaInsets();
 
   const [email, setEmail] = useState(initialEmail);
   const [code, setCode] = useState('');
@@ -45,8 +47,11 @@ export default function ResetPasswordScreen() {
       setError('Please enter your email');
       return;
     }
+    // Supabase's email-based recovery OTP is 6 OR 8 digits depending on
+    // the project's auth setting. Accept any length the user typed; the
+    // verifyOtp call below will reject anything malformed.
     if (trimmedCode.length < 6) {
-      setError('Enter the 6-digit code from your email');
+      setError('Enter the code from your email');
       return;
     }
     if (password.length < 6) {
@@ -129,14 +134,23 @@ export default function ResetPasswordScreen() {
         <ScrollView
           contentContainerStyle={{
             flexGrow: 1,
-            justifyContent: 'center',
-            padding: theme.spacing.lg,
+            // Sit content below the status bar / dynamic island. The form is
+            // tall enough on this screen that centering it overflowed the top
+            // safe area on devices with a notch.
+            paddingTop: insets.top + 56,
+            paddingBottom: insets.bottom + theme.spacing.lg,
+            paddingHorizontal: theme.spacing.lg,
           }}
           keyboardShouldPersistTaps="handled"
         >
           <Pressable
             onPress={() => router.back()}
-            style={{ position: 'absolute', top: 60, left: theme.spacing.lg }}
+            style={{
+              position: 'absolute',
+              top: insets.top + 12,
+              left: theme.spacing.lg,
+              zIndex: 1,
+            }}
             hitSlop={12}
           >
             <ArrowLeft size={24} color={theme.colors.textSecondary} />
@@ -163,8 +177,8 @@ export default function ResetPasswordScreen() {
               }}
             >
               {initialEmail
-                ? `We sent a 6-digit code to ${initialEmail}. It expires in 1 hour.`
-                : 'Enter the email and the 6-digit code we just sent you.'}
+                ? `We sent a reset code to ${initialEmail}. It expires in 1 hour.`
+                : 'Enter the email and the code we just sent you.'}
             </Text>
           </View>
 
@@ -214,17 +228,17 @@ export default function ResetPasswordScreen() {
                   marginLeft: 4,
                 }}
               >
-                6-digit code
+                Reset code
               </Text>
               <TextInput
                 value={code}
-                onChangeText={(t) => setCode(t.replace(/[^0-9]/g, '').slice(0, 6))}
-                placeholder="123456"
+                onChangeText={(t) => setCode(t.replace(/[^0-9]/g, '').slice(0, 8))}
+                placeholder="Paste the code from your email"
                 placeholderTextColor={theme.colors.textTertiary}
                 keyboardType="number-pad"
                 autoComplete="one-time-code"
                 textContentType="oneTimeCode"
-                maxLength={6}
+                maxLength={8}
                 style={{
                   backgroundColor: theme.colors.surface,
                   borderWidth: 1,
@@ -233,7 +247,7 @@ export default function ResetPasswordScreen() {
                   padding: 14,
                   color: theme.colors.textPrimary,
                   fontSize: 22,
-                  letterSpacing: 6,
+                  letterSpacing: 4,
                   textAlign: 'center',
                   fontWeight: '600',
                 }}
