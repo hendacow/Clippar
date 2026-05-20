@@ -287,14 +287,29 @@ export function useCamera({
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
 
+    // Eagerly flip the recording state BEFORE telling iOS to finalize the
+    // clip. The `recordAsync` promise in startRecording can take 5–10s to
+    // resolve on iOS (it has to finalize the MP4 container), and the
+    // `finally` block that flips state only runs after that. Without this
+    // eager flip:
+    //   - The torch (bound to camera.isRecording) stays on for those
+    //     5–10s after the user pressed stop, looking like a bug.
+    //   - The shutter onPress closure still sees isRecording=true, so a
+    //     follow-up press fires "instant stop" against an already-stopped
+    //     recording — calling cameraRef.stopRecording() twice can confuse
+    //     the iOS AVCaptureSession and stretch the finalize delay further.
+    // The recordAsync promise still resolves in the background and the
+    // clip is still saved through the existing finally pipeline; this
+    // just makes the UI source of truth instant.
+    isRecordingRef.current = false;
+    setIsRecording(false);
+
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       cameraRef.current.stopRecording();
       // The recordAsync promise in startRecording will resolve with the video
     } catch (error) {
       console.error('[useCamera] Stop recording error:', error);
-      isRecordingRef.current = false;
-      setIsRecording(false);
     }
   }, []);
 
