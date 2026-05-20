@@ -1,6 +1,6 @@
 // Course preset — captures the per-round setup choices the user makes for
 // a course so they can skip the setup screens on repeat visits. See
-// supabase/migrations/009_course_presets.sql for the source schema.
+// clippar_app/supabase/migrations/009_course_presets.sql for the source schema.
 export type CoursePreset = {
   id: string;
   user_id: string;
