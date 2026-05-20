@@ -54,11 +54,36 @@ try {
 
 export type ShutterSource = 'key-event' | 'volume' | 'ble' | 'simulated' | 'none';
 
+export type ShutterClickEvent = { count: 1 | 2 | 3 };
+
 export interface ShutterState {
   connected: boolean;
   source: ShutterSource;
   statusLabel: string;
+  /**
+   * Fires immediately on every physical press, with no debounce. Use this
+   * when latency matters more than knowing the gesture (e.g., emitting
+   * haptic feedback the moment the user presses, or stopping a clip
+   * already in progress). Multiple presses fire this multiple times.
+   */
   onPress: (callback: () => void) => () => void;
+  /**
+   * Debounced handler that fires once per gesture after a short quiet
+   * window, with the total click count (1, 2, or 3). Use when you need
+   * to distinguish single from double from triple click — e.g., mapping
+   * 1 click → start/stop shot, 2 → next hole, 3 → quick penalty. The
+   * cost is a ~CLICK_WINDOW_MS delay before the action fires.
+   */
+  onClick: (callback: (event: ShutterClickEvent) => void) => () => void;
+  /**
+   * Cancel the pending click-resolution timer and reset the count. Call
+   * from an `onPress` listener when you've handled the press immediately
+   * and don't want the debounced `onClick` to fire later. Example: a
+   * recording-screen press that means "stop recording right now" — we
+   * stop on the press and call this so the 1s onClick window doesn't
+   * resolve into "start recording again".
+   */
+  clearPendingClicks: () => void;
   simulatePress: () => void;
   ble: ReturnType<typeof useBLE>;
 }
@@ -66,17 +91,103 @@ export interface ShutterState {
 // Shutter key codes we listen for
 const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 
+// How long to wait after the last press before deciding a gesture is done.
+// 1000ms — generous enough that a slow / nervous double or triple click is
+// never misread as separate gestures. The downside is a 1s latency on
+// single-click actions, but for golf this is invisible: pressing to start
+// a shot is followed by 5–20s of walking up to the ball anyway, and
+// pressing to stop happens after the swing has clearly finished. User
+// testing settled on this number after 300ms and 400ms both clipped real
+// gestures sometimes.
+const CLICK_WINDOW_MS = 1000;
+
+// Many cheap shutters fire BOTH a key-event (HID) AND a volume change for
+// the SAME physical press, with the two events landing within a few tens of
+// milliseconds. We use this window to dedupe — if a press from one source
+// lands within DUP_WINDOW_MS of a press from another source, we treat them
+// as the same physical press and only count it once.
+const DUP_WINDOW_MS = 120;
+
+// We cap the counted clicks at this number; further presses in the same
+// window collapse to a triple. Any reasonable golf-mid-round action maps
+// to 1, 2, or 3 clicks and we don't want to encourage four-click chords.
+const MAX_CLICKS = 3;
+
+// Verbose console logging gated to dev builds. Set to false in production
+// to keep the JS bridge quiet during recording.
+const DEBUG = __DEV__;
+
+const slog = (label: string, data?: Record<string, unknown>) => {
+  if (!DEBUG) return;
+  // Use a stable timestamp + label prefix so events sort and grep cleanly
+  // in the Metro log stream.
+  console.log(`[shutter ${Date.now() % 100000}] ${label}`, data ?? '');
+};
+
 export function useShutter(): ShutterState {
   const ble = useBLE();
+  // Immediate-press listeners: fire on every physical press, no debounce.
   const listenersRef = useRef<Set<() => void>>(new Set());
+  // Debounced-click listeners: fire once per gesture with the total count.
+  const clickListenersRef = useRef<Set<(e: ShutterClickEvent) => void>>(new Set());
+  // Rolling count of recent presses, flushed to clickListenersRef after
+  // CLICK_WINDOW_MS of quiet. Refs because we mutate from inside callbacks.
+  const clickCountRef = useRef(0);
+  const clickFlushTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
+  // Per-source last-emit timestamps. We use these to dedupe events from
+  // different sources that fire for the SAME physical press. Cheap shutters
+  // commonly emit both a HID key event and a volume change within ~10–80ms;
+  // counting both as separate presses produces phantom "double clicks" that
+  // randomly advance the hole. The fix is a time-windowed cross-source
+  // suppression — see emitPress.
+  const lastEmitBySourceRef = useRef<Partial<Record<ShutterSource, number>>>({});
+
   const [lastPressTime, setLastPressTime] = useState(0);
   const [activeSource, setActiveSource] = useState<ShutterSource>('none');
   const activeSourceRef = useRef<ShutterSource>('none');
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // --- Helper: emit press to all listeners ---
+  // Every physical press from every source (key-event, volume, ble,
+  // simulated) flows through here. It does four things:
+  //   1. Cross-source dedup — if a press from any OTHER source fired within
+  //      DUP_WINDOW_MS, treat this as the same physical press and skip.
+  //   2. Bumps the source / activity timestamp.
+  //   3. Fires immediate `onPress` listeners with no delay.
+  //   4. Feeds the click counter; the counter flushes to `onClick`
+  //      listeners CLICK_WINDOW_MS after the last press in a gesture.
   const emitPress = useCallback((source: ShutterSource) => {
-    setLastPressTime(Date.now());
+    const now = Date.now();
+
+    // (1) Cross-source dedup. Find the most recent emit time across all
+    //     other sources and check if it's within the dedup window.
+    let mostRecentOtherSource: ShutterSource | null = null;
+    let mostRecentOtherTs = 0;
+    for (const [src, ts] of Object.entries(lastEmitBySourceRef.current)) {
+      if (src === source || ts === undefined) continue;
+      if (ts > mostRecentOtherTs) {
+        mostRecentOtherTs = ts;
+        mostRecentOtherSource = src as ShutterSource;
+      }
+    }
+    const dupAge = now - mostRecentOtherTs;
+    if (mostRecentOtherSource && dupAge < DUP_WINDOW_MS) {
+      slog('emit SUPPRESSED (cross-source dup)', {
+        source,
+        suppressedBy: mostRecentOtherSource,
+        ageMs: dupAge,
+        dupWindowMs: DUP_WINDOW_MS,
+      });
+      // Still record this source's timestamp so subsequent dedup decisions
+      // see it — otherwise the SECOND of three duplicates would slip
+      // through if it's far from the first but close to nothing.
+      lastEmitBySourceRef.current[source] = now;
+      return;
+    }
+    lastEmitBySourceRef.current[source] = now;
+
+    setLastPressTime(now);
     setActiveSource(source);
     activeSourceRef.current = source;
 
@@ -87,8 +198,46 @@ export function useShutter(): ShutterState {
       activeSourceRef.current = 'none';
     }, 60_000);
 
+    // (3) click counter + flush timer. Set up BEFORE firing the immediate
+    // listeners so a listener can call clearPendingClicks() to cancel the
+    // flush in-flight (e.g. "stop recording now, don't trigger another
+    // onClick 1s later that would start a new recording").
+    clickCountRef.current = Math.min(clickCountRef.current + 1, MAX_CLICKS);
+    slog('emit ACCEPTED', {
+      source,
+      count: clickCountRef.current,
+      immediateListeners: listenersRef.current.size,
+      clickListeners: clickListenersRef.current.size,
+    });
+    if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
+    clickFlushTimerRef.current = setTimeout(() => {
+      const count = clickCountRef.current as 1 | 2 | 3;
+      slog('click FLUSH', {
+        count,
+        listenerCount: clickListenersRef.current.size,
+      });
+      clickCountRef.current = 0;
+      clickFlushTimerRef.current = undefined;
+      clickListenersRef.current.forEach((cb) => cb({ count }));
+    }, CLICK_WINDOW_MS);
+
+    // (4) immediate listeners. Fire AFTER (3) so listeners that want to
+    // short-circuit the gesture (via clearPendingClicks) can actually
+    // cancel the flush we just scheduled.
     listenersRef.current.forEach((cb) => cb());
   }, []);
+
+  // --- Route BLE presses through the unified emit pipeline ---
+  // Previously the BLE path bypassed emitPress and called subscriber
+  // callbacks directly. That meant BLE presses never reached the click
+  // counter. Now everything funnels through emitPress so click counting
+  // works regardless of input source.
+  useEffect(() => {
+    return ble.onPress(() => {
+      slog('source[ble] press');
+      emitPress('ble');
+    });
+  }, [ble.onPress, emitPress]);
 
   // --- Method 1: expo-key-event ---
   // Always call the wrapper hook unconditionally — it's either the real hook
@@ -100,30 +249,107 @@ export function useShutter(): ShutterState {
   useEffect(() => {
     if (!keyEvent || !keyEventAvailable) return;
     if (SHUTTER_KEYS.has(keyEvent.key)) {
+      slog('source[key-event] press', { key: keyEvent.key });
       emitPress('key-event');
+    } else {
+      slog('source[key-event] ignored (not a shutter key)', { key: keyEvent.key });
     }
   }, [keyEvent, emitPress]);
 
   // --- Method 2: react-native-volume-manager ---
+  // Volume changes feed the press pipeline. We have to reset the volume
+  // back to the middle after each press so the shutter can keep firing
+  // (otherwise it caps at 1.0 or 0.0 and stops sending change events).
+  // The catch: our own setVolume call ALSO triggers the volume listener,
+  // so naive code counts each press as two events.
+  //
+  // Previous attempt used a time-windowed flag that suppressed ANY event
+  // arriving within 200ms of our setVolume call. That was wrong — a real
+  // physical press arriving inside that window got silently dropped (we
+  // saw it in logs at ts=99155: a 0.65 press swallowed as "own reset").
+  //
+  // New approach: VALUE-based suppression. We know the value we asked the
+  // OS to set (RESET_TARGET = 0.5). Real shutter presses produce 0.55,
+  // 0.65, or 0.7 — never exactly 0.5. So when the listener fires we just
+  // compare the reported value to the reset target. If it matches within
+  // a small tolerance, it's our own reset and we suppress it. Otherwise
+  // it's a real press regardless of timing.
+  //
+  // We still timestamp the expected reset so a stale expectation can't
+  // suppress a future event if the reset listener event never lands (the
+  // window is generous — 600ms — because the suppression is correctness-
+  // critical and the false-positive rate is essentially zero).
+  const expectedResetUntilRef = useRef<number | null>(null);
+  const RESET_TARGET = 0.5;
+  const RESET_TOLERANCE = 0.02;
+  const EXPECTED_RESET_WINDOW_MS = 600;
+
   useEffect(() => {
-    if (!volumeAvailable || !VolumeManager) return;
+    if (!volumeAvailable || !VolumeManager) {
+      slog('volume manager unavailable — HUD will show, no volume capture');
+      return;
+    }
 
-    // Suppress native volume HUD
-    try { VolumeManager.showNativeVolumeUI({ enabled: false }); } catch {}
+    // Suppress native volume HUD. If this throws or no-ops, the iOS volume
+    // slider will appear on every press — log so we know.
+    let hudSuppressed = false;
+    try {
+      VolumeManager.showNativeVolumeUI({ enabled: false });
+      hudSuppressed = true;
+    } catch (e) {
+      slog('VolumeManager.showNativeVolumeUI threw — HUD WILL APPEAR', {
+        error: (e as Error).message,
+      });
+    }
+    slog('volume manager init', { hudSuppressed });
 
-    const subscription = VolumeManager.addVolumeListener(() => {
-      // Only use volume as source if key-event didn't already fire
-      // (some shutters trigger both volume change AND key event)
-      if (activeSourceRef.current !== 'key-event') {
-        emitPress('volume');
+    // Helper: reset the system volume to the middle and arm the value-
+    // based suppression so the corresponding listener fire (with value
+    // ~= RESET_TARGET) doesn't count as a press.
+    const resetVolumeSafely = () => {
+      expectedResetUntilRef.current = Date.now() + EXPECTED_RESET_WINDOW_MS;
+      try {
+        VolumeManager.setVolume(RESET_TARGET, { showUI: false });
+      } catch {}
+    };
+
+    const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
+      const value = event?.volume ?? -1;
+      const now = Date.now();
+      const expectedUntil = expectedResetUntilRef.current;
+      const expecting = expectedUntil !== null && now <= expectedUntil;
+      const matchesReset = Math.abs(value - RESET_TARGET) <= RESET_TOLERANCE;
+
+      if (expecting && matchesReset) {
+        // This event is our own reset landing. Suppress and clear the
+        // expectation so the next reset cycle starts clean.
+        slog('volume change SUPPRESSED (matches expected reset)', {
+          volume: value,
+          target: RESET_TARGET,
+        });
+        expectedResetUntilRef.current = null;
+        return;
       }
 
-      // Reset volume to middle so it can trigger in both directions
-      try { VolumeManager.setVolume(0.5, { showUI: false }); } catch {}
+      // Either we weren't expecting a reset, or the value doesn't look
+      // like one. Treat as a real press. (If we were expecting a reset
+      // that never came, the next setVolume call will overwrite the
+      // expectation so no leak.)
+      if (expecting) {
+        slog('source[volume] change (real, despite pending reset)', {
+          volume: value,
+          target: RESET_TARGET,
+          delta: Math.abs(value - RESET_TARGET).toFixed(3),
+        });
+      } else {
+        slog('source[volume] change', { volume: value });
+      }
+      emitPress('volume');
+      resetVolumeSafely();
     });
 
-    // Set initial volume to middle
-    try { VolumeManager.setVolume(0.5, { showUI: false }); } catch {}
+    // Initial reset to centre so the shutter can fire in either direction
+    resetVolumeSafely();
 
     return () => {
       subscription?.remove?.();
@@ -148,24 +374,47 @@ export function useShutter(): ShutterState {
       ? `${ble.connectedDevice?.name ?? 'Clicker'} Connected`
       : 'No Clicker Connected';
 
-  // --- Unified onPress ---
-  const onPress = useCallback(
-    (callback: () => void): (() => void) => {
-      // Register with BLE (fallback for custom BLE peripherals)
-      const unsubBle = ble.onPress(callback);
+  // --- Unified onPress (immediate) ---
+  // Subscribers are called for every physical press across every input
+  // source. The BLE source no longer needs a separate registration here
+  // because the useEffect above routes BLE presses through emitPress.
+  const onPress = useCallback((callback: () => void): (() => void) => {
+    listenersRef.current.add(callback);
+    return () => {
+      listenersRef.current.delete(callback);
+    };
+  }, []);
 
-      // Register with our local listeners (key-event + volume)
-      listenersRef.current.add(callback);
-
+  // --- Debounced onClick (1/2/3-click semantics) ---
+  // Fires after CLICK_WINDOW_MS of quiet with the count of presses seen
+  // in that window. Add the subscriber to the same Set the emit timer
+  // flushes to.
+  const onClick = useCallback(
+    (callback: (e: ShutterClickEvent) => void): (() => void) => {
+      clickListenersRef.current.add(callback);
       return () => {
-        unsubBle();
-        listenersRef.current.delete(callback);
+        clickListenersRef.current.delete(callback);
       };
     },
-    [ble.onPress]
+    []
   );
 
+  // Cancel any pending click-resolution timer + zero the count. Called
+  // from listeners that have handled the press immediately and don't
+  // want the debounced onClick to fire later for the same gesture.
+  const clearPendingClicks = useCallback(() => {
+    if (clickFlushTimerRef.current) {
+      clearTimeout(clickFlushTimerRef.current);
+      clickFlushTimerRef.current = undefined;
+    }
+    if (clickCountRef.current > 0) {
+      slog('click cleared by listener', { hadCount: clickCountRef.current });
+    }
+    clickCountRef.current = 0;
+  }, []);
+
   const simulatePress = useCallback(() => {
+    slog('source[simulated] press');
     emitPress('simulated');
   }, [emitPress]);
 
@@ -173,6 +422,7 @@ export function useShutter(): ShutterState {
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
     };
   }, []);
 
@@ -181,6 +431,8 @@ export function useShutter(): ShutterState {
     source,
     statusLabel,
     onPress,
+    onClick,
+    clearPendingClicks,
     simulatePress,
     ble,
   };
