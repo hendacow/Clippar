@@ -239,6 +239,14 @@ export function useShutter(): ShutterState {
   }, [keyEvent, emitPress]);
 
   // --- Method 2: react-native-volume-manager ---
+  // Volume changes feed the press pipeline. We have to reset the volume
+  // back to the middle after each press so the shutter can keep firing
+  // (otherwise it caps at 1.0 or 0.0 and stops sending change events).
+  // The catch: our own setVolume call ALSO triggers the volume listener,
+  // so naive code counts each press as two events. We use a ref flag to
+  // suppress the listener fire that our reset call provokes.
+  const ownResetInFlightRef = useRef(false);
+
   useEffect(() => {
     if (!volumeAvailable || !VolumeManager) {
       slog('volume manager unavailable — HUD will show, no volume capture');
@@ -258,19 +266,36 @@ export function useShutter(): ShutterState {
     }
     slog('volume manager init', { hudSuppressed });
 
-    const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
-      slog('source[volume] change', { volume: event?.volume });
-      // Dedup is handled inside emitPress now (cross-source time window),
-      // so we always feed the press through — emitPress decides whether to
-      // suppress.
-      emitPress('volume');
+    // Helper: reset the system volume to the middle and mark the next
+    // listener fire as our own so we don't count it as a press.
+    const resetVolumeSafely = () => {
+      ownResetInFlightRef.current = true;
+      try {
+        VolumeManager.setVolume(0.5, { showUI: false });
+      } catch {}
+      // Clear the flag after a short window — the resulting volume event
+      // arrives async so we give it room to land. 200ms is conservative
+      // enough that a real user can't physically press in that window AND
+      // have the press misread as a reset.
+      setTimeout(() => {
+        ownResetInFlightRef.current = false;
+      }, 200);
+    };
 
-      // Reset volume to middle so it can trigger in both directions
-      try { VolumeManager.setVolume(0.5, { showUI: false }); } catch {}
+    const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
+      if (ownResetInFlightRef.current) {
+        slog('volume change SUPPRESSED (own reset in flight)', {
+          volume: event?.volume,
+        });
+        return;
+      }
+      slog('source[volume] change', { volume: event?.volume });
+      emitPress('volume');
+      resetVolumeSafely();
     });
 
-    // Set initial volume to middle
-    try { VolumeManager.setVolume(0.5, { showUI: false }); } catch {}
+    // Initial reset to centre so the shutter can fire in either direction
+    resetVolumeSafely();
 
     return () => {
       subscription?.remove?.();
