@@ -583,6 +583,13 @@ export default function RecordScreen() {
           mode="video"
           videoQuality="1080p"
           mute
+          // Phone torch as a "recording in progress" indicator. Cheap BLE
+          // shutters don't expose their LED, so we use the rear camera
+          // flash instead — visible from wherever the phone is pointed
+          // (typically AT the golfer for a tripod setup). Auto-follows
+          // camera.isRecording so it turns on the instant recording
+          // starts and off the instant it stops.
+          enableTorch={camera.isRecording}
         />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }]}>
