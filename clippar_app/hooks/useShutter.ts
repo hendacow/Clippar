@@ -83,10 +83,11 @@ export interface ShutterState {
 const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 
 // How long to wait after the last press before deciding a gesture is done.
-// 300ms catches a deliberate double-click while keeping single-click
-// latency feeling snappy. Tunable — bump up to 400ms if double-clicks are
-// being misread as singles, down to 250ms if singles feel laggy.
-const CLICK_WINDOW_MS = 300;
+// 400ms is the spec — single-click waits 400ms before committing as a shot,
+// double/triple-click each get another 400ms grace. Felt right in user
+// testing where 300ms was demonstrably too tight (real 2nd presses landed
+// at +390ms and got read as two separate singles).
+const CLICK_WINDOW_MS = 400;
 
 // Many cheap shutters fire BOTH a key-event (HID) AND a volume change for
 // the SAME physical press, with the two events landing within a few tens of
@@ -243,9 +244,28 @@ export function useShutter(): ShutterState {
   // back to the middle after each press so the shutter can keep firing
   // (otherwise it caps at 1.0 or 0.0 and stops sending change events).
   // The catch: our own setVolume call ALSO triggers the volume listener,
-  // so naive code counts each press as two events. We use a ref flag to
-  // suppress the listener fire that our reset call provokes.
-  const ownResetInFlightRef = useRef(false);
+  // so naive code counts each press as two events.
+  //
+  // Previous attempt used a time-windowed flag that suppressed ANY event
+  // arriving within 200ms of our setVolume call. That was wrong — a real
+  // physical press arriving inside that window got silently dropped (we
+  // saw it in logs at ts=99155: a 0.65 press swallowed as "own reset").
+  //
+  // New approach: VALUE-based suppression. We know the value we asked the
+  // OS to set (RESET_TARGET = 0.5). Real shutter presses produce 0.55,
+  // 0.65, or 0.7 — never exactly 0.5. So when the listener fires we just
+  // compare the reported value to the reset target. If it matches within
+  // a small tolerance, it's our own reset and we suppress it. Otherwise
+  // it's a real press regardless of timing.
+  //
+  // We still timestamp the expected reset so a stale expectation can't
+  // suppress a future event if the reset listener event never lands (the
+  // window is generous — 600ms — because the suppression is correctness-
+  // critical and the false-positive rate is essentially zero).
+  const expectedResetUntilRef = useRef<number | null>(null);
+  const RESET_TARGET = 0.5;
+  const RESET_TOLERANCE = 0.02;
+  const EXPECTED_RESET_WINDOW_MS = 600;
 
   useEffect(() => {
     if (!volumeAvailable || !VolumeManager) {
@@ -266,30 +286,47 @@ export function useShutter(): ShutterState {
     }
     slog('volume manager init', { hudSuppressed });
 
-    // Helper: reset the system volume to the middle and mark the next
-    // listener fire as our own so we don't count it as a press.
+    // Helper: reset the system volume to the middle and arm the value-
+    // based suppression so the corresponding listener fire (with value
+    // ~= RESET_TARGET) doesn't count as a press.
     const resetVolumeSafely = () => {
-      ownResetInFlightRef.current = true;
+      expectedResetUntilRef.current = Date.now() + EXPECTED_RESET_WINDOW_MS;
       try {
-        VolumeManager.setVolume(0.5, { showUI: false });
+        VolumeManager.setVolume(RESET_TARGET, { showUI: false });
       } catch {}
-      // Clear the flag after a short window — the resulting volume event
-      // arrives async so we give it room to land. 200ms is conservative
-      // enough that a real user can't physically press in that window AND
-      // have the press misread as a reset.
-      setTimeout(() => {
-        ownResetInFlightRef.current = false;
-      }, 200);
     };
 
     const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
-      if (ownResetInFlightRef.current) {
-        slog('volume change SUPPRESSED (own reset in flight)', {
-          volume: event?.volume,
+      const value = event?.volume ?? -1;
+      const now = Date.now();
+      const expectedUntil = expectedResetUntilRef.current;
+      const expecting = expectedUntil !== null && now <= expectedUntil;
+      const matchesReset = Math.abs(value - RESET_TARGET) <= RESET_TOLERANCE;
+
+      if (expecting && matchesReset) {
+        // This event is our own reset landing. Suppress and clear the
+        // expectation so the next reset cycle starts clean.
+        slog('volume change SUPPRESSED (matches expected reset)', {
+          volume: value,
+          target: RESET_TARGET,
         });
+        expectedResetUntilRef.current = null;
         return;
       }
-      slog('source[volume] change', { volume: event?.volume });
+
+      // Either we weren't expecting a reset, or the value doesn't look
+      // like one. Treat as a real press. (If we were expecting a reset
+      // that never came, the next setVolume call will overwrite the
+      // expectation so no leak.)
+      if (expecting) {
+        slog('source[volume] change (real, despite pending reset)', {
+          volume: value,
+          target: RESET_TARGET,
+          delta: Math.abs(value - RESET_TARGET).toFixed(3),
+        });
+      } else {
+        slog('source[volume] change', { volume: value });
+      }
       emitPress('volume');
       resetVolumeSafely();
     });
