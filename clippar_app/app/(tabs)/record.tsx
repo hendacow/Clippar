@@ -94,20 +94,69 @@ export default function RecordScreen() {
     return () => { setRecordingActive(false); };
   }, [isActive, setRecordingActive]);
 
-  // Subscribe shutter press (BLE or volume button) to camera toggle
+  // Subscribe shutter press → 1/2/3-click action map.
+  //
+  // The cheap off-the-shelf shutters Clippar supports only emit a single
+  // event per physical press (no key-up/key-down), so the only gesture
+  // dimensions we get are click count and rhythm. useShutter.onClick
+  // gives us debounced count semantics:
+  //   1 click  = toggle shot recording (start a new clip, or stop the
+  //              current one)
+  //   2 clicks = next hole — user can advance without touching the phone
+  //   3 clicks = quick penalty (defaults to water hazard, the most
+  //              common type; tap the on-screen penalty sheet to choose
+  //              a different type)
+  //
+  // The cost is a CLICK_WINDOW_MS (~400ms) delay on single-click actions
+  // because we have to wait to see whether more clicks are coming. For
+  // golf this is invisible — pressing to start a shot is followed by
+  // 5–20s of walking up to the ball anyway.
   useEffect(() => {
     if (!isActive) return;
 
-    const unsubscribe = shutter.onPress(() => {
-      if (isNative) {
-        camera.toggleRecording();
-      } else {
-        camera.simulateRecording();
+    const unsubscribe = shutter.onClick(({ count }) => {
+      if (count === 1) {
+        if (isNative) {
+          camera.toggleRecording();
+        } else {
+          camera.simulateRecording();
+        }
+      } else if (count === 2) {
+        // Skip if we're mid-shot — user probably double-clicked by
+        // accident. End-hole only makes sense between shots.
+        if (!camera.isRecording) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+          round.endHole();
+        }
+      } else if (count === 3) {
+        if (!camera.isRecording) {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+          round.addPenalty('water_hazard');
+        }
       }
     });
 
     return unsubscribe;
-  }, [shutter.onPress, isActive, camera.toggleRecording, camera.simulateRecording]);
+  }, [
+    shutter.onClick,
+    isActive,
+    camera.toggleRecording,
+    camera.simulateRecording,
+    camera.isRecording,
+    round.endHole,
+    round.addPenalty,
+  ]);
+
+  // Light haptic on EVERY physical press, fired immediately (before the
+  // click counter has decided what gesture it is). Gives the user a felt
+  // confirmation that the press registered even though the action is
+  // delayed by the debounce window.
+  useEffect(() => {
+    if (!isActive) return;
+    return shutter.onPress(() => {
+      Haptics.selectionAsync();
+    });
+  }, [shutter.onPress, isActive]);
 
   // Check for orphaned rounds on mount
   useEffect(() => {

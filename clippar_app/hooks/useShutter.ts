@@ -54,11 +54,27 @@ try {
 
 export type ShutterSource = 'key-event' | 'volume' | 'ble' | 'simulated' | 'none';
 
+export type ShutterClickEvent = { count: 1 | 2 | 3 };
+
 export interface ShutterState {
   connected: boolean;
   source: ShutterSource;
   statusLabel: string;
+  /**
+   * Fires immediately on every physical press, with no debounce. Use this
+   * when latency matters more than knowing the gesture (e.g., emitting
+   * haptic feedback the moment the user presses, or stopping a clip
+   * already in progress). Multiple presses fire this multiple times.
+   */
   onPress: (callback: () => void) => () => void;
+  /**
+   * Debounced handler that fires once per gesture after a short quiet
+   * window, with the total click count (1, 2, or 3). Use when you need
+   * to distinguish single from double from triple click — e.g., mapping
+   * 1 click → start/stop shot, 2 → next hole, 3 → quick penalty. The
+   * cost is a ~CLICK_WINDOW_MS delay before the action fires.
+   */
+  onClick: (callback: (event: ShutterClickEvent) => void) => () => void;
   simulatePress: () => void;
   ble: ReturnType<typeof useBLE>;
 }
@@ -66,15 +82,40 @@ export interface ShutterState {
 // Shutter key codes we listen for
 const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 
+// How long to wait after the last press before deciding a gesture is done.
+// 400ms catches a deliberate double-click without being so long that single
+// clicks feel laggy. Triple-click works within a 2× window via the natural
+// rhythm of pressing 3× in succession.
+const CLICK_WINDOW_MS = 400;
+
+// We cap the counted clicks at this number; further presses in the same
+// window collapse to a triple. Any reasonable golf-mid-round action maps
+// to 1, 2, or 3 clicks and we don't want to encourage four-click chords.
+const MAX_CLICKS = 3;
+
 export function useShutter(): ShutterState {
   const ble = useBLE();
+  // Immediate-press listeners: fire on every physical press, no debounce.
   const listenersRef = useRef<Set<() => void>>(new Set());
+  // Debounced-click listeners: fire once per gesture with the total count.
+  const clickListenersRef = useRef<Set<(e: ShutterClickEvent) => void>>(new Set());
+  // Rolling count of recent presses, flushed to clickListenersRef after
+  // CLICK_WINDOW_MS of quiet. Refs because we mutate from inside callbacks.
+  const clickCountRef = useRef(0);
+  const clickFlushTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+
   const [lastPressTime, setLastPressTime] = useState(0);
   const [activeSource, setActiveSource] = useState<ShutterSource>('none');
   const activeSourceRef = useRef<ShutterSource>('none');
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   // --- Helper: emit press to all listeners ---
+  // Every physical press from every source (key-event, volume, ble,
+  // simulated) flows through here. It does three things:
+  //   1. Bumps the source / activity timestamp.
+  //   2. Fires immediate `onPress` listeners with no delay.
+  //   3. Feeds the click counter; the counter flushes to `onClick`
+  //      listeners CLICK_WINDOW_MS after the last press in a gesture.
   const emitPress = useCallback((source: ShutterSource) => {
     setLastPressTime(Date.now());
     setActiveSource(source);
@@ -87,8 +128,28 @@ export function useShutter(): ShutterState {
       activeSourceRef.current = 'none';
     }, 60_000);
 
+    // (2) immediate listeners
     listenersRef.current.forEach((cb) => cb());
+
+    // (3) click counter + flush timer
+    clickCountRef.current = Math.min(clickCountRef.current + 1, MAX_CLICKS);
+    if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
+    clickFlushTimerRef.current = setTimeout(() => {
+      const count = clickCountRef.current as 1 | 2 | 3;
+      clickCountRef.current = 0;
+      clickFlushTimerRef.current = undefined;
+      clickListenersRef.current.forEach((cb) => cb({ count }));
+    }, CLICK_WINDOW_MS);
   }, []);
+
+  // --- Route BLE presses through the unified emit pipeline ---
+  // Previously the BLE path bypassed emitPress and called subscriber
+  // callbacks directly. That meant BLE presses never reached the click
+  // counter. Now everything funnels through emitPress so click counting
+  // works regardless of input source.
+  useEffect(() => {
+    return ble.onPress(() => emitPress('ble'));
+  }, [ble.onPress, emitPress]);
 
   // --- Method 1: expo-key-event ---
   // Always call the wrapper hook unconditionally — it's either the real hook
@@ -148,21 +209,29 @@ export function useShutter(): ShutterState {
       ? `${ble.connectedDevice?.name ?? 'Clicker'} Connected`
       : 'No Clicker Connected';
 
-  // --- Unified onPress ---
-  const onPress = useCallback(
-    (callback: () => void): (() => void) => {
-      // Register with BLE (fallback for custom BLE peripherals)
-      const unsubBle = ble.onPress(callback);
+  // --- Unified onPress (immediate) ---
+  // Subscribers are called for every physical press across every input
+  // source. The BLE source no longer needs a separate registration here
+  // because the useEffect above routes BLE presses through emitPress.
+  const onPress = useCallback((callback: () => void): (() => void) => {
+    listenersRef.current.add(callback);
+    return () => {
+      listenersRef.current.delete(callback);
+    };
+  }, []);
 
-      // Register with our local listeners (key-event + volume)
-      listenersRef.current.add(callback);
-
+  // --- Debounced onClick (1/2/3-click semantics) ---
+  // Fires after CLICK_WINDOW_MS of quiet with the count of presses seen
+  // in that window. Add the subscriber to the same Set the emit timer
+  // flushes to.
+  const onClick = useCallback(
+    (callback: (e: ShutterClickEvent) => void): (() => void) => {
+      clickListenersRef.current.add(callback);
       return () => {
-        unsubBle();
-        listenersRef.current.delete(callback);
+        clickListenersRef.current.delete(callback);
       };
     },
-    [ble.onPress]
+    []
   );
 
   const simulatePress = useCallback(() => {
@@ -173,6 +242,7 @@ export function useShutter(): ShutterState {
   useEffect(() => {
     return () => {
       if (timeoutRef.current) clearTimeout(timeoutRef.current);
+      if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
     };
   }, []);
 
@@ -181,6 +251,7 @@ export function useShutter(): ShutterState {
     source,
     statusLabel,
     onPress,
+    onClick,
     simulatePress,
     ble,
   };
