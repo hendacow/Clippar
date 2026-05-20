@@ -2,6 +2,17 @@ console.log("OTA test 2026-05-17");
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { Stack } from 'expo-router';
+import * as Linking from 'expo-linking';
+
+// TEMP DEBUG (remove once reset flow verified): instrument every deep
+// link the app receives — both cold-start launch URL and every url
+// event. Output appears in Metro as [deeplink] lines.
+Linking.getInitialURL()
+  .then((u) => console.log('[deeplink] getInitialURL =', u))
+  .catch((e) => console.log('[deeplink] getInitialURL threw', e));
+Linking.addEventListener('url', (e) => {
+  console.log('[deeplink] url event =', e.url);
+});
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
