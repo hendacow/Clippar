@@ -3,15 +3,20 @@ import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { Stack } from 'expo-router';
 import * as Linking from 'expo-linking';
+import { consumeRecoveryDeepLink } from '@/lib/recoveryLinkBus';
 
-// TEMP DEBUG (remove once reset flow verified): instrument every deep
-// link the app receives — both cold-start launch URL and every url
-// event. Output appears in Metro as [deeplink] lines.
-Linking.getInitialURL()
-  .then((u) => console.log('[deeplink] getInitialURL =', u))
-  .catch((e) => console.log('[deeplink] getInitialURL threw', e));
+// Module-load hook: capture every deep link before any screen mounts.
+// expo-router routes the URL to a screen (e.g. /reset-password), but the
+// screen's own useEffect Linking listener races the OS — the url event
+// fires before the screen's handler subscribes, so the screen sees
+// nothing. Handling here, ahead of routing, avoids that race entirely.
+Linking.getInitialURL().then((url) => {
+  console.log('[deeplink] getInitialURL =', url);
+  if (url) consumeRecoveryDeepLink(url);
+});
 Linking.addEventListener('url', (e) => {
   console.log('[deeplink] url event =', e.url);
+  consumeRecoveryDeepLink(e.url);
 });
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';

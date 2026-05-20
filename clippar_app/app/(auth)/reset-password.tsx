@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -7,80 +7,16 @@ import {
   Platform,
   ScrollView,
 } from 'react-native';
-import { router, useLocalSearchParams } from 'expo-router';
-import * as Linking from 'expo-linking';
+import { router } from 'expo-router';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { supabase } from '@/lib/supabase';
-
-// Handles both Supabase recovery callback flows on a single URL parse:
-//   - PKCE  (default in supabase-js v2.x): `<scheme>://reset-password?code=...`
-//     → call exchangeCodeForSession(code) to seed the recovery session.
-//   - Implicit (older): `<scheme>://reset-password#access_token=...&refresh_token=...&type=recovery`
-//     → call setSession({access, refresh}).
-// Returns: 'ready' on success, 'invalid' if a recovery payload was present
-// but couldn't be exchanged, or 'not-recovery' if the URL had no recovery
-// payload at all (so the caller can keep waiting for the real link).
-async function consumeRecoveryUrl(
-  url: string | null
-): Promise<'ready' | 'invalid' | 'not-recovery'> {
-  // TEMP DEBUG (remove once reset flow is verified): log the URL the screen
-  // is parsing and which branch wins. Helps diagnose 'Link invalid' false-trips.
-  console.log('[reset-password] consumeRecoveryUrl url=', url);
-  if (!url) {
-    console.log('[reset-password] result=not-recovery (no url)');
-    return 'not-recovery';
-  }
-
-  // 1) PKCE: ?code=<auth_code>
-  const qIdx = url.indexOf('?');
-  if (qIdx !== -1) {
-    const hashIdx = url.indexOf('#', qIdx);
-    const qStr = hashIdx === -1 ? url.slice(qIdx + 1) : url.slice(qIdx + 1, hashIdx);
-    const qp = new URLSearchParams(qStr);
-    const code = qp.get('code');
-    if (code) {
-      console.log('[reset-password] pkce code present, exchanging…');
-      const { error } = await supabase.auth.exchangeCodeForSession(code);
-      console.log('[reset-password] exchangeCodeForSession error=', error?.message ?? 'none');
-      return error ? 'invalid' : 'ready';
-    }
-    // Supabase sometimes redirects with an explicit error param when the
-    // token is expired/used. Surface that as invalid so the user gets a
-    // clear message.
-    if (qp.get('error') || qp.get('error_code')) {
-      console.log('[reset-password] query has error param:', qp.get('error_code'), qp.get('error_description'));
-      return 'invalid';
-    }
-  }
-
-  // 2) Implicit: #access_token=...&refresh_token=...&type=recovery
-  const hIdx = url.indexOf('#');
-  if (hIdx !== -1) {
-    const hp = new URLSearchParams(url.slice(hIdx + 1));
-    const type = hp.get('type');
-    const access = hp.get('access_token');
-    const refresh = hp.get('refresh_token');
-    console.log('[reset-password] hash params type=', type, 'access?', !!access, 'refresh?', !!refresh);
-    if (type === 'recovery' && access && refresh) {
-      console.log('[reset-password] implicit flow, setting session…');
-      const { error } = await supabase.auth.setSession({
-        access_token: access,
-        refresh_token: refresh,
-      });
-      console.log('[reset-password] setSession error=', error?.message ?? 'none');
-      return error ? 'invalid' : 'ready';
-    }
-    if (hp.get('error') || hp.get('error_code')) {
-      console.log('[reset-password] hash has error param:', hp.get('error_code'), hp.get('error_description'));
-      return 'invalid';
-    }
-  }
-
-  console.log('[reset-password] result=not-recovery (no recognized payload)');
-  return 'not-recovery';
-}
+import {
+  getRecoveryState,
+  subscribeRecovery,
+  resetRecoveryBus,
+} from '@/lib/recoveryLinkBus';
 
 export default function ResetPasswordScreen() {
   const [password, setPassword] = useState('');
@@ -90,81 +26,41 @@ export default function ResetPasswordScreen() {
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
 
-  // expo-router consumes the deep-link URL during routing, which is why
-  // Linking.getInitialURL() returns null on a fresh entry. The real source
-  // of truth for the query params (PKCE `?code=`) is useLocalSearchParams.
-  const params = useLocalSearchParams<{
-    code?: string;
-    error?: string;
-    error_code?: string;
-    error_description?: string;
-  }>();
-
-  // Track resolved state in a ref so async callbacks read the live value
-  // (closures otherwise capture 'pending' at effect-creation time).
-  const stateRef = useRef<'pending' | 'ready' | 'invalid'>('pending');
-
+  // The deep-link URL has already been parsed by app/_layout.tsx's
+  // module-level listener (which beats the OS race that the in-screen
+  // listener loses). We just read the resulting state here.
   useEffect(() => {
-    let mounted = true;
-
-    const resolve = (next: 'ready' | 'invalid', message?: string) => {
-      if (!mounted || stateRef.current !== 'pending') return;
-      stateRef.current = next;
-      setLinkReady(next);
-      if (message) setError(message);
+    const apply = (s: ReturnType<typeof getRecoveryState>) => {
+      console.log('[reset-password] recoveryBus state=', s);
+      if (s.kind === 'ready') {
+        setLinkReady('ready');
+      } else if (s.kind === 'invalid') {
+        setLinkReady('invalid');
+        setError(s.message);
+      }
     };
 
-    const consume = async (url: string | null) => {
-      const result = await consumeRecoveryUrl(url);
-      if (result === 'ready') resolve('ready');
-      else if (result === 'invalid') resolve('invalid', 'This reset link is no longer valid.');
-      // 'not-recovery' → keep waiting; another url event may bring the real one.
-    };
+    apply(getRecoveryState());
+    const unsub = subscribeRecovery(apply);
 
-    // 1) Primary path: expo-router gave us the query params from the deep
-    //    link. For PKCE this is `?code=...`, for an error redirect it's
-    //    `?error=...&error_code=...`. Handle this synchronously on mount.
-    console.log('[reset-password] mount params=', JSON.stringify(params));
-    if (params.code) {
-      console.log('[reset-password] params.code present, exchanging…');
-      (async () => {
-        const { error } = await supabase.auth.exchangeCodeForSession(params.code!);
-        console.log('[reset-password] exchangeCodeForSession error=', error?.message ?? 'none');
-        if (error) resolve('invalid', 'This reset link is no longer valid.');
-        else resolve('ready');
-      })();
-    } else if (params.error || params.error_code) {
-      console.log('[reset-password] params has error:', params.error_code, params.error_description);
-      resolve('invalid', params.error_description || 'This reset link is no longer valid.');
-    }
-
-    // 2) Fallback path: implicit flow puts tokens in URL fragment, which
-    //    useLocalSearchParams doesn't expose. Parse those via Linking.
-    const sub = Linking.addEventListener('url', (e) => {
-      consume(e.url);
-    });
-    Linking.getInitialURL().then((initial) => {
-      if (mounted && initial && initial.includes('#')) consume(initial);
-    });
-
-    // Safety net: if nothing resolves in 5s, surface invalid so the user
-    // isn't stuck on a blank screen.
+    // Safety net: if nothing arrives in 5s, surface invalid.
     const deadlineId = setTimeout(() => {
-      if (mounted && stateRef.current === 'pending') {
+      if (getRecoveryState().kind === 'pending') {
         console.log('[reset-password] 5s deadline, marking invalid');
-        resolve('invalid');
+        setLinkReady('invalid');
+        setError(
+          'We didn’t receive a valid reset link. Request a new one from the login screen.'
+        );
       }
     }, 5000);
 
     return () => {
-      mounted = false;
-      sub.remove();
+      unsub();
       clearTimeout(deadlineId);
+      // Reset the bus so the next attempt starts clean (otherwise a stale
+      // 'invalid' from a previous link would flash on the next mount).
+      resetRecoveryBus();
     };
-    // params is captured at mount; expo-router gives us a stable object for
-    // the initial route entry, so depending on it would re-run the effect
-    // on every render with no new info.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSubmit = async () => {
