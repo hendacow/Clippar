@@ -19,7 +19,6 @@ export default function ForgotPasswordScreen() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [sent, setSent] = useState(false);
   const { resetPassword } = useAuth();
 
   const handleSubmit = async () => {
@@ -32,7 +31,15 @@ export default function ForgotPasswordScreen() {
     setError('');
     try {
       await resetPassword(trimmed);
-      setSent(true);
+      // Move straight to the reset screen with the email pre-filled so the
+      // user can paste the 6-digit code they just received. Avoids the old
+      // 'check your email' interstitial that ended at a clickable link
+      // (which got eaten by email pre-fetchers and broke the recovery
+      // token before the user could use it).
+      router.push({
+        pathname: '/(auth)/reset-password',
+        params: { email: trimmed },
+      } as never);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Failed to send reset email';
       setError(message);
@@ -40,36 +47,6 @@ export default function ForgotPasswordScreen() {
       setLoading(false);
     }
   };
-
-  if (sent) {
-    return (
-      <GradientBackground>
-        <View
-          style={{
-            flex: 1,
-            justifyContent: 'center',
-            alignItems: 'center',
-            padding: theme.spacing.lg,
-          }}
-        >
-          <Text style={{ ...theme.typography.h2, color: theme.colors.primary, marginBottom: 16 }}>
-            Check Your Email
-          </Text>
-          <Text
-            style={{
-              ...theme.typography.body,
-              color: theme.colors.textSecondary,
-              textAlign: 'center',
-              marginBottom: 32,
-            }}
-          >
-            We've sent a password reset link to {email.trim()}. Tap the link to set a new password.
-          </Text>
-          <Button title="Back to Login" onPress={() => router.replace('/(auth)/login')} variant="secondary" />
-        </View>
-      </GradientBackground>
-    );
-  }
 
   return (
     <GradientBackground>
@@ -113,7 +90,7 @@ export default function ForgotPasswordScreen() {
                 paddingHorizontal: 12,
               }}
             >
-              Enter the email on your account and we'll send you a link to reset your password.
+              Enter the email on your account and we'll send you a 6-digit code to reset your password.
             </Text>
           </View>
 
@@ -157,7 +134,7 @@ export default function ForgotPasswordScreen() {
             ) : null}
 
             <Button
-              title="Send reset link"
+              title="Send reset code"
               onPress={handleSubmit}
               loading={loading}
               style={{ marginTop: 8 }}

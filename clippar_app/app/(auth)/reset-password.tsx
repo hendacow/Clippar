@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import {
   View,
   Text,
@@ -6,64 +6,49 @@ import {
   KeyboardAvoidingView,
   Platform,
   ScrollView,
+  Pressable,
 } from 'react-native';
-import { router } from 'expo-router';
+import { router, useLocalSearchParams } from 'expo-router';
+import { ArrowLeft } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { supabase } from '@/lib/supabase';
-import {
-  getRecoveryState,
-  subscribeRecovery,
-  resetRecoveryBus,
-} from '@/lib/recoveryLinkBus';
 
+// OTP-based password reset. The user typed their email on forgot-password,
+// triggered Supabase's resetPasswordForEmail, and was routed here with the
+// email pre-filled in params. The email they received contains a 6-digit
+// code (Token in Supabase's template). We verify it server-side via
+// verifyOtp, then update the password in the same submit.
+//
+// Why a code instead of a clickable link: clickable recovery links are
+// single-use, and email pipelines (Gmail, iOS Mail link previews, scanners)
+// frequently pre-fetch the URL, consuming the token before the user can.
+// A code that the user types in by hand sidesteps that entirely.
 export default function ResetPasswordScreen() {
+  const params = useLocalSearchParams<{ email?: string }>();
+  const initialEmail = (params.email ?? '').trim();
+
+  const [email, setEmail] = useState(initialEmail);
+  const [code, setCode] = useState('');
   const [password, setPassword] = useState('');
   const [confirm, setConfirm] = useState('');
   const [loading, setLoading] = useState(false);
-  const [linkReady, setLinkReady] = useState<'pending' | 'ready' | 'invalid'>('pending');
   const [error, setError] = useState('');
   const [done, setDone] = useState(false);
 
-  // The deep-link URL has already been parsed by app/_layout.tsx's
-  // module-level listener (which beats the OS race that the in-screen
-  // listener loses). We just read the resulting state here.
-  useEffect(() => {
-    const apply = (s: ReturnType<typeof getRecoveryState>) => {
-      console.log('[reset-password] recoveryBus state=', s);
-      if (s.kind === 'ready') {
-        setLinkReady('ready');
-      } else if (s.kind === 'invalid') {
-        setLinkReady('invalid');
-        setError(s.message);
-      }
-    };
-
-    apply(getRecoveryState());
-    const unsub = subscribeRecovery(apply);
-
-    // Safety net: if nothing arrives in 5s, surface invalid.
-    const deadlineId = setTimeout(() => {
-      if (getRecoveryState().kind === 'pending') {
-        console.log('[reset-password] 5s deadline, marking invalid');
-        setLinkReady('invalid');
-        setError(
-          'We didn’t receive a valid reset link. Request a new one from the login screen.'
-        );
-      }
-    }, 5000);
-
-    return () => {
-      unsub();
-      clearTimeout(deadlineId);
-      // Reset the bus so the next attempt starts clean (otherwise a stale
-      // 'invalid' from a previous link would flash on the next mount).
-      resetRecoveryBus();
-    };
-  }, []);
-
   const handleSubmit = async () => {
+    const trimmedEmail = email.trim();
+    const trimmedCode = code.trim();
+
+    if (!trimmedEmail) {
+      setError('Please enter your email');
+      return;
+    }
+    if (trimmedCode.length < 6) {
+      setError('Enter the 6-digit code from your email');
+      return;
+    }
     if (password.length < 6) {
       setError('Password must be at least 6 characters');
       return;
@@ -72,14 +57,29 @@ export default function ResetPasswordScreen() {
       setError('Passwords do not match');
       return;
     }
+
     setLoading(true);
     setError('');
     try {
+      // Step 1: verify the OTP and establish a recovery session.
+      const { error: otpErr } = await supabase.auth.verifyOtp({
+        email: trimmedEmail,
+        token: trimmedCode,
+        type: 'recovery',
+      });
+      if (otpErr) {
+        // Supabase returns a generic "Token has expired or is invalid"
+        // for any of: wrong code, expired code, already-used code. Surface
+        // verbatim so the user knows to request a fresh one.
+        throw otpErr;
+      }
+
+      // Step 2: with the recovery session active, update the password.
       const { error: updErr } = await supabase.auth.updateUser({ password });
       if (updErr) throw updErr;
-      // Sign out so the recovery session doesn't linger; force a fresh login
-      // with the new password. This also prevents the user from staying
-      // logged in via a transient recovery token.
+
+      // Step 3: sign out so the recovery session doesn't linger. The user
+      // logs in with the new password fresh.
       await supabase.auth.signOut();
       setDone(true);
     } catch (err: unknown) {
@@ -120,46 +120,6 @@ export default function ResetPasswordScreen() {
     );
   }
 
-  if (linkReady === 'invalid') {
-    return (
-      <GradientBackground>
-        <View
-          style={{
-            flex: 1,
-            justifyContent: 'center',
-            alignItems: 'center',
-            padding: theme.spacing.lg,
-          }}
-        >
-          <Text style={{ ...theme.typography.h2, color: theme.colors.accentRed, marginBottom: 16 }}>
-            Link invalid or expired
-          </Text>
-          <Text
-            style={{
-              ...theme.typography.body,
-              color: theme.colors.textSecondary,
-              textAlign: 'center',
-              marginBottom: 32,
-            }}
-          >
-            This reset link can no longer be used. Request a new one from the login screen.
-          </Text>
-          <Button
-            title="Back to login"
-            onPress={() => router.replace('/(auth)/login')}
-            variant="secondary"
-          />
-        </View>
-      </GradientBackground>
-    );
-  }
-
-  if (linkReady === 'pending') {
-    // Short, deliberate blank state while we resolve the deep link. Avoids
-    // flashing the form before the session is set up.
-    return <GradientBackground><View style={{ flex: 1 }} /></GradientBackground>;
-  }
-
   return (
     <GradientBackground>
       <KeyboardAvoidingView
@@ -174,7 +134,15 @@ export default function ResetPasswordScreen() {
           }}
           keyboardShouldPersistTaps="handled"
         >
-          <View style={{ alignItems: 'center', marginBottom: 32 }}>
+          <Pressable
+            onPress={() => router.back()}
+            style={{ position: 'absolute', top: 60, left: theme.spacing.lg }}
+            hitSlop={12}
+          >
+            <ArrowLeft size={24} color={theme.colors.textSecondary} />
+          </Pressable>
+
+          <View style={{ alignItems: 'center', marginBottom: 24 }}>
             <Text
               style={{
                 ...theme.typography.h1,
@@ -183,20 +151,95 @@ export default function ResetPasswordScreen() {
                 letterSpacing: -0.5,
               }}
             >
-              Set a new password
+              Enter your reset code
             </Text>
             <Text
               style={{
                 ...theme.typography.bodySmall,
                 color: theme.colors.textSecondary,
                 marginTop: 8,
+                textAlign: 'center',
+                paddingHorizontal: 12,
               }}
             >
-              At least 6 characters.
+              {initialEmail
+                ? `We sent a 6-digit code to ${initialEmail}. It expires in 1 hour.`
+                : 'Enter the email and the 6-digit code we just sent you.'}
             </Text>
           </View>
 
           <View style={{ gap: 16 }}>
+            {/* Email — editable if we didn't get it from the previous screen,
+                read-only if we did, so the user can't accidentally mis-edit. */}
+            <View>
+              <Text
+                style={{
+                  color: theme.colors.textSecondary,
+                  fontSize: 13,
+                  fontWeight: '500',
+                  marginBottom: 6,
+                  marginLeft: 4,
+                }}
+              >
+                Email
+              </Text>
+              <TextInput
+                value={email}
+                onChangeText={setEmail}
+                editable={!initialEmail}
+                placeholder="you@email.com"
+                placeholderTextColor={theme.colors.textTertiary}
+                autoCapitalize="none"
+                keyboardType="email-address"
+                autoComplete="email"
+                style={{
+                  backgroundColor: theme.colors.surface,
+                  borderWidth: 1,
+                  borderColor: theme.colors.surfaceBorder,
+                  borderRadius: theme.radius.md,
+                  padding: 14,
+                  color: initialEmail ? theme.colors.textTertiary : theme.colors.textPrimary,
+                  fontSize: 16,
+                }}
+              />
+            </View>
+
+            <View>
+              <Text
+                style={{
+                  color: theme.colors.textSecondary,
+                  fontSize: 13,
+                  fontWeight: '500',
+                  marginBottom: 6,
+                  marginLeft: 4,
+                }}
+              >
+                6-digit code
+              </Text>
+              <TextInput
+                value={code}
+                onChangeText={(t) => setCode(t.replace(/[^0-9]/g, '').slice(0, 6))}
+                placeholder="123456"
+                placeholderTextColor={theme.colors.textTertiary}
+                keyboardType="number-pad"
+                autoComplete="one-time-code"
+                textContentType="oneTimeCode"
+                maxLength={6}
+                style={{
+                  backgroundColor: theme.colors.surface,
+                  borderWidth: 1,
+                  borderColor: theme.colors.surfaceBorder,
+                  borderRadius: theme.radius.md,
+                  padding: 14,
+                  color: theme.colors.textPrimary,
+                  fontSize: 22,
+                  letterSpacing: 6,
+                  textAlign: 'center',
+                  fontWeight: '600',
+                }}
+              />
+            </View>
+
             <View>
               <Text
                 style={{
@@ -266,7 +309,7 @@ export default function ResetPasswordScreen() {
             ) : null}
 
             <Button
-              title="Update password"
+              title="Reset password"
               onPress={handleSubmit}
               loading={loading}
               style={{ marginTop: 8 }}

@@ -2,22 +2,6 @@ console.log("OTA test 2026-05-17");
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
 import { Stack } from 'expo-router';
-import * as Linking from 'expo-linking';
-import { consumeRecoveryDeepLink } from '@/lib/recoveryLinkBus';
-
-// Module-load hook: capture every deep link before any screen mounts.
-// expo-router routes the URL to a screen (e.g. /reset-password), but the
-// screen's own useEffect Linking listener races the OS — the url event
-// fires before the screen's handler subscribes, so the screen sees
-// nothing. Handling here, ahead of routing, avoids that race entirely.
-Linking.getInitialURL().then((url) => {
-  console.log('[deeplink] getInitialURL =', url);
-  if (url) consumeRecoveryDeepLink(url);
-});
-Linking.addEventListener('url', (e) => {
-  console.log('[deeplink] url event =', e.url);
-  consumeRecoveryDeepLink(e.url);
-});
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
