@@ -39,10 +39,13 @@ CREATE TABLE course_presets (
   name TEXT NOT NULL,
 
   -- Used to sort the picker so the most-recently-used preset shows first.
-  last_used_at TIMESTAMPTZ DEFAULT NOW(),
+  -- NOT NULL enforces the invariant the TS types and the picker query rely
+  -- on (the ORDER BY last_used_at would otherwise need a NULLS LAST clause
+  -- and the type would have to widen to `string | null`).
+  last_used_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
 
   -- A user shouldn't be able to create two presets with the exact same
   -- name. Easier to scan in the picker and avoids confusion.
