@@ -12,6 +12,7 @@ import { router } from 'expo-router';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
+import { SocialAuthButtons } from '@/components/auth/SocialAuthButtons';
 import { useAuth } from '@/hooks/useAuth';
 
 export default function SignUpScreen() {
@@ -218,6 +219,11 @@ export default function SignUpScreen() {
               onPress={handleSignUp}
               loading={loading}
               style={{ marginTop: 8 }}
+            />
+
+            <SocialAuthButtons
+              onAuthSuccess={() => router.replace('/(tabs)')}
+              onAuthError={setError}
             />
 
             <View
