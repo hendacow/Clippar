@@ -987,6 +987,15 @@ export default function EditorScreen() {
             'Native Build Required',
             'The highlight reel composer needs a native build. Please rebuild: npx expo run:ios --device'
           );
+        } else if (msg.includes('-11847') || /interrupt/i.test(msg) || /cancelled/i.test(msg)) {
+          // -11847 = AVErrorOperationInterrupted, fired when iOS suspended
+          // the export because the app stayed in the background too long.
+          // The clips and trim settings are still saved — they just need
+          // re-composing now that the app is foregrounded again.
+          Alert.alert(
+            'Export Paused',
+            "Your reel was being made when the app went to the background and iOS interrupted it. Tap Export again to finish — your clips are saved.",
+          );
         } else {
           Alert.alert('Export Failed', `Reel composition failed: ${msg}`);
         }

@@ -2127,12 +2127,51 @@ public class ShotDetectorModule: Module {
             }
             exportSession.shouldOptimizeForNetworkUse = true
 
+            // Request a UIKit background task so iOS doesn't interrupt the
+            // export with AVErrorOperationInterrupted (-11847) if the user
+            // backgrounds the app mid-compose. iOS grants up to ~30s of
+            // grace after backgrounding — long enough for a typical
+            // 9-18 clip round at the 1080p preset.
+            //
+            // We call cancelExport() in the expiration handler so the
+            // partial file gets cleaned up gracefully rather than left
+            // half-written. The completion callback then fires with
+            // status == .cancelled and the normal error handling below
+            // surfaces it to JS — the editor can prompt the user to
+            // re-run the compose when they come back.
+            //
+            // beginBackgroundTask is a UIApplication API and must be
+            // invoked on the main thread; we sync-dispatch since we're
+            // currently on a global queue.
+            var bgTaskId: UIBackgroundTaskIdentifier = .invalid
+            DispatchQueue.main.sync {
+                bgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ClipparReelCompose") {
+                    print("[Clippar.Compose] background task expiring — cancelling export")
+                    exportSession.cancelExport()
+                }
+            }
+            defer {
+                if bgTaskId != .invalid {
+                    DispatchQueue.main.async {
+                        UIApplication.shared.endBackgroundTask(bgTaskId)
+                    }
+                }
+            }
+
             let semaphore = DispatchSemaphore(value: 0)
             var exportError: Error?
 
             exportSession.exportAsynchronously {
-                if exportSession.status == .failed {
-                    exportError = exportSession.error
+                // Capture both .failed AND .cancelled as errors. .cancelled
+                // happens when the bg-task expires; we want the JS layer
+                // to know the compose didn't finish (rather than thinking
+                // it succeeded with a partial file).
+                if exportSession.status == .failed || exportSession.status == .cancelled {
+                    exportError = exportSession.error ?? NSError(
+                        domain: "ClipparExport",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Export was cancelled (likely backgrounded too long)"]
+                    )
                 }
                 semaphore.signal()
             }
@@ -2156,6 +2195,8 @@ public class ShotDetectorModule: Module {
                 let underlying = (nsErr.userInfo[NSUnderlyingErrorKey] as? NSError).map { "code=\($0.code) domain=\($0.domain)" } ?? "none"
                 print("[Clippar.Compose] FAIL exportSession.status=\(exportSession.status.rawValue) error=\(error.localizedDescription) code=\(nsErr.code) domain=\(nsErr.domain) underlying=\(underlying) userInfo=\(nsErr.userInfo)")
                 print("[Clippar.Compose] context: clips=\(clips.count) totalDurationSec=\(CMTimeGetSeconds(totalDuration)) renderSize=\(renderSize) hasOverlay=\(scorecard != nil) hasMusic=\(musicUri != nil) videoCompositionInstructions=\(videoComposition.instructions.count)")
+                // Clean up the partial output file if cancelled mid-write.
+                try? FileManager.default.removeItem(at: outputURL)
                 promise.reject(Exception(name: "ERR_COMPOSE_FAILED", description: "Reel compose failed: \(error.localizedDescription) (code \(nsErr.code))"))
                 return
             }
