@@ -20,14 +20,16 @@ const DEFAULT_PAR = 4;
 function createInitialState(
   roundId: string,
   courseName: string,
-  courseId?: string,
-  courseHoles?: HoleData[]
+  courseId: string | undefined,
+  courseHoles: HoleData[] | undefined,
+  holesPlayed: 9 | 18,
+  startHole: 1 | 10,
 ): RoundState {
   return {
     roundId,
     courseId,
     courseName,
-    currentHole: 1,
+    currentHole: startHole,
     currentShot: 1,
     isRecording: false,
     scores: [],
@@ -35,8 +37,18 @@ function createInitialState(
     totalScore: 0,
     totalPar: 0,
     courseHoles,
+    holesPlayed,
+    startHole,
     status: 'in_progress',
   };
+}
+
+// Where the round naturally ends. e.g. 18 holes starting at 1 → finish
+// after hole 18; 9 holes starting at 10 → finish after hole 18; 9 holes
+// starting at 1 → finish after hole 9. Used by endHole and addPenalty
+// pickup branches to decide when to mark the round 'finished'.
+function lastHoleOf(holesPlayed: 9 | 18, startHole: 1 | 10): number {
+  return startHole + holesPlayed - 1;
 }
 
 function getParForHole(courseHoles: HoleData[] | undefined, holeNumber: number): number {
@@ -53,14 +65,19 @@ export function useRound() {
   const startRound = useCallback(async (
     courseName: string,
     courseId?: string,
-    courseHoles?: HoleData[]
+    courseHoles?: HoleData[],
+    // Wave 3: round setup options. Defaults preserve pre-Wave-3 behavior
+    // (full 18 starting at hole 1) so any caller that hasn't been updated
+    // yet keeps working.
+    holesPlayed: 9 | 18 = 18,
+    startHole: 1 | 10 = 1,
   ) => {
     lastShotTypeRef.current = null;
     try {
       const round = await createRound({
         course_name: courseName,
         course_id: courseId,
-        holes_played: 18,
+        holes_played: holesPlayed,
       });
 
       if (!round) throw new Error('Failed to create round');
@@ -71,7 +88,10 @@ export function useRound() {
         course_id: courseId,
       });
 
-      setState(createInitialState(round.id, courseName, courseId, courseHoles));
+      setState(createInitialState(
+        round.id, courseName, courseId, courseHoles,
+        holesPlayed, startHole,
+      ));
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       return true;
     } catch (err) {
@@ -117,8 +137,10 @@ export function useRound() {
       setState((prev) => {
         if (!prev || prev.status !== 'in_progress') return prev;
 
-        // Don't auto-advance if we're already past hole 18
-        if (prev.currentHole >= 18) return prev;
+        // Don't auto-advance past the configured last hole. (e.g. for a
+        // front-9 round starting at hole 1, the last hole is 9 — auto
+        // classification shouldn't tick the user into hole 10.)
+        if (prev.currentHole >= lastHoleOf(prev.holesPlayed, prev.startHole)) return prev;
 
         const par = getParForHole(prev.courseHoles, prev.currentHole);
         const holeClips = prev.clips.filter((c) => c.holeNumber === prev.currentHole);
@@ -237,13 +259,14 @@ export function useRound() {
 
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
 
-        if (nextHole > 18) {
+        const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
+        if (nextHole > lastHole) {
           return {
             ...prev,
             scores: newScores,
             totalScore: newTotalScore,
             totalPar: newTotalPar,
-            currentHole: 18,
+            currentHole: lastHole,
             currentShot: prev.currentShot,
             status: 'finished' as const,
           };
@@ -324,13 +347,14 @@ export function useRound() {
 
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      if (nextHole > 18) {
+      const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
+      if (nextHole > lastHole) {
         return {
           ...prev,
           scores: newScores,
           totalScore: newTotalScore,
           totalPar: newTotalPar,
-          currentHole: 18,
+          currentHole: lastHole,
           currentShot: prev.currentShot,
           status: 'finished' as const,
         };
@@ -429,6 +453,12 @@ export function useRound() {
         clips,
         totalScore,
         totalPar,
+        // Recovered rounds predate the Wave 3 setup options being
+        // persisted to local storage. Default to a full 18 starting at
+        // hole 1 (the legacy behaviour). Phase D will add these to the
+        // local round row and pull through here.
+        holesPlayed: 18,
+        startHole: 1,
         status: 'in_progress',
       });
     } catch (error) {

@@ -40,6 +40,12 @@ export interface RoundState {
   totalScore: number;
   totalPar: number;
   courseHoles?: HoleData[];
+  // Round setup choices — defaults are 18 / start at 1, matching the
+  // hard-coded behavior we shipped before Wave 3 presets. Carried in
+  // state (not just on the row) because endHole / addPenalty need them
+  // at runtime to know when the round is over.
+  holesPlayed: 9 | 18;
+  startHole: 1 | 10;
   status: 'not_started' | 'in_progress' | 'finished' | 'uploading' | 'processing' | 'ready';
 }
 
