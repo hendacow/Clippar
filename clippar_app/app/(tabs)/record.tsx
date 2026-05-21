@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from 'react';
-import { View, Text, Pressable, Alert, Platform, StyleSheet } from 'react-native';
+import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView } from 'react-native';
 import { router } from 'expo-router';
 import { useRecordingContext } from '@/contexts/RecordingContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,12 +15,14 @@ import {
   Film,
   Video,
   ArrowLeft,
+  Bookmark,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
+import { Segmented } from '@/components/ui/Segmented';
 import { RecordingIndicator } from '@/components/record/RecordingIndicator';
 import { ScoreOverlay } from '@/components/record/ScoreOverlay';
 import { PenaltySheet } from '@/components/record/PenaltySheet';
@@ -33,8 +35,10 @@ import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
 import { getOrphanedRounds, getCloudBackupEnabled } from '@/lib/storage';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
+import { listCoursePresets, touchCoursePreset } from '@/lib/api';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
+import type { CoursePreset } from '@/types/preset';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 const DEFAULT_PAR = 4;
@@ -63,6 +67,15 @@ export default function RecordScreen() {
   // The Import path uses router.push to /round/import and never sets
   // this to 'import' (no need — that flow lives on a different route).
   const [mode, setMode] = useState<null | 'live'>(null);
+
+  // Wave 3 Phase C: round setup. Defaults match the legacy hard-coded
+  // behaviour (full 18 from hole 1). When a preset is tapped these get
+  // overwritten with its values; the manual flow uses the segmented
+  // controls below the course search to set them.
+  const [holesPlayed, setHolesPlayed] = useState<9 | 18>(18);
+  const [startHole, setStartHole] = useState<1 | 10>(1);
+  const [presets, setPresets] = useState<CoursePreset[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(false);
 
   const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
@@ -205,13 +218,70 @@ export default function RecordScreen() {
     ? (roundState.courseHoles.find((h) => h.holeNumber === roundState.currentHole)?.par ?? DEFAULT_PAR)
     : DEFAULT_PAR;
 
+  // Manual-flow start: user typed/selected a course and (optionally) tweaked
+  // the holes / start-hole selectors. Validates and kicks off round.startRound.
   const startRound = async () => {
     if (!courseName.trim()) {
       Alert.alert('Course Name', 'Please enter or select a course to start.');
       return;
     }
-    await round.startRound(courseName.trim(), selectedCourseId, courseHoles);
+    await round.startRound(
+      courseName.trim(),
+      selectedCourseId,
+      courseHoles,
+      holesPlayed,
+      startHole,
+    );
   };
+
+  // Preset-flow start: user tapped one of their saved presets. Pre-fills
+  // all the setup state and kicks off the round directly — the whole point
+  // of presets is one-tap-and-go for repeat visits. Best-effort touches
+  // last_used_at so the preset sorts to the top of the picker next time.
+  const startFromPreset = useCallback(async (preset: CoursePreset) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    // Mirror state into the form fields so a back-out keeps the values
+    // visible in case the round fails to start.
+    setCourseName(preset.course_name);
+    setSelectedCourseId(preset.course_id ?? undefined);
+    setCourseHoles(undefined); // preset doesn't carry the per-hole par data
+    setHolesPlayed(preset.holes_played);
+    setStartHole(preset.start_hole);
+
+    const ok = await round.startRound(
+      preset.course_name,
+      preset.course_id ?? undefined,
+      undefined,
+      preset.holes_played,
+      preset.start_hole,
+    );
+    if (ok) {
+      // Non-blocking — failed timestamp bump shouldn't tank the round.
+      void touchCoursePreset(preset.id);
+    }
+  }, [round.startRound]);
+
+  // Load the user's presets when they enter the Live setup screen. We
+  // load lazily (not on tab mount) so we don't hammer the network for
+  // users who only use Import.
+  useEffect(() => {
+    if (mode !== 'live') return;
+    let cancelled = false;
+    setPresetsLoading(true);
+    listCoursePresets()
+      .then((rows) => {
+        if (cancelled) return;
+        setPresets(rows);
+      })
+      .catch((err) => {
+        // Non-fatal — the manual flow still works. Log so we know.
+        console.log('[record] listCoursePresets failed:', err?.message);
+      })
+      .finally(() => {
+        if (!cancelled) setPresetsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [mode]);
 
   const handleEndHole = () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -383,12 +453,17 @@ export default function RecordScreen() {
     );
   }
 
-    // ---- IDLE STATE: Live recording — course selection ----
+    // ---- IDLE STATE: Live recording — course / preset picker ----
     // Reached when the user picked 'Live' on the chooser. Type narrowing
     // means mode must be 'live' here since 'null' was handled above.
+    // Wave 3 Phase C: presets list at the top for one-tap repeat visits,
+    // course search + 9/18 + start-hole selectors below for manual setup.
     return (
       <GradientBackground>
-        <View style={{ flex: 1, paddingTop: insets.top, padding: 24 }}>
+        <ScrollView
+          contentContainerStyle={{ paddingTop: insets.top, padding: 24, paddingBottom: 48 }}
+          keyboardShouldPersistTaps="handled"
+        >
           <Pressable
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -396,6 +471,8 @@ export default function RecordScreen() {
               setCourseName('');
               setSelectedCourseId(undefined);
               setCourseHoles(undefined);
+              setHolesPlayed(18);
+              setStartHole(1);
             }}
             hitSlop={12}
             style={{ marginBottom: 12, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6 }}
@@ -407,7 +484,7 @@ export default function RecordScreen() {
             Live recording
           </Text>
           <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
-            Pick your course and you're ready to go.
+            Pick a saved round or set one up.
           </Text>
 
           {/* Shutter Status */}
@@ -438,14 +515,105 @@ export default function RecordScreen() {
             </Card>
           </Pressable>
 
-          {/* Course Search — Phase C will replace this with a course-or-preset
-              picker. For now Phase B keeps the existing flow so Live recording
-              continues to work end-to-end. */}
+          {/* Saved rounds (presets) — only rendered if the user has any. One
+              tap = instant round start with all the captured setup choices. */}
+          {presets.length > 0 && (
+            <>
+              <Text style={{
+                ...theme.typography.caption,
+                color: theme.colors.textTertiary,
+                textTransform: 'uppercase',
+                letterSpacing: 0.5,
+                marginBottom: 8,
+              }}>
+                Saved rounds
+              </Text>
+              <View style={{ gap: 8, marginBottom: 24 }}>
+                {presets.map((preset) => (
+                  <Pressable
+                    key={preset.id}
+                    onPress={() => startFromPreset(preset)}
+                    hitSlop={4}
+                  >
+                    <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                      <Bookmark size={18} color={theme.colors.accent} />
+                      <View style={{ flex: 1 }}>
+                        <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
+                          {preset.name}
+                        </Text>
+                        <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+                          {preset.holes_played === 9
+                            ? preset.start_hole === 1 ? 'Front 9' : 'Back 9'
+                            : '18 holes'}
+                          {' · '}{preset.course_name}
+                        </Text>
+                      </View>
+                      <ChevronRight size={16} color={theme.colors.textTertiary} />
+                    </Card>
+                  </Pressable>
+                ))}
+              </View>
+              <Text style={{
+                ...theme.typography.caption,
+                color: theme.colors.textTertiary,
+                textTransform: 'uppercase',
+                letterSpacing: 0.5,
+                marginBottom: 8,
+              }}>
+                Or set up a new round
+              </Text>
+            </>
+          )}
+
+          {/* Course search */}
           <CourseSearch
             value={courseName}
             onChangeText={setCourseName}
             onSelectCourse={handleCourseSelect}
           />
+
+          {/* Round options. Only show holes selector once a course is in the
+              field — for a brand new user with no course typed there's
+              nothing yet to configure. */}
+          {courseName.trim().length > 0 && (
+            <View style={{ marginTop: 20 }}>
+              <Text style={{ ...theme.typography.bodySmall, color: theme.colors.textSecondary, fontWeight: '600', marginBottom: 8 }}>
+                Holes
+              </Text>
+              <Segmented
+                value={String(holesPlayed)}
+                options={[{ value: '9', label: '9' }, { value: '18', label: '18' }]}
+                onChange={(v) => {
+                  setHolesPlayed(v === '9' ? 9 : 18);
+                  // 18-hole rounds can't start on hole 10 (would only play 9).
+                  // Reset to 1 if the user toggles back to 18.
+                  if (v === '18') setStartHole(1);
+                }}
+              />
+
+              {holesPlayed === 9 && (
+                <>
+                  <Text style={{
+                    ...theme.typography.bodySmall,
+                    color: theme.colors.textSecondary,
+                    fontWeight: '600',
+                    marginTop: 16,
+                    marginBottom: 8,
+                  }}>
+                    Starting hole
+                  </Text>
+                  <Segmented
+                    value={String(startHole)}
+                    options={[
+                      { value: '1', label: 'Front 9' },
+                      { value: '10', label: 'Back 9' },
+                    ]}
+                    onChange={(v) => setStartHole(v === '10' ? 10 : 1)}
+                  />
+                </>
+              )}
+            </View>
+          )}
 
           <Button
             title="Start Round"
@@ -465,7 +633,7 @@ export default function RecordScreen() {
               style={{ marginTop: 16 }}
             />
           )}
-        </View>
+        </ScrollView>
       </GradientBackground>
     );
   }
