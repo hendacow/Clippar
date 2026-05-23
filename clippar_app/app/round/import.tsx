@@ -62,6 +62,44 @@ const MediaLibrary = isNative
   ? (require('expo-media-library') as typeof import('expo-media-library'))
   : null;
 
+// Safe wrapper around expo-image-picker's launchImageLibraryAsync. When the
+// user picks a video that lives in iCloud Photos (not yet downloaded to the
+// device), iOS tries to stream the bytes down on the fly. If that fails for
+// any reason — flaky network, iCloud throttling, asset not yet replicated,
+// app suspended mid-download — the picker rejects with a PHPhotosErrorDomain
+// 3164 ("The operation couldn't be completed.") error. Sentry caught this
+// uncaught in production (CLIPPAR-9). We swallow it here, return null so the
+// caller treats it as "user cancelled", and surface a friendly Alert that
+// tells the user how to recover (download the videos in the Photos app
+// first, then come back and import).
+async function pickVideosSafely(
+  options: Parameters<NonNullable<typeof ImagePicker>['launchImageLibraryAsync']>[0]
+): Promise<Awaited<ReturnType<NonNullable<typeof ImagePicker>['launchImageLibraryAsync']>> | null> {
+  if (!ImagePicker) return null;
+  try {
+    return await ImagePicker.launchImageLibraryAsync(options);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const looksLikeICloudFailure =
+      /PHPhotosError/i.test(msg) ||
+      /3164/.test(msg) ||
+      /operation couldn.t be completed/i.test(msg);
+    console.warn('[import] picker failed:', msg);
+    if (looksLikeICloudFailure) {
+      Alert.alert(
+        'Video stored in iCloud',
+        "iOS couldn't download one of the videos you picked. Open the Photos app, tap the video so it downloads to your phone, then come back and try the import again.",
+      );
+    } else {
+      Alert.alert(
+        "Couldn't open videos",
+        'Something went wrong picking videos. Try again, or restart the app if it keeps happening.',
+      );
+    }
+    return null;
+  }
+}
+
 // Gap (ms) between consecutive clip creationTimes that signals a new hole.
 const HOLE_GAP_MS = 3 * 60 * 1000; // > 3 minutes = new hole
 const HOLE_GAP_AMBIGUOUS_MS = 2 * 60 * 1000; // 2-3min is ambiguous, confirm with pose
@@ -191,16 +229,14 @@ export default function ImportRoundScreen() {
 
   // Auto-detect: let user pick all clips, classify each, group by putt→swing transitions
   const handleAutoDetectPick = async () => {
-    if (!ImagePicker) return;
-
-    const result = await ImagePicker.launchImageLibraryAsync({
+    const result = await pickVideosSafely({
       mediaTypes: ['videos'],
       allowsMultipleSelection: true,
       quality: 1,
       orderedSelection: true,
     });
 
-    if (result.canceled || !result.assets?.length) return;
+    if (!result || result.canceled || !result.assets?.length) return;
 
     const videos = result.assets.map((a) => ({
       uri: a.uri,
@@ -584,16 +620,14 @@ export default function ImportRoundScreen() {
 
   // Bulk import: pick all videos at once
   const pickBulkVideos = async () => {
-    if (!ImagePicker) return;
-
-    const result = await ImagePicker.launchImageLibraryAsync({
+    const result = await pickVideosSafely({
       mediaTypes: ['videos'],
       allowsMultipleSelection: true,
       quality: 1,
       orderedSelection: true,
     });
 
-    if (result.canceled || !result.assets?.length) return;
+    if (!result || result.canceled || !result.assets?.length) return;
 
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setBulkVideos(
@@ -666,15 +700,13 @@ export default function ImportRoundScreen() {
 
   // Pick clips for a single hole — just add URIs, no processing
   const pickClipsForHole = async (holeNumber: number) => {
-    if (!ImagePicker) return;
-
-    const result = await ImagePicker.launchImageLibraryAsync({
+    const result = await pickVideosSafely({
       mediaTypes: ['videos'],
       allowsMultipleSelection: true,
       quality: 1,
     });
 
-    if (result.canceled || !result.assets?.length) return;
+    if (!result || result.canceled || !result.assets?.length) return;
 
     const newClips: ImportedClip[] = result.assets.map((asset) => ({
       uri: asset.uri,
@@ -1114,11 +1146,39 @@ export default function ImportRoundScreen() {
               style={{
                 color: theme.colors.textSecondary,
                 fontSize: 14,
-                marginBottom: 20,
+                marginBottom: 12,
               }}
             >
               Import videos from your camera roll and assign them to holes.
             </Text>
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'flex-start',
+                gap: 8,
+                padding: 12,
+                marginBottom: 20,
+                backgroundColor: theme.colors.surfaceElevated,
+                borderRadius: 8,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+              }}
+            >
+              <Info size={16} color={theme.colors.textSecondary} style={{ marginTop: 1 }} />
+              <Text
+                style={{
+                  color: theme.colors.textSecondary,
+                  fontSize: 12,
+                  flex: 1,
+                  lineHeight: 18,
+                }}
+              >
+                Videos stored in iCloud need to be downloaded to your phone
+                first. Open the Photos app and tap each clip so it caches
+                locally before importing.
+              </Text>
+            </View>
 
             <CourseSearch
               value={courseName}
