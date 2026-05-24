@@ -6,11 +6,31 @@ import {
   defaultPresetName,
 } from '@/types/preset';
 
+// Resolve the signed-in user from the locally-stored session.
+//
+// `supabase.auth.getUser()` validates the access token against the Auth
+// server on every call. A flaky connection — or an access token a moment
+// past expiry that hasn't auto-refreshed yet — makes it return no user,
+// surfacing as a misleading "Not authenticated" error even though a valid,
+// refreshable session is sitting in local storage. `getSession()` reads
+// (and silently refreshes) that stored session without a network round
+// trip. RLS still enforces auth server-side on every query below, so
+// trusting the local session for the user id is safe.
+async function getSessionUser() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.user ?? null;
+}
+
+async function requireUser() {
+  const user = await getSessionUser();
+  if (!user) throw new Error('Not authenticated');
+  return user;
+}
+
 // ============ Profiles ============
 
 export async function getProfile() {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { data, error } = await supabase
     .from('profiles')
@@ -42,8 +62,7 @@ export async function getProfile() {
 }
 
 export async function updateProfile(updates: Record<string, unknown>) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { data, error } = await supabase
     .from('profiles')
@@ -59,8 +78,7 @@ export async function updateProfile(updates: Record<string, unknown>) {
 // ============ Rounds ============
 
 export async function getRounds() {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   // Sort by created_at (TIMESTAMPTZ) so multiple rounds on the same date
   // are ordered correctly. Falling back to `date` (DATE column, no time)
@@ -92,8 +110,7 @@ export async function createRound(round: {
   course_name: string;
   holes_played?: number;
 }) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { data, error } = await supabase
     .from('rounds')
@@ -222,7 +239,7 @@ export async function upsertScore(score: {
  */
 export async function repairScoresParData(): Promise<number> {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getSessionUser();
     if (!user) return 0;
 
     // Find scores with NULL score_to_par for this user's rounds
@@ -284,7 +301,7 @@ export async function saveScoreToSupabase(score: {
   putts?: number;
   penalty_strokes?: number;
 }) {
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = await getSessionUser();
   if (!user) return;
 
   const score_to_par = score.strokes - score.par;
@@ -554,8 +571,7 @@ export async function submitCourseSuggestion(suggestion: {
   hole_data?: { holeNumber: number; par: number; strokeIndex?: number; lengthMeters?: number }[];
 }) {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
-    if (!user) throw new Error('Not authenticated');
+    const user = await requireUser();
 
     const { data, error } = await supabase
       .from('course_suggestions')
@@ -585,7 +601,7 @@ export async function submitCourseSuggestion(suggestion: {
 
 export async function getMyCourseSuggestions() {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getSessionUser();
     if (!user) return [];
 
     const { data, error } = await supabase
@@ -608,7 +624,7 @@ export async function getMyCourseSuggestions() {
 
 export async function getHardwareOrder() {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getSessionUser();
     if (!user) return null;
 
     const { data, error } = await supabase
@@ -631,7 +647,7 @@ export async function getHardwareOrder() {
 
 export async function getHardwareOrders() {
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getSessionUser();
     if (!user) return [];
 
     const { data, error } = await supabase
@@ -665,7 +681,7 @@ export async function getUserStats() {
   };
 
   try {
-    const { data: { user } } = await supabase.auth.getUser();
+    const user = await getSessionUser();
     if (!user) return zero;
 
     // Fetch all rounds for the user
@@ -784,8 +800,7 @@ export async function getScoreHighlights(
   category: ScoreCategory,
   dateFilter?: 'month' | '3months' | 'all',
 ): Promise<ScoreHighlightGroup[]> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   // 1. Fetch all rounds
   let roundsQuery = supabase
@@ -895,8 +910,7 @@ export async function getScoreHighlights(
  * Get best rounds sorted by lowest score_to_par.
  */
 export async function getBestRounds(limit = 20) {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { data, error } = await supabase
     .from('rounds')
@@ -995,8 +1009,7 @@ export async function getHighlightCompilationClips(
     timeframe?: HighlightCompilationTimeframe;
   } = {},
 ): Promise<{ clipPaths: string[]; signedUrls: string[] }> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   // 1. Rounds scoped to user + optional course + timeframe
   let roundsQuery = supabase
@@ -1266,8 +1279,7 @@ export async function getMusicTracks() {
  * the user has none yet — never throws on no rows.
  */
 export async function listCoursePresets(): Promise<CoursePreset[]> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { data, error } = await supabase
     .from('course_presets')
@@ -1287,8 +1299,7 @@ export async function listCoursePresets(): Promise<CoursePreset[]> {
 export async function createCoursePreset(
   input: CoursePresetInput
 ): Promise<CoursePreset> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const name = input.name?.trim() || defaultPresetName({
     course_name: input.course_name,
@@ -1325,7 +1336,7 @@ export async function createCoursePreset(
  * explicit filter still scopes the update to the caller's rows.
  */
 export async function touchCoursePreset(id: string): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
+  const user = await getSessionUser();
   if (!user) return;
 
   // Supabase returns errors in-band via `{ error }`; they don't throw. Read
@@ -1350,8 +1361,7 @@ export async function touchCoursePreset(id: string): Promise<void> {
  * reason as touchCoursePreset above.
  */
 export async function deleteCoursePreset(id: string): Promise<void> {
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) throw new Error('Not authenticated');
+  const user = await requireUser();
 
   const { error } = await supabase
     .from('course_presets')
