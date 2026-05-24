@@ -1,7 +1,7 @@
 console.log("OTA test 2026-05-17");
 import { useEffect, useState } from 'react';
 import { Platform } from 'react-native';
-import { Stack } from 'expo-router';
+import { Stack, useSegments, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { BottomSheetModalProvider } from '@gorhom/bottom-sheet';
@@ -56,8 +56,26 @@ export const unstable_settings = {
 SplashScreen.preventAutoHideAsync();
 
 function RootLayout() {
-  const { loading } = useAuth();
+  const { user, loading } = useAuth();
+  const segments = useSegments();
+  const router = useRouter();
   const [biometricChecked, setBiometricChecked] = useState(false);
+
+  // Auth gate. Standard expo-router pattern: watch the current route
+  // segments + auth state, push the user into the right group.
+  //   - Signed-out user inside (tabs)/round/profile → bounce to /(auth)/login
+  //   - Signed-in user on any (auth) screen     → bounce to /(tabs)
+  // Wait for auth to finish loading so we don't redirect on a stale null
+  // user during cold start.
+  useEffect(() => {
+    if (loading) return;
+    const inAuthGroup = segments[0] === '(auth)';
+    if (!user && !inAuthGroup) {
+      router.replace('/(auth)/login');
+    } else if (user && inAuthGroup) {
+      router.replace('/(tabs)');
+    }
+  }, [user, loading, segments, router]);
 
   useEffect(() => {
     if (loading) return;
