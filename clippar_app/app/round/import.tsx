@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -23,8 +23,9 @@ import {
   List,
   AlertTriangle,
   ImagePlus,
-  Sparkles,
   Info,
+  Bookmark,
+  ChevronRight,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -32,7 +33,15 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
-import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
+import {
+  createRound,
+  createShot,
+  updateRound,
+  saveScoreToSupabase,
+  listCoursePresets,
+  touchCoursePreset,
+} from '@/lib/api';
+import type { CoursePreset } from '@/types/preset';
 import {
   saveLocalClip,
   saveLocalRound,
@@ -120,7 +129,7 @@ interface HoleImport {
   expanded: boolean;
 }
 
-type ImportStep = 'setup' | 'mode' | 'scorecard' | 'bulk-import' | 'auto-processing' | 'import';
+type ImportStep = 'setup' | 'mode' | 'scorecard' | 'bulk-import' | 'import';
 
 export default function ImportRoundScreen() {
   const insets = useSafeAreaInsets();
@@ -138,14 +147,11 @@ export default function ImportRoundScreen() {
     total: 0,
   });
 
-  // Quick Import state
-  const [importMode, setImportMode] = useState<'quick' | 'manual' | 'auto' | null>(null);
-  // Auto-detect classification progress
-  const [autoProgress, setAutoProgress] = useState<{ current: number; total: number; phase: string }>({
-    current: 0,
-    total: 0,
-    phase: '',
-  });
+  // Import flow mode. Auto-detect was removed in Phase D — it was unreliable
+  // for casual golfers (false-positive putt→swing transitions broke hole
+  // grouping). Quick Import + Manual Import cover everything users actually
+  // need.
+  const [importMode, setImportMode] = useState<'quick' | 'manual' | null>(null);
   const [startingNine, setStartingNine] = useState<'front' | 'back'>('front');
   const [scores, setScores] = useState<Record<number, number>>({});
   const [pars, setPars] = useState<Record<number, number>>({});
@@ -153,6 +159,35 @@ export default function ImportRoundScreen() {
   const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number; assetId?: string }[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [sanityWarning, setSanityWarning] = useState<{ oversizedHoles: number[] } | null>(null);
+
+  // Wave 3 Phase D: pre-fill the import setup with one of the user's saved
+  // round presets. The list is shown above the course search on the setup
+  // step. Tapping a preset fills in courseName / selectedCourseId / holes
+  // count / starting nine so the user can hit Continue immediately. We
+  // load lazily on screen mount; failure is non-fatal.
+  const [presets, setPresets] = useState<CoursePreset[]>([]);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCoursePresets()
+      .then((rows) => {
+        if (!cancelled) setPresets(rows);
+      })
+      .catch((err) => {
+        console.log('[import] listCoursePresets failed:', err?.message);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const applyPreset = (preset: CoursePreset) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setCourseName(preset.course_name);
+    setSelectedCourseId(preset.course_id ?? undefined);
+    setHolesCount(preset.holes_played);
+    setStartingNine(preset.start_hole === 10 ? 'back' : 'front');
+    // Best-effort — failure to bump last_used_at shouldn't break the flow.
+    void touchCoursePreset(preset.id);
+  };
 
   const handleCourseSelect = (course: { id: string; name: string }, holeData: HoleData[]) => {
     setSelectedCourseId(course.id);
@@ -214,363 +249,14 @@ export default function ImportRoundScreen() {
     setStep('scorecard');
   }, [courseHoles, getOrderedHoleNumbers]);
 
-  const handleModeSelect = (mode: 'quick' | 'manual' | 'auto') => {
+  const handleModeSelect = (mode: 'quick' | 'manual') => {
     setImportMode(mode);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (mode === 'manual') {
       setStep('import');
-    } else if (mode === 'auto') {
-      // Auto-detect: pick all videos at once, then classify each to find hole boundaries
-      handleAutoDetectPick();
     } else {
       initScorecard();
     }
-  };
-
-  // Auto-detect: let user pick all clips, classify each, group by putt→swing transitions
-  const handleAutoDetectPick = async () => {
-    const result = await pickVideosSafely({
-      mediaTypes: ['videos'],
-      allowsMultipleSelection: true,
-      quality: 1,
-      orderedSelection: true,
-    });
-
-    if (!result || result.canceled || !result.assets?.length) return;
-
-    const videos = result.assets.map((a) => ({
-      uri: a.uri,
-      duration: a.duration ?? undefined,
-      assetId: a.assetId ?? undefined,
-    }));
-
-    await runAutoDetect(videos);
-  };
-
-  // Classify every clip, then group them into holes.
-  // PRIMARY strategy: timestamp gaps from MediaLibrary creationTime (> 3min = new hole).
-  // SECONDARY: pose-based putt→swing transitions (used for ambiguous 2-3min gaps, or as
-  // a full fallback if no clips have creationTime / permission denied).
-  const runAutoDetect = async (
-    videos: { uri: string; duration?: number; assetId?: string }[]
-  ) => {
-    setStep('auto-processing');
-    setAutoProgress({ current: 0, total: videos.length, phase: 'Reading metadata...' });
-
-    // Step 0: Try to fetch creationTime for each clip via MediaLibrary.
-    // Request permission lazily the first time we hit a clip that has an assetId.
-    let permissionChecked = false;
-    let permissionGranted = false;
-
-    type WithMeta = {
-      uri: string;
-      duration?: number;
-      assetId?: string;
-      creationTime?: number;
-      pickerIndex: number;
-    };
-    const withMeta: WithMeta[] = [];
-
-    for (let i = 0; i < videos.length; i++) {
-      const v = videos[i];
-      let creationTime: number | undefined;
-
-      if (MediaLibrary && v.assetId) {
-        if (!permissionChecked) {
-          try {
-            const current = await MediaLibrary.getPermissionsAsync();
-            permissionGranted = current.granted;
-            if (!permissionGranted && current.canAskAgain) {
-              const req = await MediaLibrary.requestPermissionsAsync();
-              permissionGranted = req.granted;
-            }
-          } catch (err) {
-            console.log('[AutoDetect] MediaLibrary permission check failed:', err);
-          }
-          permissionChecked = true;
-        }
-
-        if (permissionGranted) {
-          try {
-            const info = await MediaLibrary.getAssetInfoAsync(v.assetId);
-            if (info?.creationTime) {
-              creationTime = info.creationTime;
-            }
-          } catch (err) {
-            console.log('[AutoDetect] getAssetInfoAsync failed for', v.assetId, err);
-          }
-        }
-      }
-
-      withMeta.push({
-        uri: v.uri,
-        duration: v.duration,
-        assetId: v.assetId,
-        creationTime,
-        pickerIndex: i,
-      });
-    }
-
-    const anyHasCreationTime = withMeta.some((m) => m.creationTime !== undefined);
-    const anyAssetIds = videos.some((v) => v.assetId);
-
-    // If clips had assetIds but permission was denied, warn the user and bail to mode.
-    if (anyAssetIds && permissionChecked && !permissionGranted) {
-      Alert.alert(
-        'Photos access needed',
-        'Auto-detect needs Photos access to group clips by time. Please allow access in Settings, or use Manual import.'
-      );
-      setStep('mode');
-      return;
-    }
-
-    // Step 1: classify each clip (pose-based).
-    type Classified = WithMeta & {
-      shotType: ShotTypeClassification;
-      confidence: number;
-    };
-    const classified: Classified[] = [];
-
-    for (let i = 0; i < withMeta.length; i++) {
-      const v = withMeta[i];
-      setAutoProgress({
-        current: i + 1,
-        total: withMeta.length,
-        phase: `Analysing shot ${i + 1} of ${withMeta.length}...`,
-      });
-      try {
-        const r = await detectSwing(v.uri);
-        classified.push({
-          ...v,
-          shotType: r.found ? r.shotType : 'swing',
-          confidence: r.confidence,
-        });
-      } catch (err) {
-        console.log('[AutoDetect] detectSwing failed, defaulting to swing:', err);
-        classified.push({ ...v, shotType: 'swing', confidence: 0 });
-      }
-    }
-
-    // Step 2: group into holes.
-    setAutoProgress({
-      current: withMeta.length,
-      total: withMeta.length,
-      phase: 'Grouping into holes...',
-    });
-
-    const ordered = getOrderedHoleNumbers();
-    const groupedHoles: HoleImport[] = ordered.map((holeNum) => {
-      const courseHole = courseHoles.find((h) => h.holeNumber === holeNum);
-      return {
-        holeNumber: holeNum,
-        par: courseHole?.par ?? 4,
-        clips: [],
-        expanded: false,
-      };
-    });
-
-    // Decide grouping strategy.
-    // If at least one clip has creationTime AND they aren't all identical → timestamp strategy.
-    // Otherwise → fall back to pose-based putt→swing grouping.
-    const creationTimes = classified
-      .map((c) => c.creationTime)
-      .filter((t): t is number => t !== undefined);
-    const allSameTimestamp =
-      creationTimes.length > 0 &&
-      creationTimes.every((t) => t === creationTimes[0]);
-
-    const useTimestampStrategy = anyHasCreationTime && !allSameTimestamp;
-
-    if (useTimestampStrategy) {
-      console.log(
-        `[AutoDetect] Using timestamp strategy for ${classified.length} clips ` +
-          `(${creationTimes.length} have creationTime)`
-      );
-
-      // Sort by creationTime ascending; preserve picker order for ties / missing values.
-      const sorted = [...classified].sort((a, b) => {
-        const at = a.creationTime;
-        const bt = b.creationTime;
-        if (at === undefined && bt === undefined) return a.pickerIndex - b.pickerIndex;
-        if (at === undefined) return a.pickerIndex - b.pickerIndex;
-        if (bt === undefined) return a.pickerIndex - b.pickerIndex;
-        if (at === bt) return a.pickerIndex - b.pickerIndex;
-        return at - bt;
-      });
-
-      let holeIdx = 0;
-      let prevTime: number | undefined;
-      let prevShotType: ShotTypeClassification | null = null;
-
-      for (let i = 0; i < sorted.length; i++) {
-        const c = sorted[i];
-        const curTime = c.creationTime;
-        let gapMs = 0;
-        if (prevTime !== undefined && curTime !== undefined) {
-          gapMs = curTime - prevTime;
-        }
-
-        let newHole = false;
-        let reason = '';
-
-        if (i === 0) {
-          reason = 'first clip';
-        } else if (gapMs > HOLE_GAP_MS) {
-          newHole = true;
-          reason = `gap=${(gapMs / 60000).toFixed(1)}min > 3min`;
-        } else if (gapMs > HOLE_GAP_AMBIGUOUS_MS) {
-          // Ambiguous: confirm with pose transition
-          if (prevShotType === 'putt' && c.shotType === 'swing') {
-            newHole = true;
-            reason = `gap=${(gapMs / 60000).toFixed(1)}min + putt→swing`;
-          } else {
-            reason = `gap=${(gapMs / 60000).toFixed(1)}min ambiguous, no putt→swing`;
-          }
-        } else if (curTime === undefined || prevTime === undefined) {
-          // No timestamp for this transition → use pose fallback
-          if (prevShotType === 'putt' && c.shotType === 'swing') {
-            newHole = true;
-            reason = 'no timestamp + putt→swing';
-          } else {
-            reason = 'no timestamp';
-          }
-        } else {
-          reason = `gap=${(gapMs / 60000).toFixed(1)}min (same hole)`;
-        }
-
-        if (newHole) {
-          holeIdx += 1;
-          // Dynamic resize: if the picker gave us more holes than the user
-          // selected (e.g. holesCount=9 but they filmed 18), append a new
-          // HoleImport row instead of clamping onto the last hole. The old
-          // `Math.min(holeIdx+1, length-1)` behavior was pinning every
-          // overflow clip onto hole 9, producing "27 shots on hole 9."
-          if (holeIdx >= groupedHoles.length) {
-            const lastHoleNum = groupedHoles[groupedHoles.length - 1]?.holeNumber ?? 0;
-            const nextHoleNum = lastHoleNum + 1;
-            const courseHole = courseHoles.find((h) => h.holeNumber === nextHoleNum);
-            groupedHoles.push({
-              holeNumber: nextHoleNum,
-              par: courseHole?.par ?? 4,
-              clips: [],
-              expanded: false,
-            });
-          }
-        }
-
-        console.log(
-          `[AutoDetect] Clip ${i + 1}: ${reason}${newHole ? ' → new hole' : ''} ` +
-            `(hole ${groupedHoles[holeIdx].holeNumber}, shotType=${c.shotType})`
-        );
-
-        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration, assetId: c.assetId });
-        prevTime = curTime ?? prevTime;
-        prevShotType = c.shotType;
-      }
-    } else {
-      console.log(
-        `[AutoDetect] Falling back to pose-based grouping ` +
-          `(anyHasCreationTime=${anyHasCreationTime}, allSameTimestamp=${allSameTimestamp})`
-      );
-
-      let holeIdx = 0;
-      let prevShotType: ShotTypeClassification | null = null;
-
-      for (let i = 0; i < classified.length; i++) {
-        const c = classified[i];
-        // putt → swing means the swing belongs to the NEXT hole
-        if (
-          prevShotType === 'putt' &&
-          c.shotType === 'swing'
-        ) {
-          holeIdx += 1;
-          // Dynamic resize (see timestamp-strategy branch for rationale).
-          if (holeIdx >= groupedHoles.length) {
-            const lastHoleNum = groupedHoles[groupedHoles.length - 1]?.holeNumber ?? 0;
-            const nextHoleNum = lastHoleNum + 1;
-            const courseHole = courseHoles.find((h) => h.holeNumber === nextHoleNum);
-            groupedHoles.push({
-              holeNumber: nextHoleNum,
-              par: courseHole?.par ?? 4,
-              clips: [],
-              expanded: false,
-            });
-          }
-          console.log(
-            `[AutoDetect] Clip ${i + 1}: putt→swing → new hole ` +
-              `(hole ${groupedHoles[holeIdx].holeNumber})`
-          );
-        } else {
-          console.log(
-            `[AutoDetect] Clip ${i + 1}: shotType=${c.shotType} ` +
-              `(hole ${groupedHoles[holeIdx].holeNumber})`
-          );
-        }
-        groupedHoles[holeIdx].clips.push({ uri: c.uri, durationMs: c.duration, assetId: c.assetId });
-        prevShotType = c.shotType;
-      }
-    }
-
-    // Sanity pass — if any hole ends up with >8 shots it's a statistical outlier
-    // (even terrible golfers rarely exceed 8 on a par-5). Flag them for the user
-    // to review grouping on the Review Clips screen. We don't auto-split yet —
-    // just surface the anomaly so they can drag clips between holes.
-    const oversizedHoles = groupedHoles
-      .filter((h) => h.clips.length > 8)
-      .map((h) => h.holeNumber);
-    if (oversizedHoles.length > 0) {
-      console.warn(
-        `[AutoDetect] Sanity pass: ${oversizedHoles.length} hole(s) with >8 shots: ${oversizedHoles.join(', ')}`
-      );
-      setSanityWarning({ oversizedHoles });
-    } else {
-      setSanityWarning(null);
-    }
-
-    // Expand holes that have clips
-    for (const h of groupedHoles) {
-      h.expanded = h.clips.length > 0;
-    }
-
-    setHoles(groupedHoles);
-
-    // Pre-fill scores based on grouping
-    const initialScores: Record<number, number> = {};
-    const initialPars: Record<number, number> = {};
-    for (const h of groupedHoles) {
-      initialPars[h.holeNumber] = h.par;
-      if (h.clips.length > 0) {
-        initialScores[h.holeNumber] = h.clips.length;
-      }
-    }
-    setScores(initialScores);
-    setPars(initialPars);
-
-    // Fire-and-forget thumbnail generation
-    for (const hole of groupedHoles) {
-      for (const clip of hole.clips) {
-        VideoThumbnails?.getThumbnailAsync(clip.uri, { time: 500, quality: 0.3 })
-          .then((thumb) => {
-            setHoles((prev) =>
-              prev.map((h) =>
-                h.holeNumber === hole.holeNumber
-                  ? {
-                      ...h,
-                      clips: h.clips.map((c) =>
-                        c.uri === clip.uri ? { ...c, thumbnailUri: thumb.uri } : c
-                      ),
-                    }
-                  : h
-              )
-            );
-          })
-          .catch(() => {});
-      }
-    }
-
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    // Route to scorecard so user can review/edit scores before confirming
-    setStep('scorecard');
   };
 
   // Scorecard helpers
@@ -788,20 +474,6 @@ export default function ImportRoundScreen() {
       });
     });
 
-    // If auto mode, recompute scores from new clip counts
-    if (importMode === 'auto') {
-      setScores((prev) => {
-        const next = { ...prev };
-        // Find next clip counts post-move
-        const sourceCount = (holes.find((h) => h.holeNumber === sourceHole)?.clips.length ?? 1) - 1;
-        const targetCount = (holes.find((h) => h.holeNumber === targetHole)?.clips.length ?? 0) + 1;
-        if (sourceCount > 0) next[sourceHole] = sourceCount;
-        else delete next[sourceHole];
-        next[targetHole] = targetCount;
-        return next;
-      });
-    }
-
     Haptics.selectionAsync();
 
     // Scroll to target hole shortly after layout settles
@@ -990,8 +662,8 @@ export default function ImportRoundScreen() {
       }
       await Promise.all(clipTasks);
 
-      // Save scores per hole — use scorecard scores for quick & auto imports, clip count for manual
-      const usesScorecard = importMode === 'quick' || importMode === 'auto';
+      // Save scores per hole — use scorecard scores for quick imports, clip count for manual
+      const usesScorecard = importMode === 'quick';
       // Score-save per hole is also independent — parallelize.
       await Promise.all(holes.map(async (hole) => {
         const holeStrokes =
@@ -1087,18 +759,11 @@ export default function ImportRoundScreen() {
       case 'bulk-import':
         setStep('scorecard');
         break;
-      case 'auto-processing':
-        // Classification can't meaningfully go back mid-flight; return to mode
-        setStep('mode');
-        break;
       case 'import':
         if (importMode === 'quick') {
           // If coming from bulk import, go back to bulk import
           setBulkVideos([]);
           setStep('bulk-import');
-        } else if (importMode === 'auto') {
-          // Clips already grouped — let user tweak the scorecard
-          setStep('scorecard');
         } else {
           setStep('mode');
         }
@@ -1179,6 +844,58 @@ export default function ImportRoundScreen() {
                 locally before importing.
               </Text>
             </View>
+
+            {/* Saved-round presets. Same pattern as the Live setup screen —
+                tap one to pre-fill course / holes / start-hole and skip the
+                manual setup for repeat visits. Only renders if the user has
+                presets saved. */}
+            {presets.length > 0 && (
+              <>
+                <Text style={{
+                  ...theme.typography.caption,
+                  color: theme.colors.textTertiary,
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}>
+                  Saved rounds
+                </Text>
+                <View style={{ gap: 8, marginBottom: 20 }}>
+                  {presets.map((preset) => (
+                    <Pressable
+                      key={preset.id}
+                      onPress={() => applyPreset(preset)}
+                      hitSlop={4}
+                    >
+                      <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+                        <Bookmark size={18} color={theme.colors.accent} />
+                        <View style={{ flex: 1 }}>
+                          <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
+                            {preset.name}
+                          </Text>
+                          <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+                            {preset.holes_played === 9
+                              ? preset.start_hole === 1 ? 'Front 9' : 'Back 9'
+                              : '18 holes'}
+                            {' · '}{preset.course_name}
+                          </Text>
+                        </View>
+                        <ChevronRight size={16} color={theme.colors.textTertiary} />
+                      </Card>
+                    </Pressable>
+                  ))}
+                </View>
+                <Text style={{
+                  ...theme.typography.caption,
+                  color: theme.colors.textTertiary,
+                  textTransform: 'uppercase',
+                  letterSpacing: 0.5,
+                  marginBottom: 8,
+                }}>
+                  Or set up a new round
+                </Text>
+              </>
+            )}
 
             <CourseSearch
               value={courseName}
@@ -1294,9 +1011,9 @@ export default function ImportRoundScreen() {
               How would you like to import your round?
             </Text>
 
-            {/* Auto Detect (recommended) */}
+            {/* Quick Import — recommended */}
             <Pressable
-              onPress={() => handleModeSelect('auto')}
+              onPress={() => handleModeSelect('quick')}
               style={({ pressed }) => ({
                 opacity: pressed ? 0.8 : 1,
               })}
@@ -1313,7 +1030,7 @@ export default function ImportRoundScreen() {
                       alignItems: 'center',
                     }}
                   >
-                    <Sparkles size={24} color={theme.colors.primary} />
+                    <Zap size={24} color={theme.colors.primary} />
                   </View>
                   <View style={{ flex: 1 }}>
                     <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginBottom: 4 }}>
@@ -1324,7 +1041,7 @@ export default function ImportRoundScreen() {
                           fontSize: 17,
                         }}
                       >
-                        Auto Detect
+                        Quick Import
                       </Text>
                       <View style={{
                         backgroundColor: theme.colors.primary,
@@ -1332,61 +1049,9 @@ export default function ImportRoundScreen() {
                         paddingVertical: 2,
                         borderRadius: 8,
                       }}>
-                        <Text style={{ color: '#000', fontSize: 10, fontWeight: '700' }}>NEW</Text>
+                        <Text style={{ color: '#000', fontSize: 10, fontWeight: '700' }}>RECOMMENDED</Text>
                       </View>
                     </View>
-                    <Text
-                      style={{
-                        color: theme.colors.textSecondary,
-                        fontSize: 13,
-                        lineHeight: 18,
-                      }}
-                    >
-                      Just pick all your videos. We'll classify each shot and automatically
-                      group them into holes. Review the scorecard after.
-                    </Text>
-                  </View>
-                  <ChevronDown
-                    size={20}
-                    color={theme.colors.textTertiary}
-                    style={{ transform: [{ rotate: '-90deg' }] }}
-                  />
-                </View>
-              </Card>
-            </Pressable>
-
-            {/* Quick Import */}
-            <Pressable
-              onPress={() => handleModeSelect('quick')}
-              style={({ pressed }) => ({
-                opacity: pressed ? 0.8 : 1,
-              })}
-            >
-              <Card style={{ marginBottom: 16, padding: 20 }}>
-                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 14 }}>
-                  <View
-                    style={{
-                      width: 48,
-                      height: 48,
-                      borderRadius: 24,
-                      backgroundColor: theme.colors.primaryMuted,
-                      justifyContent: 'center',
-                      alignItems: 'center',
-                    }}
-                  >
-                    <Zap size={24} color={theme.colors.primary} />
-                  </View>
-                  <View style={{ flex: 1 }}>
-                    <Text
-                      style={{
-                        color: theme.colors.textPrimary,
-                        fontWeight: '700',
-                        fontSize: 17,
-                        marginBottom: 4,
-                      }}
-                    >
-                      Quick Import
-                    </Text>
                     <Text
                       style={{
                         color: theme.colors.textSecondary,
@@ -1464,93 +1129,6 @@ export default function ImportRoundScreen() {
     );
   }
 
-  // ---- STEP 2.5: Auto-Detect Processing ----
-  if (step === 'auto-processing') {
-    const pct = autoProgress.total > 0
-      ? Math.round((autoProgress.current / autoProgress.total) * 100)
-      : 0;
-    return (
-      <GradientBackground>
-        <View
-          style={{
-            flex: 1,
-            paddingTop: insets.top,
-            justifyContent: 'center',
-            alignItems: 'center',
-            padding: 32,
-          }}
-        >
-          <View
-            style={{
-              width: 80,
-              height: 80,
-              borderRadius: 40,
-              backgroundColor: theme.colors.primaryMuted,
-              justifyContent: 'center',
-              alignItems: 'center',
-              marginBottom: 24,
-            }}
-          >
-            <Sparkles size={36} color={theme.colors.primary} />
-          </View>
-          <Text
-            style={{
-              color: theme.colors.textPrimary,
-              fontSize: 20,
-              fontWeight: '700',
-              marginBottom: 8,
-              textAlign: 'center',
-            }}
-          >
-            Auto-detecting holes
-          </Text>
-          <Text
-            style={{
-              color: theme.colors.textSecondary,
-              fontSize: 14,
-              textAlign: 'center',
-              marginBottom: 32,
-            }}
-          >
-            {autoProgress.phase}
-          </Text>
-          {autoProgress.total > 0 && (
-            <>
-              <View
-                style={{
-                  width: '100%',
-                  height: 8,
-                  backgroundColor: theme.colors.primaryMuted,
-                  borderRadius: 4,
-                  overflow: 'hidden',
-                  marginBottom: 12,
-                }}
-              >
-                <View
-                  style={{
-                    width: `${pct}%`,
-                    height: '100%',
-                    backgroundColor: theme.colors.primary,
-                  }}
-                />
-              </View>
-              <Text
-                style={{
-                  color: theme.colors.textTertiary,
-                  fontSize: 13,
-                  fontVariant: ['tabular-nums'],
-                }}
-              >
-                {autoProgress.current} / {autoProgress.total} ({pct}%)
-              </Text>
-            </>
-          )}
-        </View>
-      </GradientBackground>
-    );
-  }
-
-  // ---- STEP 3: Scorecard Entry ----
   if (step === 'scorecard') {
     const ordered = getOrderedHoleNumbers();
     const showBothNines = holesCount > 9;
@@ -1869,45 +1447,6 @@ export default function ImportRoundScreen() {
               paddingBottom: selectedScoreCell !== null ? 180 : 120,
             }}
           >
-            {/* Auto-detected banner */}
-            {importMode === 'auto' && (
-              <Card
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 12,
-                  padding: 14,
-                  marginBottom: 20,
-                  backgroundColor: theme.colors.primary + '15',
-                  borderColor: theme.colors.primary + '40',
-                  borderWidth: 1,
-                }}
-              >
-                <Sparkles size={20} color={theme.colors.primary} />
-                <View style={{ flex: 1 }}>
-                  <Text
-                    style={{
-                      color: theme.colors.textPrimary,
-                      fontSize: 14,
-                      fontWeight: '700',
-                      marginBottom: 2,
-                    }}
-                  >
-                    Scores Auto-Detected
-                  </Text>
-                  <Text
-                    style={{
-                      color: theme.colors.textSecondary,
-                      fontSize: 12,
-                      lineHeight: 16,
-                    }}
-                  >
-                    Shots were grouped into holes automatically. Tap any cell to adjust.
-                  </Text>
-                </View>
-              </Card>
-            )}
-
             {/* Starting Nine Toggle */}
             <View style={{ marginBottom: 20 }}>
               <Text
@@ -2298,16 +1837,10 @@ export default function ImportRoundScreen() {
 
             <View style={{ paddingHorizontal: 16, paddingTop: 8 }}>
               <Button
-                title={importMode === 'auto' ? 'Next — Review Clips' : 'Next — Import Videos'}
+                title="Next — Import Videos"
                 onPress={() => {
-                  if (importMode === 'auto') {
-                    // Clips already picked & grouped by auto-detect; skip bulk-import and
-                    // go straight to the per-hole review screen.
-                    setStep('import');
-                  } else {
-                    setBulkVideos([]);
-                    setStep('bulk-import');
-                  }
+                  setBulkVideos([]);
+                  setStep('bulk-import');
                 }}
               />
             </View>
@@ -2557,7 +2090,7 @@ export default function ImportRoundScreen() {
               fontSize: 18,
             }}
           >
-            {importMode === 'quick' || importMode === 'auto' ? 'Review Clips' : 'Add Clips'}
+            {importMode === 'quick' ? 'Review Clips' : 'Add Clips'}
           </Text>
           <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
             {totalClips} clip{totalClips !== 1 ? 's' : ''}
@@ -2569,28 +2102,6 @@ export default function ImportRoundScreen() {
           style={{ flex: 1 }}
           contentContainerStyle={{ padding: 16, paddingBottom: 120 }}
         >
-          {importMode === 'auto' && (
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 8,
-                paddingHorizontal: 4,
-                marginBottom: 12,
-              }}
-            >
-              <Info size={14} color={theme.colors.textTertiary} />
-              <Text
-                style={{
-                  color: theme.colors.textTertiary,
-                  fontSize: 12,
-                  flex: 1,
-                }}
-              >
-                Long-press any clip to move it to a different hole.
-              </Text>
-            </View>
-          )}
           {sanityWarning && sanityWarning.oversizedHoles.length > 0 && (
             <View
               style={{
@@ -2687,8 +2198,7 @@ export default function ImportRoundScreen() {
                     >
                       Par {hole.par} · {hole.clips.length} clip
                       {hole.clips.length !== 1 ? 's' : ''}
-                      {(importMode === 'quick' || importMode === 'auto') &&
-                      scores[hole.holeNumber]
+                      {importMode === 'quick' && scores[hole.holeNumber]
                         ? ` · Score: ${scores[hole.holeNumber]}`
                         : ''}
                     </Text>
