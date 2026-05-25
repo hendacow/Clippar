@@ -104,11 +104,26 @@ export function useRound() {
       // retry than silently create an unsyncable round.
       console.error('[useRound] startRound failed:', err);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      Alert.alert(
-        'Could not start round',
-        'Failed to create round on the server. Check your connection and try again.',
-        [{ text: 'OK' }]
-      );
+
+      // Specific cause: createRound throws 'Not authenticated' when
+      // supabase.auth.getUser() returns no user. Surface that distinctly
+      // so the user knows they need to sign in — the generic "check your
+      // connection" message was misleading (it's an auth issue, not a
+      // network issue).
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/not authenticated/i.test(msg)) {
+        Alert.alert(
+          'Please sign in',
+          'Your session has expired or you are not signed in. Sign out and back in to continue.',
+          [{ text: 'OK' }]
+        );
+      } else {
+        Alert.alert(
+          'Could not start round',
+          'Failed to create round on the server. Check your connection and try again.',
+          [{ text: 'OK' }]
+        );
+      }
       return false;
     }
   }, []);
