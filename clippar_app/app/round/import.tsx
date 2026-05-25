@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -24,8 +24,6 @@ import {
   AlertTriangle,
   ImagePlus,
   Info,
-  Bookmark,
-  ChevronRight,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -33,15 +31,7 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
-import {
-  createRound,
-  createShot,
-  updateRound,
-  saveScoreToSupabase,
-  listCoursePresets,
-  touchCoursePreset,
-} from '@/lib/api';
-import type { CoursePreset } from '@/types/preset';
+import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
 import {
   saveLocalClip,
   saveLocalRound,
@@ -159,35 +149,6 @@ export default function ImportRoundScreen() {
   const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number; assetId?: string }[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [sanityWarning, setSanityWarning] = useState<{ oversizedHoles: number[] } | null>(null);
-
-  // Wave 3 Phase D: pre-fill the import setup with one of the user's saved
-  // round presets. The list is shown above the course search on the setup
-  // step. Tapping a preset fills in courseName / selectedCourseId / holes
-  // count / starting nine so the user can hit Continue immediately. We
-  // load lazily on screen mount; failure is non-fatal.
-  const [presets, setPresets] = useState<CoursePreset[]>([]);
-
-  useEffect(() => {
-    let cancelled = false;
-    listCoursePresets()
-      .then((rows) => {
-        if (!cancelled) setPresets(rows);
-      })
-      .catch((err) => {
-        console.log('[import] listCoursePresets failed:', err?.message);
-      });
-    return () => { cancelled = true; };
-  }, []);
-
-  const applyPreset = (preset: CoursePreset) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setCourseName(preset.course_name);
-    setSelectedCourseId(preset.course_id ?? undefined);
-    setHolesCount(preset.holes_played);
-    setStartingNine(preset.start_hole === 10 ? 'back' : 'front');
-    // Best-effort — failure to bump last_used_at shouldn't break the flow.
-    void touchCoursePreset(preset.id);
-  };
 
   const handleCourseSelect = (course: { id: string; name: string }, holeData: HoleData[]) => {
     setSelectedCourseId(course.id);
@@ -844,58 +805,6 @@ export default function ImportRoundScreen() {
                 locally before importing.
               </Text>
             </View>
-
-            {/* Saved-round presets. Same pattern as the Live setup screen —
-                tap one to pre-fill course / holes / start-hole and skip the
-                manual setup for repeat visits. Only renders if the user has
-                presets saved. */}
-            {presets.length > 0 && (
-              <>
-                <Text style={{
-                  ...theme.typography.caption,
-                  color: theme.colors.textTertiary,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.5,
-                  marginBottom: 8,
-                }}>
-                  Saved rounds
-                </Text>
-                <View style={{ gap: 8, marginBottom: 20 }}>
-                  {presets.map((preset) => (
-                    <Pressable
-                      key={preset.id}
-                      onPress={() => applyPreset(preset)}
-                      hitSlop={4}
-                    >
-                      <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                        <Bookmark size={18} color={theme.colors.accent} />
-                        <View style={{ flex: 1 }}>
-                          <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
-                            {preset.name}
-                          </Text>
-                          <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
-                            {preset.holes_played === 9
-                              ? preset.start_hole === 1 ? 'Front 9' : 'Back 9'
-                              : '18 holes'}
-                            {' · '}{preset.course_name}
-                          </Text>
-                        </View>
-                        <ChevronRight size={16} color={theme.colors.textTertiary} />
-                      </Card>
-                    </Pressable>
-                  ))}
-                </View>
-                <Text style={{
-                  ...theme.typography.caption,
-                  color: theme.colors.textTertiary,
-                  textTransform: 'uppercase',
-                  letterSpacing: 0.5,
-                  marginBottom: 8,
-                }}>
-                  Or set up a new round
-                </Text>
-              </>
-            )}
 
             <CourseSearch
               value={courseName}
