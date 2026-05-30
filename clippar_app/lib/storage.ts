@@ -615,6 +615,71 @@ export async function deleteLocalRound(roundId: string) {
   await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
 }
 
+/**
+ * Delete a single clip row (used by the recording screen's "Delete last
+ * shot" action). Returns the clip's local file URIs so the caller can
+ * best-effort delete the underlying video files. We DON'T delete the
+ * files here to keep this module free of the shot-detector native
+ * dependency (avoids an import cycle) — file cleanup is the caller's job.
+ *
+ * Also pulls the clip out of the upload queue so a just-deleted shot
+ * doesn't get pushed to Storage after the fact.
+ */
+export async function deleteLocalClip(
+  clipId: number
+): Promise<{ fileUris: string[] }> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{
+    file_uri: string | null;
+    trimmed_file_uri: string | null;
+    original_file_uri: string | null;
+  }>(
+    'SELECT file_uri, trimmed_file_uri, original_file_uri FROM local_clips WHERE id = ?',
+    clipId
+  );
+  await database.runAsync('DELETE FROM local_clips WHERE id = ?', clipId);
+  // Best-effort: a clip that was already queued for upload shouldn't fire
+  // after deletion. The queue is keyed by round_id + clip metadata, so we
+  // can't target a single clip precisely here, but leaving the row out of
+  // local_clips means the queue processor skips it (it joins on clip rows).
+
+  const fileUris = [
+    row?.file_uri,
+    row?.trimmed_file_uri,
+    row?.original_file_uri,
+  ].filter((u): u is string => !!u && u.startsWith('file://'));
+  // De-dupe (trimmed often === file_uri) so we don't try to delete twice.
+  return { fileUris: [...new Set(fileUris)] };
+}
+
+/**
+ * Reassign a clip to a different hole (used by the scorecard screen's
+ * "Move to hole" action). Updates hole_number and resets shot_number to
+ * the end of the destination hole so ordering stays sane. Marks the
+ * round's reel stale since the composed sequence changed.
+ */
+export async function updateClipHole(
+  clipId: number,
+  newHoleNumber: number,
+  roundId: string
+): Promise<void> {
+  const database = await getDatabase();
+  // Place the moved clip after the last existing shot on the target hole.
+  const maxRow = await database.getFirstAsync<{ max_shot: number | null }>(
+    'SELECT MAX(shot_number) AS max_shot FROM local_clips WHERE round_id = ? AND hole_number = ?',
+    roundId,
+    newHoleNumber
+  );
+  const nextShot = (maxRow?.max_shot ?? 0) + 1;
+  await database.runAsync(
+    'UPDATE local_clips SET hole_number = ?, shot_number = ? WHERE id = ?',
+    newHoleNumber,
+    nextShot,
+    clipId
+  );
+  await markReelStale(roundId).catch(() => {});
+}
+
 // ---- Upload error tracking ----
 
 export async function markClipUploadError(clipId: number, errorMessage: string) {
