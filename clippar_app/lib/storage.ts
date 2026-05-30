@@ -653,6 +653,39 @@ export async function deleteLocalClip(
 }
 
 /**
+ * Wipe a round's clips + scores but KEEP the round row. Used by the
+ * recording-screen clicker tutorial, which practices on the REAL round
+ * (so the user sees real recording / hole changes / penalties) and then
+ * resets it to a clean slate when the tutorial finishes — "as if no
+ * videos were taken, just like the start of the round."
+ *
+ * Returns the deleted clips' local file URIs so the caller can best-effort
+ * delete the underlying video files. (In practice mode the camera discards
+ * clips before they're saved, so this usually finds nothing — but we clear
+ * defensively in case any slipped through.)
+ */
+export async function resetRoundData(
+  roundId: string
+): Promise<{ fileUris: string[] }> {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<{
+    file_uri: string | null;
+    trimmed_file_uri: string | null;
+    original_file_uri: string | null;
+  }>(
+    'SELECT file_uri, trimmed_file_uri, original_file_uri FROM local_clips WHERE round_id = ?',
+    roundId
+  );
+  await database.runAsync('DELETE FROM local_clips WHERE round_id = ?', roundId);
+  await database.runAsync('DELETE FROM local_scores WHERE round_id = ?', roundId);
+  await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
+  const fileUris = rows
+    .flatMap((r) => [r.file_uri, r.trimmed_file_uri, r.original_file_uri])
+    .filter((u): u is string => !!u && u.startsWith('file://'));
+  return { fileUris: [...new Set(fileUris)] };
+}
+
+/**
  * Reassign a clip to a different hole (used by the scorecard screen's
  * "Move to hole" action). Updates hole_number and resets shot_number to
  * the end of the destination hole so ordering stays sane. Marks the

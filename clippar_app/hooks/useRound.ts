@@ -15,6 +15,7 @@ import {
   getClipsForRound,
   deleteLocalRound,
   deleteLocalClip,
+  resetRoundData,
 } from '@/lib/storage';
 
 const DEFAULT_PAR = 4;
@@ -563,6 +564,45 @@ export function useRound() {
     setState(null);
   }, []);
 
+  // Reset the round to its just-started state, keeping the same roundId and
+  // setup (course / holes / start hole). Used by the recording-screen
+  // clicker tutorial: the user practices on the real round (sees real
+  // recording / hole changes / penalties), then this wipes everything back
+  // to a clean slate so the actual round begins fresh. Clears in-memory
+  // state + the round's SQLite clips/scores + resets the round row's
+  // hole/shot pointers. (In practice mode the camera discards clips before
+  // they're persisted, so usually there's nothing to delete — but we clear
+  // defensively.)
+  const resetToStart = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current) return;
+
+    lastShotTypeRef.current = null;
+    setState(
+      createInitialState(
+        current.roundId,
+        current.courseName,
+        current.courseId,
+        current.courseHoles,
+        current.holesPlayed,
+        current.startHole,
+      )
+    );
+
+    try {
+      const { fileUris } = await resetRoundData(current.roundId);
+      for (const uri of fileUris) {
+        deleteFile(uri).catch(() => {});
+      }
+      await updateLocalRound(current.roundId, {
+        current_hole: current.startHole,
+        current_shot: 1,
+      });
+    } catch (err) {
+      console.log('[useRound] resetToStart failed:', err);
+    }
+  }, []);
+
   // Delete the most recently recorded clip (the recording screen's
   // "Delete last shot" action). Removes it from in-memory state, decrements
   // the shot counter so the next recording reuses that shot number, and
@@ -624,6 +664,7 @@ export function useRound() {
     recoverRound,
     discardRound,
     resetRound,
+    resetToStart,
     deleteLastClip,
   };
 }
