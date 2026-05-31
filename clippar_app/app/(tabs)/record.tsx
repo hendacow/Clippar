@@ -15,7 +15,6 @@ import {
   Film,
   Video,
   ArrowLeft,
-  Bookmark,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -28,6 +27,8 @@ import { ScoreOverlay } from '@/components/record/ScoreOverlay';
 import { PenaltySheet } from '@/components/record/PenaltySheet';
 import { CameraPermissionScreen } from '@/components/record/CameraPermissionScreen';
 import { CourseSearch } from '@/components/record/CourseSearch';
+import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
+import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
 import { useBLE } from '@/hooks/useBLE';
 import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
@@ -67,6 +68,22 @@ export default function RecordScreen() {
   // The Import path uses router.push to /round/import and never sets
   // this to 'import' (no need — that flow lives on a different route).
   const [mode, setMode] = useState<null | 'live'>(null);
+
+  // Wave 3 Phase D-redo: when the user enters Live mode AND has saved
+  // presets, we now show a Preset Picker first as an intermediate step,
+  // before the manual setup screen. `livePhase` distinguishes the two:
+  //   - 'preset-picker' = list of saved rounds + "Set up new" CTA
+  //   - 'setup'         = the existing course-search / holes / start-hole
+  //                       manual setup screen
+  // Users without presets jump straight to 'setup' since there's nothing
+  // to pick from.
+  const [livePhase, setLivePhase] = useState<'preset-picker' | 'setup'>('setup');
+
+  // Wave 3 Phase D-redo: when a preset is tapped on the picker we open
+  // a bottom-sheet confirmation that lets the user override the start
+  // hole before kicking off the round. Holds the preset whose sheet is
+  // currently open; null = sheet closed.
+  const [confirmingPreset, setConfirmingPreset] = useState<CoursePreset | null>(null);
 
   // Wave 3 Phase C: round setup. Defaults match the legacy hard-coded
   // behaviour (full 18 from hole 1). When a preset is tapped these get
@@ -234,26 +251,36 @@ export default function RecordScreen() {
     );
   };
 
-  // Preset-flow start: user tapped one of their saved presets. Pre-fills
-  // all the setup state and kicks off the round directly — the whole point
+  // Preset-flow start: user tapped one of their saved presets and
+  // (optionally) overrode some setup values in the Confirm Sheet. Pre-fills
+  // the setup state and kicks off the round directly — the whole point
   // of presets is one-tap-and-go for repeat visits. Best-effort touches
   // last_used_at so the preset sorts to the top of the picker next time.
-  const startFromPreset = useCallback(async (preset: CoursePreset) => {
+  //
+  // Phase D-redo: the `overrides` arg carries any values the user changed
+  // on the Confirm Sheet (currently just startHole). It's optional so
+  // callers can still hand-off a "use the preset as-is" start when there's
+  // no confirmation step (e.g. future programmatic shortcuts).
+  const startFromPreset = useCallback(async (
+    preset: CoursePreset,
+    overrides?: { startHole?: 1 | 10 }
+  ) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    const effectiveStartHole = overrides?.startHole ?? preset.start_hole;
     // Mirror state into the form fields so a back-out keeps the values
     // visible in case the round fails to start.
     setCourseName(preset.course_name);
     setSelectedCourseId(preset.course_id ?? undefined);
     setCourseHoles(undefined); // preset doesn't carry the per-hole par data
     setHolesPlayed(preset.holes_played);
-    setStartHole(preset.start_hole);
+    setStartHole(effectiveStartHole);
 
     const ok = await round.startRound(
       preset.course_name,
       preset.course_id ?? undefined,
       undefined,
       preset.holes_played,
-      preset.start_hole,
+      effectiveStartHole,
     );
     if (ok) {
       // Non-blocking — failed timestamp bump shouldn't tank the round.
@@ -366,6 +393,13 @@ export default function RecordScreen() {
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               setMode('live');
+              // Phase D-redo: if the user already has saved presets, land
+              // on the picker so they can one-tap into a repeat round.
+              // Otherwise skip straight to manual setup — no point in an
+              // empty picker. The picker's useEffect handles fetching;
+              // we make the call locally on the snapshot we have right now
+              // so the decision is synchronous.
+              setLivePhase(presets.length > 0 ? 'preset-picker' : 'setup');
             }}
             style={({ pressed }) => ({
               borderRadius: theme.radius.lg,
@@ -453,11 +487,58 @@ export default function RecordScreen() {
     );
   }
 
-    // ---- IDLE STATE: Live recording — course / preset picker ----
-    // Reached when the user picked 'Live' on the chooser. Type narrowing
-    // means mode must be 'live' here since 'null' was handled above.
-    // Wave 3 Phase C: presets list at the top for one-tap repeat visits,
-    // course search + 9/18 + start-hole selectors below for manual setup.
+    // ---- IDLE STATE: Live recording — Preset Picker (Phase D-redo) ----
+    // Reached when the user picked 'Live' AND has at least one saved
+    // preset. The picker lists their saved rounds with a "Set up new
+    // round" CTA. Tapping a preset opens the PresetConfirmSheet (bottom
+    // sheet) so the user can override the start hole before kicking off.
+    // The ConfirmSheet is rendered as a sibling so it can portal-overlay
+    // on top of the picker.
+    if (livePhase === 'preset-picker') {
+      return (
+        <>
+          <PresetPickerScreen
+            presets={presets}
+            loading={presetsLoading}
+            title="Start a round"
+            subtitle="Tap a saved round for one-tap setup, or start fresh."
+            onSelectPreset={(preset) => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setConfirmingPreset(preset);
+            }}
+            onSetUpNew={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setLivePhase('setup');
+            }}
+            onBack={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setMode(null);
+              setLivePhase('setup'); // reset for next entry
+            }}
+          />
+          <PresetConfirmSheet
+            preset={confirmingPreset}
+            ctaLabel="Start round"
+            onCancel={() => setConfirmingPreset(null)}
+            onConfirm={({ startHole: chosenStartHole }) => {
+              const target = confirmingPreset;
+              setConfirmingPreset(null);
+              if (target) {
+                // Fire and forget — round.startRound has its own error
+                // surface (alerts on failure). Don't await here so the
+                // sheet animation can complete cleanly.
+                void startFromPreset(target, { startHole: chosenStartHole });
+              }
+            }}
+          />
+        </>
+      );
+    }
+
+    // ---- IDLE STATE: Live recording — manual setup screen ----
+    // Reached when the user picked 'Live' AND either has no presets OR
+    // tapped "Set up new round" on the picker. Course search + 9/18 +
+    // start-hole selectors for explicit setup.
     return (
       <GradientBackground>
         <ScrollView
@@ -467,7 +548,14 @@ export default function RecordScreen() {
           <Pressable
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setMode(null);
+              // Back-navigation: if the user has presets, return to the
+              // picker so they can switch their mind. Otherwise drop all
+              // the way back to the chooser (no picker exists to return to).
+              if (presets.length > 0) {
+                setLivePhase('preset-picker');
+              } else {
+                setMode(null);
+              }
               setCourseName('');
               setSelectedCourseId(undefined);
               setCourseHoles(undefined);
@@ -484,7 +572,7 @@ export default function RecordScreen() {
             Live recording
           </Text>
           <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
-            Pick a saved round or set one up.
+            Set up a new round.
           </Text>
 
           {/* Shutter Status */}
@@ -515,55 +603,9 @@ export default function RecordScreen() {
             </Card>
           </Pressable>
 
-          {/* Saved rounds (presets) — only rendered if the user has any. One
-              tap = instant round start with all the captured setup choices. */}
-          {presets.length > 0 && (
-            <>
-              <Text style={{
-                ...theme.typography.caption,
-                color: theme.colors.textTertiary,
-                textTransform: 'uppercase',
-                letterSpacing: 0.5,
-                marginBottom: 8,
-              }}>
-                Saved rounds
-              </Text>
-              <View style={{ gap: 8, marginBottom: 24 }}>
-                {presets.map((preset) => (
-                  <Pressable
-                    key={preset.id}
-                    onPress={() => startFromPreset(preset)}
-                    hitSlop={4}
-                  >
-                    <Card style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-                      <Bookmark size={18} color={theme.colors.accent} />
-                      <View style={{ flex: 1 }}>
-                        <Text style={{ color: theme.colors.textPrimary, fontWeight: '600' }}>
-                          {preset.name}
-                        </Text>
-                        <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
-                          {preset.holes_played === 9
-                            ? preset.start_hole === 1 ? 'Front 9' : 'Back 9'
-                            : '18 holes'}
-                          {' · '}{preset.course_name}
-                        </Text>
-                      </View>
-                      <ChevronRight size={16} color={theme.colors.textTertiary} />
-                    </Card>
-                  </Pressable>
-                ))}
-              </View>
-              <Text style={{
-                ...theme.typography.caption,
-                color: theme.colors.textTertiary,
-                textTransform: 'uppercase',
-                letterSpacing: 0.5,
-                marginBottom: 8,
-              }}>
-                Or set up a new round
-              </Text>
-            </>
-          )}
+          {/* Saved-rounds list previously lived here. Moved to the
+              PresetPickerScreen (Phase D-redo) which shows BEFORE this
+              setup screen for users with presets. */}
 
           {/* Course search */}
           <CourseSearch

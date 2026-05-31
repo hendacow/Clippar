@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -31,7 +31,17 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { CourseSearch } from '@/components/record/CourseSearch';
-import { createRound, createShot, updateRound, saveScoreToSupabase } from '@/lib/api';
+import {
+  createRound,
+  createShot,
+  updateRound,
+  saveScoreToSupabase,
+  listCoursePresets,
+  touchCoursePreset,
+} from '@/lib/api';
+import type { CoursePreset } from '@/types/preset';
+import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
+import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
 import {
   saveLocalClip,
   saveLocalRound,
@@ -119,7 +129,11 @@ interface HoleImport {
   expanded: boolean;
 }
 
-type ImportStep = 'setup' | 'mode' | 'scorecard' | 'bulk-import' | 'import';
+// Wave 3 Phase D-redo: 'preset-picker' is the new initial step shown
+// when the user has at least one saved preset. The picker lets them
+// one-tap a saved round (which routes through a confirm sheet) or pick
+// "Set up new round" to fall through to the existing 'setup' step.
+type ImportStep = 'preset-picker' | 'setup' | 'mode' | 'scorecard' | 'bulk-import' | 'import';
 
 export default function ImportRoundScreen() {
   const insets = useSafeAreaInsets();
@@ -128,6 +142,9 @@ export default function ImportRoundScreen() {
   const [courseHoles, setCourseHoles] = useState<HoleData[]>([]);
   const [holesCount, setHolesCount] = useState(18);
   const [holes, setHoles] = useState<HoleImport[]>([]);
+  // Default to 'setup' for users with no presets; users WITH presets get
+  // promoted to 'preset-picker' by the lazy-load effect below as soon as
+  // their preset list comes back from Supabase.
   const [step, setStep] = useState<ImportStep>('setup');
   const [importing, setImporting] = useState(false);
   // Per-clip import progress for the final import phase (button label uses this
@@ -149,6 +166,60 @@ export default function ImportRoundScreen() {
   const [bulkVideos, setBulkVideos] = useState<{ uri: string; duration?: number; assetId?: string }[]>([]);
   const [bulkProcessing, setBulkProcessing] = useState(false);
   const [sanityWarning, setSanityWarning] = useState<{ oversizedHoles: number[] } | null>(null);
+
+  // Wave 3 Phase D-redo: presets list + sheet-confirm state.
+  //   - `presets` holds the user's saved rounds, loaded on mount.
+  //   - `presetsLoading` lets the picker show a skeleton until the first
+  //     response arrives.
+  //   - `confirmingPreset` is non-null while the bottom-sheet confirm
+  //     dialog is open over the picker.
+  const [presets, setPresets] = useState<CoursePreset[]>([]);
+  const [presetsLoading, setPresetsLoading] = useState(true);
+  const [confirmingPreset, setConfirmingPreset] = useState<CoursePreset | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    listCoursePresets()
+      .then((rows) => {
+        if (cancelled) return;
+        setPresets(rows);
+        // Auto-promote into the preset-picker step IFF we're still on
+        // the default 'setup' step (user hasn't navigated yet) and we
+        // actually have presets to show. This avoids ping-ponging the
+        // user back to a picker they already dismissed by tapping "Set
+        // up new round".
+        if (rows.length > 0) {
+          setStep((prev) => (prev === 'setup' ? 'preset-picker' : prev));
+        }
+      })
+      .catch((err) => {
+        console.log('[import] listCoursePresets failed:', err?.message);
+      })
+      .finally(() => {
+        if (!cancelled) setPresetsLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Pre-fill the setup state from a preset (called after the user
+  // confirms in the bottom sheet, possibly with an overridden start
+  // hole). Then advance to the setup step so the user can review/edit
+  // the course before continuing to scorecard / mode select.
+  const applyPreset = (
+    preset: CoursePreset,
+    overrides?: { startHole?: 1 | 10 }
+  ) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    const effectiveStartHole = overrides?.startHole ?? preset.start_hole;
+    setCourseName(preset.course_name);
+    setSelectedCourseId(preset.course_id ?? undefined);
+    setHolesCount(preset.holes_played);
+    setStartingNine(effectiveStartHole === 10 ? 'back' : 'front');
+    // Bump last_used_at so this preset sorts to the top next time.
+    // Best-effort — failure shouldn't tank the import.
+    void touchCoursePreset(preset.id);
+    setStep('setup');
+  };
 
   const handleCourseSelect = (course: { id: string; name: string }, holeData: HoleData[]) => {
     setSelectedCourseId(course.id);
@@ -708,8 +779,17 @@ export default function ImportRoundScreen() {
   // Back navigation per step
   const handleBack = () => {
     switch (step) {
-      case 'setup':
+      case 'preset-picker':
         router.back();
+        break;
+      case 'setup':
+        // If presets exist, back returns to the picker so the user can
+        // re-choose. Otherwise drop all the way out (no picker exists).
+        if (presets.length > 0) {
+          setStep('preset-picker');
+        } else {
+          router.back();
+        }
         break;
       case 'mode':
         setStep('setup');
@@ -731,6 +811,48 @@ export default function ImportRoundScreen() {
         break;
     }
   };
+
+  // ---- STEP 0: Preset Picker (Wave 3 Phase D-redo) ----
+  // Shown when the user lands on Import AND has at least one saved
+  // preset. Tap a preset → confirm sheet → applyPreset() pre-fills the
+  // setup screen and routes to step 'setup' for review. Tap "Set up
+  // new round" → step 'setup' (empty form).
+  if (step === 'preset-picker') {
+    return (
+      <>
+        <PresetPickerScreen
+          presets={presets}
+          loading={presetsLoading}
+          title="Import a round"
+          subtitle="Tap a saved round to reuse its setup, or import from scratch."
+          onSelectPreset={(preset) => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setConfirmingPreset(preset);
+          }}
+          onSetUpNew={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setStep('setup');
+          }}
+          onBack={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            router.back();
+          }}
+        />
+        <PresetConfirmSheet
+          preset={confirmingPreset}
+          ctaLabel="Continue"
+          onCancel={() => setConfirmingPreset(null)}
+          onConfirm={({ startHole: chosenStartHole }) => {
+            const target = confirmingPreset;
+            setConfirmingPreset(null);
+            if (target) {
+              applyPreset(target, { startHole: chosenStartHole });
+            }
+          }}
+        />
+      </>
+    );
+  }
 
   // ---- STEP 1: Setup ----
   if (step === 'setup') {
