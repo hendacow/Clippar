@@ -374,11 +374,12 @@ export function useEditorState(roundId: string | undefined) {
       });
 
       // Persist to SQLite (clip ids are the numeric row id as a string).
-      const numId = parseInt(clipId, 10);
-      if (!isNaN(numId) && storage && state.roundId) {
+      const numId = Number(clipId);
+      if (Number.isInteger(numId) && storage && state.roundId) {
         storage
           .updateClipHole(numId, targetHoleNumber, state.roundId)
           .catch(() => {});
+      }
       }
     },
     [state.roundId]
