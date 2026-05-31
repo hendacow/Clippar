@@ -49,18 +49,32 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
+// Shared row style for the clip-actions menu (move/exclude/delete).
+const menuRowStyle = {
+  flexDirection: 'row' as const,
+  alignItems: 'center' as const,
+  gap: 12,
+  paddingVertical: 14,
+  paddingHorizontal: 14,
+  borderRadius: theme.radius.md,
+  backgroundColor: theme.colors.surfaceElevated,
+  borderWidth: 1,
+  borderColor: theme.colors.surfaceBorder,
+  marginBottom: 10,
+};
+
 // ---- Clip Card (matches GolfCam style) ----
 function ClipCard({
   clip,
   onEdit,
   onRemove,
-  onToggleExclude,
+  onLongPress,
   onDownload,
 }: {
   clip: EditorClip;
   onEdit: () => void;
   onRemove: () => void;
-  onToggleExclude: () => void;
+  onLongPress: () => void;
   onDownload: () => void;
 }) {
   const [thumbnail, setThumbnail] = useState<string | null>(clip.thumbnailUri ?? null);
@@ -98,9 +112,9 @@ function ClipCard({
         }}
         onLongPress={() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-          onToggleExclude();
+          onLongPress();
         }}
-        delayLongPress={500}
+        delayLongPress={400}
       >
         <View
           style={{
@@ -267,7 +281,7 @@ function HoleSection({
   hole,
   onClipEdit,
   onRemoveClip,
-  onToggleExclude,
+  onClipLongPress,
   onClipDownload,
   onHoleSave,
   onHoleShare,
@@ -276,7 +290,7 @@ function HoleSection({
   hole: EditorHoleSection;
   onClipEdit: (clip: EditorClip) => void;
   onRemoveClip: (clipId: string) => void;
-  onToggleExclude: (clipId: string) => void;
+  onClipLongPress: (clip: EditorClip) => void;
   onClipDownload: (clip: EditorClip) => void;
   onHoleSave: (hole: EditorHoleSection) => void;
   onHoleShare: (hole: EditorHoleSection) => void;
@@ -398,7 +412,7 @@ function HoleSection({
             clip={clip}
             onEdit={() => onClipEdit(clip)}
             onRemove={() => onRemoveClip(clip.id)}
-            onToggleExclude={() => onToggleExclude(clip.id)}
+            onLongPress={() => onClipLongPress(clip)}
             onDownload={() => onClipDownload(clip)}
           />
         ))}
@@ -461,7 +475,11 @@ function SlotCard({ label }: { label: string }) {
 // MAIN EDITOR SCREEN
 // ============================================================
 export default function EditorScreen() {
-  const { roundId, recompose } = useLocalSearchParams<{ roundId: string; recompose?: string }>();
+  const { roundId, recompose, review } = useLocalSearchParams<{ roundId: string; recompose?: string; review?: string }>();
+  // Review mode: opened mid-round from the recording screen's "Review round
+  // so far". Hides the final Export action so the user can't accidentally
+  // finalize a reel while the round is still in progress.
+  const isReview = review === '1';
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
   const { state } = editor;
@@ -481,6 +499,9 @@ export default function EditorScreen() {
 
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
+  // Long-press a clip → opens the clip-actions menu (move to hole / exclude
+  // / delete). Holds the clip whose menu is open; null = closed.
+  const [movingClip, setMovingClip] = useState<EditorClip | null>(null);
 
   // Derive trim progress from current state
   const allClips = state.holes.flatMap((h) => h.clips);
@@ -1145,24 +1166,28 @@ export default function EditorScreen() {
             </Text>
           </Pressable>
 
-          <Pressable
-            onPress={handleExportPress}
-            style={{
-              flexDirection: 'row',
-              alignItems: 'center',
-              gap: 4,
-              paddingHorizontal: 12,
-              paddingVertical: 8,
-              borderRadius: 8,
-              backgroundColor: '#000',
-              opacity: hasUntrimmedClips ? 0.4 : 1,
-            }}
-          >
-            <Upload size={13} color="#fff" />
-            <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-              Export
-            </Text>
-          </Pressable>
+          {/* Export hidden in review mode (round still in progress) — the
+              user is just checking/fixing clips, not finalizing the reel. */}
+          {!isReview && (
+            <Pressable
+              onPress={handleExportPress}
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 4,
+                paddingHorizontal: 12,
+                paddingVertical: 8,
+                borderRadius: 8,
+                backgroundColor: '#000',
+                opacity: hasUntrimmedClips ? 0.4 : 1,
+              }}
+            >
+              <Upload size={13} color="#fff" />
+              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                Export
+              </Text>
+            </Pressable>
+          )}
         </View>
       </View>
 
@@ -1260,7 +1285,7 @@ export default function EditorScreen() {
             hole={hole}
             onClipEdit={handleClipEdit}
             onRemoveClip={editor.removeClip}
-            onToggleExclude={editor.toggleExclude}
+            onClipLongPress={setMovingClip}
             onClipDownload={handleClipDownload}
             onHoleSave={handleHoleSave}
             onHoleShare={handleHoleShare}
@@ -1303,6 +1328,142 @@ export default function EditorScreen() {
         }}
         onDismiss={() => setTrimClip(null)}
       />
+
+      {/* Clip actions menu (long-press a clip): move to a different hole,
+          exclude/include from the reel, or delete. Move-to-hole is the
+          headline action — it's how you fix a clip that auto-landed on the
+          wrong hole. */}
+      <Modal
+        visible={!!movingClip}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMovingClip(null)}
+      >
+        <Pressable
+          style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' }}
+          onPress={() => setMovingClip(null)}
+        >
+          <Pressable
+            style={{
+              backgroundColor: theme.colors.surface,
+              borderTopLeftRadius: 20,
+              borderTopRightRadius: 20,
+              padding: 20,
+              paddingBottom: insets.bottom + 20,
+            }}
+            onPress={(e) => e.stopPropagation()}
+          >
+            {movingClip && (
+              <>
+                <Text
+                  style={{
+                    color: theme.colors.textPrimary,
+                    fontSize: 17,
+                    fontWeight: '700',
+                    marginBottom: 2,
+                  }}
+                >
+                  Stroke {movingClip.shotNumber}
+                </Text>
+                <Text style={{ color: theme.colors.textTertiary, fontSize: 13, marginBottom: 16 }}>
+                  Currently on Hole {movingClip.holeNumber}
+                </Text>
+
+                {/* Move to hole */}
+                <Text
+                  style={{
+                    ...theme.typography.caption,
+                    color: theme.colors.textTertiary,
+                    textTransform: 'uppercase',
+                    letterSpacing: 0.5,
+                    marginBottom: 8,
+                  }}
+                >
+                  Move to hole
+                </Text>
+                <ScrollView
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  style={{ marginBottom: 18 }}
+                  contentContainerStyle={{ gap: 8, paddingRight: 8 }}
+                >
+                  {state.holes
+                    .filter((h) => h.holeNumber !== movingClip.holeNumber)
+                    .map((h) => (
+                      <Pressable
+                        key={h.holeNumber}
+                        onPress={() => {
+                          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                          editor.moveClipToHole(movingClip.id, h.holeNumber);
+                          setMovingClip(null);
+                        }}
+                        style={{
+                          width: 52,
+                          height: 52,
+                          borderRadius: 12,
+                          backgroundColor: theme.colors.surfaceElevated,
+                          borderWidth: 1,
+                          borderColor: theme.colors.surfaceBorder,
+                          justifyContent: 'center',
+                          alignItems: 'center',
+                        }}
+                      >
+                        <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700' }}>
+                          {h.holeNumber}
+                        </Text>
+                      </Pressable>
+                    ))}
+                  {state.holes.filter((h) => h.holeNumber !== movingClip.holeNumber).length === 0 && (
+                    <Text style={{ color: theme.colors.textTertiary, fontSize: 13, paddingVertical: 16 }}>
+                      No other holes yet.
+                    </Text>
+                  )}
+                </ScrollView>
+
+                {/* Exclude / include + delete */}
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                    editor.toggleExclude(movingClip.id);
+                    setMovingClip(null);
+                  }}
+                  style={menuRowStyle}
+                >
+                  <XCircle size={18} color={theme.colors.textSecondary} />
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}>
+                    {movingClip.isExcluded ? 'Include in reel' : 'Exclude from reel'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    const id = movingClip.id;
+                    setMovingClip(null);
+                    Alert.alert('Delete clip', 'Remove this clip from the round?', [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Delete', style: 'destructive', onPress: () => editor.removeClip(id) },
+                    ]);
+                  }}
+                  style={menuRowStyle}
+                >
+                  <X size={18} color={theme.colors.accentRed} />
+                  <Text style={{ color: theme.colors.accentRed, fontSize: 15, fontWeight: '600' }}>
+                    Delete clip
+                  </Text>
+                </Pressable>
+
+                <Pressable
+                  onPress={() => setMovingClip(null)}
+                  style={{ paddingVertical: 14, alignItems: 'center', marginTop: 4 }}
+                >
+                  <Text style={{ color: theme.colors.textTertiary, fontSize: 15, fontWeight: '600' }}>
+                    Cancel
+                  </Text>
+                </Pressable>
+              </>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
 
       {/* Music picker */}
       <MusicPicker

@@ -10,7 +10,7 @@ import {
   markClipTrimmed,
   getSetting,
 } from '@/lib/storage';
-import { detectAndTrim } from 'shot-detector';
+import { detectAndTrim, deleteFile } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 
@@ -44,6 +44,16 @@ interface UseCameraParams {
   getLocation?: () => Promise<{ latitude: number; longitude: number } | null>;
   onClipSaved?: (clip: ClipMetadata) => void;
   onShotClassified?: (shotType: ShotTypeClassification) => void;
+  /**
+   * Practice mode (clicker tutorial). When true, the camera records and the
+   * isRecording state toggles normally — so the user SEES recording happen —
+   * but on stop the captured video is discarded: no clip is saved to SQLite,
+   * no upload is queued, and onClipSaved / onShotClassified are NOT fired.
+   * This lets the tutorial run a live dry-run on the real round without
+   * polluting it. Captured at recording-start time so a clip started during
+   * practice is always discarded even if practice ends mid-finalize.
+   */
+  practice?: boolean;
 }
 
 export function useCamera({
@@ -53,8 +63,13 @@ export function useCamera({
   getLocation,
   onClipSaved,
   onShotClassified,
+  practice = false,
 }: UseCameraParams) {
   const cameraRef = useRef<CameraView>(null);
+  // Mirror `practice` into a ref so startRecording can capture its value at
+  // the moment recording begins (the recordAsync promise resolves later).
+  const practiceRef = useRef(practice);
+  practiceRef.current = practice;
   const [isRecording, setIsRecording] = useState(false);
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
   const isRecordingRef = useRef(false);
@@ -131,6 +146,11 @@ export function useCamera({
   const startRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || isRecordingRef.current) return;
 
+    // Capture practice mode AT START. If the tutorial started this clip, we
+    // discard it on stop regardless of whether practice mode is still on by
+    // the time recordAsync resolves.
+    const isPractice = practiceRef.current;
+
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       isRecordingRef.current = true;
@@ -152,6 +172,16 @@ export function useCamera({
       const video = await cameraRef.current.recordAsync({
         maxDuration: 120,
       });
+
+      // Practice / tutorial clip — discard it. The user saw the recording
+      // happen (REC indicator, torch) but we don't persist anything.
+      if (isPractice) {
+        if (video?.uri) {
+          deleteFile(video.uri).catch(() => {});
+        }
+        console.log('[useCamera] practice clip discarded (tutorial)');
+        return;
+      }
 
       // Recording stopped — process the clip
       if (video?.uri) {

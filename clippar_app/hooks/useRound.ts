@@ -5,6 +5,7 @@ import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from 
 import { PENALTY_STROKES } from '@/types/round';
 import type { ShotTypeClassification } from 'shot-detector';
 import { createRound, updateRound, upsertScore } from '@/lib/api';
+import { deleteFile } from 'shot-detector';
 import {
   saveLocalRound,
   updateLocalRound,
@@ -13,6 +14,8 @@ import {
   getLocalScores,
   getClipsForRound,
   deleteLocalRound,
+  deleteLocalClip,
+  resetRoundData,
 } from '@/lib/storage';
 
 const DEFAULT_PAR = 4;
@@ -561,6 +564,93 @@ export function useRound() {
     setState(null);
   }, []);
 
+  // Reset the round to its just-started state, keeping the same roundId and
+  // setup (course / holes / start hole). Used by the recording-screen
+  // clicker tutorial: the user practices on the real round (sees real
+  // recording / hole changes / penalties), then this wipes everything back
+  // to a clean slate so the actual round begins fresh. Clears in-memory
+  // state + the round's SQLite clips/scores + resets the round row's
+  // hole/shot pointers. (In practice mode the camera discards clips before
+  // they're persisted, so usually there's nothing to delete — but we clear
+  // defensively.)
+  const resetToStart = useCallback(async () => {
+    const current = stateRef.current;
+    if (!current) return;
+
+    lastShotTypeRef.current = null;
+    setState(
+      createInitialState(
+        current.roundId,
+        current.courseName,
+        current.courseId,
+        current.courseHoles,
+        current.holesPlayed,
+        current.startHole,
+      )
+    );
+
+    try {
+      const { fileUris } = await resetRoundData(current.roundId);
+      for (const uri of fileUris) {
+        deleteFile(uri).catch(() => {});
+      }
+      await updateLocalRound(current.roundId, {
+        current_hole: current.startHole,
+        current_shot: 1,
+      });
+    } catch (err) {
+      console.log('[useRound] resetToStart failed:', err);
+    }
+  }, []);
+
+  // Delete the most recently recorded clip (the recording screen's
+  // "Delete last shot" action). Removes it from in-memory state, decrements
+  // the shot counter so the next recording reuses that shot number, and
+  // deletes the SQLite row. We delete only clips on the CURRENT hole so a
+  // stray double-tap can't reach back into a completed hole's footage.
+  // Returns true if a clip was removed.
+  const deleteLastClip = useCallback(async (): Promise<boolean> => {
+    const current = stateRef.current;
+    if (!current) return false;
+
+    // Find the last clip on the current hole (clips are appended in order).
+    const holeClips = current.clips.filter(
+      (c) => c.holeNumber === current.currentHole
+    );
+    const lastClip = holeClips[holeClips.length - 1];
+    if (!lastClip) return false;
+
+    // Optimistically update state: drop the last current-hole clip and
+    // step the shot counter back one (never below 1).
+    setState((prev) => {
+      if (!prev) return prev;
+      const idx = prev.clips.lastIndexOf(lastClip);
+      const nextClips =
+        idx >= 0 ? [...prev.clips.slice(0, idx), ...prev.clips.slice(idx + 1)] : prev.clips;
+      return {
+        ...prev,
+        clips: nextClips,
+        currentShot: Math.max(1, prev.currentShot - 1),
+      };
+    });
+
+    // Persist: delete the SQLite row (if it has a local id) and best-effort
+    // remove the underlying video file(s).
+    try {
+      if (typeof lastClip.id === 'number') {
+        const { fileUris } = await deleteLocalClip(lastClip.id);
+        for (const uri of fileUris) {
+          deleteFile(uri).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.log('[useRound] deleteLastClip persist failed:', err);
+    }
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+    return true;
+  }, []);
+
   return {
     state,
     startRound,
@@ -574,5 +664,7 @@ export function useRound() {
     recoverRound,
     discardRound,
     resetRound,
+    resetToStart,
+    deleteLastClip,
   };
 }

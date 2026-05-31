@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView } from 'react-native';
 import { router } from 'expo-router';
 import { useRecordingContext } from '@/contexts/RecordingContext';
@@ -15,6 +15,7 @@ import {
   Film,
   Video,
   ArrowLeft,
+  Settings2,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
@@ -29,12 +30,14 @@ import { CameraPermissionScreen } from '@/components/record/CameraPermissionScre
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
 import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
+import { ClickerTutorial } from '@/components/record/ClickerTutorial';
+import { RecordingSettingsSheet } from '@/components/record/RecordingSettingsSheet';
 import { useBLE } from '@/hooks/useBLE';
 import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
-import { getOrphanedRounds, getCloudBackupEnabled } from '@/lib/storage';
+import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from '@/lib/storage';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset } from '@/lib/api';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
@@ -94,6 +97,28 @@ export default function RecordScreen() {
   const [presets, setPresets] = useState<CoursePreset[]>([]);
   const [presetsLoading, setPresetsLoading] = useState(false);
 
+  // Recording-screen options (Wave 3 batch).
+  //   - lightEnabled: master switch for the torch-while-recording indicator.
+  //   - showRecordingSettings: the gear-button bottom sheet.
+  //   - tutorialActive: the gated clicker tutorial overlay is up. While true,
+  //     the real shutter handlers are suppressed so practising gestures
+  //     doesn't actually record / advance holes.
+  //   - tutorialDismissed: user chose "don't show again" (loaded from + saved
+  //     to SQLite settings). Gates the auto-show on round start.
+  //   - dontShowAgain: the in-tutorial checkbox state.
+  const [lightEnabled, setLightEnabled] = useState(true);
+  const [showRecordingSettings, setShowRecordingSettings] = useState(false);
+  const [tutorialActive, setTutorialActive] = useState(false);
+  const [tutorialDismissed, setTutorialDismissed] = useState(false);
+  const [dontShowAgain, setDontShowAgain] = useState(false);
+  // Monotonic penalty counter — bumped each time a penalty is applied so the
+  // tutorial coach can detect "a penalty happened" (state alone can't tell a
+  // penalty from a recorded shot, since both touch currentShot).
+  const [penaltyCount, setPenaltyCount] = useState(0);
+  // Ensures the tutorial auto-shows at most once per round (not on every
+  // re-render where isActive stays true).
+  const tutorialShownForRoundRef = useRef<string | null>(null);
+
   const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
   const isActive = roundState?.status === 'in_progress';
@@ -104,6 +129,9 @@ export default function RecordScreen() {
     holeNumber: roundState?.currentHole ?? 1,
     shotNumber: roundState?.currentShot ?? 1,
     getLocation: getCurrentLocation,
+    // Tutorial = live practice run: record so the user sees it, but discard
+    // the clip. resetToStart wipes any hole/penalty changes when it ends.
+    practice: tutorialActive,
     onClipSaved: useCallback(
       (clip: ClipMetadata) => {
         round.recordClip(clip);
@@ -152,6 +180,12 @@ export default function RecordScreen() {
 
     const unsubscribe = shutter.onClick(({ count }) => {
       console.log(`[record] onClick count=${count} isRecording=${camera.isRecording} ts=${Date.now() % 100000}`);
+      // NOTE: during the clicker tutorial the real actions DO fire — the
+      // tutorial is a live practice run on the real round (camera is in
+      // practice mode so clips are discarded, and round.resetToStart wipes
+      // everything when the tutorial ends). So we deliberately do NOT gate
+      // on tutorial state here.
+
       // count===1 while recording would mean the onPress fast-path failed
       // to short-circuit (e.g. clearPendingClicks didn't run). Log so we
       // catch regressions, then bail — onPress already toggled.
@@ -174,6 +208,9 @@ export default function RecordScreen() {
         console.log('[record] action: addPenalty water_hazard');
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         round.addPenalty('water_hazard');
+        // Bump the penalty counter so the tutorial coach can detect that a
+        // penalty was applied (state alone is ambiguous vs. a recorded shot).
+        setPenaltyCount((n) => n + 1);
       }
     });
 
@@ -230,6 +267,114 @@ export default function RecordScreen() {
       }
     });
   }, [roundState]);
+
+  // Load the "don't show clicker tutorial again" flag once on mount.
+  useEffect(() => {
+    getSetting('clicker_tutorial_dismissed')
+      .then((v) => setTutorialDismissed(v === '1'))
+      .catch(() => {});
+  }, []);
+
+  // Auto-show the clicker tutorial when a Live round becomes active, unless
+  // the user has dismissed it. Guarded by a ref so it fires once per round,
+  // not on every render where isActive stays true. The tutorial is a live
+  // practice run on this round — round.resetToStart wipes it clean when done.
+  useEffect(() => {
+    if (!isActive || !roundState) return;
+    if (tutorialDismissed) return;
+    if (tutorialShownForRoundRef.current === roundState.roundId) return;
+    tutorialShownForRoundRef.current = roundState.roundId;
+    setDontShowAgain(false);
+    setPenaltyCount(0);
+    setTutorialActive(true);
+  }, [isActive, roundState, tutorialDismissed]);
+
+  // End the tutorial (finished OR skipped): stop any practice recording,
+  // wipe the round back to a clean slate, persist the dismiss flag, and
+  // clear the overlay. Practice clips are discarded by the camera, and
+  // resetToStart clears any hole/penalty changes made while practising.
+  const endTutorial = useCallback(async () => {
+    if (dontShowAgain) {
+      setTutorialDismissed(true);
+      void setSetting('clicker_tutorial_dismissed', '1');
+    }
+    setTutorialActive(false);
+    if (camera.isRecording) {
+      if (isNative) camera.stopRecording();
+      else camera.simulateRecording();
+    }
+    await round.resetToStart();
+    setPenaltyCount(0);
+  }, [dontShowAgain, camera.isRecording, camera.stopRecording, camera.simulateRecording, round.resetToStart]);
+
+  // Replay from the recording settings sheet. Because replaying runs another
+  // practice pass that ends in resetToStart, doing it after real shots would
+  // wipe them — so confirm first when the round already has progress.
+  const handleReplayTutorial = useCallback(() => {
+    setShowRecordingSettings(false);
+    const begin = () => {
+      setDontShowAgain(false);
+      setPenaltyCount(0);
+      setTutorialActive(true);
+    };
+    const hasProgress =
+      !!roundState &&
+      (roundState.clips.length > 0 ||
+        roundState.currentShot > 1 ||
+        roundState.currentHole !== roundState.startHole);
+    if (hasProgress) {
+      Alert.alert(
+        'Replay tutorial?',
+        'This runs another practice pass and resets your round to the start — shots taken so far will be cleared.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Replay & reset', style: 'destructive', onPress: begin },
+        ]
+      );
+    } else {
+      begin();
+    }
+  }, [roundState]);
+
+  // Open the scorecard/editor to review the round in progress. Guarded so
+  // we don't navigate away mid-recording. The record screen stays mounted
+  // underneath (router.push), so the in-memory round survives the trip.
+  const handleReviewRound = useCallback(() => {
+    if (!roundState) return;
+    if (camera.isRecording) {
+      Alert.alert('Stop recording first', 'Stop the current clip before reviewing your round.');
+      return;
+    }
+    setShowRecordingSettings(false);
+    router.push(`/round/editor?roundId=${roundState.roundId}&review=1`);
+  }, [roundState, camera.isRecording]);
+
+  // Delete the most recent clip on the current hole.
+  const handleDeleteLastShot = useCallback(() => {
+    Alert.alert(
+      'Delete last shot',
+      'Remove the most recent clip on this hole? This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            const removed = await round.deleteLastClip();
+            setShowRecordingSettings(false);
+            if (!removed) {
+              Alert.alert('Nothing to delete', 'No clips recorded on this hole yet.');
+            }
+          },
+        },
+      ]
+    );
+  }, [round.deleteLastClip]);
+
+  // Whether the current hole has any clips to delete.
+  const canDeleteLastShot = !!roundState?.clips.some(
+    (c) => c.holeNumber === roundState.currentHole
+  );
 
   const currentPar = roundState?.courseHoles
     ? (roundState.courseHoles.find((h) => h.holeNumber === roundState.currentHole)?.par ?? DEFAULT_PAR)
@@ -796,10 +941,11 @@ export default function RecordScreen() {
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed
-          // (typically AT the golfer for a tripod setup). Auto-follows
-          // camera.isRecording so it turns on the instant recording
-          // starts and off the instant it stops.
-          enableTorch={camera.isRecording}
+          // (typically AT the golfer for a tripod setup). Follows
+          // camera.isRecording so it turns on the instant recording starts
+          // and off the instant it stops — but only when the user has the
+          // Recording light toggle on (recording settings sheet).
+          enableTorch={camera.isRecording && lightEnabled}
         />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }]}>
@@ -847,40 +993,72 @@ export default function RecordScreen() {
         </Text>
       </View>
 
-      {/* End Round button — top right below overlay */}
-      <Pressable
-        onPress={() => {
-          if (isNative) {
-            Alert.alert(
-              'End Round',
-              `End round after hole ${roundState.currentHole}?`,
-              [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'End Round', onPress: () => round.endRoundEarly() },
-              ]
-            );
-          } else {
-            round.endRoundEarly();
-          }
-        }}
-        style={{
-          position: 'absolute',
-          top: insets.top + 52,
-          right: 12,
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 4,
-          backgroundColor: 'rgba(0,0,0,0.5)',
-          paddingHorizontal: 10,
-          paddingVertical: 6,
-          borderRadius: 16,
-        }}
-      >
-        <Flag size={12} color={theme.colors.textSecondary} />
-        <Text style={{ color: theme.colors.textSecondary, fontSize: 11, fontWeight: '600' }}>
-          End Round
-        </Text>
-      </Pressable>
+      {/* Recording settings gear — top left, under the shutter badge.
+          Hidden during the tutorial to keep the practice run focused. */}
+      {!tutorialActive && (
+        <Pressable
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setShowRecordingSettings(true);
+          }}
+          hitSlop={8}
+          style={{
+            position: 'absolute',
+            top: insets.top + 92,
+            left: 12,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            paddingHorizontal: 10,
+            paddingVertical: 6,
+            borderRadius: 16,
+          }}
+        >
+          <Settings2 size={12} color={theme.colors.textSecondary} />
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 11, fontWeight: '600' }}>
+            Options
+          </Text>
+        </Pressable>
+      )}
+
+      {/* End Round button — top right below overlay. Hidden during the
+          tutorial so a stray tap can't finalize the practice round. */}
+      {!tutorialActive && (
+        <Pressable
+          onPress={() => {
+            if (isNative) {
+              Alert.alert(
+                'End Round',
+                `End round after hole ${roundState.currentHole}?`,
+                [
+                  { text: 'Cancel', style: 'cancel' },
+                  { text: 'End Round', onPress: () => round.endRoundEarly() },
+                ]
+              );
+            } else {
+              round.endRoundEarly();
+            }
+          }}
+          style={{
+            position: 'absolute',
+            top: insets.top + 52,
+            right: 12,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 4,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            paddingHorizontal: 10,
+            paddingVertical: 6,
+            borderRadius: 16,
+          }}
+        >
+          <Flag size={12} color={theme.colors.textSecondary} />
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 11, fontWeight: '600' }}>
+            End Round
+          </Text>
+        </Pressable>
+      )}
 
       {/* Bottom controls overlay */}
       <View style={[styles.bottomControls, { paddingBottom: insets.bottom + 16 }]}>
@@ -917,6 +1095,34 @@ export default function RecordScreen() {
         onSelect={handlePenaltySelect}
         onDismiss={() => setShowPenalty(false)}
       />
+
+      <RecordingSettingsSheet
+        visible={showRecordingSettings}
+        onDismiss={() => setShowRecordingSettings(false)}
+        lightEnabled={lightEnabled}
+        onToggleLight={setLightEnabled}
+        onReviewRound={handleReviewRound}
+        onDeleteLastShot={handleDeleteLastShot}
+        canDeleteLastShot={canDeleteLastShot}
+        onReplayTutorial={handleReplayTutorial}
+      />
+
+      {/* Live clicker tutorial — a non-blocking coach over the real
+          recording screen. Real actions fire (camera is in practice mode so
+          clips are discarded); resetToStart wipes the round clean when done.
+          The coach observes recording / hole / penalty state to tick steps. */}
+      {tutorialActive && (
+        <ClickerTutorial
+          isRecording={camera.isRecording}
+          currentHole={roundState.currentHole}
+          penaltyCount={penaltyCount}
+          connected={shutter.connected}
+          onFinish={endTutorial}
+          onSkip={endTutorial}
+          dontShowAgain={dontShowAgain}
+          onDontShowAgainChange={setDontShowAgain}
+        />
+      )}
     </View>
   );
 }

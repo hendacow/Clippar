@@ -310,6 +310,81 @@ export function useEditorState(roundId: string | undefined) {
     }));
   }, []);
 
+  // Move a clip to a different hole (scorecard screen's "Move to hole"
+  // action). Updates the in-memory section grouping immediately and
+  // persists the new hole_number to SQLite. The moved clip lands at the
+  // end of the destination hole's shot order.
+  const moveClipToHole = useCallback(
+    (clipId: string, targetHoleNumber: number) => {
+      setState((prev) => {
+        // Locate the clip and its current hole.
+        let moved: EditorClip | undefined;
+        for (const h of prev.holes) {
+          const found = h.clips.find((c) => c.id === clipId);
+          if (found) {
+            moved = found;
+            break;
+          }
+        }
+        if (!moved || moved.holeNumber === targetHoleNumber) return prev;
+
+        // Next shot number on the target hole.
+        const targetHole = prev.holes.find((h) => h.holeNumber === targetHoleNumber);
+        const nextShot =
+          (targetHole?.clips.reduce((m, c) => Math.max(m, c.shotNumber), 0) ?? 0) + 1;
+        const movedUpdated: EditorClip = {
+          ...moved,
+          holeNumber: targetHoleNumber,
+          shotNumber: nextShot,
+        };
+
+        // Rebuild holes: drop from source, append to target (create the
+        // target section if it doesn't exist yet), keep sections sorted.
+        let holes = prev.holes.map((h) => ({
+          ...h,
+          clips: h.clips.filter((c) => c.id !== clipId),
+        }));
+
+        if (holes.some((h) => h.holeNumber === targetHoleNumber)) {
+          holes = holes.map((h) =>
+            h.holeNumber === targetHoleNumber
+              ? {
+                  ...h,
+                  clips: [...h.clips, movedUpdated].sort(
+                    (a, b) => a.shotNumber - b.shotNumber
+                  ),
+                }
+              : h
+          );
+        } else {
+          holes = [
+            ...holes,
+            {
+              holeNumber: targetHoleNumber,
+              par: DEFAULT_PAR,
+              strokes: 1,
+              scoreToPar: 1 - DEFAULT_PAR,
+              clips: [movedUpdated],
+            },
+          ];
+        }
+        holes.sort((a, b) => a.holeNumber - b.holeNumber);
+
+        return { ...prev, holes };
+      });
+
+      // Persist to SQLite (clip ids are the numeric row id as a string).
+      const numId = Number(clipId);
+      if (Number.isInteger(numId) && storage && state.roundId) {
+        storage
+          .updateClipHole(numId, targetHoleNumber, state.roundId)
+          .catch(() => {});
+      }
+      }
+    },
+    [state.roundId]
+  );
+
   const updateTrim = useCallback(
     (
       clipId: string,
@@ -773,6 +848,7 @@ export function useEditorState(roundId: string | undefined) {
     reload: loadRound,
     reorderClips,
     removeClip,
+    moveClipToHole,
     updateTrim,
     updateClipDuration,
     setIntro,
