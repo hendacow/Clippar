@@ -380,7 +380,6 @@ export function useEditorState(roundId: string | undefined) {
           .updateClipHole(numId, targetHoleNumber, state.roundId)
           .catch(() => {});
       }
-      }
     },
     [state.roundId]
   );
