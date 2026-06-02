@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2 } from 'lucide-react-native';
+import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -24,7 +24,7 @@ import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
 import { markReelFresh } from '@/lib/storage';
-import { saveClipToPhotos, saveHoleToPhotos, shareHole } from '@/lib/clipShare';
+import { saveClipToPhotos, saveHoleToPhotos, shareHole, stitchHoleClips, shareClip } from '@/lib/clipShare';
 // `uploadReelToStorage` is now invoked lazily by the share-link flow rather
 // than at compose time. Imported there, not here.
 import { resolveTrackToLocalUri } from '@/lib/music';
@@ -70,12 +70,17 @@ function ClipCard({
   onRemove,
   onLongPress,
   onDownload,
+  disabled = false,
+  onPressWhenDisabled,
 }: {
   clip: EditorClip;
   onEdit: () => void;
   onRemove: () => void;
   onLongPress: () => void;
   onDownload: () => void;
+  /** Select mode: per-clip actions are inert; a tap toggles the hole. */
+  disabled?: boolean;
+  onPressWhenDisabled?: () => void;
 }) {
   const [thumbnail, setThumbnail] = useState<string | null>(clip.thumbnailUri ?? null);
 
@@ -106,11 +111,16 @@ function ClipCard({
 
       <Pressable
         onPress={() => {
+          if (disabled) {
+            onPressWhenDisabled?.();
+            return;
+          }
           if (clip.isExcluded) return;
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
           onEdit();
         }}
         onLongPress={() => {
+          if (disabled) return;
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
           onLongPress();
         }}
@@ -286,6 +296,9 @@ function HoleSection({
   onHoleSave,
   onHoleShare,
   busyHoleNumber,
+  selectMode,
+  selected,
+  onToggleSelect,
 }: {
   hole: EditorHoleSection;
   onClipEdit: (clip: EditorClip) => void;
@@ -295,22 +308,43 @@ function HoleSection({
   onHoleSave: (hole: EditorHoleSection) => void;
   onHoleShare: (hole: EditorHoleSection) => void;
   busyHoleNumber: number | null;
+  selectMode: boolean;
+  selected: boolean;
+  onToggleSelect: () => void;
 }) {
   const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
   const canStitchHole = usableClips.length > 0;
   const isBusy = busyHoleNumber === hole.holeNumber;
   return (
-    <View style={{ marginBottom: 24 }}>
-      {/* Hole header — bold left-aligned like GolfCam */}
-      <View
+    <View
+      style={{
+        marginBottom: 24,
+        // Highlight the whole section when picked in select mode.
+        backgroundColor: selectMode && selected ? theme.colors.primaryMuted : 'transparent',
+        borderRadius: selectMode ? 12 : 0,
+        paddingVertical: selectMode ? 8 : 0,
+      }}
+    >
+      {/* Hole header — bold left-aligned like GolfCam. In select mode the
+          whole header is a toggle and shows a checkbox. */}
+      <Pressable
+        onPress={selectMode ? onToggleSelect : undefined}
+        disabled={!selectMode}
         style={{
           flexDirection: 'row',
-          alignItems: 'baseline',
+          alignItems: 'center',
           paddingHorizontal: 16,
           marginBottom: 10,
           gap: 12,
         }}
       >
+        {selectMode && (
+          selected ? (
+            <CircleCheck size={22} color={theme.colors.primary} />
+          ) : (
+            <Circle size={22} color={theme.colors.textTertiary} />
+          )
+        )}
         <Text
           style={{
             color: theme.colors.primary,
@@ -339,10 +373,11 @@ function HoleSection({
           Score {hole.strokes}
         </Text>
 
-        {/* Per-hole stitch + share / save actions. Hidden when there's
-            nothing usable on this hole (excluded clips / waiting for
-            auto-trim). Disabled while another hole is mid-stitch. */}
-        {canStitchHole && (
+        {/* Per-hole stitch + share / save actions. Hidden in select mode
+            (the bottom bar handles the multi-hole action there) and when
+            there's nothing usable on this hole. Disabled while another
+            hole is mid-stitch. */}
+        {!selectMode && canStitchHole && (
           <View
             style={{
               flexDirection: 'row',
@@ -398,7 +433,7 @@ function HoleSection({
             </Pressable>
           </View>
         )}
-      </View>
+      </Pressable>
 
       {/* Clip cards row */}
       <ScrollView
@@ -414,6 +449,10 @@ function HoleSection({
             onRemove={() => onRemoveClip(clip.id)}
             onLongPress={() => onClipLongPress(clip)}
             onDownload={() => onClipDownload(clip)}
+            // In select mode tapping anywhere on the hole toggles the
+            // whole hole, so per-clip edit/remove/long-press are inert.
+            disabled={selectMode}
+            onPressWhenDisabled={onToggleSelect}
           />
         ))}
 
@@ -616,6 +655,87 @@ export default function EditorScreen() {
       setBusyHoleNumber(null);
     }
   }, [state.courseName]);
+
+  // ---- Multi-hole selection → custom highlight reel ----
+  // "Select" mode lets the user tick a subset of holes (e.g. 3, 6, 14),
+  // then stitch JUST those holes into one video they can save to Photos or
+  // share. Reuses the same stitch/save/share plumbing as the per-hole
+  // buttons — a multi-hole reel is just a wider list of clip URIs.
+  const [selectMode, setSelectMode] = useState(false);
+  const [selectedHoles, setSelectedHoles] = useState<number[]>([]);
+  const [selectionBusy, setSelectionBusy] = useState(false);
+
+  const exitSelectMode = useCallback(() => {
+    setSelectMode(false);
+    setSelectedHoles([]);
+  }, []);
+
+  const toggleHoleSelected = useCallback((holeNumber: number) => {
+    Haptics.selectionAsync();
+    setSelectedHoles((prev) =>
+      prev.includes(holeNumber)
+        ? prev.filter((h) => h !== holeNumber)
+        : [...prev, holeNumber]
+    );
+  }, []);
+
+  // Gather the usable clip URIs for the selected holes, in hole then shot
+  // order. Excluded / still-trimming clips are skipped.
+  const collectSelectedUris = useCallback((): string[] => {
+    const order = [...selectedHoles].sort((a, b) => a - b);
+    const uris: string[] = [];
+    for (const hn of order) {
+      const hole = state.holes.find((h) => h.holeNumber === hn);
+      if (!hole) continue;
+      hole.clips
+        .filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim)
+        .forEach((c) => uris.push(c.sourceUri!));
+    }
+    return uris;
+  }, [selectedHoles, state.holes]);
+
+  const handleSaveSelected = useCallback(async () => {
+    const uris = collectSelectedUris();
+    if (uris.length === 0) {
+      Alert.alert('No clips ready', 'The selected holes have no finished clips to include yet.');
+      return;
+    }
+    setSelectionBusy(true);
+    try {
+      const ok = await saveHoleToPhotos(uris);
+      if (ok) {
+        Alert.alert(
+          'Saved',
+          `Highlight saved to Photos — ${selectedHoles.length} hole${selectedHoles.length > 1 ? 's' : ''}, ${uris.length} clip${uris.length > 1 ? 's' : ''}.`,
+        );
+        exitSelectMode();
+      } else {
+        Alert.alert('Save Failed', 'Could not stitch + save the highlight. Check Photos access in Settings and try again.');
+      }
+    } finally {
+      setSelectionBusy(false);
+    }
+  }, [collectSelectedUris, selectedHoles.length, exitSelectMode]);
+
+  const handleShareSelected = useCallback(async () => {
+    const uris = collectSelectedUris();
+    if (uris.length === 0) {
+      Alert.alert('No clips ready', 'The selected holes have no finished clips to include yet.');
+      return;
+    }
+    setSelectionBusy(true);
+    try {
+      const stitched = await stitchHoleClips(uris);
+      if (!stitched) {
+        Alert.alert('Share Failed', 'Could not build the highlight. Try again.');
+        return;
+      }
+      const label = [...selectedHoles].sort((a, b) => a - b).join(', ');
+      await shareClip(stitched, `Holes ${label} – ${state.courseName || 'Round'}`);
+    } finally {
+      setSelectionBusy(false);
+    }
+  }, [collectSelectedUris, selectedHoles, state.courseName]);
 
   const handlePreviewAll = useCallback(() => {
     if (hasUntrimmedClips) {
@@ -1124,7 +1244,7 @@ export default function EditorScreen() {
           <X size={18} color={theme.colors.textPrimary} />
         </Pressable>
 
-        {/* Course name + clip count */}
+        {/* Course name + clip count (or selection status in select mode) */}
         <View style={{ alignItems: 'center', flex: 1, marginHorizontal: 8 }}>
           <Text
             style={{
@@ -1134,17 +1254,21 @@ export default function EditorScreen() {
             }}
             numberOfLines={1}
           >
-            {state.courseName || 'Edit Reel'}
+            {selectMode ? 'Select holes' : state.courseName || 'Edit Reel'}
           </Text>
           <Text style={{ color: theme.colors.textTertiary, fontSize: 11 }}>
-            {totalClips} clips · {state.holes.length} holes
+            {selectMode
+              ? `${selectedHoles.length} selected`
+              : `${totalClips} clips · ${state.holes.length} holes`}
           </Text>
         </View>
 
-        {/* Preview + Export buttons */}
-        <View style={{ flexDirection: 'row', gap: 6 }}>
+        {/* Right cluster: in select mode just a Done/Cancel; otherwise
+            Select + Preview + Export. */}
+        {selectMode ? (
           <Pressable
-            onPress={handlePreviewAll}
+            onPress={exitSelectMode}
+            hitSlop={8}
             style={{
               paddingHorizontal: 12,
               paddingVertical: 8,
@@ -1152,43 +1276,87 @@ export default function EditorScreen() {
               backgroundColor: theme.colors.surfaceElevated,
               borderWidth: 1,
               borderColor: theme.colors.surfaceBorder,
-              opacity: hasUntrimmedClips ? 0.4 : 1,
             }}
           >
-            <Text
-              style={{
-                color: theme.colors.textPrimary,
-                fontSize: 13,
-                fontWeight: '600',
-              }}
-            >
-              Preview
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
+              Cancel
             </Text>
           </Pressable>
-
-          {/* Export hidden in review mode (round still in progress) — the
-              user is just checking/fixing clips, not finalizing the reel. */}
-          {!isReview && (
+        ) : (
+          <View style={{ flexDirection: 'row', gap: 6 }}>
+            {/* Select holes → custom highlight */}
             <Pressable
-              onPress={handleExportPress}
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setSelectMode(true);
+              }}
               style={{
                 flexDirection: 'row',
                 alignItems: 'center',
                 gap: 4,
+                paddingHorizontal: 10,
+                paddingVertical: 8,
+                borderRadius: 8,
+                backgroundColor: theme.colors.surfaceElevated,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+                opacity: hasUntrimmedClips || totalClips === 0 ? 0.4 : 1,
+              }}
+              disabled={hasUntrimmedClips || totalClips === 0}
+            >
+              <ListChecks size={13} color={theme.colors.textPrimary} />
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
+                Select
+              </Text>
+            </Pressable>
+
+            <Pressable
+              onPress={handlePreviewAll}
+              style={{
                 paddingHorizontal: 12,
                 paddingVertical: 8,
                 borderRadius: 8,
-                backgroundColor: '#000',
+                backgroundColor: theme.colors.surfaceElevated,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
                 opacity: hasUntrimmedClips ? 0.4 : 1,
               }}
             >
-              <Upload size={13} color="#fff" />
-              <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-                Export
+              <Text
+                style={{
+                  color: theme.colors.textPrimary,
+                  fontSize: 13,
+                  fontWeight: '600',
+                }}
+              >
+                Preview
               </Text>
             </Pressable>
-          )}
-        </View>
+
+            {/* Export hidden in review mode (round still in progress) — the
+                user is just checking/fixing clips, not finalizing the reel. */}
+            {!isReview && (
+              <Pressable
+                onPress={handleExportPress}
+                style={{
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 4,
+                  paddingHorizontal: 12,
+                  paddingVertical: 8,
+                  borderRadius: 8,
+                  backgroundColor: '#000',
+                  opacity: hasUntrimmedClips ? 0.4 : 1,
+                }}
+              >
+                <Upload size={13} color="#fff" />
+                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
+                  Export
+                </Text>
+              </Pressable>
+            )}
+          </View>
+        )}
       </View>
 
       {/* ---- AUTO-TRIM PROGRESS BANNER ---- */}
@@ -1217,7 +1385,9 @@ export default function EditorScreen() {
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
           paddingTop: 16,
-          paddingBottom: insets.bottom + 80,
+          // Extra bottom room in select mode so the action bar doesn't
+          // cover the last hole.
+          paddingBottom: insets.bottom + (selectMode ? 120 : 80),
         }}
       >
         {/* Music selection row */}
@@ -1290,6 +1460,9 @@ export default function EditorScreen() {
             onHoleSave={handleHoleSave}
             onHoleShare={handleHoleShare}
             busyHoleNumber={busyHoleNumber}
+            selectMode={selectMode}
+            selected={selectedHoles.includes(hole.holeNumber)}
+            onToggleSelect={() => toggleHoleSelected(hole.holeNumber)}
           />
         ))}
 
@@ -1315,6 +1488,87 @@ export default function EditorScreen() {
           </View>
         )}
       </ScrollView>
+
+      {/* ---- SELECT-MODE ACTION BAR ---- */}
+      {/* Fixed bar over the bottom while picking holes for a custom reel.
+          Save stitches the selected holes into one video saved to Photos;
+          Share opens the iOS share sheet (Instagram, Snap, Messages, etc.). */}
+      {selectMode && (
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            paddingHorizontal: 16,
+            paddingTop: 12,
+            paddingBottom: insets.bottom + 12,
+            backgroundColor: theme.colors.surface,
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.surfaceBorder,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 14, fontWeight: '700' }}>
+              {selectedHoles.length === 0
+                ? 'Pick holes for a highlight'
+                : `${selectedHoles.length} hole${selectedHoles.length > 1 ? 's' : ''} selected`}
+            </Text>
+            <Text style={{ color: theme.colors.textTertiary, fontSize: 11 }}>
+              {selectionBusy ? 'Building your highlight…' : 'Save to Photos or share'}
+            </Text>
+          </View>
+
+          {/* Save to Photos */}
+          <Pressable
+            onPress={handleSaveSelected}
+            disabled={selectedHoles.length === 0 || selectionBusy}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              paddingHorizontal: 14,
+              paddingVertical: 11,
+              borderRadius: 10,
+              backgroundColor: theme.colors.surfaceElevated,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              opacity: selectedHoles.length === 0 || selectionBusy ? 0.4 : 1,
+            }}
+          >
+            {selectionBusy ? (
+              <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+            ) : (
+              <Download size={16} color={theme.colors.textPrimary} />
+            )}
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 14, fontWeight: '700' }}>
+              Save
+            </Text>
+          </Pressable>
+
+          {/* Share */}
+          <Pressable
+            onPress={handleShareSelected}
+            disabled={selectedHoles.length === 0 || selectionBusy}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 6,
+              paddingHorizontal: 16,
+              paddingVertical: 11,
+              borderRadius: 10,
+              backgroundColor: theme.colors.primary,
+              opacity: selectedHoles.length === 0 || selectionBusy ? 0.4 : 1,
+            }}
+          >
+            <Share2 size={16} color="#000" />
+            <Text style={{ color: '#000', fontSize: 14, fontWeight: '800' }}>Share</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* Trim modal */}
       <ClipTrimModal
