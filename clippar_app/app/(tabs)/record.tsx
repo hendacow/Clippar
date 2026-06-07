@@ -925,11 +925,11 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={true} avoids AVCaptureSession audio format negotiation, which
-          was failing with kAudioUnitErr_FormatNotSupported (-10868) and
-          killing the session 2s after recordAsync. Golf swing clips don't
-          rely on audio, so the trade-off is acceptable until the underlying
-          audio session config is fixed. */}
+      {/* Audio is recorded (mute removed) — the AVCaptureSession -10868 /
+          kAudioUnitErr_FormatNotSupported crash that previously forced mute
+          is now handled by `useCamera.ts` configuring the audio session
+          (allowsRecordingIOS + MixWithOthers) before the camera mounts.
+          Without audio captured here the exported reel has silent clips. */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
@@ -937,7 +937,6 @@ export default function RecordScreen() {
           facing="back"
           mode="video"
           videoQuality="1080p"
-          mute
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed
