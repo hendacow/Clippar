@@ -925,11 +925,16 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={true} avoids AVCaptureSession audio format negotiation, which
-          was failing with kAudioUnitErr_FormatNotSupported (-10868) and
-          killing the session 2s after recordAsync. Golf swing clips don't
-          rely on audio, so the trade-off is acceptable until the underlying
-          audio session config is fixed. */}
+      {/* mute={false}: capture the mic so live clips have audio. The -10868
+          "error while recording" crash came from the BLE volume-clicker
+          (react-native-volume-manager) holding the shared AVAudioSession in the
+          record-hostile .ambient category. The real fix is a native patch to
+          expo-camera (patches/expo-camera+17.0.10.patch): it asserts
+          .playAndRecord on the camera's own sessionQueue immediately before the
+          mic AVCaptureDeviceInput is attached — the exact point the crash fired.
+          .mixWithOthers keeps the clicker's volume KVO alive. Requires a native
+          rebuild (Swift change); the useCamera.ts JS must NOT ship to Metro
+          ahead of that rebuilt binary. */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
@@ -937,7 +942,7 @@ export default function RecordScreen() {
           facing="back"
           mode="video"
           videoQuality="1080p"
-          mute
+          mute={false}
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed

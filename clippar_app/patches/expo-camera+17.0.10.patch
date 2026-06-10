@@ -1,0 +1,57 @@
+diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+index dc2a548..bc39f49 100644
+--- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
++++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
+@@ -144,6 +144,52 @@ class CameraSessionManager: NSObject {
+     }
+ 
+     if !delegate.isMuted && delegate.mode == .video {
++      // [clippar audio-fix] Configure the shared AVAudioSession for recording
++      // IMMEDIATELY before attaching the mic input below.
++      //
++      // This is the exact point where -10868 (kAudioUnitErr_FormatNotSupported)
++      // is thrown: session.addInput(audioDeviceInput) instantiates the capture
++      // audio unit, which negotiates a mic input format against whatever category
++      // the shared AVAudioSession currently holds. react-native-volume-manager
++      // (the BLE volume-clicker) sets the shared session to .ambient + setActive:YES
++      // at mount and re-stamps it on every app foreground — and .ambient is a
++      // playback-only category that exposes no usable input format, so the audio
++      // unit fails to instantiate and the whole AVCaptureSession dies.
++      //
++      // expo-camera normally never touches AVAudioSession (it leaves
++      // usesApplicationAudioSession / automaticallyConfiguresApplicationAudioSession
++      // at their iOS defaults), so it inherits RNVM's hostile .ambient route.
++      // Here we assert .playAndRecord with .videoRecording mode just-in-time so
++      // the capture unit has a valid input format to negotiate against.
++      //
++      // IMPORTANT: we deliberately do NOT set
++      // self.session.automaticallyConfiguresApplicationAudioSession = false.
++      // Keeping auto-config = TRUE means expo-av (used by the editor's
++      // PreviewPlayer) can still reclaim a .playback session afterwards so reel
++      // previews stay audible. We are the just-in-time configurator, not the
++      // permanent owner.
++      //
++      // Options: [.mixWithOthers, .allowBluetooth]. .mixWithOthers keeps RNVM's
++      // outputVolume KVO alive so the volume-clicker channel can still STOP the
++      // recording. .defaultToSpeaker is intentionally omitted (it is irrelevant
++      // to capture-unit input-format negotiation and only changes output routing).
++      // This runs on the camera's private sessionQueue, ordered correctly against
++      // the addInput below — which is precisely what the prior JS-at-record-time
++      // attempts could not guarantee.
++      // This same function is the mediaServicesWereReset re-add path (see
++      // addErrorNotification), so post-reset recovery is covered too.
++      let audioSession = AVAudioSession.sharedInstance()
++      do {
++        try audioSession.setCategory(
++          .playAndRecord,
++          mode: .videoRecording,
++          options: [.mixWithOthers, .allowBluetooth]
++        )
++        try audioSession.setActive(true)
++      } catch {
++        log.info("\(#function): audio session config failed: \(error.localizedDescription)")
++      }
++
+       if let audioCapturedevice = AVCaptureDevice.default(for: .audio) {
+         do {
+           let audioDeviceInput = try AVCaptureDeviceInput(device: audioCapturedevice)

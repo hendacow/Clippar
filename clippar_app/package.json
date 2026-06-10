@@ -3,7 +3,11 @@
   "main": "expo-router/entry",
   "version": "1.0.0",
   "scripts": {
+    "postinstall": "patch-package",
     "start": "expo start",
+    "dev": "APP_VARIANT=development expo start --lan",
+    "dev:tunnel": "APP_VARIANT=development expo start --tunnel",
+    "dev:clear": "APP_VARIANT=development expo start --lan --clear",
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web"
@@ -77,6 +81,8 @@
   "devDependencies": {
     "@types/react": "~19.1.0",
     "@types/react-native": "^0.72.8",
+    "patch-package": "^8.0.1",
+    "postinstall-postinstall": "^2.1.0",
     "react-test-renderer": "19.1.0",
     "typescript": "~5.9.2"
   },

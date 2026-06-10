@@ -11,7 +11,8 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Scissors, Check, RotateCcw, Music, VolumeX } from 'lucide-react-native';
+import { X, Scissors, Check, RotateCcw, Music, VolumeX, PersonStanding } from 'lucide-react-native';
+import { PoseOverlay } from '@/components/editor/PoseOverlay';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { useEditorState } from '@/hooks/useEditorState';
@@ -362,6 +363,7 @@ function NativeClipPlayer({
   onEnd,
   seekTarget = 'start',
   draggingHandle = 'none',
+  showPoseOverlay = false,
 }: {
   uri: string;
   trimStartMs: number;
@@ -371,6 +373,7 @@ function NativeClipPlayer({
   onEnd: () => void;
   seekTarget?: 'start' | 'end';
   draggingHandle?: 'none' | 'start' | 'end';
+  showPoseOverlay?: boolean;
 }) {
   // CRITICAL: never early-return before calling hooks. ExpoVideo is non-null
   // because the caller gates on `isNative`; the non-null assertion is safe.
@@ -451,12 +454,29 @@ function NativeClipPlayer({
   }, [player, onEnd]);
 
   return (
-    <VideoView
-      player={player}
-      style={{ flex: 1 }}
-      contentFit="contain"
-      nativeControls={false}
-    />
+    <View style={{ flex: 1 }}>
+      <VideoView
+        player={player}
+        style={{ flex: 1 }}
+        contentFit="contain"
+        nativeControls={false}
+      />
+      {/* LIVE pose-overlay (toggle). Render-only; never baked into exports.
+          getCurrentTimeSec is wrapped in try/catch because the expo-video
+          player can be disposed mid-poll during a clip change / seek. */}
+      {showPoseOverlay && (
+        <PoseOverlay
+          uri={uri}
+          getCurrentTimeSec={() => {
+            try {
+              return player.currentTime;
+            } catch {
+              return null;
+            }
+          }}
+        />
+      )}
+    </View>
   );
 }
 
@@ -889,6 +909,10 @@ export default function PreviewScreen() {
   const [musicEnabled, setMusicEnabled] = useState(false);
   const soundRef = useRef<any>(null);
 
+  // LIVE pose-overlay toggle (analytical replay). Off by default → byte-identical
+  // playback. When on, draws the detected skeleton over the clip while it plays.
+  const [showPoseOverlay, setShowPoseOverlay] = useState(false);
+
   // Reload editor state on focus to pick up trim changes from other screens
   useFocusEffect(
     useCallback(() => {
@@ -1096,6 +1120,7 @@ export default function PreviewScreen() {
           onEnd={handleVideoEnd}
           seekTarget={trimMode ? seekTarget : 'start'}
           draggingHandle={trimMode ? draggingHandle : 'none'}
+          showPoseOverlay={showPoseOverlay && !trimMode}
         />
       ) : currentClip ? (
         <WebClipPlaceholder clip={currentClip} />
@@ -1156,6 +1181,22 @@ export default function PreviewScreen() {
           </View>
 
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {/* Pose-overlay toggle (analytical replay). Native only; hidden in
+                trim mode where the skeleton would distract from handle drags. */}
+            {isNative && !trimMode && (
+              <Pressable
+                onPress={() => setShowPoseOverlay((v) => !v)}
+                hitSlop={10}
+                style={{
+                  width: 36, height: 36, borderRadius: 18,
+                  backgroundColor: showPoseOverlay ? theme.colors.primary + '40' : 'rgba(0,0,0,0.5)',
+                  justifyContent: 'center', alignItems: 'center',
+                }}
+              >
+                <PersonStanding size={18} color={showPoseOverlay ? theme.colors.primary : 'rgba(255,255,255,0.7)'} />
+              </Pressable>
+            )}
+
             {/* Music toggle */}
             <Pressable
               onPress={toggleMusic}

@@ -63,8 +63,26 @@ public class ShotDetectorModule: Module {
 
         // Combined detect + passthrough trim in one call.
         // Returns detection result plus trimmedUri (null if no swing found).
-        AsyncFunction("detectAndTrim") { (videoUri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], promise: Promise) in
-            self.detectAndTrimVideo(uri: videoUri, preRollMs: preRollMs, postRollMs: postRollMs, recentShotTypes: recentShotTypes, promise: promise)
+        //
+        // `strategy` selects the detection algorithm at RUNTIME (one binary holds
+        // all variants): "baseline"/"default" run the byte-for-byte-unchanged
+        // detectSwingEvent; "aboveShoulderGate" / "velocityPeak" / "audioFused"
+        // run the additive new functions. `optionsJson` is a JSON object of
+        // tunable thresholds (DetectionOptions) — empty string "{}" uses defaults.
+        //
+        // ARITY: Expo Modules matches AsyncFunction arity exactly. The JS wrapper
+        // (modules/shot-detector/index.ts) MUST always pass all 6 args, defaulting
+        // strategy/optionsJson from config — JS + native ship together.
+        AsyncFunction("detectAndTrim") { (videoUri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], strategy: String, optionsJson: String, promise: Promise) in
+            self.detectAndTrimVideo(uri: videoUri, preRollMs: preRollMs, postRollMs: postRollMs, recentShotTypes: recentShotTypes, strategy: strategy, optionsJson: optionsJson, promise: promise)
+        }
+
+        // Read-only pose timeline for the live SVG pose-overlay (analytical
+        // replay). Reuses the untouched extractPoseFrames, then applies the
+        // track's preferredTransform to per-joint x/y so the SVG skeleton aligns
+        // with VideoView contentFit='contain'. Does NOT touch detection/trim.
+        AsyncFunction("extractPoseTimeline") { (videoUri: String, promise: Promise) in
+            self.extractPoseTimelinePayload(uri: videoUri, promise: promise)
         }
 
         // Stitch multiple clips into a single video using AVMutableComposition.
@@ -239,7 +257,7 @@ public class ShotDetectorModule: Module {
 
     // MARK: - Combined Detect + Trim
 
-    private func detectAndTrimVideo(uri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], promise: Promise) {
+    private func detectAndTrimVideo(uri: String, preRollMs: Double, postRollMs: Double, recentShotTypes: [String], strategy: String, optionsJson: String, promise: Promise) {
         DispatchQueue.global(qos: .userInitiated).async {
             // Wrap entire operation in autoreleasepool to ensure AVAsset, AVAssetReader,
             // VNImageRequestHandler, pixel buffers, and AVAssetExportSession are freed
@@ -263,11 +281,19 @@ public class ShotDetectorModule: Module {
                 // Step 1: Detect swing
                 let poseFrames = try self.extractPoseFrames(from: asset)
                 let audioTransients = try self.detectAudioTransients(from: asset)
-                let result = self.detectSwingEvent(
+                let options = DetectionOptions(json: optionsJson)
+                var diag = DetectionDiagnostics(strategy: strategy)
+                diag.poseFrameCount = poseFrames.count
+                diag.hadAudioTrack = !asset.tracks(withMediaType: .audio).isEmpty
+                diag.hadAnyTransient = !audioTransients.isEmpty
+                let result = self.dispatchDetection(
+                    strategy: strategy,
                     poseFrames: poseFrames,
                     audioTransients: audioTransients,
                     asset: asset,
-                    recentShotTypes: recentShotTypes
+                    recentShotTypes: recentShotTypes,
+                    options: options,
+                    diag: &diag
                 )
 
                 let detectionElapsed = CACurrentMediaTime() - startTime
@@ -275,10 +301,12 @@ public class ShotDetectorModule: Module {
 
                 print("[ShotDetector] Detection took \(String(format: "%.1f", detectionElapsed))s for \(String(format: "%.1f", durationMs/1000))s video (\(poseFrames.count) frames analysed)")
 
+                self.logABHarness(diag)
+
                 guard result.found else {
                     let availableMBAfter = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
                     print("[ShotDetector] Available memory: \(String(format: "%.0f", availableMBAfter))MB after processing (delta: \(String(format: "%.0f", availableMBAfter - availableMB))MB)")
-                    promise.resolve([
+                    var payload: [String: Any] = [
                         "found": false,
                         "impactTimeMs": 0.0,
                         "trimStartMs": 0.0,
@@ -286,7 +314,9 @@ public class ShotDetectorModule: Module {
                         "confidence": 0.0,
                         "shotType": "swing",
                         "trimmedUri": NSNull(),
-                    ] as [String: Any])
+                    ]
+                    diag.merge(into: &payload)
+                    promise.resolve(payload)
                     return
                 }
 
@@ -316,7 +346,7 @@ public class ShotDetectorModule: Module {
 
                 guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
                     // Detection succeeded but trim failed — return detection result without trim
-                    promise.resolve([
+                    var payload: [String: Any] = [
                         "found": true,
                         "impactTimeMs": result.impactTimeMs,
                         "trimStartMs": trimStart,
@@ -324,7 +354,9 @@ public class ShotDetectorModule: Module {
                         "confidence": result.confidence,
                         "shotType": result.shotType.rawValue,
                         "trimmedUri": NSNull(),
-                    ] as [String: Any])
+                    ]
+                    diag.merge(into: &payload)
+                    promise.resolve(payload)
                     return
                 }
 
@@ -356,7 +388,7 @@ public class ShotDetectorModule: Module {
 
                 if let error = exportError {
                     print("[ShotDetector] Trim failed: \(error.localizedDescription) — returning detection result only")
-                    promise.resolve([
+                    var payload: [String: Any] = [
                         "found": true,
                         "impactTimeMs": result.impactTimeMs,
                         "trimStartMs": trimStart,
@@ -364,7 +396,9 @@ public class ShotDetectorModule: Module {
                         "confidence": result.confidence,
                         "shotType": result.shotType.rawValue,
                         "trimmedUri": NSNull(),
-                    ] as [String: Any])
+                    ]
+                    diag.merge(into: &payload)
+                    promise.resolve(payload)
                     return
                 }
 
@@ -374,7 +408,7 @@ public class ShotDetectorModule: Module {
                 let availableMBAfter = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
                 print("[ShotDetector] Available memory: \(String(format: "%.0f", availableMBAfter))MB after processing (delta: \(String(format: "%.0f", availableMBAfter - availableMB))MB)")
 
-                promise.resolve([
+                var payload: [String: Any] = [
                     "found": true,
                     "impactTimeMs": result.impactTimeMs,
                     "trimStartMs": trimStart,
@@ -382,7 +416,9 @@ public class ShotDetectorModule: Module {
                     "confidence": result.confidence,
                     "shotType": result.shotType.rawValue,
                     "trimmedUri": outputURL.absoluteString,
-                ] as [String: Any])
+                ]
+                diag.merge(into: &payload)
+                promise.resolve(payload)
             } catch {
                 promise.reject(Exception(name: "ERR_DETECT_TRIM_FAILED", description: error.localizedDescription))
             }
@@ -2360,5 +2396,1201 @@ public class ShotDetectorModule: Module {
         container.addSublayer(scoreText)
 
         return container
+    }
+
+    // ============================================================================
+    // MARK: - NEW: Strategy Dispatch + Detection Variants (additive, baseline-safe)
+    // ============================================================================
+    //
+    // Everything below is ADDITIVE. The baseline functions (detectSwingEvent,
+    // detectAudioTransients, extractPoseFrames, classifyShotType, fallbackClassify,
+    // and the trim/export path) are NOT modified. All strategy variants compile
+    // into one binary; config.detection.strategy (a JS string) picks the active
+    // one at runtime via dispatchDetection's switch. The 'baseline'/'default'
+    // cases call the unchanged detectSwingEvent.
+    //
+    // Critique fixes applied (see design JSON critiques):
+    //   #1 ORIENTATION  — extractPoseFramesOriented() corrects coords via the
+    //                     track preferredTransform + a sanity gate that disables
+    //                     the gate (falls back to baseline) when coords look wrong.
+    //   #2 FALSE-NEG    — on gate failure we fall back to the baseline impact for
+    //                     the clip, never to clip-midpoint. ARC_MARGIN/MIN_ARC etc.
+    //                     are tunable via DetectionOptions.
+    //   #3 5fps CONTIN. — single dominant drop accepted; smoothing reconciled with
+    //                     the velocity threshold (gate runs on RAW Y for velocity,
+    //                     smoothed Y only for arc/peak).
+    //   #4 DENSE PASS   — velocityPeak dense re-decode uses the SAME oriented
+    //                     projection, re-derives shoulderY in-window, reads per-buffer
+    //                     PTS and trims a widened window by PTS (GOP snapping).
+    //   #5 AUDIO        — spectral flux + centroid + band ratios at the measurable
+    //                     22050Hz/512 reality (no <=10ms attack clause); the snapped
+    //                     onset must be the LARGEST in-window flux AND within ~50ms
+    //                     of the velocityPeak wrist-speed estimate.
+    //   #6 SELECTION    — prefer audio-confirmed episode, else max(arc*downVelMax);
+    //                     'last' only as final tie-break. episodeCount logged.
+    //   #7 DROPOUT      — wrist joint-count flips between adjacent frames mark that
+    //                     velocity step invalid (skip for velocity/continuity).
+
+    // MARK: New tunable options (parsed from optionsJson)
+
+    /// All thresholds for the new strategies. Defaults match the design;
+    /// every value is overridable from JS via `config.detection.options`
+    /// (forwarded as the `optionsJson` arg). Unknown keys are ignored, missing
+    /// keys keep the default — so an empty "{}" object uses pure defaults.
+    private struct DetectionOptions {
+        // --- Pose gate (aboveShoulderGate / velocityPeak / audioFused) ---
+        // Wrists must clear the shoulder line by this ADDITIVE margin (Vision
+        // bottom-origin space, oriented). NOT a fraction — see critique #1/#2.
+        var arcMargin: CGFloat = 0.06
+        // Minimum total vertical excursion address->peak.
+        var minArc: CGFloat = 0.25
+        // Minimum peak downward wrist speed per ~6-frame (~0.2s @5fps) step.
+        var minDownVel: CGFloat = 0.06
+        // Allowed upward reversal during the downswing before it's rejected.
+        var maxReversal: CGFloat = 0.02
+        // Episode selection policy: "audioElseScore" (default, critique #6),
+        // "last", or "bestConfidence".
+        var pickPolicy: String = "audioElseScore"
+        // velocityPeak dense second pass — off for batch import to avoid
+        // ~0.5s x 60-100 clips (the hook passes refine:false there).
+        var refine: Bool = true
+        var denseWindowMs: Double = 250.0
+
+        // --- audioFused spectral analysis (22050Hz mono, 512-sample Hann, hop 128) ---
+        var centroidFloorHz: Float = 1800.0   // wind gate: reject low-centroid (wind) onsets
+        var lowBandRatioCeil: Float = 0.5      // wind gate: reject onsets dominated by <500Hz
+        var highBandFloor: Float = 0.08        // require some 2-4kHz energy (sharp crack)
+        var audioWindowMs: Double = 200.0      // half-width of pose downswing window
+        var onsetMinSpacingMs: Double = 250.0  // adaptive peak-pick min spacing
+        var fluxMedianMs: Double = 150.0       // sliding-median window for adaptive threshold
+        var fluxDeltaScale: Float = 0.0        // extra delta above median (0 = median only)
+        // Onset must agree with the velocityPeak wrist-speed time within this
+        // tolerance (critique #5) so a coincident clap/cart-door cannot win.
+        var audioPoseAgreeMs: Double = 50.0
+
+        // --- Putt post-roll (read ONLY here, never edits baseline line ~306) ---
+        // NOTE: under the baseline strategy the untouchable native line
+        // `max(postRollMs, 4000)` pins putts at >=4000ms regardless of this.
+        // This value is read only inside the new variants if ever needed; we
+        // keep it for documentation parity and do not apply it (baseline trim
+        // math is forbidden to edit). Putts staying long is satisfied by the
+        // existing 4000 floor.
+        var puttPostRollMs: Double = 4000.0
+
+        init(json: String) {
+            guard !json.isEmpty,
+                  let data = json.data(using: .utf8),
+                  let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                return
+            }
+            func f(_ k: String) -> Float? { (obj[k] as? NSNumber)?.floatValue }
+            func d(_ k: String) -> Double? { (obj[k] as? NSNumber)?.doubleValue }
+            func g(_ k: String) -> CGFloat? { (obj[k] as? NSNumber).map { CGFloat($0.doubleValue) } }
+            func b(_ k: String) -> Bool? { obj[k] as? Bool }
+            func s(_ k: String) -> String? { obj[k] as? String }
+
+            if let v = g("arcMargin") { arcMargin = v }
+            if let v = g("minArc") { minArc = v }
+            if let v = g("minDownVel") { minDownVel = v }
+            if let v = g("maxReversal") { maxReversal = v }
+            if let v = s("pickPolicy") { pickPolicy = v }
+            if let v = b("refine") { refine = v }
+            if let v = d("denseWindowMs") { denseWindowMs = v }
+            if let v = f("centroidFloorHz") { centroidFloorHz = v }
+            if let v = f("lowBandRatioCeil") { lowBandRatioCeil = v }
+            if let v = f("highBandFloor") { highBandFloor = v }
+            if let v = d("audioWindowMs") { audioWindowMs = v }
+            if let v = d("onsetMinSpacingMs") { onsetMinSpacingMs = v }
+            if let v = d("fluxMedianMs") { fluxMedianMs = v }
+            if let v = f("fluxDeltaScale") { fluxDeltaScale = v }
+            if let v = d("audioPoseAgreeMs") { audioPoseAgreeMs = v }
+            if let v = d("puttPostRollMs") { puttPostRollMs = v }
+        }
+    }
+
+    // MARK: Harness diagnostics (critique #10 — honest A/B)
+
+    /// Per-clip diagnostics emitted as OPTIONAL keys at all four resolve sites
+    /// plus one machine-parseable `[ABHARNESS]` print line. All keys are optional
+    /// in the JS contract, so an absent key never breaks an existing caller.
+    private struct DetectionDiagnostics {
+        var strategy: String
+        var impactTimeMs: Double = 0.0
+        var confidence: Double = 0.0
+        var gatePassed: Bool = false        // a full-swing gate episode was chosen
+        var episodeCount: Int = 0           // gated episodes found
+        var poseFrameCount: Int = 0
+        var hadAudioTrack: Bool = false     // clip has an audio track at all
+        var hadAnyTransient: Bool = false   // baseline transients or spec-flux onsets existed
+        var audioUsable: Bool = false       // a QUALIFYING onset existed in-window (denominator)
+        var audioOnsetMatched: Bool = false // audio onset was actually snapped to
+        var orientationOK: Bool = true      // oriented-pose sanity check passed
+        var refinedDense: Bool = false      // velocityPeak dense pass actually ran
+
+        init(strategy: String) { self.strategy = strategy }
+
+        /// Add the OPTIONAL harness keys onto a resolve payload. The primary
+        /// keys (found/impactTimeMs/trimStartMs/trimEndMs/confidence/shotType/
+        /// trimmedUri) are left as-is — these are purely additive so an absent
+        /// key never breaks an existing JS caller.
+        func merge(into payload: inout [String: Any]) {
+            payload["chosenStrategy"] = strategy
+            payload["episodeCount"] = episodeCount
+            payload["poseFrameCount"] = poseFrameCount
+            payload["gatePassed"] = gatePassed
+            payload["hadAudioTrack"] = hadAudioTrack
+            payload["audioUsable"] = audioUsable
+            payload["audioOnsetMatched"] = audioOnsetMatched
+            // Whether ANY transient/onset existed (audio-usability denominator).
+            payload["hadAnyTransient"] = hadAnyTransient
+        }
+    }
+
+    private func logABHarness(_ d: DetectionDiagnostics) {
+        let dict: [String: Any] = [
+            "strategy": d.strategy,
+            "impactMs": Int(d.impactTimeMs),
+            "confidence": Double(round(100 * d.confidence) / 100),
+            "gatePassed": d.gatePassed,
+            "episodeCount": d.episodeCount,
+            "poseFrames": d.poseFrameCount,
+            "hadAudioTrack": d.hadAudioTrack,
+            "hadAnyTransient": d.hadAnyTransient,
+            "audioUsable": d.audioUsable,
+            "audioOnsetMatched": d.audioOnsetMatched,
+            "orientationOK": d.orientationOK,
+            "refinedDense": d.refinedDense,
+        ]
+        if let data = try? JSONSerialization.data(withJSONObject: dict),
+           let json = String(data: data, encoding: .utf8) {
+            print("[ABHARNESS] " + json)
+        }
+    }
+
+    // MARK: Dispatch
+
+    /// Runtime strategy switch. `baseline`/`default` call the UNCHANGED
+    /// detectSwingEvent; new strategies call the additive variants. Any new
+    /// variant that internally bails (orientation looks wrong, no gated swing)
+    /// falls back to the baseline detectSwingEvent for that clip so behavior
+    /// degrades gracefully and never dumps to clip-midpoint (critique #2).
+    private func dispatchDetection(
+        strategy: String,
+        poseFrames: [PoseFrame],
+        audioTransients: [Double],
+        asset: AVURLAsset,
+        recentShotTypes: [String],
+        options: DetectionOptions,
+        diag: inout DetectionDiagnostics
+    ) -> SwingResult {
+        let result: SwingResult
+        switch strategy {
+        case "aboveShoulderGate":
+            result = detectSwing_aboveShoulderGate(
+                poseFrames: poseFrames, audioTransients: audioTransients,
+                asset: asset, recentShotTypes: recentShotTypes,
+                options: options, diag: &diag)
+        case "velocityPeak":
+            result = detectSwing_velocityPeak(
+                poseFrames: poseFrames, audioTransients: audioTransients,
+                asset: asset, recentShotTypes: recentShotTypes,
+                options: options, diag: &diag)
+        case "audioFused":
+            result = detectSwing_audioFused(
+                poseFrames: poseFrames, audioTransients: audioTransients,
+                asset: asset, recentShotTypes: recentShotTypes,
+                options: options, diag: &diag)
+        default:
+            // "baseline" and anything unrecognized -> byte-for-byte baseline.
+            result = detectSwingEvent(
+                poseFrames: poseFrames, audioTransients: audioTransients,
+                asset: asset, recentShotTypes: recentShotTypes)
+        }
+        diag.impactTimeMs = result.impactTimeMs
+        diag.confidence = result.confidence
+        return result
+    }
+
+    // MARK: Oriented pose source (critique #1)
+
+    /// An oriented copy of pose data for the NEW absolute-magnitude gates.
+    /// extractPoseFrames runs Vision with orientation:.up into a forced 480x640
+    /// buffer and never applies preferredTransform, so its coords are rotated /
+    /// aspect-squashed. The baseline tolerates that (it only uses relative
+    /// ordering), but the new gates calibrate to absolute "above shoulder by
+    /// margin" thresholds and would calibrate to garbage. This function
+    /// re-extracts pose with the CORRECT CGImagePropertyOrientation derived from
+    /// the track preferredTransform, in a buffer sized to the display aspect so
+    /// the vertical axis is the true vertical. It does NOT modify extractPoseFrames.
+    private func extractPoseFramesOriented(from asset: AVURLAsset) throws -> [PoseFrame] {
+        guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+            throw NSError(domain: "ShotDetector", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
+        }
+
+        let transform = videoTrack.preferredTransform
+        let orientation = cgOrientation(for: transform)
+
+        // Display-correct aspect: apply the transform to natural size so the
+        // buffer is sized to how the clip is shown (portrait stays portrait).
+        let natural = videoTrack.naturalSize
+        let displayRect = CGRect(origin: .zero, size: natural).applying(transform)
+        let displayW = abs(displayRect.width)
+        let displayH = abs(displayRect.height)
+        // Long edge ~640 for Vision speed parity with baseline, preserving aspect.
+        let targetLong: CGFloat = 640
+        let aspect = (displayW > 0 && displayH > 0) ? (displayW / displayH) : (480.0 / 640.0)
+        var bufW: Int
+        var bufH: Int
+        if aspect >= 1.0 {
+            bufW = Int(targetLong)
+            bufH = max(16, Int((targetLong / aspect).rounded()))
+        } else {
+            bufH = Int(targetLong)
+            bufW = max(16, Int((targetLong * aspect).rounded()))
+        }
+
+        let fps = videoTrack.nominalFrameRate
+        let frameStep = max(6, Int(fps / 5.0))
+
+        let reader = try AVAssetReader(asset: asset)
+        let outputSettings: [String: Any] = [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferWidthKey as String: bufW,
+            kCVPixelBufferHeightKey as String: bufH,
+        ]
+        let trackOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+        trackOutput.alwaysCopiesSampleData = false
+        reader.add(trackOutput)
+
+        guard reader.startReading() else {
+            throw NSError(domain: "ShotDetector", code: 2, userInfo: [NSLocalizedDescriptionKey: "Failed to start reading video"])
+        }
+
+        var frames: [PoseFrame] = []
+        var frameIndex = 0
+        var readerDone = false
+        while !readerDone {
+            autoreleasepool {
+                guard let sampleBuffer = trackOutput.copyNextSampleBuffer() else {
+                    readerDone = true
+                    return
+                }
+                defer { frameIndex += 1 }
+                guard frameIndex % frameStep == 0 else { return }
+
+                let presentationTime = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+                let timeMs = CMTimeGetSeconds(presentationTime) * 1000.0
+                guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+
+                let poseRequest = VNDetectHumanBodyPoseRequest()
+                // Correct orientation so Vision's normalized coords are upright.
+                let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: orientation, options: [:])
+                try? handler.perform([poseRequest])
+
+                guard let observation = poseRequest.results?.first else {
+                    frames.append(PoseFrame(
+                        frameIndex: frameIndex, timeMs: timeMs,
+                        leftWrist: nil, rightWrist: nil,
+                        leftElbow: nil, rightElbow: nil,
+                        leftShoulder: nil, rightShoulder: nil,
+                        leftHip: nil, rightHip: nil,
+                        nose: nil, confidence: 0))
+                    return
+                }
+                frames.append(PoseFrame(
+                    frameIndex: frameIndex, timeMs: timeMs,
+                    leftWrist: self.safePoint(observation, .leftWrist),
+                    rightWrist: self.safePoint(observation, .rightWrist),
+                    leftElbow: self.safePoint(observation, .leftElbow),
+                    rightElbow: self.safePoint(observation, .rightElbow),
+                    leftShoulder: self.safePoint(observation, .leftShoulder),
+                    rightShoulder: self.safePoint(observation, .rightShoulder),
+                    leftHip: self.safePoint(observation, .leftHip),
+                    rightHip: self.safePoint(observation, .rightHip),
+                    nose: self.safePoint(observation, .nose),
+                    confidence: observation.confidence))
+            }
+        }
+        reader.cancelReading()
+        return frames
+    }
+
+    /// Map a track preferredTransform to the CGImagePropertyOrientation that
+    /// makes the decoded buffer upright for Vision. Mirrors the standard
+    /// AVFoundation rotation cases (0/90/180/270).
+    private func cgOrientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
+        if t.a == 1 && t.b == 0 && t.c == 0 && t.d == 1 { return .up }            // 0
+        if t.a == 0 && t.b == 1 && t.c == -1 && t.d == 0 { return .right }        // 90 CW
+        if t.a == -1 && t.b == 0 && t.c == 0 && t.d == -1 { return .down }        // 180
+        if t.a == 0 && t.b == -1 && t.c == 1 && t.d == 0 { return .left }         // 270 CW
+        return .up
+    }
+
+    /// Sanity check (critique #1): in an upright golfer the shoulders should sit
+    /// ABOVE the hips (higher Y in Vision bottom-origin space) in a majority of
+    /// frames. If they don't, coords look rotated/garbage and the absolute gate
+    /// is unreliable — caller should fall back to baseline.
+    private func orientationLooksUpright(_ frames: [PoseFrame]) -> Bool {
+        var ok = 0
+        var total = 0
+        for f in frames {
+            guard let s = avgShoulderY(f), let h = avgHipY(f) else { continue }
+            total += 1
+            if s > h { ok += 1 }
+        }
+        guard total >= 3 else { return false }
+        return Double(ok) / Double(total) >= 0.6
+    }
+
+    // MARK: Gate primitives (episode model + dropout-aware velocity)
+
+    /// A candidate full-swing episode found by the gate walk.
+    private struct SwingEpisode {
+        var addressIdx: Int
+        var peakIdx: Int
+        var impactIdx: Int
+        var peakY: CGFloat            // max smoothed wrist Y during backswing
+        var addressY: CGFloat         // smoothed wrist Y at address
+        var shoulderYAtPeak: CGFloat
+        var downVelMax: CGFloat       // max valid downward wrist speed (per step)
+        var arc: CGFloat              // peakY - addressY
+    }
+
+    /// Centered 3-tap moving average — used only for arc/peak detection, NOT for
+    /// velocity (critique #3: smoothing fights the velocity threshold, so the
+    /// velocity clause reads RAW Y while arc/peak read smoothed Y).
+    private func smooth3(_ v: [CGFloat]) -> [CGFloat] {
+        guard v.count >= 3 else { return v }
+        var out = v
+        for i in 1..<(v.count - 1) {
+            out[i] = (v[i - 1] + v[i] + v[i + 1]) / 3.0
+        }
+        return out
+    }
+
+    /// Per-frame wrist Y plus how many wrist joints contributed (1 or 2), so the
+    /// gate can mark steps where the count flips as invalid (critique #7) — a
+    /// 2-joint->1-joint switch injects a fake Y step that must not satisfy or
+    /// fail the velocity / continuity clauses.
+    private func wristYWithCount(_ f: PoseFrame) -> (y: CGFloat, count: Int)? {
+        if let l = f.leftWrist, let r = f.rightWrist { return ((l.y + r.y) / 2.0, 2) }
+        if let l = f.leftWrist { return (l.y, 1) }
+        if let r = f.rightWrist { return (r.y, 1) }
+        return nil
+    }
+
+    /// Core gate shared by aboveShoulderGate / velocityPeak / audioFused.
+    /// Returns the gated episodes (may be empty) and the per-index arrays it
+    /// computed, so velocityPeak can reuse the oriented coarse signal.
+    private struct GateScan {
+        var episodes: [SwingEpisode]
+        var rawWristY: [CGFloat]
+        var smoothWristY: [CGFloat]
+        var shoulderY: [CGFloat]
+        var wristCount: [Int]      // 0 = no wrist that frame
+        var times: [Double]
+        var validFrameIdx: [Int]   // poseFrames indices that had usable wrist+conf
+    }
+
+    private func scanGate(_ poseFrames: [PoseFrame], options: DetectionOptions) -> GateScan {
+        // Build per-frame series over frames that have a usable wrist and
+        // sufficient confidence. We keep parallel arrays indexed by a compacted
+        // "valid frame" sequence so neighbor velocity is between real samples.
+        var rawY: [CGFloat] = []
+        var sY: [CGFloat] = []
+        var wc: [Int] = []
+        var ts: [Double] = []
+        var srcIdx: [Int] = []
+        for (i, f) in poseFrames.enumerated() {
+            guard f.confidence > 0.3, let w = wristYWithCount(f) else { continue }
+            rawY.append(w.y)
+            wc.append(w.count)
+            sY.append(avgShoulderY(f) ?? 0.55)
+            ts.append(f.timeMs)
+            srcIdx.append(i)
+        }
+
+        let smoothY = smooth3(rawY)
+        var episodes: [SwingEpisode] = []
+
+        let n = rawY.count
+        guard n >= 4 else {
+            return GateScan(episodes: episodes, rawWristY: rawY,
+                            smoothWristY: smoothY, shoulderY: sY, wristCount: wc,
+                            times: ts, validFrameIdx: srcIdx)
+        }
+
+        // Walk: find local minima (address candidates), the following max
+        // (backswing peak), then the subsequent max-downward-speed frame (impact).
+        var i = 1
+        while i < n - 1 {
+            // Address: a local low in smoothed wrist Y near/under shoulder line.
+            let isAddress = smoothY[i] <= smoothY[i - 1] && smoothY[i] <= smoothY[i + 1]
+            if !isAddress { i += 1; continue }
+            let addressIdx = i
+            let addressY = smoothY[i]
+
+            // Rise to a peak.
+            var j = i + 1
+            var peakIdx = addressIdx
+            var peakY = smoothY[addressIdx]
+            while j < n {
+                if smoothY[j] > peakY {
+                    peakY = smoothY[j]
+                    peakIdx = j
+                }
+                // Stop rising once we turn down meaningfully past the peak.
+                if j > peakIdx && smoothY[j] < peakY - 0.02 { break }
+                j += 1
+            }
+            if peakIdx <= addressIdx { i += 1; continue }
+
+            // Downswing: find max valid downward speed after the peak, using RAW
+            // Y and skipping steps where the wrist joint-count flips (critique #7).
+            var impactIdx = peakIdx
+            var downVelMax: CGFloat = 0
+            var reversal: CGFloat = 0
+            var k = peakIdx + 1
+            while k < n {
+                let stepValid = (wc[k] == wc[k - 1])
+                let dy = rawY[k - 1] - rawY[k] // positive = wrist moving down
+                if stepValid {
+                    if dy > downVelMax {
+                        downVelMax = dy
+                        impactIdx = k
+                    }
+                    if dy < 0 { reversal = max(reversal, -dy) } // upward move magnitude
+                }
+                // End downswing window when wrists settle near/under shoulder for a beat.
+                if rawY[k] < sY[k] && k > impactIdx + 1 { break }
+                if k - peakIdx > 6 { break } // downswing is fast — bound the search
+                k += 1
+            }
+
+            // ---- FULL-SWING GATE ----
+            let shoulderAtPeak = sY[peakIdx]
+            let clearedShoulder = peakY > shoulderAtPeak + options.arcMargin   // (a)
+            let arc = peakY - addressY
+            let enoughArc = arc > options.minArc                               // (b)
+            // (c) continuity: accept a single dominant drop OR >=2 decreasing
+            // samples; reject a large upward reversal mid-downswing.
+            let noBadReversal = reversal <= options.maxReversal
+            // (d) min downward velocity.
+            let fastEnough = downVelMax > options.minDownVel
+            // (e) commitment: address existed before AND wrist falls back through
+            // the address zone by impact (rejects a follow-through-only motion).
+            let returnedDown = impactIdx > peakIdx && rawY[impactIdx] <= addressY + options.arcMargin
+
+            if clearedShoulder && enoughArc && noBadReversal && fastEnough && returnedDown {
+                episodes.append(SwingEpisode(
+                    addressIdx: addressIdx, peakIdx: peakIdx, impactIdx: impactIdx,
+                    peakY: peakY, addressY: addressY, shoulderYAtPeak: shoulderAtPeak,
+                    downVelMax: downVelMax, arc: arc))
+                // Continue scanning AFTER this impact to collect later episodes.
+                i = max(impactIdx, addressIdx + 1)
+            } else {
+                i = addressIdx + 1
+            }
+        }
+
+        return GateScan(episodes: episodes, rawWristY: rawY,
+                        smoothWristY: smoothY, shoulderY: sY, wristCount: wc,
+                        times: ts, validFrameIdx: srcIdx)
+    }
+
+    /// Decisive-episode selection (critique #6): prefer the episode with audio
+    /// confirmation (if audioTimes provided), else max(arc*downVelMax); 'last'
+    /// only as a final tie-break. Honors options.pickPolicy overrides.
+    private func selectEpisode(
+        _ episodes: [SwingEpisode],
+        scan: GateScan,
+        audioTimes: [Double],
+        options: DetectionOptions
+    ) -> SwingEpisode? {
+        guard !episodes.isEmpty else { return nil }
+        if episodes.count == 1 { return episodes[0] }
+
+        switch options.pickPolicy {
+        case "last":
+            return episodes.max(by: { $0.impactIdx < $1.impactIdx })
+        case "bestConfidence":
+            return episodes.max(by: { ($0.arc * $0.downVelMax) < ($1.arc * $1.downVelMax) })
+        default: // "audioElseScore"
+            // (i) audio-confirmed: an audio onset within audioWindow of the
+            //     episode's impact time.
+            if !audioTimes.isEmpty {
+                let confirmed = episodes.filter { ep in
+                    let t = scan.times[ep.impactIdx]
+                    return audioTimes.contains { abs($0 - t) < options.audioWindowMs }
+                }
+                if !confirmed.isEmpty {
+                    return confirmed.max(by: { ($0.arc * $0.downVelMax) < ($1.arc * $1.downVelMax) })
+                }
+            }
+            // (ii) else max score; (iii) 'last' tie-break via impactIdx.
+            return episodes.max(by: {
+                let s0 = $0.arc * $0.downVelMax
+                let s1 = $1.arc * $1.downVelMax
+                if abs(s0 - s1) < 1e-6 { return $0.impactIdx < $1.impactIdx }
+                return s0 < s1
+            })
+        }
+    }
+
+    /// Build a SwingResult from a chosen episode, reusing the baseline classifier
+    /// + confidence shape. Maps the compacted episode index back to the original
+    /// poseFrames index so classifyShotType gets the right frame window.
+    private func resultFromEpisode(
+        _ ep: SwingEpisode,
+        scan: GateScan,
+        poseFrames: [PoseFrame],
+        audioTransients: [Double],
+        impactTimeMsOverride: Double?,
+        asset: AVURLAsset,
+        recentShotTypes: [String]
+    ) -> SwingResult {
+        let impactTimeMs = impactTimeMsOverride ?? scan.times[ep.impactIdx]
+        let srcImpactIdx = scan.validFrameIdx[ep.impactIdx]
+
+        var confidence = 0.6
+        if ep.arc > 0.2 { confidence += 0.1 }
+        if ep.arc > 0.35 { confidence += 0.1 }
+        confidence += 0.05 // a real address->peak->impact episode passed the gate
+        if audioTransients.contains(where: { abs($0 - impactTimeMs) < 200.0 }) { confidence += 0.2 }
+        let srcImpactFrame = poseFrames[min(srcImpactIdx, poseFrames.count - 1)]
+        if srcImpactFrame.confidence > 0.6 { confidence += 0.05 }
+        confidence = min(1.0, confidence)
+
+        let sceneSignal = self.sceneGreenSignal(from: asset)
+        let shotType = classifyShotType(
+            poseFrames: poseFrames,
+            impactFrameIndex: srcImpactIdx,
+            backswingPeakY: ep.peakY,
+            audioTransients: audioTransients,
+            impactTimeMs: impactTimeMs,
+            sceneSignal: sceneSignal,
+            recentShotTypes: recentShotTypes)
+
+        return SwingResult(
+            found: true,
+            impactTimeMs: impactTimeMs,
+            impactFrameIndex: srcImpactFrame.frameIndex,
+            confidence: confidence,
+            shotType: shotType)
+    }
+
+    // MARK: Strategy — aboveShoulderGate
+
+    /// Pure-pose, wind-immune waggle fix. On orientation failure OR no gated
+    /// episode, falls back to the baseline detectSwingEvent (critique #1/#2 —
+    /// never clip-midpoint).
+    private func detectSwing_aboveShoulderGate(
+        poseFrames: [PoseFrame],
+        audioTransients: [Double],
+        asset: AVURLAsset,
+        recentShotTypes: [String],
+        options: DetectionOptions,
+        diag: inout DetectionDiagnostics
+    ) -> SwingResult {
+        // Need enough pose data; otherwise baseline handles the fallback path.
+        guard poseFrames.count >= 5 else {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        // Use an ORIENTED pose source for the absolute gate. If re-extraction
+        // fails, fall back to the baseline frames (relative ordering still works
+        // for baseline, but our absolute gate needs upright coords — so we also
+        // run the sanity check below).
+        let orientedFrames = (try? extractPoseFramesOriented(from: asset)) ?? poseFrames
+        let upright = orientationLooksUpright(orientedFrames)
+        diag.orientationOK = upright
+        if !upright {
+            print("[ABGATE] orientation looks rotated — disabling gate, using baseline")
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        let scan = scanGate(orientedFrames, options: options)
+        diag.episodeCount = scan.episodes.count
+        guard let ep = selectEpisode(scan.episodes, scan: scan, audioTimes: audioTransients, options: options) else {
+            print("[ABGATE] no gated episode — baseline fallback (episodes=\(scan.episodes.count))")
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        diag.gatePassed = true
+        // classifyShotType expects indices into the ORIENTED frames here (the
+        // window it samples is relative, and oriented frames share the same
+        // frameStep cadence as baseline). We pass orientedFrames consistently.
+        let result = resultFromEpisode(ep, scan: scan, poseFrames: orientedFrames,
+                                       audioTransients: audioTransients,
+                                       impactTimeMsOverride: nil,
+                                       asset: asset, recentShotTypes: recentShotTypes)
+        print("[ABGATE] gated impact ms=\(Int(result.impactTimeMs)) arc=\(String(format: "%.2f", ep.arc)) downVel=\(String(format: "%.3f", ep.downVelMax)) episodes=\(scan.episodes.count)")
+        return result
+    }
+
+    // MARK: Strategy — velocityPeak (dense sub-frame refinement)
+
+    /// aboveShoulderGate + a dense ~30fps re-decode in a +/-denseWindow around
+    /// the coarse impact, in the SAME oriented projection, re-deriving shoulderY
+    /// in-window (critique #4). Parabolic sub-frame interp only when the dense
+    /// samples are too few; otherwise the dense-pass peak time is used directly.
+    private func detectSwing_velocityPeak(
+        poseFrames: [PoseFrame],
+        audioTransients: [Double],
+        asset: AVURLAsset,
+        recentShotTypes: [String],
+        options: DetectionOptions,
+        diag: inout DetectionDiagnostics
+    ) -> SwingResult {
+        guard poseFrames.count >= 5 else {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        let orientedFrames = (try? extractPoseFramesOriented(from: asset)) ?? poseFrames
+        let upright = orientationLooksUpright(orientedFrames)
+        diag.orientationOK = upright
+        if !upright {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        let scan = scanGate(orientedFrames, options: options)
+        diag.episodeCount = scan.episodes.count
+        guard let ep = selectEpisode(scan.episodes, scan: scan, audioTimes: audioTransients, options: options) else {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+        diag.gatePassed = true
+
+        // Coarse impact time + a coarse parabolic refine on the velocity series.
+        let coarseImpactMs = scan.times[ep.impactIdx]
+        var refinedMs = coarseImpactMs
+
+        // Coarse parabolic interp on raw downward-speed v[i]=rawY[i-1]-rawY[i].
+        // 3-point peak interp on (v[k-1], v[k], v[k+1]) of the speed series.
+        // GUARDED (critique #4): clamp the vertex and only apply when the
+        // denominator is non-degenerate — at ~5fps a coarse peak is often a
+        // near-impulse, so this is a small nudge and the dense pass below is the
+        // real precision win.
+        let k = ep.impactIdx
+        if k >= 2 && k + 1 < scan.rawWristY.count {
+            let vA = scan.rawWristY[k - 2] - scan.rawWristY[k - 1]
+            let vB = scan.rawWristY[k - 1] - scan.rawWristY[k]
+            let vC = scan.rawWristY[k] - scan.rawWristY[k + 1]
+            let denom = vA - 2 * vB + vC
+            if abs(denom) > 1e-4 {
+                var delta = 0.5 * (vA - vC) / denom
+                delta = max(-0.5, min(0.5, delta)) // guard near-impulse saturation
+                let t0 = scan.times[k]
+                let t1 = scan.times[k + 1]
+                refinedMs = t0 + Double(delta) * (t1 - t0)
+            }
+        }
+
+        // Dense second pass (critique #4): re-decode a widened window, re-derive
+        // shoulderY in-window, find the true wrist-speed peak. Off for batch
+        // import via options.refine=false.
+        if options.refine {
+            if let dense = denseRefineImpact(asset: asset, aroundMs: coarseImpactMs, options: options) {
+                refinedMs = dense
+                diag.refinedDense = true
+                print("[VELPEAK] dense refine ms=\(Int(dense)) (coarse=\(Int(coarseImpactMs)))")
+            } else {
+                print("[VELPEAK] dense refine unavailable — using coarse/parabolic ms=\(Int(refinedMs))")
+            }
+        }
+
+        let result = resultFromEpisode(ep, scan: scan, poseFrames: orientedFrames,
+                                       audioTransients: audioTransients,
+                                       impactTimeMsOverride: refinedMs,
+                                       asset: asset, recentShotTypes: recentShotTypes)
+        return result
+    }
+
+    /// Dense ~full-rate re-decode of a +/-denseWindow window around `aroundMs`,
+    /// in the SAME oriented projection as the coarse pass. Reads per-buffer PTS
+    /// and requests a WIDER reader.timeRange to absorb GOP/sync-sample snapping,
+    /// then trims by PTS. Re-derives shoulderY in-window. Returns the refined
+    /// impact time in ms, or nil if too few samples (caller keeps coarse).
+    private func denseRefineImpact(asset: AVURLAsset, aroundMs: Double, options: DetectionOptions) -> Double? {
+        guard let videoTrack = asset.tracks(withMediaType: .video).first else { return nil }
+        let transform = videoTrack.preferredTransform
+        let orientation = cgOrientation(for: transform)
+
+        let natural = videoTrack.naturalSize
+        let displayRect = CGRect(origin: .zero, size: natural).applying(transform)
+        let displayW = abs(displayRect.width)
+        let displayH = abs(displayRect.height)
+        let targetLong: CGFloat = 640
+        let aspect = (displayW > 0 && displayH > 0) ? (displayW / displayH) : (480.0 / 640.0)
+        var bufW: Int; var bufH: Int
+        if aspect >= 1.0 { bufW = Int(targetLong); bufH = max(16, Int((targetLong / aspect).rounded())) }
+        else { bufH = Int(targetLong); bufW = max(16, Int((targetLong * aspect).rounded())) }
+
+        let halfMs = options.denseWindowMs
+        // Widen the request by ~300ms each side for GOP snapping; trim by PTS.
+        let padMs = 300.0
+        let durationMs = CMTimeGetSeconds(asset.duration) * 1000.0
+        let reqStartMs = max(0.0, aroundMs - halfMs - padMs)
+        let reqEndMs = min(durationMs, aroundMs + halfMs + padMs)
+        guard reqEndMs > reqStartMs else { return nil }
+
+        var refined: Double? = nil
+        autoreleasepool {
+            guard let reader = try? AVAssetReader(asset: asset) else { return }
+            let outputSettings: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: bufW,
+                kCVPixelBufferHeightKey as String: bufH,
+            ]
+            let trackOutput = AVAssetReaderTrackOutput(track: videoTrack, outputSettings: outputSettings)
+            trackOutput.alwaysCopiesSampleData = false
+            reader.add(trackOutput)
+            reader.timeRange = CMTimeRange(
+                start: CMTime(seconds: reqStartMs / 1000.0, preferredTimescale: 600),
+                duration: CMTime(seconds: (reqEndMs - reqStartMs) / 1000.0, preferredTimescale: 600))
+            guard reader.startReading() else { return }
+
+            // Decode every frame in-window (no frame skipping — dense).
+            var denseY: [CGFloat] = []
+            var denseW: [Int] = []
+            var denseS: [CGFloat] = []
+            var denseT: [Double] = []
+            var done = false
+            while !done {
+                autoreleasepool {
+                    guard let sb = trackOutput.copyNextSampleBuffer() else { done = true; return }
+                    let pts = CMSampleBufferGetPresentationTimeStamp(sb)
+                    let tMs = CMTimeGetSeconds(pts) * 1000.0
+                    // Trim by PTS to the actual +/-halfMs window.
+                    guard tMs >= aroundMs - halfMs && tMs <= aroundMs + halfMs else { return }
+                    guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
+                    let req = VNDetectHumanBodyPoseRequest()
+                    let handler = VNImageRequestHandler(cvPixelBuffer: pb, orientation: orientation, options: [:])
+                    try? handler.perform([req])
+                    guard let obs = req.results?.first, obs.confidence > 0.3 else { return }
+                    let f = PoseFrame(
+                        frameIndex: 0, timeMs: tMs,
+                        leftWrist: self.safePoint(obs, .leftWrist),
+                        rightWrist: self.safePoint(obs, .rightWrist),
+                        leftElbow: nil, rightElbow: nil,
+                        leftShoulder: self.safePoint(obs, .leftShoulder),
+                        rightShoulder: self.safePoint(obs, .rightShoulder),
+                        leftHip: nil, rightHip: nil, nose: nil,
+                        confidence: obs.confidence)
+                    guard let w = self.wristYWithCount(f) else { return }
+                    denseY.append(w.y)
+                    denseW.append(w.count)
+                    denseS.append(self.avgShoulderY(f) ?? 0.55) // re-derived in-window
+                    denseT.append(tMs)
+                }
+            }
+            reader.cancelReading()
+
+            // Need enough dense samples to beat the coarse estimate.
+            guard denseY.count >= 4 else { return }
+
+            // Max valid downward speed (skip joint-count flips, critique #7).
+            // shoulderY is RE-DERIVED in-window (denseS) and used to bias the
+            // search toward the downswing region (wrist at/below shoulder line),
+            // keeping the dense pass commensurate with the coarse gate (critique
+            // #4) rather than picking a backswing-side velocity spike.
+            var peakK = 1
+            var peakV: CGFloat = -.greatestFiniteMagnitude
+            for k in 1..<denseY.count {
+                guard denseW[k] == denseW[k - 1] else { continue }
+                let dy = denseY[k - 1] - denseY[k]
+                // Down-region weighting: full weight near/below the shoulder line.
+                let belowShoulder = denseY[k] <= denseS[k] + 0.05
+                let weighted = belowShoulder ? dy : dy * 0.5
+                if weighted > peakV { peakV = weighted; peakK = k }
+            }
+
+            // Parabolic sub-frame interp on the dense speed series; prefer the
+            // dense peak time when too few neighbors (critique #4 guard).
+            var outMs = denseT[peakK]
+            if peakK >= 2 && peakK + 1 < denseY.count {
+                let vA = denseY[peakK - 2] - denseY[peakK - 1]
+                let vB = denseY[peakK - 1] - denseY[peakK]
+                let vC = denseY[peakK] - denseY[peakK + 1]
+                let denom = vA - 2 * vB + vC
+                if abs(denom) > 1e-4 {
+                    var delta = 0.5 * (vA - vC) / denom
+                    delta = max(-0.5, min(0.5, delta))
+                    let t0 = denseT[peakK]
+                    let t1 = denseT[min(peakK + 1, denseT.count - 1)]
+                    outMs = t0 + Double(delta) * (t1 - t0)
+                }
+            }
+            refined = outMs
+        }
+        return refined
+    }
+
+    // MARK: Strategy — audioFused (spectral snap onto the pose gate)
+
+    /// Pose gate decides; audio only refines timing inside the validated window.
+    /// The snapped onset must be the LARGEST in-window flux onset AND agree with
+    /// the velocityPeak wrist-speed estimate within options.audioPoseAgreeMs
+    /// (critique #5). On no qualifying onset, keep pose timing, audioOnsetMatched
+    /// = false (critique #5/#10). On orientation failure / no gate, baseline.
+    private func detectSwing_audioFused(
+        poseFrames: [PoseFrame],
+        audioTransients: [Double],
+        asset: AVURLAsset,
+        recentShotTypes: [String],
+        options: DetectionOptions,
+        diag: inout DetectionDiagnostics
+    ) -> SwingResult {
+        guard poseFrames.count >= 5 else {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        let orientedFrames = (try? extractPoseFramesOriented(from: asset)) ?? poseFrames
+        let upright = orientationLooksUpright(orientedFrames)
+        diag.orientationOK = upright
+        if !upright {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+
+        let scan = scanGate(orientedFrames, options: options)
+        diag.episodeCount = scan.episodes.count
+        guard let ep = selectEpisode(scan.episodes, scan: scan, audioTimes: audioTransients, options: options) else {
+            return detectSwingEvent(poseFrames: poseFrames, audioTransients: audioTransients,
+                                    asset: asset, recentShotTypes: recentShotTypes)
+        }
+        diag.gatePassed = true
+
+        // Derive a precise pose impact via the dense pass (critique #5: window
+        // centered on the ms-scale estimate, not the coarse 5fps impact).
+        let coarseImpactMs = scan.times[ep.impactIdx]
+        let poseImpactMs = denseRefineImpact(asset: asset, aroundMs: coarseImpactMs, options: options) ?? coarseImpactMs
+        if poseImpactMs != coarseImpactMs { diag.refinedDense = true }
+
+        // Spectral onsets across the whole clip (new analyzer, baseline untouched).
+        let onsets = (try? detectAudioOnsets_specFlux(from: asset, options: options)) ?? []
+        diag.hadAnyTransient = diag.hadAnyTransient || !onsets.isEmpty
+
+        // Qualifying onsets = passed wind/sharpness gate AND inside the pose window.
+        let lo = poseImpactMs - options.audioWindowMs
+        let hi = poseImpactMs + options.audioWindowMs
+        let inWindow = onsets.filter { $0.passedGate && $0.timeMs >= lo && $0.timeMs <= hi }
+        diag.audioUsable = !inWindow.isEmpty
+
+        var impactMs = poseImpactMs
+        if !inWindow.isEmpty {
+            // LARGEST in-window flux onset (critique #5).
+            if let best = inWindow.max(by: { ($0.flux * $0.highBandRatio) < ($1.flux * $1.highBandRatio) }) {
+                // Must agree with the wrist-speed (pose) estimate.
+                if abs(best.timeMs - poseImpactMs) <= options.audioPoseAgreeMs {
+                    impactMs = best.timeMs
+                    diag.audioOnsetMatched = true
+                    print("[AUDIOFUSED] snap onset ms=\(Int(best.timeMs)) flux=\(String(format: "%.2f", best.flux)) centroid=\(Int(best.centroidHz)) HBR=\(String(format: "%.2f", best.highBandRatio))")
+                } else {
+                    print("[AUDIOFUSED] in-window onset disagrees with pose (onset=\(Int(best.timeMs)) pose=\(Int(poseImpactMs))) — keeping pose")
+                }
+            }
+        } else {
+            print("[AUDIOFUSED] no qualifying onset in window — keeping pose ms=\(Int(poseImpactMs))")
+        }
+
+        var result = resultFromEpisode(ep, scan: scan, poseFrames: orientedFrames,
+                                       audioTransients: audioTransients,
+                                       impactTimeMsOverride: impactMs,
+                                       asset: asset, recentShotTypes: recentShotTypes)
+        // Confidence: boost on a confirmed audio snap, soften slightly on mismatch.
+        if diag.audioOnsetMatched {
+            result = SwingResult(found: result.found, impactTimeMs: result.impactTimeMs,
+                                 impactFrameIndex: result.impactFrameIndex,
+                                 confidence: min(1.0, result.confidence + 0.1),
+                                 shotType: result.shotType)
+        } else if diag.audioUsable {
+            result = SwingResult(found: result.found, impactTimeMs: result.impactTimeMs,
+                                 impactFrameIndex: result.impactFrameIndex,
+                                 confidence: max(0.0, result.confidence - 0.05),
+                                 shotType: result.shotType)
+        }
+        diag.confidence = result.confidence
+        return result
+    }
+
+    // MARK: New spectral onset analyzer (vDSP FFT) — additive, NOT detectAudioTransients
+
+    /// A single detected audio onset with the features the wind/sharpness gate
+    /// needs. `passedGate` = cleared the wind (centroid/low-band) + sharpness
+    /// (high-band) gates.
+    private struct AudioOnset {
+        let timeMs: Double
+        let flux: Float
+        let centroidHz: Float
+        let lowBandRatio: Float   // energy <500Hz / total
+        let highBandRatio: Float  // energy 2-4kHz / total
+        let passedGate: Bool
+    }
+
+    /// Spectral-flux onset detection with a wind/sharpness gate (critique #5).
+    ///
+    /// Bin math (22050Hz mono, 512-sample frame): bin spacing = 22050/512 ≈
+    /// 43.07 Hz; <500Hz ≈ bins 1..11; 2-4kHz ≈ bins 47..93; Nyquist 11025Hz.
+    /// A 512-sample frame integrates ~23ms, so the sub-10ms impulse-attack clause
+    /// from the original research is UNMEASURABLE here and is intentionally
+    /// dropped — we rely on flux + centroid wind-gate + high-band sharpness +
+    /// the pose-window cross-validation done by the caller. Hop 128 ≈ 5.8ms
+    /// gives ms-scale onset timing.
+    ///
+    /// Reuses ONE vDSP FFT setup for the whole clip (autoreleasepool discipline
+    /// matching the baseline). Does NOT touch detectAudioTransients.
+    private func detectAudioOnsets_specFlux(from asset: AVURLAsset, options: DetectionOptions) throws -> [AudioOnset] {
+        guard let audioTrack = asset.tracks(withMediaType: .audio).first else { return [] }
+
+        let reader = try AVAssetReader(asset: asset)
+        let outputSettings: [String: Any] = [
+            AVFormatIDKey: kAudioFormatLinearPCM,
+            AVLinearPCMBitDepthKey: 16,
+            AVLinearPCMIsBigEndianKey: false,
+            AVLinearPCMIsFloatKey: false,
+            AVLinearPCMIsNonInterleaved: false,
+            AVSampleRateKey: 22050,
+            AVNumberOfChannelsKey: 1,
+        ]
+        let trackOutput = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
+        reader.add(trackOutput)
+        guard reader.startReading() else { return [] }
+
+        var allSamples: [Int16] = []
+        var done = false
+        while !done {
+            autoreleasepool {
+                guard let sb = trackOutput.copyNextSampleBuffer() else { done = true; return }
+                guard let bb = CMSampleBufferGetDataBuffer(sb) else { return }
+                let length = CMBlockBufferGetDataLength(bb)
+                var data = Data(count: length)
+                data.withUnsafeMutableBytes { raw in
+                    if let base = raw.baseAddress {
+                        CMBlockBufferCopyDataBytes(bb, atOffset: 0, dataLength: length, destination: base)
+                    }
+                }
+                let count = length / MemoryLayout<Int16>.size
+                data.withUnsafeBytes { raw in
+                    if let p = raw.bindMemory(to: Int16.self).baseAddress {
+                        allSamples.append(contentsOf: UnsafeBufferPointer(start: p, count: count))
+                    }
+                }
+            }
+        }
+        reader.cancelReading()
+        guard allSamples.count > 1024 else { return [] }
+
+        let sampleRate: Float = 22050.0
+        let floatSamples = allSamples.map { Float($0) / Float(Int16.max) }
+
+        // --- FFT setup (single, reused) ---
+        let log2n = vDSP_Length(9)        // 2^9 = 512
+        let frameSize = 512
+        let hop = 128
+        let halfN = frameSize / 2
+        guard let fftSetup = vDSP_create_fftsetup(log2n, FFTRadix(kFFTRadix2)) else { return [] }
+        defer { vDSP_destroy_fftsetup(fftSetup) }
+
+        // Hann window (precomputed once).
+        var hann = [Float](repeating: 0, count: frameSize)
+        vDSP_hann_window(&hann, vDSP_Length(frameSize), Int32(vDSP_HANN_NORM))
+
+        let binHz = sampleRate / Float(frameSize) // ≈43.07 Hz
+        let lowBandMaxBin = max(1, Int(500.0 / binHz))         // <500Hz
+        let hiBandLoBin = Int(2000.0 / binHz)                  // 2kHz
+        let hiBandHiBin = min(halfN - 1, Int(4000.0 / binHz))  // 4kHz
+
+        // Per-frame magnitude spectrum -> flux + features.
+        var prevMag = [Float](repeating: 0, count: halfN)
+        var fluxes: [Float] = []
+        var centroids: [Float] = []
+        var lbrs: [Float] = []
+        var hbrs: [Float] = []
+        var frameTimesMs: [Double] = []
+
+        var windowed = [Float](repeating: 0, count: frameSize)
+        var realp = [Float](repeating: 0, count: halfN)
+        var imagp = [Float](repeating: 0, count: halfN)
+        var magnitudes = [Float](repeating: 0, count: halfN)
+
+        var idx = 0
+        // We compute UNSCALED magnitudes. Every feature we use is either a ratio
+        // (centroid, low/high-band ratio) or compared to a frame-local median
+        // (flux), so the constant vDSP_fft_zrip 2x scaling cancels and is omitted.
+        while idx + frameSize <= floatSamples.count {
+            autoreleasepool {
+                // Window the frame.
+                floatSamples.withUnsafeBufferPointer { src in
+                    vDSP_vmul(src.baseAddress! + idx, 1, hann, 1, &windowed, 1, vDSP_Length(frameSize))
+                }
+                // Pack real input into split-complex, run the real FFT, take mags.
+                realp.withUnsafeMutableBufferPointer { rp in
+                    imagp.withUnsafeMutableBufferPointer { ip in
+                        var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                        windowed.withUnsafeBufferPointer { wp in
+                            wp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: halfN) { cp in
+                                vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(halfN))
+                            }
+                        }
+                        vDSP_fft_zrip(fftSetup, &split, 1, log2n, FFTDirection(FFT_FORWARD))
+                        // Magnitude = sqrt(re^2 + im^2). NOTE: in the zrip packed
+                        // format realp[0]=DC and imagp[0]=Nyquist; zvabs would
+                        // fold the Nyquist into bin 0's magnitude. We overwrite
+                        // bin 0 with |DC| afterward so it's the true DC term.
+                        let dc = rp.baseAddress![0]
+                        magnitudes.withUnsafeMutableBufferPointer { mp in
+                            vDSP_zvabs(&split, 1, mp.baseAddress!, 1, vDSP_Length(halfN))
+                        }
+                        magnitudes[0] = abs(dc)
+                    }
+                }
+
+                // Positive spectral flux vs previous frame.
+                var flux: Float = 0
+                var total: Float = 0
+                var lowE: Float = 0
+                var hiE: Float = 0
+                var weighted: Float = 0
+                for k in 0..<halfN {
+                    let m = magnitudes[k]
+                    let d = m - prevMag[k]
+                    if d > 0 { flux += d }
+                    total += m
+                    weighted += m * (Float(k) * binHz)
+                    if k <= lowBandMaxBin { lowE += m }
+                    if k >= hiBandLoBin && k <= hiBandHiBin { hiE += m }
+                }
+                let centroid = total > 0 ? weighted / total : 0
+                let lbr = total > 0 ? lowE / total : 0
+                let hbr = total > 0 ? hiE / total : 0
+
+                fluxes.append(flux)
+                centroids.append(centroid)
+                lbrs.append(lbr)
+                hbrs.append(hbr)
+                frameTimesMs.append(Double(idx) / Double(sampleRate) * 1000.0)
+
+                // Save current magnitude as previous for next flux.
+                for k in 0..<halfN { prevMag[k] = magnitudes[k] }
+            }
+            idx += hop
+        }
+
+        guard fluxes.count > 5 else { return [] }
+
+        // Adaptive peak pick (Dixon): local max AND flux >= sliding-median + delta,
+        // AND >= onsetMinSpacing since last accepted onset.
+        let medFrames = max(3, Int(options.fluxMedianMs / (Double(hop) / Double(sampleRate) * 1000.0)))
+        var onsets: [AudioOnset] = []
+        var lastMs = -1e9
+        let n = fluxes.count
+        for j in 1..<(n - 1) {
+            let isLocalMax = fluxes[j] >= fluxes[j - 1] && fluxes[j] >= fluxes[j + 1]
+            guard isLocalMax else { continue }
+            let lo = max(0, j - medFrames)
+            let hi = min(n - 1, j + medFrames)
+            let slice = Array(fluxes[lo...hi]).sorted()
+            let median = slice[slice.count / 2]
+            let mean = slice.reduce(0, +) / Float(slice.count)
+            let threshold = median + options.fluxDeltaScale * mean
+            guard fluxes[j] > threshold && fluxes[j] > 0 else { continue }
+            let tMs = frameTimesMs[j]
+            guard tMs - lastMs >= options.onsetMinSpacingMs else { continue }
+            lastMs = tMs
+
+            // Wind/sharpness gate (critique #5): centroid above floor, low-band
+            // not dominant, some high-band (2-4kHz) energy.
+            let passed = centroids[j] >= options.centroidFloorHz
+                && lbrs[j] < options.lowBandRatioCeil
+                && hbrs[j] >= options.highBandFloor
+            onsets.append(AudioOnset(
+                timeMs: tMs, flux: fluxes[j], centroidHz: centroids[j],
+                lowBandRatio: lbrs[j], highBandRatio: hbrs[j], passedGate: passed))
+        }
+        return onsets
+    }
+
+    // ============================================================================
+    // MARK: - NEW: Pose timeline for live SVG overlay (read-only, orientation-correct)
+    // ============================================================================
+
+    /// Read-only payload for the live pose-overlay toggle. Reuses
+    /// extractPoseFramesOriented so the per-joint x/y are already in the upright
+    /// display space (critique #11: apply preferredTransform to coords, not only
+    /// width/height). Emits DISPLAY-oriented normalized coords (Vision bottom-
+    /// origin Y) plus display width/height so JS can contain-fit map them.
+    ///
+    /// JS contract:
+    ///   { width: Number, height: Number,
+    ///     frames: [ { timeMs: Number, confidence: Number,
+    ///                 joints: { leftWrist: {x,y,confidence}, rightWrist, leftElbow,
+    ///                           rightElbow, leftShoulder, rightShoulder, leftHip,
+    ///                           rightHip, nose } } ] }
+    /// Only joints present that frame are included (extractPoseFrames null-filters
+    /// confidence<=0.3). Falls back to {width:0,height:0,frames:[]} on failure.
+    private func extractPoseTimelinePayload(uri: String, promise: Promise) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            autoreleasepool {
+            do {
+                let fileURL = self.resolveFileURL(uri)
+                guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                    promise.resolve(["width": 0, "height": 0, "frames": []] as [String: Any])
+                    return
+                }
+                let asset = AVURLAsset(url: fileURL)
+                guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+                    promise.resolve(["width": 0, "height": 0, "frames": []] as [String: Any])
+                    return
+                }
+                // Display-oriented size (apply preferredTransform).
+                let natural = videoTrack.naturalSize
+                let displayRect = CGRect(origin: .zero, size: natural).applying(videoTrack.preferredTransform)
+                let displayW = abs(displayRect.width)
+                let displayH = abs(displayRect.height)
+
+                // Oriented pose frames — coords already upright/display-space.
+                let frames = try self.extractPoseFramesOriented(from: asset)
+
+                var framePayloads: [[String: Any]] = []
+                framePayloads.reserveCapacity(frames.count)
+                for f in frames {
+                    var joints: [String: Any] = [:]
+                    func add(_ name: String, _ p: CGPoint?) {
+                        guard let p = p else { return }
+                        joints[name] = ["x": Double(p.x), "y": Double(p.y), "confidence": 1.0]
+                    }
+                    add("leftWrist", f.leftWrist)
+                    add("rightWrist", f.rightWrist)
+                    add("leftElbow", f.leftElbow)
+                    add("rightElbow", f.rightElbow)
+                    add("leftShoulder", f.leftShoulder)
+                    add("rightShoulder", f.rightShoulder)
+                    add("leftHip", f.leftHip)
+                    add("rightHip", f.rightHip)
+                    add("nose", f.nose)
+                    framePayloads.append([
+                        "timeMs": f.timeMs,
+                        "confidence": Double(f.confidence),
+                        "joints": joints,
+                    ])
+                }
+
+                promise.resolve([
+                    "width": Double(displayW),
+                    "height": Double(displayH),
+                    "frames": framePayloads,
+                ] as [String: Any])
+            } catch {
+                promise.resolve(["width": 0, "height": 0, "frames": []] as [String: Any])
+            }
+            } // autoreleasepool
+        }
     }
 }

@@ -3,7 +3,7 @@ import { Platform, InteractionManager } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
-import type { ShotTypeClassification } from 'shot-detector';
+import type { ShotTypeClassification, DetectionStrategy } from 'shot-detector';
 import {
   saveLocalClip,
   updateClipEditorState,
@@ -13,21 +13,44 @@ import {
 import { detectAndTrim, deleteFile } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
+import { logDetection } from '@/lib/detectionLog';
 
-// Read user-configured pre/post roll from SQLite, falling back to config defaults.
-// Mirrors useEditorState.getTrimSettings so live record uses the same numbers as import.
+// Resolve the active trim window (pre/post roll). Mirrors
+// useEditorState.getTrimSettings so live record uses the same numbers as import.
+//
+// FIX #8 — full-swing window must win over a stale saved override.
+// The DEFAULT is now config.trim.windows.fullSwing (2500/1500, ~4s total),
+// NOT the legacy defaultPreRollMs/defaultPostRollMs (3000/2000). A saved
+// 'trim_settings' override is only honored when the user EXPLICITLY opted into
+// the new window (parsed.window === 'fullSwing'). Overrides written before this
+// change carry no `window` marker (or carry the old 3000/2000 numbers), so they
+// are intentionally ignored here — otherwise they would silently shadow the new
+// fullSwing window and day-zero clips would keep trimming to the old length.
 async function loadTrimSettings(): Promise<{ preRollMs: number; postRollMs: number }> {
-  let preRollMs = config.trim.defaultPreRollMs;
-  let postRollMs = config.trim.defaultPostRollMs;
+  let { preRollMs, postRollMs } = config.trim.windows.fullSwing;
   try {
     const saved = await getSetting('trim_settings');
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed.preRollMs) preRollMs = parsed.preRollMs;
-      if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+      // Only an explicit fullSwing-tagged override may replace the config window.
+      if (parsed.window === 'fullSwing') {
+        if (parsed.preRollMs) preRollMs = parsed.preRollMs;
+        if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+      }
     }
   } catch {}
   return { preRollMs, postRollMs };
+}
+
+// Resolve the configured detection strategy + options for the native dispatch.
+// Defaults come from config.detection; passed positionally to detectAndTrim so
+// the 6-arg native arity is always satisfied via the JS wrapper.
+function resolveDetection(
+  extraOptions?: Record<string, unknown>
+): { strategy: DetectionStrategy; optionsJson: string } {
+  const strategy = config.detection.strategy;
+  const options = { ...(config.detection.options ?? {}), ...(extraOptions ?? {}) };
+  return { strategy, optionsJson: JSON.stringify(options) };
 }
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -162,6 +185,47 @@ export function useCamera({
 
       const { roundId: rid, holeNumber: hole, shotNumber: shot } = paramsRef.current;
 
+      // Make the iOS audio session record-capable BEFORE recordAsync.
+      //
+      // PRIMARY FIX (native): a patch-package patch to expo-camera's
+      // CameraSessionManager.updateSessionAudioIsMuted() now asserts
+      // AVAudioSession .playAndRecord + setActive(true) on the camera's own
+      // sessionQueue IMMEDIATELY before it attaches the mic AVCaptureDeviceInput
+      // (the exact point where -10868 / kAudioUnitErr_FormatNotSupported fired
+      // because react-native-volume-manager held the shared session in the
+      // record-hostile .ambient category). That native assertion is the load-
+      // bearing fix and is correctly ordered against the capture audio unit —
+      // something this JS code could never guarantee on its own. See
+      // patches/expo-camera+17.0.10.patch.
+      //
+      // The block below is now only a defensive belt-and-suspenders for the
+      // mid-round re-record case: the CameraView mounts once with a constant
+      // mute={false}, so the native just-in-time assertion runs at mount (and on
+      // mediaServicesWereReset), NOT on every record. If the user visits the
+      // editor between shots, PreviewPlayer flips the shared session to
+      // .playback; coming back to record, we re-assert a record-capable session
+      // here via expo-av so output/category state is sane before recordAsync.
+      // We use expo-av (allowsRecordingIOS:true, MixWithOthers) — the mirror of
+      // PreviewPlayer's playback reclaim — rather than RNVM.setCategory, so we
+      // do NOT disturb RNVM's active session or its outputVolume KVO (the volume
+      // channel that the AB-Shutter3 clicker uses to STOP recording must stay
+      // live). This is intentionally NON-fatal: the native patch already
+      // guarantees correctness, so any failure here is swallowed.
+      try {
+        const ExpoAV = require('expo-av') as typeof import('expo-av');
+        await ExpoAV.Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
+          shouldDuckAndroid: false,
+          interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
+          playThroughEarpieceAndroid: false,
+        });
+      } catch (err) {
+        console.log('[useCamera] pre-record setAudioMode (non-fatal):', err);
+      }
+
       // Small delay to ensure camera is ready (avoids "error while recording" on iOS)
       await new Promise((r) => setTimeout(r, 200));
 
@@ -228,7 +292,19 @@ export function useCamera({
         InteractionManager.runAfterInteractions(() => {
           loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
           try {
-            const result = await detectAndTrim(finalUri, preRollMs, postRollMs);
+            // Forward the configured detection strategy + options. Live record
+            // processes one clip at a time with no inter-clip context ([]).
+            const { strategy, optionsJson } = resolveDetection();
+            const result = await detectAndTrim(
+              finalUri,
+              preRollMs,
+              postRollMs,
+              [],
+              strategy,
+              optionsJson
+            );
+            // A/B harness (additive, non-fatal): record a structured row.
+            void logDetection(clipId, result).catch(() => {});
             if (!clipId) return;
 
             if (result.found && result.trimmedUri) {
@@ -311,6 +387,23 @@ export function useCamera({
       isRecordingRef.current = false;
       setIsRecording(false);
       KeepAwake?.deactivateKeepAwake('recording');
+      // INTENTIONALLY do NOT restore the shared session to .ambient here.
+      //
+      // The mic AVCaptureDeviceInput stays attached to the AVCaptureSession
+      // between shots (mute is a constant false; the input is only removed when
+      // mute flips to true). If we flipped the shared session back to .ambient +
+      // setActive (which RNVM's setCategory('Ambient', true) does), a subsequent
+      // foreground / route-change / interruption could force the still-attached
+      // mic input to renegotiate against the record-hostile .ambient category and
+      // re-throw -10868 on the running session. Leaving the session in
+      // .playAndRecord (asserted natively at mount) is the safe steady state.
+      //
+      // RNVM's outputVolume KVO — the AB-Shutter3 clicker's volume channel —
+      // continues to fire under .playAndRecord, so the clicker still starts and
+      // stops recording. When the user navigates to the editor, PreviewPlayer
+      // explicitly reclaims a .playback session (expo-av), which is what makes
+      // reel previews audible; that reclaim works because we leave
+      // expo-camera's automaticallyConfiguresApplicationAudioSession = true.
     }
   }, [getLocation, onClipSaved, onShotClassified]);
 

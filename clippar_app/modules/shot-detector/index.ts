@@ -1,4 +1,17 @@
+import { config } from "../../constants/config";
+
 export type ShotTypeClassification = 'swing' | 'putt';
+
+/**
+ * Swing-detection strategy. Chosen at runtime via `config.detection.strategy`
+ * and forwarded to native, which dispatches accordingly. 'baseline' (and the
+ * native 'default' case) call the unchanged historical detector.
+ */
+export type DetectionStrategy =
+  | 'baseline'
+  | 'aboveShoulderGate'
+  | 'velocityPeak'
+  | 'audioFused';
 
 export type SwingDetectionResult = {
   found: boolean;
@@ -11,6 +24,61 @@ export type SwingDetectionResult = {
 
 export type DetectAndTrimResult = SwingDetectionResult & {
   trimmedUri: string | null;
+  // --- A/B harness keys (optional; absent on older native builds / tests) ---
+  /** Strategy native actually ran (echoes back the dispatched case). */
+  chosenStrategy?: string;
+  /** Number of candidate swing episodes the strategy considered. */
+  episodeCount?: number;
+  /** Pose frames extracted during detection. */
+  poseFrameCount?: number;
+  /** Whether the strategy's gate (e.g. above-shoulder) passed. */
+  gatePassed?: boolean;
+  /** Source video had an audio track at all. */
+  hadAudioTrack?: boolean;
+  /** A qualifying audio onset existed in the pose window (honest A/B denominator). */
+  audioUsable?: boolean;
+  /** An audio onset was actually snapped to. */
+  audioOnsetMatched?: boolean;
+  /** Any baseline transient or spectral-flux onset existed. */
+  hadAnyTransient?: boolean;
+};
+
+/**
+ * Per-frame pose timeline returned by `extractPoseTimeline`, used for the
+ * LIVE SVG pose-overlay toggle in the editor (never baked into exports).
+ *
+ * Coords are Vision-normalized 0..1 with Y=0 at the BOTTOM, already
+ * display-oriented (the asset's preferredTransform has been applied to x/y),
+ * so `width`/`height` are the display-oriented pixel dimensions. Joint keys
+ * are present only for frames where that joint was detected.
+ */
+export type PoseJoint = {
+  x: number;
+  y: number;
+  confidence: number;
+};
+
+export type PoseJointName =
+  | 'leftWrist'
+  | 'rightWrist'
+  | 'leftElbow'
+  | 'rightElbow'
+  | 'leftShoulder'
+  | 'rightShoulder'
+  | 'leftHip'
+  | 'rightHip'
+  | 'nose';
+
+export type PoseFrame = {
+  timeMs: number;
+  confidence: number;
+  joints: Partial<Record<PoseJointName, PoseJoint>>;
+};
+
+export type PoseTimeline = {
+  width: number;
+  height: number;
+  frames: PoseFrame[];
 };
 
 export type TrimResult = {
@@ -88,7 +156,8 @@ type ShotDetectorEvents = {
 type NativeModuleType = {
   detectSwing(videoUri: string): Promise<SwingDetectionResult>;
   trimVideo(videoUri: string, startMs: number, endMs: number): Promise<TrimResult>;
-  detectAndTrim(videoUri: string, preRollMs: number, postRollMs: number, recentShotTypes: string[]): Promise<DetectAndTrimResult>;
+  detectAndTrim(videoUri: string, preRollMs: number, postRollMs: number, recentShotTypes: string[], strategy: string, optionsJson: string): Promise<DetectAndTrimResult>;
+  extractPoseTimeline(videoUri: string): Promise<PoseTimeline>;
   stitchClips(clipUris: string[]): Promise<StitchResult>;
   composeReel(clips: ComposeClipInput[], scorecardJson: string, musicUri: string): Promise<ComposeReelResult>;
   clearTrimCache(): Promise<ClearTrimCacheResult>;
@@ -182,15 +251,25 @@ export async function trimVideo(
  * @param postRollMs - Milliseconds after impact to include (default 2000)
  * @param recentShotTypes - Last few classifications on this hole (inter-clip context
  *   for the 3-tier classifier). Pass [] if no context is available.
+ * @param strategy - Detection strategy to dispatch natively. Defaults to
+ *   `config.detection.strategy` ('baseline' ships day-zero, byte-identical).
+ *   Existing call sites omit this and inherit the config default.
+ * @param optionsJson - JSON-encoded strategy tuning knobs (DetectionOptions).
+ *   Defaults to `JSON.stringify(config.detection.options)`.
  *
  * Returns detection result + trimmedUri (null if no swing found or trim failed).
  * Falls back gracefully when the native module is unavailable.
+ *
+ * NOTE: native `detectAndTrim` is a 6-arg AsyncFunction; Expo Modules matches
+ * arity exactly, so this wrapper ALWAYS forwards all six positional args.
  */
 export async function detectAndTrim(
   videoUri: string,
   preRollMs: number = 3000,
   postRollMs: number = 2000,
-  recentShotTypes: ShotTypeClassification[] = []
+  recentShotTypes: ShotTypeClassification[] = [],
+  strategy: DetectionStrategy = config.detection.strategy,
+  optionsJson: string = JSON.stringify(config.detection.options ?? {})
 ): Promise<DetectAndTrimResult> {
   if (!nativeModule) {
     console.warn(
@@ -207,13 +286,44 @@ export async function detectAndTrim(
     };
   }
 
-  const result = await nativeModule.detectAndTrim(videoUri, preRollMs, postRollMs, recentShotTypes);
+  const result = await nativeModule.detectAndTrim(
+    videoUri,
+    preRollMs,
+    postRollMs,
+    recentShotTypes,
+    strategy,
+    optionsJson
+  );
   return {
     ...result,
     // NSNull from Swift becomes null in JS, but just be safe
     trimmedUri: result.trimmedUri ?? null,
     shotType: (result.shotType as ShotTypeClassification) ?? 'swing',
   };
+}
+
+/**
+ * Extract a per-frame pose timeline for the LIVE SVG pose-overlay toggle in
+ * the editor. This is render-time only — pose data is NEVER baked into an
+ * exported clip.
+ *
+ * Coords are Vision-normalized 0..1 (Y=0 at BOTTOM), already display-oriented
+ * (preferredTransform applied), matching the display-oriented width/height.
+ *
+ * Falls back to an empty timeline when the native function is unavailable
+ * (Expo Go, or a native build predating this function).
+ */
+export async function extractPoseTimeline(
+  videoUri: string
+): Promise<PoseTimeline> {
+  if (!nativeModule || typeof nativeModule.extractPoseTimeline !== "function") {
+    console.warn(
+      "[ShotDetector] extractPoseTimeline not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return { width: 0, height: 0, frames: [] };
+  }
+
+  return nativeModule.extractPoseTimeline(videoUri);
 }
 
 /**

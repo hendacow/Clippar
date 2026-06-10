@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getClipUrl } from '@/lib/r2';
-import { detectAndTrim, deleteFile, getMemoryStats, type ShotTypeClassification } from 'shot-detector';
+import { detectAndTrim, deleteFile, getMemoryStats, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
+import { logDetection } from '@/lib/detectionLog';
 import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
@@ -491,24 +492,59 @@ export function useEditorState(roundId: string | undefined) {
     };
   }, []);
 
-  /** Load user's trim settings (pre/post roll) from SQLite, falling back to config defaults. */
+  /**
+   * Resolve the active trim window (pre/post roll) for the import pipeline.
+   *
+   * FIX #8 — full-swing window must win over a stale saved override.
+   * The DEFAULT is now config.trim.windows.fullSwing (2500/1500, ~4s total),
+   * NOT the legacy defaultPreRollMs/defaultPostRollMs (3000/2000). A saved
+   * 'trim_settings' override is only honored when the user EXPLICITLY opted into
+   * the new window (parsed.window === 'fullSwing'). Overrides written before this
+   * change carry no `window` marker (or carry the old 3000/2000 numbers), so they
+   * are intentionally ignored here — otherwise they would silently shadow the new
+   * fullSwing window. Kept identical to useCamera.loadTrimSettings so import and
+   * live record trim to the same length.
+   */
   const getTrimSettings = useCallback(async (): Promise<{
     preRollMs: number;
     postRollMs: number;
   }> => {
-    let preRollMs = config.trim.defaultPreRollMs;
-    let postRollMs = config.trim.defaultPostRollMs;
+    let { preRollMs, postRollMs } = config.trim.windows.fullSwing;
     if (storage) {
       try {
         const saved = await storage.getSetting('trim_settings');
         if (saved) {
           const parsed = JSON.parse(saved);
-          if (parsed.preRollMs) preRollMs = parsed.preRollMs;
-          if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+          // Only an explicit fullSwing-tagged override may replace the config window.
+          if (parsed.window === 'fullSwing') {
+            if (parsed.preRollMs) preRollMs = parsed.preRollMs;
+            if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+          }
         }
       } catch {}
     }
     return { preRollMs, postRollMs };
+  }, []);
+
+  /**
+   * Resolve the configured detection strategy + options-JSON for the import
+   * pipeline's detectAndTrim calls.
+   *
+   * FIX #4 — keep the velocityPeak dense pass enabled on the import path. Imports
+   * are not latency-critical (background batch in the editor), so when the active
+   * strategy is 'velocityPeak' we force `refine: true` in the forwarded options to
+   * request the native dense second pass. Other strategies pass options untouched.
+   */
+  const resolveDetection = useCallback((): {
+    strategy: DetectionStrategy;
+    optionsJson: string;
+  } => {
+    const strategy = config.detection.strategy;
+    const options: Record<string, unknown> = { ...(config.detection.options ?? {}) };
+    if (strategy === 'velocityPeak') {
+      options.refine = true;
+    }
+    return { strategy, optionsJson: JSON.stringify(options) };
   }, []);
 
   /** Helper: update a single clip in React state by ID */
@@ -544,9 +580,19 @@ export function useEditorState(roundId: string | undefined) {
 
       const originalSourceUri = clip.sourceUri;
       const { preRollMs, postRollMs } = await getTrimSettings();
+      const { strategy, optionsJson } = resolveDetection();
 
       try {
-        const result = await detectAndTrim(originalSourceUri, preRollMs, postRollMs);
+        const result = await detectAndTrim(
+          originalSourceUri,
+          preRollMs,
+          postRollMs,
+          [],
+          strategy,
+          optionsJson
+        );
+        // A/B harness (additive, non-fatal): record a structured row.
+        void logDetection(clipId, result).catch(() => {});
 
         const updatedClip: EditorClip = {
           ...clip,
@@ -625,7 +671,7 @@ export function useEditorState(roundId: string | undefined) {
         return null;
       }
     },
-    [state.holes, getTrimSettings, updateClipInState]
+    [state.holes, getTrimSettings, resolveDetection, updateClipInState]
   );
 
   /**
@@ -637,6 +683,10 @@ export function useEditorState(roundId: string | undefined) {
     trimCancelledRef.current = false;
 
     const { preRollMs, postRollMs } = await getTrimSettings();
+    // Configured strategy + options for the whole batch (fix #4: velocityPeak
+    // dense pass via options.refine is enabled on this import path inside
+    // resolveDetection).
+    const { strategy, optionsJson } = resolveDetection();
 
     // Collect all clips that need trimming across all holes
     const untrimmedClips: EditorClip[] = [];
@@ -690,8 +740,12 @@ export function useEditorState(roundId: string | undefined) {
           clip.sourceUri!,
           preRollMs,
           postRollMs,
-          recentForHole
+          recentForHole,
+          strategy,
+          optionsJson
         );
+        // A/B harness (additive, non-fatal): record a structured row.
+        void logDetection(clip.id, result).catch(() => {});
 
         // Record this clip's classification for future siblings on the same hole (keep last 3).
         if (result.found) {
@@ -828,7 +882,7 @@ export function useEditorState(roundId: string | undefined) {
     }
 
     console.log('[useEditorState] All untrimmed clips processed');
-  }, [state.holes, getTrimSettings, updateClipInState]);
+  }, [state.holes, getTrimSettings, resolveDetection, updateClipInState]);
 
   // Get all clips in playback order: intro → hole clips in order → outro
   // Excluded clips are skipped

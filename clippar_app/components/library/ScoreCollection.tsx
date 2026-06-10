@@ -345,6 +345,7 @@ function VideoPlayerModal({
   enableTrim,
   onTrimSave,
   onDismiss,
+  enablePoseOverlay,
 }: {
   visible: boolean;
   clips: PreviewClip[];
@@ -352,6 +353,7 @@ function VideoPlayerModal({
   enableTrim?: boolean;
   onTrimSave?: (clipIndex: number, trimStartMs: number, trimEndMs: number) => void;
   onDismiss: () => void;
+  enablePoseOverlay?: boolean;
 }) {
   return (
     <Modal
@@ -367,6 +369,7 @@ function VideoPlayerModal({
           roundGroups={roundGroups}
           enableTrim={enableTrim}
           onTrimSave={onTrimSave}
+          enablePoseOverlay={enablePoseOverlay}
         />
       </View>
     </Modal>
@@ -753,6 +756,7 @@ export function ScoreCollection() {
         enableTrim={isNative}
         onTrimSave={handleTrimSave}
         onDismiss={handleDismiss}
+        enablePoseOverlay={isNative}
       />
     </View>
   );
