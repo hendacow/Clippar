@@ -58,10 +58,11 @@ export const config = {
     options: {} as Record<string, unknown>,
   },
   tracer: {
-    // Master kill switch — day-zero false. Every tracer code path (capture,
-    // detect, geometry, render, playback switching) is gated on this so the
-    // app is byte-identical with it off. Flip true on clippar-dev to test.
-    enabled: false as boolean,
+    // Master kill switch. Every tracer code path (capture, detect, geometry,
+    // render, playback switching) is gated on this so the app is byte-identical
+    // with it off. ENABLED for clippar-dev field testing — flip back to false
+    // to instantly revert to stock behavior (originals are never modified).
+    enabled: true as boolean,
     // Sub-gate within `enabled` for compass-heading capture at record start.
     captureHeading: true as boolean,
     // ── Ball-launch detection knobs (forwarded to native detectBallLaunch
