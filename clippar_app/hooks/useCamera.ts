@@ -10,7 +10,7 @@ import {
   markClipTrimmed,
   getSetting,
 } from '@/lib/storage';
-import { detectAndTrim, deleteFile } from 'shot-detector';
+import { detectAndTrim, deleteFile, getDevicePitchDeg } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { logDetection } from '@/lib/detectionLog';
@@ -39,6 +39,13 @@ async function loadTrimSettings(): Promise<{ preRollMs: number; postRollMs: numb
       }
     }
   } catch {}
+  // Tracer hook (no-op at the default 0): a longer post-impact window keeps
+  // more ball flight in the trimmed clip for the arc draw-on. Gated on
+  // config.tracer.enabled so day-zero behavior is byte-identical. Mirrored in
+  // useEditorState.getTrimSettings so import re-trims match live record.
+  if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
+    postRollMs += config.tracer.extraPostRollMs;
+  }
   return { preRollMs, postRollMs };
 }
 
@@ -64,7 +71,23 @@ interface UseCameraParams {
   roundId: string;
   holeNumber: number;
   shotNumber: number;
-  getLocation?: () => Promise<{ latitude: number; longitude: number } | null>;
+  getLocation?: () => Promise<{
+    latitude: number;
+    longitude: number;
+    // Horizontal accuracy radius (m). Additive — useLocation now reports it;
+    // the tracer pipeline gates landing-spot pairing on it (gps_accuracy_m).
+    accuracy?: number | null;
+  } | null>;
+  /**
+   * Tracer capture: compass azimuth of the camera optical axis, sampled at
+   * record start (useLocation.getCurrentHeading — non-prompting per F13).
+   * Only fired when config.tracer.enabled && config.tracer.captureHeading.
+   */
+  getHeading?: () => Promise<{
+    headingDeg: number;
+    isTrue: boolean;
+    calibration: number;
+  } | null>;
   onClipSaved?: (clip: ClipMetadata) => void;
   onShotClassified?: (shotType: ShotTypeClassification) => void;
   /**
@@ -84,6 +107,7 @@ export function useCamera({
   holeNumber,
   shotNumber,
   getLocation,
+  getHeading,
   onClipSaved,
   onShotClassified,
   practice = false,
@@ -185,6 +209,27 @@ export function useCamera({
 
       const { roundId: rid, holeNumber: hole, shotNumber: shot } = paramsRef.current;
 
+      // Tracer capture (F2/F13): fire compass-heading + device-pitch sampling
+      // WITHOUT awaiting — getHeadingAsync needs ~0.5-1s of compass settle and
+      // CoreMotion needs a sample window, both of which overlap the multi-
+      // second recording instead of delaying it. The local consts are captured
+      // by this same closure, which awaits them (with a null timeout) at the
+      // save block after recordAsync resolves — no ref needed. Gated so
+      // tracer.enabled=false never touches the compass or CoreMotion.
+      const captureTracerPose =
+        config.tracer.enabled && config.tracer.captureHeading;
+      const headingPromise: Promise<{
+        headingDeg: number;
+        isTrue: boolean;
+        calibration: number;
+      } | null> =
+        captureTracerPose && getHeading
+          ? getHeading().catch(() => null)
+          : Promise.resolve(null);
+      const pitchPromise: Promise<number | null> = captureTracerPose
+        ? getDevicePitchDeg().catch(() => null)
+        : Promise.resolve(null);
+
       // Make the iOS audio session record-capable BEFORE recordAsync.
       //
       // PRIMARY FIX (native): a patch-package patch to expo-camera's
@@ -253,7 +298,11 @@ export function useCamera({
         const durationSeconds = (Date.now() - recordingStartTime.current) / 1000;
 
         // Get GPS if available
-        let gps: { latitude: number; longitude: number } | null = null;
+        let gps: {
+          latitude: number;
+          longitude: number;
+          accuracy?: number | null;
+        } | null = null;
         if (getLocation) {
           try {
             gps = await getLocation();
@@ -261,6 +310,19 @@ export function useCamera({
             // GPS optional
           }
         }
+
+        // Tracer capture: the heading/pitch promises were fired at record
+        // start, so they're almost always settled by now. Bound the wait at
+        // 1500ms each — a compass that never settles becomes a null fix, not
+        // a hung save. Nulls are fine: the tracer pipeline gates on them.
+        const heading = await Promise.race([
+          headingPromise,
+          new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+        ]);
+        const pitchDeg = await Promise.race([
+          pitchPromise,
+          new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+        ]);
 
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
@@ -274,6 +336,11 @@ export function useCamera({
           original_file_uri: finalUri,
           gps_latitude: gps?.latitude,
           gps_longitude: gps?.longitude,
+          gps_accuracy_m: gps?.accuracy ?? undefined,
+          camera_heading_deg: heading?.headingDeg,
+          camera_heading_is_true: heading ? (heading.isTrue ? 1 : 0) : undefined,
+          camera_heading_calibration: heading?.calibration,
+          camera_pitch_deg: pitchDeg ?? undefined,
           duration_seconds: durationSeconds,
           auto_trimmed: 0,
           needs_trim: 1,
@@ -405,7 +472,7 @@ export function useCamera({
       // reel previews audible; that reclaim works because we leave
       // expo-camera's automaticallyConfiguresApplicationAudioSession = true.
     }
-  }, [getLocation, onClipSaved, onShotClassified]);
+  }, [getLocation, getHeading, onClipSaved, onShotClassified]);
 
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;

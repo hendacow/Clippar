@@ -18,6 +18,7 @@ import {
   Settings2,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -57,7 +58,7 @@ export default function RecordScreen() {
   const ble = useBLE();
   const shutter = useShutter();
   const round = useRound();
-  const { getCurrentLocation } = useLocation();
+  const { getCurrentLocation, getCurrentHeading } = useLocation();
   const [courseName, setCourseName] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | undefined>();
   const [courseHoles, setCourseHoles] = useState<HoleData[] | undefined>();
@@ -128,7 +129,17 @@ export default function RecordScreen() {
     roundId: roundState?.roundId ?? '',
     holeNumber: roundState?.currentHole ?? 1,
     shotNumber: roundState?.currentShot ?? 1,
-    getLocation: getCurrentLocation,
+    // Tracer capture: tight GPS (BestForNavigation) only when the tracer is
+    // enabled — landing-spot pairing gates on the accuracy radius. Disabled
+    // (day zero) this closure is byte-identical to the old Accuracy.High call.
+    getLocation: useCallback(
+      () => getCurrentLocation({ highAccuracy: config.tracer.enabled }),
+      [getCurrentLocation]
+    ),
+    // Compass azimuth at record start (non-prompting; null unless location
+    // permission already granted). useCamera only fires it when
+    // config.tracer.enabled && config.tracer.captureHeading.
+    getHeading: getCurrentHeading,
     // Tutorial = live practice run: record so the user sees it, but discard
     // the clip. resetToStart wipes any hole/penalty changes when it ends.
     practice: tutorialActive,

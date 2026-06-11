@@ -184,6 +184,36 @@ function ClipCard({
             </View>
           )}
 
+          {/* Spinner overlay while the shot-tracer arc renders (config.tracer
+              — tracerStatus is only ever set when the flag is on). Same
+              treatment as the auto-trim "Waiting..." overlay above. */}
+          {!clip.needsTrim && clip.tracerStatus === 'pending' && (
+            <View
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                right: 0,
+                bottom: 0,
+                backgroundColor: 'rgba(0,0,0,0.35)',
+                justifyContent: 'center',
+                alignItems: 'center',
+              }}
+            >
+              <ActivityIndicator size="small" color="#fff" />
+              <Text
+                style={{
+                  color: 'rgba(255,255,255,0.85)',
+                  fontSize: 10,
+                  fontWeight: '600',
+                  marginTop: 4,
+                }}
+              >
+                Tracing...
+              </Text>
+            </View>
+          )}
+
           {/* Duration badge (top-left, like GolfCam) */}
           {duration ? (
             <View
@@ -312,7 +342,11 @@ function HoleSection({
   selected: boolean;
   onToggleSelect: () => void;
 }) {
-  const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+  // F17: clips mid-tracer-render are excluded the same way untrimmed clips
+  // are — their arc would be missing from the stitched output.
+  const usableClips = hole.clips.filter(
+    (c) => !c.isExcluded && c.sourceUri && !c.needsTrim && c.tracerStatus !== 'pending'
+  );
   const canStitchHole = usableClips.length > 0;
   const isBusy = busyHoleNumber === hole.holeNumber;
   return (
@@ -548,6 +582,14 @@ export default function EditorScreen() {
   const isTrimming = untrimmedCount > 0;
   const hasUntrimmedClips = isTrimming;
 
+  // F17: while any tracer render is pending, Export / per-hole save+share /
+  // multi-select must wait — composeReel and the tracer batch would
+  // otherwise run concurrent AVAssetExportSessions, and the output would be
+  // missing arcs about to land. tracerStatus is only populated when
+  // config.tracer.enabled, so this is 0 (and all gates inert) day-zero.
+  const tracerPendingCount = allClips.filter((c) => c.tracerStatus === 'pending').length;
+  const isTracing = tracerPendingCount > 0;
+
   // Start processAllUntrimmed once when loading finishes (guarded by ref)
   const trimStartedRef = useRef(false);
   useEffect(() => {
@@ -557,6 +599,18 @@ export default function EditorScreen() {
     trimStartedRef.current = true;
     editor.processAllUntrimmed();
   }, [state.loading]);
+
+  // Start the shot-tracer batch once auto-trim has fully settled (tracers
+  // pair clips by GPS and render onto the TRIMMED files, so they must run
+  // last). Skipped in review mode — mid-round battery burn for arcs the
+  // user isn't finalizing yet.
+  const tracerStartedRef = useRef(false);
+  useEffect(() => {
+    if (!config.tracer.enabled || state.loading || tracerStartedRef.current) return;
+    if (untrimmedCount > 0 || isReview) return;
+    tracerStartedRef.current = true;
+    editor.processAllTracers();
+  }, [state.loading, untrimmedCount]);
   const [musicPickerVisible, setMusicPickerVisible] = useState(false);
   const [selectedMusic, setSelectedMusic] = useState<Pick<MusicTrack, 'id' | 'title' | 'file_url'> | null>(null);
 
@@ -622,7 +676,17 @@ export default function EditorScreen() {
   // (non-excluded, non-pending) clips, saves the result to Photos.
   const [busyHoleNumber, setBusyHoleNumber] = useState<number | null>(null);
   const handleHoleSave = useCallback(async (hole: EditorHoleSection) => {
-    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    // F17: wait for tracer renders — mirrors the needsTrim gating below.
+    if (isTracing) {
+      Alert.alert(
+        'Tracers Rendering',
+        'Shot tracers are still being added to your clips. Try again in a moment.'
+      );
+      return;
+    }
+    const usableClips = hole.clips.filter(
+      (c) => !c.isExcluded && c.sourceUri && !c.needsTrim && c.tracerStatus !== 'pending'
+    );
     if (usableClips.length === 0) return;
     setBusyHoleNumber(hole.holeNumber);
     try {
@@ -638,11 +702,21 @@ export default function EditorScreen() {
     } finally {
       setBusyHoleNumber(null);
     }
-  }, []);
+  }, [isTracing]);
 
   // Per-hole share — stitches and opens the iOS share sheet.
   const handleHoleShare = useCallback(async (hole: EditorHoleSection) => {
-    const usableClips = hole.clips.filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim);
+    // F17: wait for tracer renders — mirrors the needsTrim gating below.
+    if (isTracing) {
+      Alert.alert(
+        'Tracers Rendering',
+        'Shot tracers are still being added to your clips. Try again in a moment.'
+      );
+      return;
+    }
+    const usableClips = hole.clips.filter(
+      (c) => !c.isExcluded && c.sourceUri && !c.needsTrim && c.tracerStatus !== 'pending'
+    );
     if (usableClips.length === 0) return;
     setBusyHoleNumber(hole.holeNumber);
     try {
@@ -654,7 +728,7 @@ export default function EditorScreen() {
     } finally {
       setBusyHoleNumber(null);
     }
-  }, [state.courseName]);
+  }, [state.courseName, isTracing]);
 
   // ---- Multi-hole selection → custom highlight reel ----
   // "Select" mode lets the user tick a subset of holes (e.g. 3, 6, 14),
@@ -688,13 +762,21 @@ export default function EditorScreen() {
       const hole = state.holes.find((h) => h.holeNumber === hn);
       if (!hole) continue;
       hole.clips
-        .filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim)
+        .filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim && c.tracerStatus !== 'pending')
         .forEach((c) => uris.push(c.sourceUri!));
     }
     return uris;
   }, [selectedHoles, state.holes]);
 
   const handleSaveSelected = useCallback(async () => {
+    // F17: wait for tracer renders before building a multi-hole highlight.
+    if (isTracing) {
+      Alert.alert(
+        'Tracers Rendering',
+        'Shot tracers are still being added to your clips. Try again in a moment.'
+      );
+      return;
+    }
     const uris = collectSelectedUris();
     if (uris.length === 0) {
       Alert.alert('No clips ready', 'The selected holes have no finished clips to include yet.');
@@ -715,9 +797,17 @@ export default function EditorScreen() {
     } finally {
       setSelectionBusy(false);
     }
-  }, [collectSelectedUris, selectedHoles.length, exitSelectMode]);
+  }, [collectSelectedUris, selectedHoles.length, exitSelectMode, isTracing]);
 
   const handleShareSelected = useCallback(async () => {
+    // F17: wait for tracer renders before building a multi-hole highlight.
+    if (isTracing) {
+      Alert.alert(
+        'Tracers Rendering',
+        'Shot tracers are still being added to your clips. Try again in a moment.'
+      );
+      return;
+    }
     const uris = collectSelectedUris();
     if (uris.length === 0) {
       Alert.alert('No clips ready', 'The selected holes have no finished clips to include yet.');
@@ -735,7 +825,7 @@ export default function EditorScreen() {
     } finally {
       setSelectionBusy(false);
     }
-  }, [collectSelectedUris, selectedHoles, state.courseName]);
+  }, [collectSelectedUris, selectedHoles, state.courseName, isTracing]);
 
   const handlePreviewAll = useCallback(() => {
     if (hasUntrimmedClips) {
@@ -760,6 +850,16 @@ export default function EditorScreen() {
       );
       return;
     }
+    // F17: composeReel must not run while the tracer batch holds an
+    // AVAssetExportSession of its own (and the reel would miss arcs that
+    // are about to finish rendering).
+    if (isTracing) {
+      Alert.alert(
+        'Tracers Rendering',
+        'Shot tracers are still being added to your clips. Export will be ready in a moment.'
+      );
+      return;
+    }
     const allClips = editor.getAllClipsInOrder();
     if (allClips.length === 0) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
@@ -770,7 +870,7 @@ export default function EditorScreen() {
     }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setExportModalVisible(true);
-  }, [editor, hasUntrimmedClips]);
+  }, [editor, hasUntrimmedClips, isTracing]);
 
   // Auto-open the export modal when arriving with `?recompose=1` (the
   // round detail page's "Reel out of date" banner deep-links here when
@@ -780,11 +880,11 @@ export default function EditorScreen() {
   useEffect(() => {
     if (recompose !== '1') return;
     if (recomposeAutoTriggeredRef.current) return;
-    if (state.loading || hasUntrimmedClips) return;
+    if (state.loading || hasUntrimmedClips || isTracing) return;
     if (totalClips === 0) return;
     recomposeAutoTriggeredRef.current = true;
     setExportModalVisible(true);
-  }, [recompose, state.loading, hasUntrimmedClips, totalClips]);
+  }, [recompose, state.loading, hasUntrimmedClips, isTracing, totalClips]);
 
   const handleExportConfirm = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
@@ -1300,9 +1400,9 @@ export default function EditorScreen() {
                 backgroundColor: theme.colors.surfaceElevated,
                 borderWidth: 1,
                 borderColor: theme.colors.surfaceBorder,
-                opacity: hasUntrimmedClips || totalClips === 0 ? 0.4 : 1,
+                opacity: hasUntrimmedClips || isTracing || totalClips === 0 ? 0.4 : 1,
               }}
-              disabled={hasUntrimmedClips || totalClips === 0}
+              disabled={hasUntrimmedClips || isTracing || totalClips === 0}
             >
               <ListChecks size={13} color={theme.colors.textPrimary} />
               <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
@@ -1346,7 +1446,7 @@ export default function EditorScreen() {
                   paddingVertical: 8,
                   borderRadius: 8,
                   backgroundColor: '#000',
-                  opacity: hasUntrimmedClips ? 0.4 : 1,
+                  opacity: hasUntrimmedClips || isTracing ? 0.4 : 1,
                 }}
               >
                 <Upload size={13} color="#fff" />
@@ -1376,6 +1476,29 @@ export default function EditorScreen() {
           <ActivityIndicator size="small" color={theme.colors.primary} />
           <Text style={{ color: theme.colors.primary, fontSize: 13, fontWeight: '600', flex: 1 }}>
             Auto-trimming clips... {allClips.length - untrimmedCount} of {allClips.length}
+          </Text>
+        </View>
+      )}
+
+      {/* ---- SHOT-TRACER PROGRESS BANNER (config.tracer) ---- */}
+      {/* Mirrors the auto-trim banner so the user knows why Export / Save /
+          Share are momentarily disabled (F17). */}
+      {!isTrimming && isTracing && (
+        <View
+          style={{
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 8,
+            paddingHorizontal: 16,
+            paddingVertical: 10,
+            backgroundColor: 'rgba(76, 175, 80, 0.1)',
+            borderBottomWidth: 1,
+            borderBottomColor: 'rgba(76, 175, 80, 0.2)',
+          }}
+        >
+          <ActivityIndicator size="small" color={theme.colors.primary} />
+          <Text style={{ color: theme.colors.primary, fontSize: 13, fontWeight: '600', flex: 1 }}>
+            Adding shot tracers...
           </Text>
         </View>
       )}

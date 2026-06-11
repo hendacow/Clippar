@@ -21,7 +21,7 @@ private enum SwingState {
 }
 
 // MARK: - Pose Tracking Data
-private struct PoseFrame {
+internal struct PoseFrame {
     let frameIndex: Int
     let timeMs: Double
     let leftWrist: CGPoint?
@@ -177,6 +177,32 @@ public class ShotDetectorModule: Module {
                     promise.resolve(["deleted": false, "error": error.localizedDescription])
                 }
             }
+        }
+
+        // ---- GPS Shot Tracer (config.tracer.enabled) ----
+        // Implementations live in ShotTracer.swift (extension ShotDetectorModule).
+        // Registered always; never invoked while the JS kill switch is off.
+        // ARITY: Expo Modules matches AsyncFunction arity exactly — the JS
+        // wrappers must always pass full positional args (modules/shot-detector/index.ts).
+
+        // Ball-launch evidence around a known impact time (Vision trajectories).
+        AsyncFunction("detectBallLaunch") { (videoUri: String, impactTimeMs: Double, optionsJson: String, promise: Promise) in
+            self.detectBallLaunchImpl(videoUri: videoUri, impactTimeMs: impactTimeMs, optionsJson: optionsJson, promise: promise)
+        }
+
+        // Burn a synthesized tracer arc onto a clip -> NEW tracer_<UUID>.mp4 (original untouched).
+        AsyncFunction("renderTracerOnClip") { (videoUri: String, specJson: String, promise: Promise) in
+            self.renderTracerOnClipImpl(videoUri: videoUri, specJson: specJson, promise: promise)
+        }
+
+        // Back-wide-camera horizontal FOV of the 1920x1080 format (landscape long axis).
+        AsyncFunction("getCameraFovDeg") { (promise: Promise) in
+            self.getCameraFovDegImpl(promise: promise)
+        }
+
+        // One-shot CoreMotion pitch of the camera optical axis (deg, positive = tilted down).
+        AsyncFunction("getDevicePitchDeg") { (promise: Promise) in
+            self.getDevicePitchDegImpl(promise: promise)
         }
     }
 
@@ -502,7 +528,7 @@ public class ShotDetectorModule: Module {
 
     // MARK: - File URL Resolution
 
-    private func resolveFileURL(_ uri: String) -> URL {
+    internal func resolveFileURL(_ uri: String) -> URL {
         if uri.hasPrefix("file://") {
             return URL(string: uri)!
         }
@@ -1588,7 +1614,7 @@ public class ShotDetectorModule: Module {
         let transform: CGAffineTransform
     }
 
-    private func computeFillTransform(
+    internal func computeFillTransform(
         naturalSize: CGSize,
         preferredTransform: CGAffineTransform,
         renderSize: CGSize
@@ -2622,7 +2648,7 @@ public class ShotDetectorModule: Module {
     /// re-extracts pose with the CORRECT CGImagePropertyOrientation derived from
     /// the track preferredTransform, in a buffer sized to the display aspect so
     /// the vertical axis is the true vertical. It does NOT modify extractPoseFrames.
-    private func extractPoseFramesOriented(from asset: AVURLAsset) throws -> [PoseFrame] {
+    internal func extractPoseFramesOriented(from asset: AVURLAsset) throws -> [PoseFrame] {
         guard let videoTrack = asset.tracks(withMediaType: .video).first else {
             throw NSError(domain: "ShotDetector", code: 1, userInfo: [NSLocalizedDescriptionKey: "No video track found"])
         }
@@ -2718,7 +2744,7 @@ public class ShotDetectorModule: Module {
     /// Map a track preferredTransform to the CGImagePropertyOrientation that
     /// makes the decoded buffer upright for Vision. Mirrors the standard
     /// AVFoundation rotation cases (0/90/180/270).
-    private func cgOrientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
+    internal func cgOrientation(for t: CGAffineTransform) -> CGImagePropertyOrientation {
         if t.a == 1 && t.b == 0 && t.c == 0 && t.d == 1 { return .up }            // 0
         if t.a == 0 && t.b == 1 && t.c == -1 && t.d == 0 { return .right }        // 90 CW
         if t.a == -1 && t.b == 0 && t.c == 0 && t.d == -1 { return .down }        // 180

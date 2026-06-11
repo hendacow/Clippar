@@ -2,7 +2,8 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getClipUrl } from '@/lib/r2';
-import { detectAndTrim, deleteFile, getMemoryStats, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
+import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
+import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
 import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
@@ -195,12 +196,22 @@ export function useEditorState(roundId: string | undefined) {
         // The trimmer uses originalUri for the timeline and these offsets
         // mark where the handles should be positioned.
 
+        // Tracer fan-out: sourceUri is the single URI everything consumes
+        // (preview playback, thumbnails, per-hole save/share, multi-select
+        // reels, full composeReel), so swapping it here covers all of them.
+        // The tracer file is a same-duration re-encode of the trimmed file,
+        // which keeps isPreTrimmed/full-range semantics valid. F14: a 'done'
+        // row whose cache file was evicted is downgraded to 'stale' (and
+        // sourceUri restored) by processAllTracers' existence guard.
+        const tracerReady =
+          config.tracer.enabled && c.tracer_status === 'done' && !!c.tracer_file_uri;
+
         return {
           id: String(c.id),
           type: 'shot' as const,
           holeNumber: c.hole_number,
           shotNumber: c.shot_number,
-          sourceUri: c.file_uri,
+          sourceUri: tracerReady ? c.tracer_file_uri : c.file_uri,
           storagePath: c.uploaded
             ? `${roundId}/hole${c.hole_number}_shot${c.shot_number}_${c.id}.mp4`
             : null,
@@ -213,6 +224,10 @@ export function useEditorState(roundId: string | undefined) {
           needsTrim: c.needs_trim === 1 && c.auto_trimmed !== 1,
           autoTrimStartMs: c.auto_trim_start_ms ?? undefined,
           autoTrimEndMs: c.auto_trim_end_ms ?? undefined,
+          // Populated only when the feature flag is on — Supabase-loaded
+          // clips never have these and consumers treat absence as "no tracer".
+          tracerUri: config.tracer.enabled ? c.tracer_file_uri ?? undefined : undefined,
+          tracerStatus: config.tracer.enabled ? c.tracer_status ?? undefined : undefined,
         };
       });
 
@@ -484,11 +499,14 @@ export function useEditorState(roundId: string | undefined) {
 
   // Cancellation flag — set to true when the editor unmounts to abort background processing
   const trimCancelledRef = useRef(false);
+  // Same pattern for the shot-tracer batch (processAllTracers).
+  const tracerCancelledRef = useRef(false);
 
-  // Clean up on unmount: cancel any in-progress trim processing
+  // Clean up on unmount: cancel any in-progress trim/tracer processing
   useEffect(() => {
     return () => {
       trimCancelledRef.current = true;
+      tracerCancelledRef.current = true;
     };
   }, []);
 
@@ -522,6 +540,13 @@ export function useEditorState(roundId: string | undefined) {
           }
         }
       } catch {}
+    }
+    // Tracer hook (no-op at the default 0): a longer post-impact window keeps
+    // more ball flight in the trimmed clip for the arc draw-on. Gated on
+    // config.tracer.enabled so day-zero behavior is byte-identical. Mirrored
+    // in useCamera.loadTrimSettings so live record matches import re-trims.
+    if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
+      postRollMs += config.tracer.extraPostRollMs;
     }
     return { preRollMs, postRollMs };
   }, []);
@@ -884,6 +909,253 @@ export function useEditorState(roundId: string | undefined) {
     console.log('[useEditorState] All untrimmed clips processed');
   }, [state.holes, getTrimSettings, resolveDetection, updateClipInState]);
 
+  // ---- Shot-tracer batch (config.tracer) ----
+
+  /**
+   * Render GPS-anchored tracer arcs onto every eligible clip. Sibling of
+   * processAllUntrimmed with the same batch discipline: sequential,
+   * cancellable via tracerCancelledRef, mark-failed-and-continue. Runs
+   * AFTER auto-trim settles (editor.tsx gates on untrimmedCount === 0) —
+   * pairing and render both need the final trimmed files.
+   *
+   * Reads rows straight from SQLite: the pairing inputs (GPS, heading,
+   * pitch, accuracy) are not part of EditorClip. Idempotent via
+   * tracer_status — 'done'/'skipped' rows are untouched, NULL/'stale'
+   * (re-)render, 'pending' (a previous session died mid-clip) restarts,
+   * 'failed' is retried at most once more (attempts in tracer_meta), then
+   * left failed.
+   *
+   * Per clip, gates run in F5 order: ALL pure-TS geometry gates (pairing,
+   * carry/accuracy band, bearing-vs-heading, anim window) BEFORE the
+   * full-resolution Vision pass, so a clip that will skip anyway never pays
+   * for detectBallLaunch.
+   */
+  const processAllTracers = useCallback(async () => {
+    if (!config.tracer.enabled || !storage || !roundId) return;
+    const db = storage;
+    tracerCancelledRef.current = false;
+
+    const rows = await db.getClipsForRound(roundId).catch(() => null);
+    if (!rows || rows.length === 0) return;
+
+    // F14 existence guard: iOS can evict tracer_<UUID>.mp4 from caches while
+    // SQLite still says 'done'. Downgrade those rows to 'stale' (and point
+    // playback back at the trimmed file) BEFORE the batch, so an evicted
+    // file is re-rendered this pass instead of black-screening the clip or
+    // failing composeReel on a missing input.
+    const FileSystem =
+      require('expo-file-system/legacy') as typeof import('expo-file-system/legacy');
+    for (const row of rows) {
+      if (row.tracer_status !== 'done' || !row.tracer_file_uri) continue;
+      let exists = false;
+      try {
+        exists = (await FileSystem.getInfoAsync(row.tracer_file_uri)).exists;
+      } catch {}
+      if (exists) continue;
+      row.tracer_status = 'stale';
+      row.tracer_file_uri = null;
+      await db
+        .updateClipTracer(row.id, { tracer_file_uri: null, tracer_status: 'stale' })
+        .catch(() => {});
+      updateClipInState(String(row.id), (c) => ({
+        ...c,
+        tracerUri: undefined,
+        tracerStatus: 'stale',
+        sourceUri: row.file_uri,
+      }));
+    }
+
+    const parseMeta = (s: string | null): { attempts?: number; [k: string]: unknown } => {
+      if (!s) return {};
+      try {
+        return JSON.parse(s) ?? {};
+      } catch {
+        return {};
+      }
+    };
+
+    const candidates = rows.filter((row) => {
+      if (row.needs_trim === 1) return false; // defensive — batch runs post-trim
+      if (row.is_excluded === 1) return false; // not played/composed; status stays NULL for a later re-include
+      if (row.tracer_status === 'done' || row.tracer_status === 'skipped') return false;
+      if (row.tracer_status === 'failed') {
+        return (parseMeta(row.tracer_meta).attempts ?? 1) < 2; // one retry, then leave failed
+      }
+      return true; // NULL | 'stale' | 'pending'
+    });
+    if (candidates.length === 0) return;
+
+    try {
+      const stats = await getMemoryStats();
+      console.log(
+        `[TRACER] === START: ${candidates.length} clip(s) to trace ===\n` +
+        `[TRACER] Available: ${stats.availableMemoryMB}MB | Used: ${stats.usedMemoryMB}MB | Free disk: ${stats.freeDiskMB}MB`
+      );
+    } catch {}
+
+    // One native FOV read per batch — the lens is constant per device.
+    let hFovLandscapeDeg: number = config.tracer.cameraHFovLandscapeDeg;
+    try {
+      hFovLandscapeDeg = (await getCameraFovDeg()) ?? hFovLandscapeDeg;
+    } catch {}
+
+    for (let i = 0; i < candidates.length; i++) {
+      const row = candidates[i];
+      const clipId = String(row.id);
+
+      if (tracerCancelledRef.current) {
+        console.log('[TRACER] Batch cancelled (unmount)');
+        return;
+      }
+
+      const persistSkip = async (reason: TracerSkipReason, meta: Partial<TracerMeta>) => {
+        await db
+          .updateClipTracer(row.id, {
+            tracer_status: 'skipped',
+            tracer_meta: JSON.stringify({ ...meta, reason }),
+          })
+          .catch(() => {});
+        updateClipInState(clipId, (c) => ({ ...c, tracerStatus: 'skipped' }));
+        console.log(
+          `[TRACER] hole=${row.hole_number} shot=${row.shot_number} SKIP reason=${reason}`
+        );
+      };
+
+      try {
+        // ── Pure-TS gate ladder (F5) ──
+        // Pairing (F16): the IMMEDIATE successor in (hole_number, sort_order,
+        // shot_number) order — getClipsForRound's ORDER BY — and same hole
+        // ONLY (the next hole's tee is not this shot's landing spot). Never
+        // scan past a GPS-less clip looking for a later fix.
+        const idx = rows.findIndex((r) => r.id === row.id);
+        const next = rows[idx + 1];
+        const successor = next && next.hole_number === row.hole_number ? next : null;
+
+        if (row.shot_type === 'putt') {
+          await persistSkip('putt', {});
+          continue;
+        }
+        if (row.impact_time_ms === null) {
+          await persistSkip('no-impact', {});
+          continue;
+        }
+        // Own fix missing → the pairing has no start point; same bucket as a
+        // missing landing fix (the meta flag disambiguates for diagnostics).
+        if (row.gps_latitude === null || row.gps_longitude === null) {
+          await persistSkip('no-next-gps', { missingOwnGps: true });
+          continue;
+        }
+        if (
+          !successor ||
+          successor.gps_latitude === null ||
+          successor.gps_longitude === null
+        ) {
+          await persistSkip('no-next-gps', {});
+          continue;
+        }
+
+        const geomInput: TracerGeometryInput = {
+          latN: row.gps_latitude,
+          lonN: row.gps_longitude,
+          latN1: successor.gps_latitude,
+          lonN1: successor.gps_longitude,
+          gpsAccuracyMN: row.gps_accuracy_m,
+          gpsAccuracyMN1: successor.gps_accuracy_m,
+          cameraHeadingDeg: row.camera_heading_deg,
+          cameraHeadingCalibration: row.camera_heading_calibration,
+          cameraPitchDownDeg: row.camera_pitch_deg,
+          hFovLandscapeDeg,
+          clipDurationSec: row.duration_seconds ?? 0,
+          impactTimeMs: row.impact_time_ms,
+          autoTrimStartMs: row.auto_trim_start_ms,
+        };
+
+        const pre = precheckArcGeometry(geomInput);
+        if (isTracerSkip(pre)) {
+          await persistSkip(pre.skip, pre.meta);
+          continue;
+        }
+
+        // Geometry gates passed — now the clip is worth the full-res Vision
+        // pass. 'pending' drives the per-clip "Tracing..." badge and the F17
+        // export/save/share gating in editor.tsx.
+        await db.updateClipTracer(row.id, { tracer_status: 'pending' }).catch(() => {});
+        updateClipInState(clipId, (c) => ({ ...c, tracerStatus: 'pending' }));
+
+        // Detect on the ORIGINAL file when available (it has more
+        // post-impact footage); impact_time_ms is already on that timeline.
+        // On the trimmed file the impact shifts back by the auto-trim start.
+        const detectUri = row.original_file_uri ?? row.file_uri;
+        const detectImpactMs = row.original_file_uri
+          ? row.impact_time_ms
+          : row.impact_time_ms - (row.auto_trim_start_ms ?? 0);
+
+        const detection = await detectBallLaunch(detectUri, detectImpactMs);
+        if (tracerCancelledRef.current) return;
+
+        // Detection-dependent gates (F3 no-heading vision-or-skip, F8a
+        // grounded veto, F8b direction conflict) + arc synthesis.
+        const arc = buildArcSpec({ ...geomInput, detection });
+        if (isTracerSkip(arc)) {
+          await persistSkip(arc.skip, arc.meta);
+          continue;
+        }
+
+        // Render onto the TRIMMED file — animStartSec is on its timeline.
+        const { tracerUri } = await renderTracer(row.file_uri, JSON.stringify(arc.spec));
+        if (!tracerUri) {
+          // Older native binary without renderTracerOnClip — graceful null.
+          throw new Error('renderTracer unavailable (native rebuild required)');
+        }
+
+        await db
+          .updateClipTracer(row.id, {
+            tracer_file_uri: tracerUri,
+            tracer_status: 'done',
+            tracer_meta: JSON.stringify(arc.meta),
+            tracer_rendered_at: new Date().toISOString(),
+          })
+          .catch(() => {});
+        // Live fan-out: sourceUri is the single consumed URI, so pointing it
+        // at the tracer file covers playback/save/share/compose immediately
+        // (no reload needed). Same mapping as loadFromLocal.
+        updateClipInState(clipId, (c) => ({
+          ...c,
+          tracerUri,
+          tracerStatus: 'done',
+          sourceUri: tracerUri,
+        }));
+
+        console.log(
+          `[TRACER] hole=${row.hole_number} shot=${row.shot_number} DONE ` +
+          `method=${arc.meta.method} carryM=${arc.meta.carryM} deltaDeg=${arc.meta.deltaDeg} ` +
+          `uri=...${tracerUri.slice(-32)}`
+        );
+        try {
+          const after = await getMemoryStats();
+          console.log(
+            `[TRACER] Clip ${i + 1}/${candidates.length} AFTER: Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB`
+          );
+        } catch {}
+      } catch (err) {
+        console.warn(`[useEditorState] Tracer failed for clip ${row.id}:`, err);
+        // Mark failed and continue — one bad clip must not wedge the batch.
+        // attempts counts total failures; the candidate filter above allows
+        // exactly one retry (attempts < 2) on a later editor open.
+        const attempts = (parseMeta(row.tracer_meta).attempts ?? 0) + 1;
+        await db
+          .updateClipTracer(row.id, {
+            tracer_status: 'failed',
+            tracer_meta: JSON.stringify({ ...parseMeta(row.tracer_meta), attempts }),
+          })
+          .catch(() => {});
+        updateClipInState(clipId, (c) => ({ ...c, tracerStatus: 'failed' }));
+      }
+    }
+
+    console.log('[TRACER] === Batch complete ===');
+  }, [roundId, updateClipInState]);
+
   // Get all clips in playback order: intro → hole clips in order → outro
   // Excluded clips are skipped
   const getAllClipsInOrder = useCallback((): EditorClip[] => {
@@ -910,5 +1182,6 @@ export function useEditorState(roundId: string | undefined) {
     getAllClipsInOrder,
     trimClip,
     processAllUntrimmed,
+    processAllTracers,
   };
 }

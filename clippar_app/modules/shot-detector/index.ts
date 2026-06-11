@@ -149,6 +149,75 @@ export type ScorecardData = {
   holes: ScorecardHole[];
 };
 
+// ─── Shot-tracer types (config.tracer; iOS-only, additive) ───
+
+/**
+ * Tuning knobs forwarded to native `detectBallLaunch` as optionsJson.
+ * Defaults come from `config.tracer` — see the wrapper below.
+ */
+export type BallLaunchOptions = {
+  trajectoryLength?: number;
+  minTrajectoryConfidence?: number;
+  detectWindowPreMs?: number;
+  detectWindowPostMs?: number;
+  fallback?: 'frameDiff' | 'none';
+};
+
+export type TracerPoint = { x: number; y: number };
+
+/**
+ * Result of the Vision trajectory pass over the launch window. All coords
+ * are normalized 0..1, display-oriented, BOTTOM-LEFT origin (same convention
+ * as PoseTimeline). `points[].tMs` is on the ORIGINAL file's timeline.
+ */
+export type BallLaunchResult = {
+  found: boolean;
+  method: 'vision' | 'none';
+  launchPoint: TracerPoint | null;
+  /** Unit launch direction from the first 3-6 trajectory points (null if degenerate). */
+  direction: { dx: number; dy: number } | null;
+  /** Full accumulated winner trajectory, capped at 60 points. */
+  points: Array<{ x: number; y: number; tMs: number }>;
+  /** F8a: a blob WAS seen in the launch ROI but failed the upward-displacement
+   *  filter (grounded/topped roll) — JS must skip with reason 'grounded'. */
+  groundedEvidence: boolean;
+  /** (mean ankle x, min ankle y + 0.01) at the frame nearest impact. */
+  poseAnchor: TracerPoint | null;
+  confidence: number;
+  /** Display-oriented pixel dims of the analyzed video (e.g. 1080 x 1920). */
+  width: number;
+  height: number;
+};
+
+/**
+ * Final arc + animation spec handed to native `renderTracerOnClip`. All
+ * control points normalized, bottom-left origin, display-oriented. Times are
+ * on the TRIMMED clip's timeline. Built entirely in lib/tracerMath.ts —
+ * Swift does zero golf math.
+ */
+export type TracerRenderSpec = {
+  p0: TracerPoint;
+  c1: TracerPoint;
+  a: TracerPoint;
+  c2: TracerPoint;
+  p3: TracerPoint;
+  animStartSec: number;
+  animDurationSec: number;
+  color?: string;
+  coreColor?: string;
+  /** Stroke widths are at-1080-wide-render pixels; native scales them. */
+  lineWidthPx?: number;
+  midWidthPx?: number;
+  glowWidthPx?: number;
+  cometHead?: boolean;
+};
+
+export type TracerRenderResult = {
+  /** file:///...caches/tracer_<UUID>.mp4, or null when native is unavailable. */
+  tracerUri: string | null;
+  durationMs: number;
+};
+
 type ShotDetectorEvents = {
   onStitchProgress: (event: StitchProgressEvent) => void;
 };
@@ -163,6 +232,10 @@ type NativeModuleType = {
   clearTrimCache(): Promise<ClearTrimCacheResult>;
   deleteFile(fileUri: string): Promise<DeleteFileResult>;
   getMemoryStats(): Promise<MemoryStats>;
+  detectBallLaunch(videoUri: string, impactTimeMs: number, optionsJson: string): Promise<BallLaunchResult>;
+  renderTracerOnClip(videoUri: string, specJson: string): Promise<{ tracerUri: string; durationMs: number }>;
+  getCameraFovDeg(): Promise<{ hFovLandscapeDeg: number | null }>;
+  getDevicePitchDeg(): Promise<{ pitchDownDeg: number | null }>;
   addListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): { remove(): void };
   removeListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): void;
 };
@@ -426,4 +499,107 @@ export async function getMemoryStats(): Promise<MemoryStats> {
   }
 
   return nativeModule.getMemoryStats();
+}
+
+// ─── Shot-tracer wrappers (config.tracer; iOS-only) ───
+
+/**
+ * Detect the real ball launch in the frames after impact via Apple Vision
+ * VNDetectTrajectoriesRequest (stationary tripod camera). Run on the
+ * ORIGINAL (untrimmed) file when available; `impactTimeMs` is on that same
+ * file's timeline.
+ *
+ * Rejects ONLY on file-not-found; every other failure mode resolves
+ * `{ found: false, method: 'none' }` so the JS fallback ladder continues.
+ *
+ * NOTE: native detectBallLaunch is a 3-arg AsyncFunction; Expo Modules
+ * matches arity exactly, so this wrapper ALWAYS forwards all three args.
+ */
+export async function detectBallLaunch(
+  videoUri: string,
+  impactTimeMs: number,
+  optionsJson: string = JSON.stringify({
+    trajectoryLength: config.tracer.trajectoryLength,
+    minTrajectoryConfidence: config.tracer.minTrajectoryConfidence,
+    detectWindowPreMs: config.tracer.detectWindowPreMs,
+    detectWindowPostMs: config.tracer.detectWindowPostMs,
+    fallback: config.tracer.fallback,
+  } satisfies BallLaunchOptions)
+): Promise<BallLaunchResult> {
+  if (!nativeModule || typeof nativeModule.detectBallLaunch !== "function") {
+    console.warn(
+      "[ShotDetector] detectBallLaunch not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return {
+      found: false,
+      method: 'none',
+      launchPoint: null,
+      direction: null,
+      points: [],
+      groundedEvidence: false,
+      poseAnchor: null,
+      confidence: 0,
+      width: 0,
+      height: 0,
+    };
+  }
+
+  return nativeModule.detectBallLaunch(videoUri, impactTimeMs, optionsJson);
+}
+
+/**
+ * Burn a tracer arc onto a clip, producing a NEW tracer_<UUID>.mp4 in caches
+ * (the source file is never touched). `specJson` is a JSON-encoded
+ * TracerRenderSpec built by lib/tracerMath.ts.
+ *
+ * Rejects on spec/file/track/export errors (ERR_TRACER_* / ERR_COMPOSITION /
+ * ERR_EXPORT_SESSION — callers mark the clip 'failed' and continue). Falls
+ * back to `{ tracerUri: null }` when the native function is unavailable.
+ */
+export async function renderTracer(
+  videoUri: string,
+  specJson: string
+): Promise<TracerRenderResult> {
+  if (!nativeModule || typeof nativeModule.renderTracerOnClip !== "function") {
+    console.warn(
+      "[ShotDetector] renderTracerOnClip not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return { tracerUri: null, durationMs: 0 };
+  }
+
+  const result = await nativeModule.renderTracerOnClip(videoUri, specJson);
+  return {
+    // NSNull from Swift becomes null in JS, but just be safe
+    tracerUri: result.tracerUri ?? null,
+    durationMs: result.durationMs ?? 0,
+  };
+}
+
+/**
+ * Back wide camera's 1920x1080-format videoFieldOfView — the LANDSCAPE
+ * (long-axis) horizontal FOV in degrees. tracerMath converts it to the
+ * portrait horizontal FOV. Null on simulator / no matching format / older
+ * native builds; callers fall back to config.tracer.cameraHFovLandscapeDeg.
+ */
+export async function getCameraFovDeg(): Promise<number | null> {
+  if (!nativeModule || typeof nativeModule.getCameraFovDeg !== "function") {
+    return null;
+  }
+
+  const result = await nativeModule.getCameraFovDeg();
+  return result?.hFovLandscapeDeg ?? null;
+}
+
+/**
+ * One-shot CoreMotion sample of the camera optical axis's downward tilt in
+ * degrees (positive = tilted down). Null after ~1s timeout, junk sample, or
+ * older native builds; callers fall back to config.tracer.horizonY.
+ */
+export async function getDevicePitchDeg(): Promise<number | null> {
+  if (!nativeModule || typeof nativeModule.getDevicePitchDeg !== "function") {
+    return null;
+  }
+
+  const result = await nativeModule.getDevicePitchDeg();
+  return result?.pitchDownDeg ?? null;
 }

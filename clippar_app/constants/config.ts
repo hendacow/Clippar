@@ -57,6 +57,48 @@ export const config = {
     // DetectionOptions in modules/shot-detector/index.ts for recognized keys.
     options: {} as Record<string, unknown>,
   },
+  tracer: {
+    // Master kill switch — day-zero false. Every tracer code path (capture,
+    // detect, geometry, render, playback switching) is gated on this so the
+    // app is byte-identical with it off. Flip true on clippar-dev to test.
+    enabled: false as boolean,
+    // Sub-gate within `enabled` for compass-heading capture at record start.
+    captureHeading: true as boolean,
+    // ── Ball-launch detection knobs (forwarded to native detectBallLaunch
+    //    as optionsJson; see BallLaunchOptions in modules/shot-detector) ──
+    trajectoryLength: 5, // VNDetectTrajectoriesRequest points-per-trajectory (floor 5)
+    minTrajectoryConfidence: 0.7,
+    detectWindowPreMs: 300, // analysis window around impact on the ORIGINAL file
+    detectWindowPostMs: 1700,
+    fallback: 'frameDiff' as 'frameDiff' | 'none', // reserved — native stub for v1
+    // ── Geometry knobs (lib/tracerMath.ts) ──
+    cameraHFovLandscapeDeg: 62, // fallback when native getCameraFovDeg() is null
+    tripodHeightM: 1.35,
+    // horizonY is a FALLBACK only: per-clip horizon is computed from the
+    // captured camera pitch (camera_pitch_deg) via computeHorizonY(). This
+    // level-camera constant is used solely when pitch is null (old clips /
+    // CoreMotion timeout).
+    horizonY: 0.52,
+    // Camera-not-facing-the-shot gate. Lateral CLAMPING is intentionally much
+    // wider (xLand in [-0.30, 1.30] in tracerMath) so slices/pushes within
+    // this gate exit the frame naturally. There is no static min-carry knob:
+    // the floor is dynamic, max(25, 2 * (gpsAccuracyN + gpsAccuracyN1)) m.
+    maxBearingDeltaDeg: 60,
+    maxCarryM: 300, // beyond this the "landing" GPS is a drop/teleport outlier
+    defaultCarryM: null as number | null, // null = skip when carry can't be derived
+    // ── Render knobs (TracerRenderSpec defaults; widths at 1080-wide render) ──
+    color: '#FF3B1F',
+    coreColor: '#FFD9A0',
+    lineWidthPx: 4,
+    midWidthPx: 8,
+    glowWidthPx: 16,
+    minAnimSec: 0.5, // skip ('anim-too-short') when less post-impact time remains
+    headDelaySec: 0.05, // arc draw-on starts this long after impact
+    cometHead: true as boolean,
+    // Added to the fullSwing postRollMs (capture + re-trim) when enabled, so
+    // future clips keep more ball flight. 0 = no-op; set 2000 for cinematic.
+    extraPostRollMs: 0,
+  },
   export: {
     defaultResolution: '1080p' as const,
     defaultFrameRate: 30 as const,
