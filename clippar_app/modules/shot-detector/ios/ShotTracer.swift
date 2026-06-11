@@ -95,6 +95,14 @@ private struct TracerRenderSpec {
     var midWidthPx: CGFloat = 8
     var glowWidthPx: CGFloat = 16
     var cometHead: Bool = true
+    /// Pill label near the apex once the arc peaks (e.g. "82m"); nil = none.
+    var labelText: String? = nil
+    /// DIAGNOSTIC (tracer-sim harness): skip ALL overlay layers — pure
+    /// passthrough export through the animation tool. Isolates environment
+    /// crashes (e.g. simulator IOSurface/XPC) from our layer construction.
+    var debugBareExport: Bool = false
+    /// DIAGNOSTIC: drop layer shadows (the heaviest offscreen-raster path).
+    var debugNoShadow: Bool = false
 
     init?(json: String) {
         guard !json.isEmpty,
@@ -129,6 +137,9 @@ private struct TracerRenderSpec {
         if let v = (obj["midWidthPx"] as? NSNumber)?.doubleValue, v > 0 { midWidthPx = CGFloat(v) }
         if let v = (obj["glowWidthPx"] as? NSNumber)?.doubleValue, v > 0 { glowWidthPx = CGFloat(v) }
         if let v = obj["cometHead"] as? Bool { cometHead = v }
+        if let v = obj["labelText"] as? String, !v.isEmpty, v.count <= 12 { labelText = v }
+        if let v = obj["debugBareExport"] as? Bool { debugBareExport = v }
+        if let v = obj["debugNoShadow"] as? Bool { debugNoShadow = v }
     }
 }
 
@@ -745,6 +756,10 @@ extension ShotDetectorModule {
             videoLayer.frame = CGRect(origin: .zero, size: renderSize)
             parentLayer.addSublayer(videoLayer)
 
+            // Diagnostic bare export: video only, no overlay layers (see
+            // TracerRenderSpec.debugBareExport).
+            if !spec.debugBareExport {
+
             // Spec coords are normalized, display-oriented, BOTTOM-LEFT origin —
             // the SAME convention as AVVideoCompositionCoreAnimationTool, so
             // mapping to render pixels is a pure scale with NO y-flip.
@@ -779,10 +794,12 @@ extension ShotDetectorModule {
             let coreLayer = strokeLayer(width: spec.lineWidthPx * widthScale, color: tracerColor(spec.coreColor, alpha: 0.75))
             // Layer shadows DO rasterize through the animation tool (CIFilter
             // blur does NOT — never attempt it).
-            coreLayer.shadowColor = baseColor.cgColor
-            coreLayer.shadowRadius = 8.0 * widthScale
-            coreLayer.shadowOpacity = 0.9
-            coreLayer.shadowOffset = .zero
+            if !spec.debugNoShadow {
+                coreLayer.shadowColor = baseColor.cgColor
+                coreLayer.shadowRadius = 8.0 * widthScale
+                coreLayer.shadowOpacity = 0.9
+                coreLayer.shadowOffset = .zero
+            }
 
             // Hard image-space deceleration toward the vanishing point.
             let ease = CAMediaTimingFunction(controlPoints: 0.17, 0.67, 0.45, 1.0)
@@ -812,10 +829,12 @@ extension ShotDetectorModule {
                 dot.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
                 dot.cornerRadius = diameter / 2.0
                 dot.backgroundColor = tracerColor(spec.coreColor, alpha: 1.0).cgColor
-                dot.shadowColor = baseColor.cgColor
-                dot.shadowRadius = 8.0 * widthScale
-                dot.shadowOpacity = 0.9
-                dot.shadowOffset = .zero
+                if !spec.debugNoShadow {
+                    dot.shadowColor = baseColor.cgColor
+                    dot.shadowRadius = 8.0 * widthScale
+                    dot.shadowOpacity = 0.9
+                    dot.shadowOffset = .zero
+                }
                 dot.position = px(spec.p0)
                 dot.opacity = 0 // hidden before launch; opacity keyframes below
 
@@ -841,6 +860,65 @@ extension ShotDetectorModule {
 
                 parentLayer.addSublayer(dot)
             }
+
+            // Carry-distance pill near the apex ("82m"): fades in as the comet
+            // crests, then stays. CATextLayer composes fine through the
+            // animation tool with NO geometry flip — the parent layer already
+            // uses the bottom-left-origin convention the spec coords assume.
+            if let labelText = spec.labelText {
+                let fontSize = 44.0 * widthScale
+                let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+                let textSize = (labelText as NSString).size(withAttributes: [.font: font])
+                let padH = 22.0 * widthScale
+                let padV = 12.0 * widthScale
+                let pillW = textSize.width + padH * 2
+                let pillH = textSize.height + padV * 2
+
+                // Pill background + child text layer (a bare CATextLayer can't
+                // vertically center its glyphs, so the text gets its own
+                // exactly-text-sized layer centered in the pill).
+                let pill = CALayer()
+                pill.bounds = CGRect(x: 0, y: 0, width: pillW, height: pillH)
+                pill.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+                pill.cornerRadius = pillH / 2.0
+                pill.masksToBounds = true
+
+                let text = CATextLayer()
+                text.string = labelText
+                text.font = font
+                text.fontSize = fontSize
+                text.alignmentMode = .center
+                text.foregroundColor = UIColor.white.cgColor
+                text.contentsScale = 2.0
+                // Device-verified: CATextLayer glyphs render upright in the
+                // animation-tool export with NO flip (a scale(1,-1) here came
+                // out mirrored in the field test).
+                text.bounds = CGRect(x: 0, y: 0, width: textSize.width + 4, height: textSize.height + 2)
+                text.position = CGPoint(x: pillW / 2, y: pillH / 2)
+                pill.addSublayer(text)
+
+                // Above the apex, clamped fully on-screen even when the apex
+                // drifts toward (or past) a frame edge on big bearing deltas.
+                let apexPx = px(spec.a)
+                let cx = min(max(apexPx.x, pillW / 2 + 8), renderSize.width - pillW / 2 - 8)
+                let cy = min(apexPx.y + pillH * 1.2, renderSize.height - pillH / 2 - 8)
+                pill.position = CGPoint(x: cx, y: cy)
+                pill.opacity = 0
+
+                // Fade in across the apex crest (55% of the draw-on) and hold.
+                let labelIn = CABasicAnimation(keyPath: "opacity")
+                labelIn.fromValue = 0.0
+                labelIn.toValue = 1.0
+                labelIn.beginTime = beginTime + spec.animDurationSec * 0.55
+                labelIn.duration = 0.3
+                labelIn.fillMode = .forwards
+                labelIn.isRemovedOnCompletion = false
+                pill.add(labelIn, forKey: "labelFadeIn")
+
+                parentLayer.addSublayer(pill)
+            }
+
+            } // end !debugBareExport
 
             // ---- Video composition ----
             let videoComposition = AVMutableVideoComposition()

@@ -57,6 +57,10 @@ export interface TracerMeta {
   bucket?: 'drive' | 'iron' | 'wedge';
   apexM?: number;
   hangS?: number;
+  /** Rendered/skipped under config.tracer.debugForceTrace — evidence gates
+   *  (putt, gps-accuracy, carry-min, bearing-delta, grounded, no-heading)
+   *  were bypassed; this arc is NOT trustworthy field data. */
+  debugForced?: boolean;
 }
 
 // ─── Spherical geometry ───
@@ -265,13 +269,16 @@ export function precheckArcGeometry(
   input: TracerGeometryInput
 ): TracerGeometry | TracerSkip {
   const { tracer } = config;
+  const force = tracer.debugForceTrace;
   const meta: TracerMeta = {};
+  if (force) meta.debugForced = true;
 
   // F4: a fix worse than 20 m can place the "landing" a full club off —
   // refuse the pairing outright rather than render a confident lie.
   if (
-    (input.gpsAccuracyMN !== null && input.gpsAccuracyMN > 20) ||
-    (input.gpsAccuracyMN1 !== null && input.gpsAccuracyMN1 > 20)
+    !force &&
+    ((input.gpsAccuracyMN !== null && input.gpsAccuracyMN > 20) ||
+      (input.gpsAccuracyMN1 !== null && input.gpsAccuracyMN1 > 20))
   ) {
     return { skip: 'gps-accuracy', meta };
   }
@@ -285,7 +292,7 @@ export function precheckArcGeometry(
     25,
     2 * ((input.gpsAccuracyMN ?? 10) + (input.gpsAccuracyMN1 ?? 10))
   );
-  if (carryM < minCarryM) return { skip: 'carry-min', meta };
+  if (!force && carryM < minCarryM) return { skip: 'carry-min', meta };
   if (carryM > tracer.maxCarryM) return { skip: 'carry-max', meta };
   const lowCarryConfidence = carryM < 40;
   if (lowCarryConfidence) meta.lowCarryConfidence = true;
@@ -303,7 +310,7 @@ export function precheckArcGeometry(
   if (headingUsable) {
     deltaDeg = bearingDeltaDeg(bearingDeg, input.cameraHeadingDeg!);
     meta.deltaDeg = round2(deltaDeg);
-    if (Math.abs(deltaDeg) > tracer.maxBearingDeltaDeg) {
+    if (!force && Math.abs(deltaDeg) > tracer.maxBearingDeltaDeg) {
       return { skip: 'bearing-delta', meta };
     }
   } else {
@@ -390,7 +397,9 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
   // F8a — detection as VETO: a blob was observed in the launch ROI but never
   // gained altitude (grounded/topped roll). Never synthesize a flying arc
   // over a rolling ball.
-  if (det?.groundedEvidence) return { skip: 'grounded', meta };
+  if (!config.tracer.debugForceTrace && det?.groundedEvidence) {
+    return { skip: 'grounded', meta };
+  }
 
   const visionOk = !!det && det.found && det.method === 'vision';
   const detDirection =
@@ -400,8 +409,9 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
 
   // F3 — no usable heading: render ONLY on real launch-direction evidence
   // (vision trajectory with a non-degenerate, upward direction).
+  // debugForceTrace: render anyway with a straight-at-center fallback below.
   if (!geom.headingUsable && (!visionOk || !detDirection || detDirection.dy <= 0)) {
-    return { skip: 'no-heading', meta };
+    if (!config.tracer.debugForceTrace) return { skip: 'no-heading', meta };
   }
 
   // Launch anchor P0: detected ball > pose ankles > frame-bottom default.
@@ -456,7 +466,7 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
       hFovPortraitDeg: geom.hFovPortraitDeg,
       vFovPortraitDeg: geom.vFovPortraitDeg,
     }).x;
-  } else {
+  } else if (detDirection && detDirection.dy > 0) {
     // No heading (F3, vision-verified path): there is no bearing delta to
     // project, so place xLand where the DETECTED launch ray points. Inverts
     // the prior-tangent construction below (u ∝ (0.6·(xApex−P0.x),
@@ -464,8 +474,14 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
     // xLand = P0.x + slope · (1.4 / 0.36) · (yApex − P0.y).
     lateralSource = 'vision';
     effDeltaDeg = null;
-    const slope = detDirection!.dx / Math.max(detDirection!.dy, 0.15);
+    const slope = detDirection.dx / Math.max(detDirection.dy, 0.15);
     xLand = clamp(p0.x + slope * (1.4 / 0.36) * (yApex - p0.y), -0.3, 1.3);
+  } else {
+    // debugForceTrace only (F3 would have skipped): no heading AND no usable
+    // vision ray — draw a straight ball flight from the launch anchor.
+    lateralSource = 'vision';
+    effDeltaDeg = null;
+    xLand = p0.x;
   }
   meta.lateralSource = lateralSource;
 
@@ -524,6 +540,9 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
     glowWidthPx: tracer.glowWidthPx,
     cometHead: tracer.cometHead,
   };
+  // Depth cue: the carry distance burned in near the apex. Rounded to whole
+  // meters — GPS error makes decimals false precision.
+  if (tracer.distanceLabel) spec.labelText = `${Math.round(geom.carryM)}m`;
   return { spec, meta };
 }
 

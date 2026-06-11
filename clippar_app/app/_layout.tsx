@@ -70,7 +70,17 @@ function RootLayout() {
   useEffect(() => {
     if (loading) return;
     const inAuthGroup = segments[0] === '(auth)';
-    if (!user && !inAuthGroup) {
+    // Dev builds only: (dev) harness screens (tracer-sim, detection-ab) are
+    // reachable without sign-in so simulator automation can deep-link to them.
+    const inDevGroup = __DEV__ && segments[0] === '(dev)';
+    // TEMP (tracer verification): SIMULATOR-ONLY autolaunch straight into the
+    // tracer-sim harness — physical devices are unaffected. Remove after the
+    // tracer render is field-verified.
+    if (__DEV__ && !Constants.isDevice && segments[0] !== '(dev)') {
+      router.replace('/(dev)/tracer-sim');
+      return;
+    }
+    if (!user && !inAuthGroup && !inDevGroup) {
       router.replace('/(auth)/login');
     } else if (user && inAuthGroup) {
       router.replace('/(tabs)');

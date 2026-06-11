@@ -324,6 +324,20 @@ export function useCamera({
           new Promise<null>((r) => setTimeout(() => r(null), 1500)),
         ]);
 
+        // TEMP tracer-capture diagnostic (remove after field validation):
+        // surfaces exactly what the sensors returned for this clip so we can
+        // confirm heading/pitch/GPS/accuracy land before going to the course.
+        console.log(
+          '[TRACER-CAPTURE]',
+          JSON.stringify({
+            gps: gps ? { lat: gps.latitude, lon: gps.longitude, accM: gps.accuracy ?? null } : null,
+            headingDeg: heading?.headingDeg ?? null,
+            headingTrue: heading?.isTrue ?? null,
+            headingCalibration: heading?.calibration ?? null,
+            pitchDownDeg: pitchDeg ?? null,
+          })
+        );
+
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
         // and swap file_uri to the trimmed file. If detection fails, the editor's

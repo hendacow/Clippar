@@ -936,16 +936,16 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={false}: capture the mic so live clips have audio. The -10868
-          "error while recording" crash came from the BLE volume-clicker
-          (react-native-volume-manager) holding the shared AVAudioSession in the
-          record-hostile .ambient category. The real fix is a native patch to
-          expo-camera (patches/expo-camera+17.0.10.patch): it asserts
-          .playAndRecord on the camera's own sessionQueue immediately before the
-          mic AVCaptureDeviceInput is attached — the exact point the crash fired.
-          .mixWithOthers keeps the clicker's volume KVO alive. Requires a native
-          rebuild (Swift change); the useCamera.ts JS must NOT ship to Metro
-          ahead of that rebuilt binary. */}
+      {/* mute={true} — TEMPORARY revert for tracer field testing.
+          Capturing the mic (mute={false}) re-triggers the -10868
+          kAudioUnitErr_FormatNotSupported recordAsync failure on real hardware
+          (the expo-camera .playAndRecord patch isn't fully holding the session
+          against react-native-volume-manager's .ambient session on this
+          device/iOS 27). The GPS tracer does NOT need clip audio (it uses
+          GPS + Vision + pose), so recording is muted here to unblock the tracer
+          test. Per-clip audio capture remains a SEPARATE open problem — revisit
+          with a deeper native audio-session coordination once the tracer is
+          validated. */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
@@ -953,7 +953,7 @@ export default function RecordScreen() {
           facing="back"
           mode="video"
           videoQuality="1080p"
-          mute={false}
+          mute
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed

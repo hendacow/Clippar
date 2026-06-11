@@ -65,6 +65,14 @@ export const config = {
     enabled: true as boolean,
     // Sub-gate within `enabled` for compass-heading capture at record start.
     captureHeading: true as boolean,
+    // DEBUG OFF-SWITCH for the evidence gates, so street tests (no club, no
+    // ball) still render an arc and the GPS distance + direction + visual
+    // shape can be verified end-to-end. Bypasses: putt classification,
+    // gps-accuracy, carry-min, bearing-delta, grounded veto, no-heading.
+    // Keeps: needs a detected impact time, two GPS fixes, carry-max sanity,
+    // and enough post-impact footage to animate. MUST be false for real
+    // rounds — it will happily draw arcs over putts and practice swings.
+    debugForceTrace: true as boolean,
     // ── Ball-launch detection knobs (forwarded to native detectBallLaunch
     //    as optionsJson; see BallLaunchOptions in modules/shot-detector) ──
     trajectoryLength: 5, // VNDetectTrajectoriesRequest points-per-trajectory (floor 5)
@@ -96,6 +104,8 @@ export const config = {
     minAnimSec: 0.5, // skip ('anim-too-short') when less post-impact time remains
     headDelaySec: 0.05, // arc draw-on starts this long after impact
     cometHead: true as boolean,
+    // Carry distance burned in as a pill label near the arc apex ("82m").
+    distanceLabel: true as boolean,
     // Added to the fullSwing postRollMs (capture + re-trim) when enabled, so
     // future clips keep more ball flight. 0 = no-op; set 2000 for cinematic.
     extraPostRollMs: 0,

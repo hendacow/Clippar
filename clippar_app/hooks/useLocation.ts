@@ -23,6 +23,58 @@ export interface HeadingFix {
   calibration: number;
 }
 
+/**
+ * Force a GENUINELY FRESH GPS fix.
+ *
+ * `getCurrentPositionAsync` can return a cached CLLocation — observed in the
+ * field as byte-identical coords across shots taken ~80m apart (it coasted on
+ * a WiFi-anchored last-known position through a WiFi→4G handoff). A stale fix
+ * collapses the tracer's carry distance to ~0 and silently skips the arc.
+ *
+ * We briefly `watchPositionAsync` and accept only a fix whose `timestamp` is
+ * at/after this call (Core Location delivers the stale last-known fix first,
+ * which we reject by its old timestamp), then take the first fresh one. Hard
+ * timeout so a cold/indoor GPS can never hang the clip save.
+ */
+async function getFreshFix(timeoutMs = 6000): Promise<Coordinates | null> {
+  const t0 = Date.now();
+  return new Promise<Coordinates | null>((resolve) => {
+    let sub: Location.LocationSubscription | null = null;
+    let done = false;
+    const finish = (c: Coordinates | null) => {
+      if (done) return;
+      done = true;
+      try { sub?.remove(); } catch {}
+      resolve(c);
+    };
+    const timer = setTimeout(() => finish(null), timeoutMs);
+    Location.watchPositionAsync(
+      {
+        accuracy: Location.Accuracy.BestForNavigation,
+        distanceInterval: 0,
+        timeInterval: 500,
+      },
+      (loc) => {
+        // 2s slack for clock skew; the cached fix is stamped tens of seconds
+        // (or minutes) old, so it never passes this gate.
+        if (loc.timestamp >= t0 - 2000) {
+          clearTimeout(timer);
+          finish({
+            latitude: loc.coords.latitude,
+            longitude: loc.coords.longitude,
+            accuracy: loc.coords.accuracy ?? null,
+          });
+        }
+      }
+    )
+      .then((s) => {
+        sub = s;
+        if (done) { try { s.remove(); } catch {} }
+      })
+      .catch(() => finish(null));
+  });
+}
+
 export function useLocation() {
   const [hasPermission, setHasPermission] = useState(false);
   const [lastLocation, setLastLocation] = useState<Coordinates | null>(null);
@@ -48,6 +100,16 @@ export function useLocation() {
       }
 
       try {
+        // Tracer (highAccuracy): demand a fresh fix so an 80m walk actually
+        // registers as an 80m carry. Falls through to the standard one-shot if
+        // the watch times out (cold GPS) — never worse than today's behavior.
+        if (opts?.highAccuracy) {
+          const fresh = await getFreshFix();
+          if (fresh) {
+            setLastLocation(fresh);
+            return fresh;
+          }
+        }
         const location = await Location.getCurrentPositionAsync({
           // BestForNavigation only when the caller needs a tight accuracy
           // radius (tracer landing-spot pairing); High otherwise — identical

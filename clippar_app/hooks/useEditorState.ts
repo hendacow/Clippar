@@ -1031,11 +1031,22 @@ export function useEditorState(roundId: string | undefined) {
         const next = rows[idx + 1];
         const successor = next && next.hole_number === row.hole_number ? next : null;
 
-        if (row.shot_type === 'putt') {
+        // debugForceTrace: ignore the classifier so street tests (no club/
+        // ball → fallback-classified 'putt') still exercise the full pipeline.
+        if (row.shot_type === 'putt' && !config.tracer.debugForceTrace) {
           await persistSkip('putt', {});
           continue;
         }
-        if (row.impact_time_ms === null) {
+        // debugForceTrace: no detected impact → anchor on the clip midpoint so
+        // the arc still renders (timing will be approximate, fine for testing).
+        let impactMs = row.impact_time_ms;
+        if (impactMs === null && config.tracer.debugForceTrace) {
+          impactMs = Math.max(0, Math.round(((row.duration_seconds ?? 0) * 1000) / 2));
+          console.log(
+            `[TRACER] hole=${row.hole_number} shot=${row.shot_number} debugForceTrace: no impact_time_ms, using clip midpoint ${impactMs}ms`
+          );
+        }
+        if (impactMs === null) {
           await persistSkip('no-impact', {});
           continue;
         }
@@ -1066,7 +1077,7 @@ export function useEditorState(roundId: string | undefined) {
           cameraPitchDownDeg: row.camera_pitch_deg,
           hFovLandscapeDeg,
           clipDurationSec: row.duration_seconds ?? 0,
-          impactTimeMs: row.impact_time_ms,
+          impactTimeMs: impactMs,
           autoTrimStartMs: row.auto_trim_start_ms,
         };
 
@@ -1087,8 +1098,8 @@ export function useEditorState(roundId: string | undefined) {
         // On the trimmed file the impact shifts back by the auto-trim start.
         const detectUri = row.original_file_uri ?? row.file_uri;
         const detectImpactMs = row.original_file_uri
-          ? row.impact_time_ms
-          : row.impact_time_ms - (row.auto_trim_start_ms ?? 0);
+          ? impactMs
+          : impactMs - (row.auto_trim_start_ms ?? 0);
 
         const detection = await detectBallLaunch(detectUri, detectImpactMs);
         if (tracerCancelledRef.current) return;

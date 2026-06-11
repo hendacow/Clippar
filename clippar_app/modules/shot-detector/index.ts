@@ -210,6 +210,8 @@ export type TracerRenderSpec = {
   midWidthPx?: number;
   glowWidthPx?: number;
   cometHead?: boolean;
+  /** Pill label drawn near the apex once the arc peaks (e.g. "82m"). */
+  labelText?: string;
 };
 
 export type TracerRenderResult = {

@@ -437,6 +437,13 @@ export default function ProfileScreen() {
               subtitle="Pick a video, see auto-trim output instantly"
               onPress={() => router.push('/profile/trim-sandbox')}
             />
+            <Divider />
+            <SettingsRow
+              icon={<Activity size={18} color={theme.colors.textSecondary} />}
+              title="Tracer Sim (debug)"
+              subtitle="Synthetic GPS shots → rendered tracer arcs"
+              onPress={() => router.push('/(dev)/tracer-sim')}
+            />
           </Card>
 
           {/* ---- UNITS ---- */}
