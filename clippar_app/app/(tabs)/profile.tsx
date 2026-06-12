@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, Alert, Switch } from 'react-native';
+import { View, Text, ScrollView, Pressable, Alert, Switch, Linking } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -430,20 +430,26 @@ export default function ProfileScreen() {
               subtitle="Photos mirroring, cloud backup, cache"
               onPress={() => router.push('/profile/storage-settings')}
             />
-            <Divider />
-            <SettingsRow
-              icon={<Activity size={18} color={theme.colors.textSecondary} />}
-              title="Trim Sandbox (debug)"
-              subtitle="Pick a video, see auto-trim output instantly"
-              onPress={() => router.push('/profile/trim-sandbox')}
-            />
-            <Divider />
-            <SettingsRow
-              icon={<Activity size={18} color={theme.colors.textSecondary} />}
-              title="Tracer Sim (debug)"
-              subtitle="Synthetic GPS shots → rendered tracer arcs"
-              onPress={() => router.push('/(dev)/tracer-sim')}
-            />
+            {/* Debug harnesses: dev builds only — App Review rejects visible
+                developer UI in production (2.2 beta/demo content). */}
+            {__DEV__ && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Trim Sandbox (debug)"
+                  subtitle="Pick a video, see auto-trim output instantly"
+                  onPress={() => router.push('/profile/trim-sandbox')}
+                />
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Tracer Sim (debug)"
+                  subtitle="Synthetic GPS shots → rendered tracer arcs"
+                  onPress={() => router.push('/(dev)/tracer-sim')}
+                />
+              </>
+            )}
           </Card>
 
           {/* ---- UNITS ---- */}
@@ -601,6 +607,22 @@ export default function ProfileScreen() {
               title={verifying ? 'Verifying Rounds…' : 'Verify My Rounds'}
               subtitle="Check every round is playable after reinstall"
               onPress={handleVerifyRounds}
+            />
+          </Card>
+
+          {/* ---- LEGAL (App Review 5.1.1: privacy policy must be reachable
+                in-app; pairs with the App Store Connect metadata URL) ---- */}
+          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
+            <SettingsRow
+              icon={<ShieldCheck size={18} color={theme.colors.textTertiary} />}
+              title="Privacy Policy"
+              onPress={() => Linking.openURL('https://clippargolf.com/privacy')}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<HelpCircle size={18} color={theme.colors.textTertiary} />}
+              title="Terms of Service"
+              onPress={() => Linking.openURL('https://clippargolf.com/terms')}
             />
           </Card>
 

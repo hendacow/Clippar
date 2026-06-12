@@ -188,11 +188,14 @@ function HorizontalRoundSection({
   size = 'default',
   onDeleteRound,
   reelSignedUrls,
+  onOpenRound,
 }: {
   rounds: MockRound[];
   size?: 'default' | 'large';
   onDeleteRound?: (id: string) => void;
   reelSignedUrls?: Record<string, string>;
+  /** Overrides the default round navigation (sample data shows a CTA). */
+  onOpenRound?: (id: string) => void;
 }) {
   return (
     <FlatList
@@ -207,7 +210,9 @@ function HorizontalRoundSection({
           round={item}
           index={index}
           size={size}
-          onPress={() => router.push(`/round/${item.id}`)}
+          onPress={() =>
+            onOpenRound ? onOpenRound(item.id) : router.push(`/round/${item.id}`)
+          }
           onDelete={onDeleteRound ? () => onDeleteRound(item.id) : undefined}
           reelSignedUrl={reelSignedUrls?.[item.id]}
         />
@@ -504,6 +509,27 @@ export default function HomeScreen() {
   const useMock = loaded && liveRounds.length === 0;
   const rounds = useMock ? MOCK_ROUNDS : liveRounds;
 
+  // Sample rounds have no backing data — navigating opened a dead "Round not
+  // found" screen (every first-session tap dead-ended there). Show a CTA
+  // toward recording instead.
+  const openRound = useCallback(
+    (id: string) => {
+      if (useMock) {
+        Alert.alert(
+          'Sample round',
+          'This is example data so there is nothing to open yet. Record or import your first round and it will show up here.',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Start a round', onPress: () => router.push('/(tabs)/record') },
+          ]
+        );
+        return;
+      }
+      router.push(`/round/${id}`);
+    },
+    [useMock]
+  );
+
   // ---- Shared stats filter (course / hole / timeframe / clips-only) ----
   const {
     filters,
@@ -688,7 +714,7 @@ export default function HomeScreen() {
         {/* ---- HERO REEL (latest highlight — top of page) ---- */}
         <HeroReel
           round={latestRound}
-          onPress={() => router.push(`/round/${latestRound.id}`)}
+          onPress={() => openRound(latestRound.id)}
           reelSignedUrl={reelSignedUrls[latestRound.id]}
         />
 
@@ -727,6 +753,7 @@ export default function HomeScreen() {
                   size="large"
                   onDeleteRound={useMock ? undefined : handleDeleteRound}
                   reelSignedUrls={reelSignedUrls}
+                  onOpenRound={openRound}
                 />
               </>
             )}
@@ -739,6 +766,7 @@ export default function HomeScreen() {
                   rounds={bestRounds}
                   onDeleteRound={useMock ? undefined : handleDeleteRound}
                   reelSignedUrls={reelSignedUrls}
+                  onOpenRound={openRound}
                 />
               </>
             )}
@@ -751,6 +779,7 @@ export default function HomeScreen() {
                   rounds={birdieRounds}
                   onDeleteRound={useMock ? undefined : handleDeleteRound}
                   reelSignedUrls={reelSignedUrls}
+                  onOpenRound={openRound}
                 />
               </>
             )}
@@ -830,7 +859,7 @@ export default function HomeScreen() {
             <RoundListCard
               key={round.id}
               round={round}
-              onPress={() => router.push(`/round/${round.id}`)}
+              onPress={() => openRound(round.id)}
               onDelete={useMock ? undefined : () => handleDeleteRound(round.id)}
             />
           ))
