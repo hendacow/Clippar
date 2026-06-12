@@ -20,6 +20,10 @@ export const config = {
     websiteUrl: 'https://clippargolf.com',
     monthlyPriceAud: 1999,
     annualPriceAud: 14900,
+    // When true, "Create Highlight Reel" requires an active subscription
+    // (paywall shown otherwise). OFF until StoreKit IAP is live — flipping
+    // this before purchases exist would lock everyone out of exports.
+    enforceExportGate: false as boolean,
   },
   hardware: {
     standardPriceCents: 5900,

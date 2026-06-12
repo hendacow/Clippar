@@ -394,7 +394,10 @@ export default function ProfileScreen() {
                 </Text>
               </View>
               <Pressable
-                onPress={() => Haptics.selectionAsync()}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  router.push('/paywall');
+                }}
                 style={{
                   paddingHorizontal: 14,
                   paddingVertical: 8,
