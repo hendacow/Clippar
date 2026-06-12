@@ -157,6 +157,24 @@ export async function updateClipEditorState(
   const fields: string[] = [];
   const values: (number | string)[] = [];
 
+  // Read the current trim/file values BEFORE writing so the tracer
+  // invalidation below can fire on real CHANGES only. The editor re-saves
+  // identical trim values on every open (FIX #8 full-swing override), and
+  // invalidating on those no-op writes destroyed every rendered tracer on
+  // the next editor visit (field bug: clip 330 rendered DONE, then went
+  // 'stale' minutes later without any user edit).
+  let before: {
+    trim_start_ms: number | null;
+    trim_end_ms: number | null;
+    file_uri: string | null;
+  } | null = null;
+  try {
+    before = await database.getFirstAsync(
+      'SELECT trim_start_ms, trim_end_ms, file_uri FROM local_clips WHERE id = ?',
+      clipId
+    );
+  } catch {}
+
   if (updates.trim_start_ms !== undefined) {
     fields.push('trim_start_ms = ?');
     values.push(updates.trim_start_ms);
@@ -199,11 +217,16 @@ export async function updateClipEditorState(
   // tracer file and mark 'stale' so the next editor open re-renders it. All
   // trim-save paths (editor updateTrim, preview.tsx, ScoreCollection
   // handleTrimSave) land in this function, so this one hook covers them all.
-  if (
-    updates.file_uri !== undefined ||
-    updates.trim_start_ms !== undefined ||
-    updates.trim_end_ms !== undefined
-  ) {
+  // CHANGED values only — re-saving identical values must not invalidate.
+  const fileChanged =
+    updates.file_uri !== undefined &&
+    (before === null || updates.file_uri !== before.file_uri);
+  const trimChanged =
+    (updates.trim_start_ms !== undefined &&
+      (before === null || updates.trim_start_ms !== before.trim_start_ms)) ||
+    (updates.trim_end_ms !== undefined &&
+      (before === null || updates.trim_end_ms !== before.trim_end_ms));
+  if (fileChanged || trimChanged) {
     await staleClipTracer(database, clipId);
   }
 }
