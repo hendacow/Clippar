@@ -34,7 +34,7 @@ import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { useOnboarding } from '@/contexts/OnboardingContext';
-import { getProfile, getRounds } from '@/lib/api';
+import { getProfile, getRounds, deleteAccount } from '@/lib/api';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
 
@@ -160,6 +160,51 @@ export default function ProfileScreen() {
         },
       },
     ]);
+  };
+
+  // App Review 5.1.1(v): account deletion must be initiated fully in-app.
+  // Two-step confirm — the second alert spells out exactly what is destroyed.
+  const [deletingAccount, setDeletingAccount] = useState(false);
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account?',
+      'This permanently deletes your account, all rounds, clips, and highlight reels from Clippar. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              'Are you absolutely sure?',
+              'Your videos saved to your Photos library stay on your phone, but everything in your Clippar account is erased forever.',
+              [
+                { text: 'Keep my account', style: 'cancel' },
+                {
+                  text: 'Delete everything',
+                  style: 'destructive',
+                  onPress: async () => {
+                    if (deletingAccount) return;
+                    setDeletingAccount(true);
+                    try {
+                      await deleteAccount();
+                      await signOut();
+                      router.replace('/(auth)/login');
+                    } catch {
+                      Alert.alert(
+                        'Deletion failed',
+                        'Something went wrong deleting your account. Please try again, or email support@clippar.com and we will delete it for you.'
+                      );
+                    } finally {
+                      setDeletingAccount(false);
+                    }
+                  },
+                },
+              ]
+            ),
+        },
+      ]
+    );
   };
 
   // Debug: smoke-test reachability of every round in Supabase so the user
@@ -632,6 +677,14 @@ export default function ProfileScreen() {
             onPress={handleSignOut}
             variant="ghost"
             icon={<LogOut size={18} color={theme.colors.textSecondary} />}
+          />
+
+          {/* ---- DELETE ACCOUNT (App Review 5.1.1(v)) ---- */}
+          <Button
+            title={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+            onPress={handleDeleteAccount}
+            variant="ghost"
+            icon={<Trash2 size={18} color={theme.colors.doubleBogey} />}
           />
 
           {/* App version */}
