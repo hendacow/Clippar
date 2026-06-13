@@ -24,6 +24,11 @@ export const config = {
     // (paywall shown otherwise). OFF until StoreKit IAP is live — flipping
     // this before purchases exist would lock everyone out of exports.
     enforceExportGate: false as boolean,
+    // RevenueCat public SDK key (per-platform). Empty → lib/iap falls back
+    // to the stub provider (Expo Go / binaries without the native module).
+    revenueCatIosKey: process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY || '',
+    // RevenueCat entitlement identifier that unlocks everything.
+    entitlementId: 'Clippar Pro',
   },
   hardware: {
     standardPriceCents: 5900,

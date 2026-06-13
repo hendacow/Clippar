@@ -160,7 +160,7 @@ export default function PaywallScreen() {
                     <Text
                       style={{ color: theme.colors.textPrimary, fontWeight: '800', fontSize: 16 }}
                     >
-                      {o.plan === 'annual' ? 'Annual' : 'Monthly'}
+                      {o.plan === 'annual' ? 'Annual' : o.plan === 'lifetime' ? 'Lifetime' : 'Monthly'}
                     </Text>
                     {o.badge ? (
                       <View
