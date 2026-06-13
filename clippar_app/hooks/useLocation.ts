@@ -38,16 +38,24 @@ export interface HeadingFix {
  */
 async function getFreshFix(timeoutMs = 6000): Promise<Coordinates | null> {
   const t0 = Date.now();
+  // WiFi-positioned fixes report ~15-65m accuracy and DON'T move when you
+  // walk (field bug #2: two fixes 4cm apart after a 50m walk, both ±18m —
+  // anchored to the same router). Satellite fixes outdoors run ~3-10m. So:
+  // accept immediately at <= this threshold, otherwise keep watching and
+  // settle for the BEST fresh fix seen when the timeout lands.
+  const goodAccuracyM = 12;
   return new Promise<Coordinates | null>((resolve) => {
     let sub: Location.LocationSubscription | null = null;
     let done = false;
+    let best: Coordinates | null = null;
+    let bestAcc = Infinity;
     const finish = (c: Coordinates | null) => {
       if (done) return;
       done = true;
       try { sub?.remove(); } catch {}
       resolve(c);
     };
-    const timer = setTimeout(() => finish(null), timeoutMs);
+    const timer = setTimeout(() => finish(best), timeoutMs);
     Location.watchPositionAsync(
       {
         accuracy: Location.Accuracy.BestForNavigation,
@@ -57,13 +65,21 @@ async function getFreshFix(timeoutMs = 6000): Promise<Coordinates | null> {
       (loc) => {
         // 2s slack for clock skew; the cached fix is stamped tens of seconds
         // (or minutes) old, so it never passes this gate.
-        if (loc.timestamp >= t0 - 2000) {
+        if (loc.timestamp < t0 - 2000) return;
+        const acc = loc.coords.accuracy ?? null;
+        const c: Coordinates = {
+          latitude: loc.coords.latitude,
+          longitude: loc.coords.longitude,
+          accuracy: acc,
+        };
+        if (acc !== null && acc <= goodAccuracyM) {
           clearTimeout(timer);
-          finish({
-            latitude: loc.coords.latitude,
-            longitude: loc.coords.longitude,
-            accuracy: loc.coords.accuracy ?? null,
-          });
+          finish(c);
+          return;
+        }
+        if (acc === null ? best === null : acc < bestAcc) {
+          best = c;
+          bestAcc = acc ?? bestAcc;
         }
       }
     )
@@ -71,7 +87,7 @@ async function getFreshFix(timeoutMs = 6000): Promise<Coordinates | null> {
         sub = s;
         if (done) { try { s.remove(); } catch {} }
       })
-      .catch(() => finish(null));
+      .catch(() => finish(best));
   });
 }
 
