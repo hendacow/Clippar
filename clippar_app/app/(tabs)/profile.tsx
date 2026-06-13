@@ -35,6 +35,7 @@ import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { getProfile, getRounds, deleteAccount } from '@/lib/api';
+import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
 
@@ -165,6 +166,53 @@ export default function ProfileScreen() {
   // App Review 5.1.1(v): account deletion must be initiated fully in-app.
   // Two-step confirm — the second alert spells out exactly what is destroyed.
   const [deletingAccount, setDeletingAccount] = useState(false);
+
+  const runAccountDeletion = useCallback(async () => {
+    if (deletingAccount) return;
+    setDeletingAccount(true);
+    try {
+      await deleteAccount();
+      // Detach the RevenueCat customer so the deleted user's purchases don't
+      // stay aliased to a dead account. NOTE: this does NOT cancel an Apple
+      // subscription — Apple only lets the USER do that in Settings (handled
+      // by the warning step before we get here).
+      await iap.reset().catch(() => {});
+      await signOut();
+      router.replace('/(auth)/login');
+    } catch {
+      Alert.alert(
+        'Deletion failed',
+        'Something went wrong deleting your account. Please try again, or email support@clippar.com and we will delete it for you.'
+      );
+    } finally {
+      setDeletingAccount(false);
+    }
+  }, [deletingAccount, signOut]);
+
+  const confirmFinalDeletion = useCallback(async () => {
+    // If there's a live auto-renewing App Store subscription, deletion can't
+    // stop Apple from billing — only the user can cancel in iOS Settings.
+    // Warn explicitly and offer the manage-subscriptions shortcut.
+    const hasSub = await iap.hasActiveStoreSubscription().catch(() => false);
+    if (hasSub) {
+      Alert.alert(
+        'Cancel your subscription first',
+        'Deleting your account does NOT cancel your Clippar Pro subscription — Apple will keep charging you until you cancel it in your iPhone Settings. Open Settings to cancel, then come back to delete your account.',
+        [
+          { text: 'Open Settings', onPress: () => Linking.openURL('https://apps.apple.com/account/subscriptions') },
+          {
+            text: 'Delete anyway',
+            style: 'destructive',
+            onPress: runAccountDeletion,
+          },
+          { text: 'Keep my account', style: 'cancel' },
+        ]
+      );
+      return;
+    }
+    runAccountDeletion();
+  }, [runAccountDeletion]);
+
   const handleDeleteAccount = () => {
     Alert.alert(
       'Delete Account?',
@@ -183,22 +231,7 @@ export default function ProfileScreen() {
                 {
                   text: 'Delete everything',
                   style: 'destructive',
-                  onPress: async () => {
-                    if (deletingAccount) return;
-                    setDeletingAccount(true);
-                    try {
-                      await deleteAccount();
-                      await signOut();
-                      router.replace('/(auth)/login');
-                    } catch {
-                      Alert.alert(
-                        'Deletion failed',
-                        'Something went wrong deleting your account. Please try again, or email support@clippar.com and we will delete it for you.'
-                      );
-                    } finally {
-                      setDeletingAccount(false);
-                    }
-                  },
+                  onPress: confirmFinalDeletion,
                 },
               ]
             ),

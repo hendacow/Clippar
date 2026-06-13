@@ -48,6 +48,15 @@ export interface IapProvider {
   isProActive(): Promise<boolean>;
   /** Tie the RevenueCat customer to the Supabase user id. No-op on stub. */
   identify(userId: string): Promise<void>;
+  /** Reset to an anonymous RevenueCat customer (on sign-out / deletion). */
+  reset(): Promise<void>;
+  /**
+   * An auto-renewing App Store subscription is currently active for this
+   * Apple ID. Distinct from isProActive() (which also true for lifetime /
+   * web subs) — used to warn that account deletion does NOT stop Apple
+   * billing, which only the user can do in iOS Settings. False on stub.
+   */
+  hasActiveStoreSubscription(): Promise<boolean>;
 }
 
 const aud = (cents: number) => `A$${(cents / 100).toFixed(2).replace(/\.00$/, '')}`;
@@ -82,6 +91,10 @@ const StubProvider: IapProvider = {
     return false;
   },
   async identify() {},
+  async reset() {},
+  async hasActiveStoreSubscription() {
+    return false;
+  },
 };
 
 // ─── RevenueCat ───
@@ -243,6 +256,29 @@ const RevenueCatProvider: IapProvider = {
       // Identity aliasing is best-effort — purchases still work anonymous.
     }
   },
+
+  async reset(): Promise<void> {
+    const Purchases = getConfiguredPurchases();
+    if (!Purchases) return;
+    try {
+      await Purchases.logOut();
+    } catch {
+      // Already anonymous, or no native module — nothing to unwind.
+    }
+  },
+
+  async hasActiveStoreSubscription(): Promise<boolean> {
+    const Purchases = getConfiguredPurchases();
+    if (!Purchases) return false;
+    try {
+      const customerInfo = await Purchases.getCustomerInfo();
+      // activeSubscriptions = product ids of auto-renewing subs only
+      // (excludes lifetime non-consumables, which need no cancellation).
+      return (customerInfo.activeSubscriptions?.length ?? 0) > 0;
+    } catch {
+      return false;
+    }
+  },
 };
 
 /**
@@ -270,4 +306,10 @@ export const iap: IapProvider = {
     RevenueCatProvider.isAvailable()
       ? RevenueCatProvider.identify(userId)
       : StubProvider.identify(userId),
+  reset: () =>
+    RevenueCatProvider.isAvailable() ? RevenueCatProvider.reset() : StubProvider.reset(),
+  hasActiveStoreSubscription: () =>
+    RevenueCatProvider.isAvailable()
+      ? RevenueCatProvider.hasActiveStoreSubscription()
+      : StubProvider.hasActiveStoreSubscription(),
 };

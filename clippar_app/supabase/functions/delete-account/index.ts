@@ -69,6 +69,23 @@ Deno.serve(async (req: Request) => {
     await supabase.from('daily_usage').delete().eq('user_id', user.id);
     await supabase.from('hardware_orders').delete().eq('user_id', user.id);
 
+    // 2b. RevenueCat subscriber cleanup (best-effort). This removes the
+    // customer record so the deleted account isn't tracked, but it does NOT
+    // cancel an active App Store subscription — only the user can do that in
+    // iOS Settings (the app warns them before reaching this point). Skipped
+    // when no secret key is configured.
+    const rcSecret = Deno.env.get('REVENUECAT_SECRET_KEY');
+    if (rcSecret) {
+      try {
+        await fetch(
+          `https://api.revenuecat.com/v1/subscribers/${encodeURIComponent(user.id)}`,
+          { method: 'DELETE', headers: { Authorization: `Bearer ${rcSecret}` } }
+        );
+      } catch (err) {
+        console.error('revenuecat subscriber delete failed', err);
+      }
+    }
+
     // 3. The auth user — cascades everything else.
     const { error: deleteError } = await supabase.auth.admin.deleteUser(user.id);
     if (deleteError) {
