@@ -22,7 +22,7 @@
  *  2. Swap EXPO_PUBLIC_REVENUECAT_IOS_KEY for the appl_... production key.
  *  3. Rebuild the dev client / EAS build (native module).
  */
-import { Platform } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import { config } from '@/constants/config';
 
 export type ProPlan = 'monthly' | 'annual' | 'lifetime';
@@ -92,8 +92,14 @@ let configured = false;
 
 function loadPurchases(): typeof import('react-native-purchases') | false {
   if (PurchasesModule !== null) return PurchasesModule;
+  // FIELD BUG: the JS package imports fine on binaries WITHOUT the native
+  // module (old dev client / Expo Go) and only explodes later at
+  // configure() — so probe the native side directly, not the require().
+  if (!NativeModules.RNPurchases) {
+    PurchasesModule = false;
+    return false;
+  }
   try {
-    // Throws on binaries without the native module (Expo Go, old dev client).
     PurchasesModule = require('react-native-purchases') as typeof import('react-native-purchases');
   } catch {
     PurchasesModule = false;
@@ -108,8 +114,15 @@ function getConfiguredPurchases() {
   }
   const Purchases = mod.default;
   if (!configured) {
-    Purchases.configure({ apiKey: config.subscription.revenueCatIosKey });
-    configured = true;
+    try {
+      Purchases.configure({ apiKey: config.subscription.revenueCatIosKey });
+      configured = true;
+    } catch {
+      // Belt-and-braces: any configure failure downgrades to the stub
+      // rather than surfacing store errors into UI flows.
+      PurchasesModule = false;
+      return null;
+    }
   }
   return Purchases;
 }
