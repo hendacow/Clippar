@@ -270,13 +270,15 @@ export function precheckArcGeometry(
 ): TracerGeometry | TracerSkip {
   const { tracer } = config;
   const force = tracer.debugForceTrace;
+  const gpsOnly = tracer.gpsOnlyTrace;
   const meta: TracerMeta = {};
-  if (force) meta.debugForced = true;
+  if (force || gpsOnly) meta.debugForced = true;
 
   // F4: a fix worse than 20 m can place the "landing" a full club off —
   // refuse the pairing outright rather than render a confident lie.
   if (
     !force &&
+    !gpsOnly &&
     ((input.gpsAccuracyMN !== null && input.gpsAccuracyMN > 20) ||
       (input.gpsAccuracyMN1 !== null && input.gpsAccuracyMN1 > 20))
   ) {
@@ -288,10 +290,11 @@ export function precheckArcGeometry(
 
   // F4 dynamic carry floor: the carry must clear the combined GPS error
   // budget of both fixes (unknown accuracy assumed 10 m), never below 25 m.
-  const minCarryM = Math.max(
-    25,
-    2 * ((input.gpsAccuracyMN ?? 10) + (input.gpsAccuracyMN1 ?? 10))
-  );
+  // gpsOnlyTrace: FIXED 25 m floor (no accuracy scaling) so a 30 m walk
+  // verifiably renders even on sloppy indoor-grade fixes.
+  const minCarryM = gpsOnly
+    ? 25
+    : Math.max(25, 2 * ((input.gpsAccuracyMN ?? 10) + (input.gpsAccuracyMN1 ?? 10)));
   if (!force && carryM < minCarryM) return { skip: 'carry-min', meta };
   if (carryM > tracer.maxCarryM) return { skip: 'carry-max', meta };
   const lowCarryConfidence = carryM < 40;
@@ -397,7 +400,8 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
   // F8a — detection as VETO: a blob was observed in the launch ROI but never
   // gained altitude (grounded/topped roll). Never synthesize a flying arc
   // over a rolling ball.
-  if (!config.tracer.debugForceTrace && det?.groundedEvidence) {
+  const bypassEvidence = config.tracer.debugForceTrace || config.tracer.gpsOnlyTrace;
+  if (!bypassEvidence && det?.groundedEvidence) {
     return { skip: 'grounded', meta };
   }
 
@@ -411,7 +415,7 @@ export function buildArcSpec(input: TracerArcInput): TracerArcResult | TracerSki
   // (vision trajectory with a non-degenerate, upward direction).
   // debugForceTrace: render anyway with a straight-at-center fallback below.
   if (!geom.headingUsable && (!visionOk || !detDirection || detDirection.dy <= 0)) {
-    if (!config.tracer.debugForceTrace) return { skip: 'no-heading', meta };
+    if (!bypassEvidence) return { skip: 'no-heading', meta };
   }
 
   // Launch anchor P0: detected ball > pose ankles > frame-bottom default.

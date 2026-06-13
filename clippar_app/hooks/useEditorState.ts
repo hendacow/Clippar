@@ -1031,16 +1031,18 @@ export function useEditorState(roundId: string | undefined) {
         const next = rows[idx + 1];
         const successor = next && next.hole_number === row.hole_number ? next : null;
 
-        // debugForceTrace: ignore the classifier so street tests (no club/
-        // ball → fallback-classified 'putt') still exercise the full pipeline.
-        if (row.shot_type === 'putt' && !config.tracer.debugForceTrace) {
+        // debugForceTrace / gpsOnlyTrace: ignore the classifier so street
+        // tests (no club/ball → fallback-classified 'putt') still render.
+        const bypassEvidence =
+          config.tracer.debugForceTrace || config.tracer.gpsOnlyTrace;
+        if (row.shot_type === 'putt' && !bypassEvidence) {
           await persistSkip('putt', {});
           continue;
         }
-        // debugForceTrace: no detected impact → anchor on the clip midpoint so
-        // the arc still renders (timing will be approximate, fine for testing).
+        // debugForceTrace / gpsOnlyTrace: no detected impact → anchor on the
+        // clip midpoint so the arc still renders (timing approximate).
         let impactMs = row.impact_time_ms;
-        if (impactMs === null && config.tracer.debugForceTrace) {
+        if (impactMs === null && bypassEvidence) {
           impactMs = Math.max(0, Math.round(((row.duration_seconds ?? 0) * 1000) / 2));
           console.log(
             `[TRACER] hole=${row.hole_number} shot=${row.shot_number} debugForceTrace: no impact_time_ms, using clip midpoint ${impactMs}ms`
@@ -1101,7 +1103,11 @@ export function useEditorState(roundId: string | undefined) {
           ? impactMs
           : impactMs - (row.auto_trim_start_ms ?? 0);
 
-        const detection = await detectBallLaunch(detectUri, detectImpactMs);
+        // gpsOnlyTrace: geometry is the whole story — skip the Vision pass
+        // entirely (renders on a black screen, and saves the full-res scan).
+        const detection = config.tracer.gpsOnlyTrace
+          ? null
+          : await detectBallLaunch(detectUri, detectImpactMs);
         if (tracerCancelledRef.current) return;
 
         // Detection-dependent gates (F3 no-heading vision-or-skip, F8a

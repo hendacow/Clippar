@@ -81,7 +81,16 @@ export const config = {
     // Keeps: needs a detected impact time, two GPS fixes, carry-max sanity,
     // and enough post-impact footage to animate. MUST be false for real
     // rounds — it will happily draw arcs over putts and practice swings.
-    debugForceTrace: true as boolean,
+    debugForceTrace: false as boolean,
+    // GPS-ONLY TEST MODE: the tracer is driven purely by geometry — it
+    // 100% renders (even on a black screen) when BOTH clips have GPS, the
+    // fixes are ≥25m and ≤300m apart, and the bearing to the "landing" is
+    // within maxBearingDeltaDeg of the camera heading. Skips swing/putt
+    // classification, ball detection (Vision pass not even run), GPS
+    // accuracy and grounded/no-heading evidence gates; impact anchors on
+    // the detected swing when present, else the clip midpoint. MUST be
+    // false for real rounds.
+    gpsOnlyTrace: true as boolean,
     // ── Ball-launch detection knobs (forwarded to native detectBallLaunch
     //    as optionsJson; see BallLaunchOptions in modules/shot-detector) ──
     trajectoryLength: 5, // VNDetectTrajectoriesRequest points-per-trajectory (floor 5)
