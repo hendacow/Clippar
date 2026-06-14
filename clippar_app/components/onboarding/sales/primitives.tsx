@@ -9,6 +9,7 @@ import Animated, {
   useSharedValue,
   useAnimatedStyle,
   useAnimatedProps,
+  useAnimatedReaction,
   withTiming,
   withSpring,
   withDelay,
@@ -18,13 +19,11 @@ import Animated, {
   Easing,
   runOnJS,
 } from 'react-native-reanimated';
-import Svg, { Path, Circle, Line } from 'react-native-svg';
 import { Star } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 
 const GOLD = '#F2C14E';
 const AnimatedText = Animated.createAnimatedComponent(TextInput);
-const AnimatedLine = Animated.createAnimatedComponent(Line);
 
 /* ── Primary CTA: press-spring + haptic ───────────────────────────────── */
 export function FlowButton({
@@ -248,20 +247,26 @@ export function CountUp({
   }, [to, durationMs, v]);
 
   const tick = () => Haptics.selectionAsync();
-  // Milestone haptics live INSIDE the attached animatedProps so the worklet
-  // actually runs each frame (a standalone useAnimatedProps never fires).
-  const animatedProps = useAnimatedProps(() => {
-    for (const m of milestones) {
-      if (v.value >= m && lastTick.value < m) {
-        lastTick.value = m;
-        runOnJS(tick)();
+  // useAnimatedProps must stay PURE (returning only props). JS side-effects
+  // from an animated value go through useAnimatedReaction — doing runOnJS +
+  // shared-value writes inside useAnimatedProps trips Reanimated's worklet
+  // reentrancy guard and hard-crashes the app.
+  useAnimatedReaction(
+    () => v.value,
+    (cur) => {
+      for (const m of milestones) {
+        if (cur >= m && lastTick.value < m) {
+          lastTick.value = m;
+          runOnJS(tick)();
+        }
       }
     }
-    return {
-      text: `${prefix}${Math.round(v.value).toLocaleString()}${suffix}`,
-      defaultValue: `${prefix}0${suffix}`,
-    };
-  }) as object;
+  );
+
+  const animatedProps = useAnimatedProps(() => ({
+    text: `${prefix}${Math.round(v.value).toLocaleString()}${suffix}`,
+    defaultValue: `${prefix}0${suffix}`,
+  })) as object;
 
   return (
     <AnimatedText
@@ -280,33 +285,44 @@ export function TrialTimeline({ days, reminderBefore }: { days: number; reminder
     progress.value = withDelay(200, withTiming(1, { duration: 700, easing: Easing.out(Easing.cubic) }));
   }, [progress]);
 
-  const W = 300;
-  const lineProps = useAnimatedProps(() => ({
-    x2: interpolate(progress.value, [0, 1], [24, W - 24]),
-  })) as object;
+  // Plain animated-width bar over a static track — no animated SVG geometry
+  // (animating <Line x2> via reanimated is fragile and can crash).
+  const fillStyle = useAnimatedStyle(() => ({ width: `${progress.value * 100}%` }));
 
   const nodes = [
-    { label: 'Today', sub: 'Full access', day: 0 },
-    { label: `Day ${days - reminderBefore}`, sub: 'We remind you', day: days - reminderBefore },
-    { label: `Day ${days}`, sub: 'Billed · cancel anytime', day: days },
+    { label: 'Today', sub: 'Full access' },
+    { label: `Day ${days - reminderBefore}`, sub: 'We remind you' },
+    { label: `Day ${days}`, sub: 'Billed · cancel anytime' },
   ];
 
   return (
-    <View style={{ alignItems: 'center', marginVertical: 8 }}>
-      <Svg width={W} height={40}>
-        <Line x1={24} y1={20} x2={W - 24} y2={20} stroke={theme.colors.surfaceBorder} strokeWidth={2} />
-        <AnimatedLine x1={24} y1={20} stroke={theme.colors.primary} strokeWidth={3} animatedProps={lineProps} />
-        {nodes.map((n, i) => (
-          <Circle
-            key={i}
-            cx={24 + (i * (W - 48)) / 2}
-            cy={20}
-            r={6}
-            fill={i === nodes.length - 1 ? GOLD : theme.colors.primary}
-          />
-        ))}
-      </Svg>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', width: W, paddingHorizontal: 6 }}>
+    <View style={{ marginVertical: 8 }}>
+      <View style={{ height: 14, justifyContent: 'center', marginBottom: 8 }}>
+        {/* track */}
+        <View style={{ height: 3, backgroundColor: theme.colors.surfaceBorder, borderRadius: 2 }} />
+        {/* animated fill */}
+        <Animated.View
+          style={[
+            { position: 'absolute', left: 0, height: 3, backgroundColor: theme.colors.primary, borderRadius: 2 },
+            fillStyle,
+          ]}
+        />
+        {/* nodes */}
+        <View style={{ position: 'absolute', left: 0, right: 0, flexDirection: 'row', justifyContent: 'space-between' }}>
+          {nodes.map((_, i) => (
+            <View
+              key={i}
+              style={{
+                width: 12,
+                height: 12,
+                borderRadius: 6,
+                backgroundColor: i === nodes.length - 1 ? GOLD : theme.colors.primary,
+              }}
+            />
+          ))}
+        </View>
+      </View>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         {nodes.map((n, i) => (
           <View key={i} style={{ alignItems: i === 0 ? 'flex-start' : i === 2 ? 'flex-end' : 'center', flex: 1 }}>
             <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>{n.label}</Text>

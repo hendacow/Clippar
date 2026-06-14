@@ -13,6 +13,7 @@ import * as Haptics from 'expo-haptics';
 import Animated, {
   useSharedValue,
   useAnimatedProps,
+  useAnimatedReaction,
   withTiming,
   withDelay,
   Easing,
@@ -26,8 +27,13 @@ const AnimatedCircle = Animated.createAnimatedComponent(Circle);
 const GOLD = '#F2C14E';
 const GOLD_SOFT = '#FFE6A8';
 
-/** Quadratic Bézier point at t. */
+/**
+ * Quadratic Bézier point at t. Marked 'worklet' so it can be called from the
+ * UI-thread animatedProps (a plain JS function called inside a worklet
+ * hard-crashes). Still callable from JS for the path-build loop.
+ */
 function quad(t: number, p0: number, p1: number, p2: number) {
+  'worklet';
   const u = 1 - t;
   return u * u * p0 + 2 * u * t * p1 + t * t * p2;
 }
@@ -91,18 +97,26 @@ export function TracerArc({
     );
   }, [replayKey, delayMs, durationMs, progress, apexFired, landFired]);
 
-  const pathProps = useAnimatedProps(() => {
-    // strokeDashoffset reveals the stroke from start to current progress.
-    if (progress.value >= apexT && apexFired.value === 0) {
-      apexFired.value = 1;
-      runOnJS(apexTick)();
+  // Haptics via useAnimatedReaction (pure animatedProps below). Firing
+  // runOnJS + writing shared values inside useAnimatedProps trips the worklet
+  // reentrancy guard and crashes.
+  useAnimatedReaction(
+    () => progress.value,
+    (p) => {
+      if (p >= apexT && apexFired.value === 0) {
+        apexFired.value = 1;
+        runOnJS(apexTick)();
+      }
+      if (p >= 0.99 && landFired.value === 0) {
+        landFired.value = 1;
+        runOnJS(landTick)();
+      }
     }
-    if (progress.value >= 0.99 && landFired.value === 0) {
-      landFired.value = 1;
-      runOnJS(landTick)();
-    }
-    return { strokeDashoffset: length * (1 - progress.value) };
-  });
+  );
+
+  const pathProps = useAnimatedProps(() => ({
+    strokeDashoffset: length * (1 - progress.value),
+  }));
 
   const ballProps = useAnimatedProps(() => {
     const t = progress.value;

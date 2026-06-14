@@ -7,7 +7,7 @@
  * lib/salesFlow). The funnel never holds an account — its exits route into the
  * existing signup/login, carrying the trial intent for the post-signup paywall.
  */
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -60,9 +60,17 @@ export default function SalesFunnel() {
     [handicap, goal]
   );
 
-  const onNext = useCallback(() => setStep((s) => Math.min(s + 1, STEPS.length - 1)), []);
-  // Skipping the micro-commit questions just advances past them.
-  const onSkip = useCallback(() => setStep((s) => Math.min(s + 1, STEPS.length - 1)), []);
+  // Throttle advances so a stray double-call (auto-advance + tap) can't skip
+  // a screen — observed handicap jumping straight past the goal question.
+  const lastAdvance = useRef(0);
+  const advance = useCallback(() => {
+    const now = Date.now();
+    if (now - lastAdvance.current < 450) return;
+    lastAdvance.current = now;
+    setStep((s) => Math.min(s + 1, STEPS.length - 1));
+  }, []);
+  const onNext = advance;
+  const onSkip = advance;
 
   const setHandicap = useCallback((h: HandicapBand) => setHandicapState(h), []);
   const setGoal = useCallback((g: GolferGoal) => setGoalState(g), []);
