@@ -15,7 +15,14 @@ export function StripeWrapper({ children }: { children: ReactNode }) {
   }
 
   return (
-    <StripeProvider publishableKey={config.stripe.publishableKey}>
+    <StripeProvider
+      publishableKey={config.stripe.publishableKey}
+      // Required for Apple Pay (physical-goods checkout). Harmless when the
+      // merchant ID / capability aren't provisioned yet — the sheet just
+      // falls back to card entry.
+      merchantIdentifier={config.stripe.merchantIdentifier}
+      urlScheme="clippar"
+    >
       <>{children}</>
     </StripeProvider>
   );

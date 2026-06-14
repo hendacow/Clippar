@@ -103,6 +103,7 @@ export default function ShopScreen() {
         amount,
         currency: config.hardware.currency,
         productType: selectedKit,
+        label: `Clippar ${selectedKit === 'standard' ? 'Standard' : 'Premium'} Kit`,
       });
 
       const success = await presentPaymentSheet();

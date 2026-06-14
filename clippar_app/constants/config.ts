@@ -5,6 +5,14 @@ export const config = {
   },
   stripe: {
     publishableKey: process.env.EXPO_PUBLIC_STRIPE_PUBLISHABLE_KEY!,
+    // Apple Pay merchant ID. Must be registered in the Apple Developer
+    // portal (Certificates → Identifiers → Merchant IDs) and the bundle's
+    // provisioning profile must carry the Apple Pay capability. One merchant
+    // ID is shared across app variants. EAS adds the capability automatically
+    // once this ID exists; the @stripe/stripe-react-native Expo plugin
+    // (app.config.js) adds the in-app-payments entitlement.
+    merchantIdentifier: 'merchant.com.clippar.app',
+    merchantCountryCode: 'AU',
   },
   pipeline: {
     url: process.env.EXPO_PUBLIC_PIPELINE_URL!,
