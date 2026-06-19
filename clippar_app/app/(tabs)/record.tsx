@@ -936,16 +936,24 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={true} — TEMPORARY revert for tracer field testing.
-          Capturing the mic (mute={false}) re-triggers the -10868
-          kAudioUnitErr_FormatNotSupported recordAsync failure on real hardware
-          (the expo-camera .playAndRecord patch isn't fully holding the session
-          against react-native-volume-manager's .ambient session on this
-          device/iOS 27). The GPS tracer does NOT need clip audio (it uses
-          GPS + Vision + pose), so recording is muted here to unblock the tracer
-          test. Per-clip audio capture remains a SEPARATE open problem — revisit
-          with a deeper native audio-session coordination once the tracer is
-          validated. */}
+      {/* mute={false} — AUDIO RECORDING ON. Attaching the mic input is what
+          arms the load-bearing fix: the expo-camera patch
+          (patches/expo-camera+17.0.10.patch) asserts AVAudioSession
+          .playAndRecord + .videoRecording with [.mixWithOthers, .allowBluetooth]
+          on the camera's sessionQueue at the exact moment it adds the mic input,
+          so the capture audio unit negotiates against a record-capable category
+          instead of react-native-volume-manager's hostile .ambient route. That
+          assertion only runs while mute={false}; muting removed the mic and
+          silently disabled the fix.
+          .mixWithOthers is deliberate — it keeps RNVM's outputVolume KVO alive,
+          so the AB-Shutter3 / volume-channel clicker (useShutter) still starts
+          and stops recording while audio is captured.
+          NOTE: the -10868 (kAudioUnitErr_FormatNotSupported) failure that
+          originally forced the mute revert only reproduces on real hardware
+          (iOS 27) — it cannot surface in the simulator. If it returns on device,
+          the [TRACER-CAPTURE] / '[useCamera] Recording error' lines in the Metro
+          log are the signal; that's the trigger to do the deeper native
+          session-coordination pass (re-assert .playAndRecord post-RNVM-restamp). */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
@@ -953,7 +961,7 @@ export default function RecordScreen() {
           facing="back"
           mode="video"
           videoQuality="1080p"
-          mute
+          mute={false}
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed
