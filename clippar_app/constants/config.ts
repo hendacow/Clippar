@@ -77,9 +77,11 @@ export const config = {
   tracer: {
     // Master kill switch. Every tracer code path (capture, detect, geometry,
     // render, playback switching) is gated on this so the app is byte-identical
-    // with it off. ENABLED for clippar-dev field testing — flip back to false
-    // to instantly revert to stock behavior (originals are never modified).
-    enabled: true as boolean,
+    // with it off. OFF for the v1 production build — the tracer has not yet
+    // passed a real-round field test, so prod ships stock behavior. Flip to
+    // true (clippar-dev only) to resume field testing; originals are never
+    // modified, so this is a pure on/off with no data risk.
+    enabled: false as boolean,
     // Sub-gate within `enabled` for compass-heading capture at record start.
     captureHeading: true as boolean,
     // DEBUG OFF-SWITCH for the evidence gates, so street tests (no club, no
@@ -98,7 +100,7 @@ export const config = {
     // accuracy and grounded/no-heading evidence gates; impact anchors on
     // the detected swing when present, else the clip midpoint. MUST be
     // false for real rounds.
-    gpsOnlyTrace: true as boolean,
+    gpsOnlyTrace: false as boolean,
     // ── Ball-launch detection knobs (forwarded to native detectBallLaunch
     //    as optionsJson; see BallLaunchOptions in modules/shot-detector) ──
     trajectoryLength: 5, // VNDetectTrajectoriesRequest points-per-trajectory (floor 5)
