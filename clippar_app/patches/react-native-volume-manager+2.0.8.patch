@@ -1,0 +1,30 @@
+diff --git a/node_modules/react-native-volume-manager/ios/VolumeManager.m b/node_modules/react-native-volume-manager/ios/VolumeManager.m
+index 5bcd2ce..0b20dfd 100644
+--- a/node_modules/react-native-volume-manager/ios/VolumeManager.m
++++ b/node_modules/react-native-volume-manager/ios/VolumeManager.m
+@@ -167,12 +167,19 @@ - (void)showVolumeUI:(BOOL)flag {
+ }
+ 
+ - (void)addVolumeListener {
+-  [audioSession setCategory:AVAudioSessionCategoryAmbient
+-                withOptions:AVAudioSessionCategoryOptionMixWithOthers |
+-   AVAudioSessionCategoryOptionAllowBluetooth
+-                      error:nil];
+-  [audioSession setActive:YES error:nil];
+-  
++  // [clippar audio-fix] Do NOT force AVAudioSessionCategoryAmbient here.
++  //
++  // RNVM only needs to OBSERVE `outputVolume` to detect the Bluetooth
++  // volume-clicker — and that KVO fires regardless of the session category.
++  // The original code forced .ambient (a playback-only category that exposes
++  // no usable mic input format), which clobbered the camera's .playAndRecord
++  // session and caused recordAsync to fail with -10868
++  // (kAudioUnitErr_FormatNotSupported) ~2s into every recording whenever the
++  // mic was attached (mute={false}). Removing the category stamp lets the
++  // expo-camera patch's .playAndRecord assertion hold, so clips record WITH
++  // audio while the clicker's volume KVO keeps working. We do not setActive
++  // either — whoever owns the session (expo-camera while recording, expo-av/
++  // expo-video during editor playback) manages activation.
+   [audioSession addObserver:self
+                  forKeyPath:@"outputVolume"
+                     options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld
