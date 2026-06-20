@@ -107,8 +107,8 @@ export function useCamera({
   useEffect(() => {
     if (isNative) {
       // Unique marker so we can verify which bundle is loaded.
-      // bundle-id: cam-fix-v2
-      console.log('[useCamera] mounted — bundle cam-fix-v2');
+      // bundle-id: cam-fix-v3 (reapply audio mode per recordAsync)
+      console.log('[useCamera] mounted — bundle cam-fix-v3');
       requestPermission();
     }
   }, [requestPermission]);
@@ -119,29 +119,40 @@ export function useCamera({
   // AVCaptureSession dies with -10868 (kAudioUnitErr_FormatNotSupported)
   // ~2s after recordAsync starts. MixWithOthers (default) avoids exclusive
   // ownership which itself breaks format negotiation.
+  //
+  // We also re-apply this immediately before every recordAsync (see
+  // startRecording) — the mount-only effect only catches the first round.
+  // After the user opens the editor (expo-av playback) and comes back to
+  // Record, the session has flipped to playback-only and the next record
+  // would otherwise fail with "An error occurred while recording a video".
+  const applyRecordingAudioMode = useCallback(async () => {
+    if (!isNative) return;
+    try {
+      const ExpoAV = require('expo-av') as typeof import('expo-av');
+      await ExpoAV.Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+        staysActiveInBackground: false,
+        interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
+        shouldDuckAndroid: false,
+        interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
+        playThroughEarpieceAndroid: false,
+      });
+    } catch (err) {
+      console.log('[useCamera] setAudioMode failed:', err);
+    }
+  }, []);
+
   useEffect(() => {
     if (!isNative) return;
     let cancelled = false;
     (async () => {
-      try {
-        const ExpoAV = require('expo-av') as typeof import('expo-av');
-        if (cancelled) return;
-        await ExpoAV.Audio.setAudioModeAsync({
-          allowsRecordingIOS: true,
-          playsInSilentModeIOS: true,
-          staysActiveInBackground: false,
-          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
-          shouldDuckAndroid: false,
-          interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
-          playThroughEarpieceAndroid: false,
-        });
-        console.log('[useCamera] audio mode set for recording');
-      } catch (err) {
-        console.log('[useCamera] setAudioMode failed:', err);
-      }
+      await applyRecordingAudioMode();
+      if (cancelled) return;
+      console.log('[useCamera] audio mode set for recording');
     })();
     return () => { cancelled = true; };
-  }, []);
+  }, [applyRecordingAudioMode]);
 
   const startRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || isRecordingRef.current) return;
@@ -161,6 +172,15 @@ export function useCamera({
       KeepAwake?.activateKeepAwakeAsync('recording');
 
       const { roundId: rid, holeNumber: hole, shotNumber: shot } = paramsRef.current;
+
+      // Re-apply the recording audio mode on every record. The mount-only
+      // effect only catches the very first round; after navigating to the
+      // editor and back the iOS audio session is playback-only and
+      // recordAsync would fail with -10868. Doing it here makes every
+      // recordAsync self-sufficient regardless of what other screens did.
+      await applyRecordingAudioMode();
+
+      if (!cameraRef.current || !isRecordingRef.current) return;
 
       // Small delay to ensure camera is ready (avoids "error while recording" on iOS)
       await new Promise((r) => setTimeout(r, 200));
@@ -312,7 +332,7 @@ export function useCamera({
       setIsRecording(false);
       KeepAwake?.deactivateKeepAwake('recording');
     }
-  }, [getLocation, onClipSaved, onShotClassified]);
+  }, [getLocation, onClipSaved, onShotClassified, applyRecordingAudioMode]);
 
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
