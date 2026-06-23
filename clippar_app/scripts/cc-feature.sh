@@ -26,8 +26,10 @@ echo "→ fetching latest main…"
 git -C "$MAIN_ROOT" fetch origin main --quiet || true
 
 echo "→ creating worktree ${WORKTREE_DIR} on ${BRANCH}…"
-git -C "$MAIN_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" origin/main 2>/dev/null \
-  || git -C "$MAIN_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" main
+# --no-track: the new feature branch must NOT track origin/main, or a bare
+# `git push` from it would push straight to main. First push uses `-u` (below).
+git -C "$MAIN_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" --no-track origin/main 2>/dev/null \
+  || git -C "$MAIN_ROOT" worktree add "$WORKTREE_DIR" -b "$BRANCH" --no-track main
 
 cat <<EOF
 
@@ -39,5 +41,6 @@ cat <<EOF
        APP_VARIANT=development npx expo start --tunnel --port ${PORT} > ${LOGFILE} 2>&1 &
   3) Run \`claude\` and tell it the feature + that Metro logs are at ${LOGFILE}
 
-  Merge when done:  verify green → PR → CI → merge → git worktree remove "$WORKTREE_DIR"
+  Merge when done:  npm run verify → git push -u origin ${BRANCH} → open PR →
+                    CI green → merge → git worktree remove "$WORKTREE_DIR"
 EOF
