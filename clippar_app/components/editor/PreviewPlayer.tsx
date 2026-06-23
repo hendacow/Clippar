@@ -11,9 +11,10 @@ import {
   Image,
   type ViewStyle,
 } from 'react-native';
-import { Scissors, RotateCcw, X, Check } from 'lucide-react-native';
+import { Scissors, RotateCcw, X, Check, PersonStanding } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
+import { PoseOverlay } from './PoseOverlay';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -78,6 +79,10 @@ interface PreviewPlayerProps {
   // Trim support
   enableTrim?: boolean;
   onTrimSave?: (clipIndex: number, trimStartMs: number, trimEndMs: number) => void;
+  // LIVE pose-overlay toggle support (render-time SVG skeleton; never baked
+  // into exports). When enabled, a toggle button appears in the info row that
+  // overlays the detected skeleton on the (native) video while it plays.
+  enablePoseOverlay?: boolean;
 }
 
 // ---- Progress bars (Instagram/Snapchat story style) ----
@@ -448,10 +453,16 @@ function NativeClipPlayer({
   clip,
   isTrimming,
   onEnd,
+  onCurrentTimeGetter,
 }: {
   clip: PreviewClip;
   isTrimming: boolean;
   onEnd: () => void;
+  // One-shot callback: hands the parent a function that reads the live
+  // playhead (seconds) for the LIVE pose overlay. Registered in an effect
+  // (never inline in render) and cleared on unmount so a disposed player is
+  // never read.
+  onCurrentTimeGetter?: (getter: (() => number | null) | null) => void;
 }) {
   const { useVideoPlayer, VideoView } = ExpoVideo!;
 
@@ -534,6 +545,28 @@ function NativeClipPlayer({
     };
   }, [player, clip.uri]);
 
+  // Expose a live-playhead getter to the parent (for the pose overlay).
+  // Reading player.currentTime is wrapped in try/catch to survive the
+  // disposed-player race, exactly like the monitor interval above. We
+  // register in an effect (not in render) and clear on unmount.
+  const onGetterRef = useRef(onCurrentTimeGetter);
+  onGetterRef.current = onCurrentTimeGetter;
+  useEffect(() => {
+    const getter = (): number | null => {
+      if (hasErrorRef.current) return null;
+      try {
+        return player.currentTime;
+      } catch {
+        // Player disposed during a cleanup race — pose overlay draws nothing.
+        return null;
+      }
+    };
+    onGetterRef.current?.(getter);
+    return () => {
+      onGetterRef.current?.(null);
+    };
+  }, [player]);
+
   return (
     <VideoView
       player={player}
@@ -595,9 +628,24 @@ export function PreviewPlayer({
   roundGroups,
   enableTrim = false,
   onTrimSave,
+  enablePoseOverlay = false,
 }: PreviewPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(startIndex);
   const [isTrimming, setIsTrimming] = useState(false);
+  const [showPoseOverlay, setShowPoseOverlay] = useState(false);
+  // Live-playhead getter handed up from NativeClipPlayer (seconds, or null
+  // when the player is disposed). Stored in a ref so the overlay always
+  // reads the current player without re-rendering the whole tree.
+  const currentTimeGetterRef = useRef<(() => number | null) | null>(null);
+  const handleCurrentTimeGetter = useCallback(
+    (getter: (() => number | null) | null) => {
+      currentTimeGetterRef.current = getter;
+    },
+    [],
+  );
+  const getPlayerTimeSec = useCallback((): number | null => {
+    return currentTimeGetterRef.current?.() ?? null;
+  }, []);
   const [showTransition, setShowTransition] = useState(false);
   const [transitionMeta, setTransitionMeta] = useState<{
     courseName: string;
@@ -607,6 +655,34 @@ export function PreviewPlayer({
   const stableOnDismiss = useRef(onDismiss);
   stableOnDismiss.current = onDismiss;
   const transitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Force a PLAYBACK audio session whenever the preview is on screen.
+  //
+  // The record screen puts iOS into a *record* session (allowsRecordingIOS:
+  // true) so the mic can attach. iOS then routes audio output to the quiet
+  // earpiece, and that session state survives after recording stops. Without
+  // resetting it here, reel/clip previews play back with no audible sound —
+  // the audio is going to the earpiece, not the speaker. allowsRecordingIOS:
+  // false routes to the speaker; playsInSilentModeIOS keeps it audible even
+  // with the hardware mute switch on.
+  useEffect(() => {
+    if (!isNative || !ExpoAV) return;
+    (async () => {
+      try {
+        await ExpoAV.Audio.setAudioModeAsync({
+          allowsRecordingIOS: false,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
+          shouldDuckAndroid: false,
+          interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
+          playThroughEarpieceAndroid: false,
+        });
+      } catch (err) {
+        console.log('[PreviewPlayer] setAudioMode (playback) failed:', err);
+      }
+    })();
+  }, []);
 
   // Clamp index if clips array changes
   useEffect(() => {
@@ -690,6 +766,11 @@ export function PreviewPlayer({
     setIsTrimming((prev) => !prev);
   }, []);
 
+  const handlePoseToggle = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setShowPoseOverlay((prev) => !prev);
+  }, []);
+
   const handleTrimSave = useCallback(
     (startMs: number, endMs: number) => {
       setIsTrimming(false);
@@ -722,12 +803,26 @@ export function PreviewPlayer({
           clip={currentClip}
           isTrimming={isTrimming}
           onEnd={handleVideoEnd}
+          onCurrentTimeGetter={
+            enablePoseOverlay ? handleCurrentTimeGetter : undefined
+          }
         />
       ) : (
         <WebClipPlaceholder
           key={`${currentIndex}-${currentClip.uri}`}
           clip={currentClip}
           onEnd={handleVideoEnd}
+        />
+      )}
+
+      {/* LIVE pose overlay — sibling over the native player only. When the
+          toggle is OFF this is not rendered at all, so the VideoView path is
+          byte-identical to before. Render-time only; never baked into export. */}
+      {isNative && ExpoVideo && enablePoseOverlay && showPoseOverlay && (
+        <PoseOverlay
+          key={`pose-${currentIndex}-${currentClip.uri}`}
+          uri={currentClip.uri}
+          getCurrentTimeSec={getPlayerTimeSec}
         />
       )}
 
@@ -760,6 +855,26 @@ export function PreviewPlayer({
             </View>
 
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              {/* Pose-overlay toggle (live SVG skeleton; native only) */}
+              {enablePoseOverlay && isNative && !isTrimming && (
+                <Pressable
+                  onPress={handlePoseToggle}
+                  style={[
+                    styles.scissorsBtn,
+                    showPoseOverlay && styles.scissorsBtnActive,
+                  ]}
+                >
+                  <PersonStanding
+                    size={18}
+                    color={
+                      showPoseOverlay
+                        ? theme.colors.primary
+                        : theme.colors.textPrimary
+                    }
+                  />
+                </Pressable>
+              )}
+
               {/* Scissors button */}
               {enableTrim && !isTrimming && (
                 <Pressable onPress={handleTrimToggle} style={styles.scissorsBtn}>
@@ -884,6 +999,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  scissorsBtnActive: {
+    backgroundColor: theme.colors.primary + '40',
   },
 
   // Round transition

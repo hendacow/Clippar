@@ -1,8 +1,14 @@
 import { supabase } from './supabase';
+import { iap } from './iap';
 
 export async function checkSubscription(): Promise<boolean> {
   const { data: { user } } = await supabase.auth.getUser();
   if (!user) return false;
+
+  // StoreKit entitlement (RevenueCat) — the in-app purchase path. Checked
+  // first because it's the live store truth; the Supabase profile keeps
+  // covering web (Stripe) subscriptions until the RC webhook unifies them.
+  if (await iap.isProActive().catch(() => false)) return true;
 
   const { data: profile } = await supabase
     .from('profiles')

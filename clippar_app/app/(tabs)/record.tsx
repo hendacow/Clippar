@@ -16,8 +16,10 @@ import {
   Video,
   ArrowLeft,
   Settings2,
+  SwitchCamera,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Badge } from '@/components/ui/Badge';
 import { Button } from '@/components/ui/Button';
@@ -57,7 +59,7 @@ export default function RecordScreen() {
   const ble = useBLE();
   const shutter = useShutter();
   const round = useRound();
-  const { getCurrentLocation } = useLocation();
+  const { getCurrentLocation, getCurrentHeading } = useLocation();
   const [courseName, setCourseName] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | undefined>();
   const [courseHoles, setCourseHoles] = useState<HoleData[] | undefined>();
@@ -119,6 +121,33 @@ export default function RecordScreen() {
   // re-render where isActive stays true).
   const tutorialShownForRoundRef = useRef<string | null>(null);
 
+  // ── Camera framing controls (ADDITIVE — does NOT touch analytics) ──────
+  // Lens (zoom) and facing are pure capture-side choices: the shot detector,
+  // auto-trim, and shot classification all run AFTER capture, on the recorded
+  // file (useCamera → detectAndTrim), so changing the lens or flipping the
+  // camera never reaches the detection/post-track pipeline.
+  //
+  // Why we set `selectedLens` explicitly: with it unset, expo-camera on iOS
+  // falls back to the virtual multi-camera device at minimum zoom, which on
+  // multi-lens iPhones is the 0.5× ultra-wide. Pinning the wide-angle (1×)
+  // lens makes 1× the default; the toggle swaps to ultra-wide for 0.5×.
+  const [facing, setFacing] = useState<'back' | 'front'>('back');
+  const [availableLenses, setAvailableLenses] = useState<string[]>([]);
+  const [zoomMode, setZoomMode] = useState<'0.5x' | '1x'>('1x');
+
+  // Resolve the iOS lens names (localized strings from getAvailableLensesAsync,
+  // e.g. "Back Camera", "Back Ultra Wide Camera") to our two framings.
+  const ultraWideLens = availableLenses.find((l) => /ultra/i.test(l));
+  const wideLens =
+    availableLenses.find((l) => /^(back|front) camera$/i.test(l)) ??
+    availableLenses.find((l) => !/(ultra|tele|dual|triple)/i.test(l)) ??
+    availableLenses[0];
+  // 0.5× only offered when the current camera actually has an ultra-wide lens
+  // (front cameras don't), so the toggle hides itself after a flip to front.
+  const hasUltraWide = !!ultraWideLens;
+  const selectedLens =
+    zoomMode === '0.5x' && ultraWideLens ? ultraWideLens : wideLens;
+
   const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
   const isActive = roundState?.status === 'in_progress';
@@ -128,7 +157,17 @@ export default function RecordScreen() {
     roundId: roundState?.roundId ?? '',
     holeNumber: roundState?.currentHole ?? 1,
     shotNumber: roundState?.currentShot ?? 1,
-    getLocation: getCurrentLocation,
+    // Tracer capture: tight GPS (BestForNavigation) only when the tracer is
+    // enabled — landing-spot pairing gates on the accuracy radius. Disabled
+    // (day zero) this closure is byte-identical to the old Accuracy.High call.
+    getLocation: useCallback(
+      () => getCurrentLocation({ highAccuracy: config.tracer.enabled }),
+      [getCurrentLocation]
+    ),
+    // Compass azimuth at record start (non-prompting; null unless location
+    // permission already granted). useCamera only fires it when
+    // config.tracer.enabled && config.tracer.captureHeading.
+    getHeading: getCurrentHeading,
     // Tutorial = live practice run: record so the user sees it, but discard
     // the clip. resetToStart wipes any hole/penalty changes when it ends.
     practice: tutorialActive,
@@ -145,6 +184,45 @@ export default function RecordScreen() {
       [round.onShotClassified]
     ),
   });
+
+  // Camera framing handlers — defined after `camera` so they can read
+  // isRecording. Both are inert mid-clip so the AVCaptureSession is never
+  // reconfigured under a running recording.
+  const flipCamera = useCallback(() => {
+    if (camera.isRecording) return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setFacing((f) => (f === 'back' ? 'front' : 'back'));
+    setZoomMode('1x'); // front has no ultra-wide — always land on 1×
+  }, [camera.isRecording]);
+
+  const selectZoom = useCallback(
+    (mode: '0.5x' | '1x') => {
+      if (camera.isRecording) return;
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      setZoomMode(mode);
+    },
+    [camera.isRecording]
+  );
+
+  // TEMP camera-lens diagnostic (dev only — remove after field validation).
+  // Prints exactly what this device reports so the 1×/0.5× lens matching can
+  // be tuned to the real localized lens names (they're device-specific).
+  useEffect(() => {
+    if (__DEV__ && availableLenses.length) {
+      console.log(
+        '[camera-lenses]',
+        JSON.stringify({
+          lenses: availableLenses,
+          wide: wideLens,
+          ultra: ultraWideLens,
+          selected: selectedLens,
+          facing,
+          zoom: zoomMode,
+        })
+      );
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [availableLenses, facing, zoomMode]);
 
   // Hide tab bar during active recording
   useEffect(() => {
@@ -925,19 +1003,40 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={true} avoids AVCaptureSession audio format negotiation, which
-          was failing with kAudioUnitErr_FormatNotSupported (-10868) and
-          killing the session 2s after recordAsync. Golf swing clips don't
-          rely on audio, so the trade-off is acceptable until the underlying
-          audio session config is fixed. */}
+      {/* mute={false} — AUDIO ON, root-cause fixed. The -10868
+          (kAudioUnitErr_FormatNotSupported) failure was react-native-volume-
+          manager's addVolumeListener forcing the shared AVAudioSession to
+          .ambient (a playback-only category) just to attach its volume-clicker
+          KVO — which clobbered the camera's .playAndRecord session and killed
+          recordAsync ~2s in. Patched RNVM (patches/react-native-volume-
+          manager+2.0.8.patch) to attach that KVO WITHOUT stamping a category,
+          so the expo-camera patch's .playAndRecord holds and clips record with
+          audio while the clicker still works.
+          REQUIRES a native rebuild — the RNVM patch is compiled Obj-C, so a
+          Metro reload alone won't include it; the dev client must be rebuilt
+          (expo run:ios / new EAS dev build). */}
       {isNative && CameraView ? (
         <CameraView
           ref={camera.cameraRef}
           style={StyleSheet.absoluteFillObject}
-          facing="back"
+          facing={facing}
+          // iOS lens selection: pins 1× (wide) by default, 0.5× (ultra-wide)
+          // when toggled. Undefined until the lens list arrives, then it snaps
+          // to the wide lens. No-op on Android (selectedLens is iOS-only).
+          selectedLens={selectedLens}
+          onAvailableLensesChanged={(e) => setAvailableLenses(e.lenses)}
+          // Belt-and-suspenders: also pull the lens list the moment the camera
+          // is ready, so 1× engages even if the change event doesn't fire on
+          // first mount (otherwise it'd sit on the 0.5× virtual-device default).
+          onCameraReady={async () => {
+            try {
+              const lenses = await camera.cameraRef.current?.getAvailableLensesAsync();
+              if (Array.isArray(lenses) && lenses.length) setAvailableLenses(lenses);
+            } catch {}
+          }}
           mode="video"
           videoQuality="1080p"
-          mute
+          mute={false}
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed
@@ -1062,6 +1161,51 @@ export default function RecordScreen() {
 
       {/* Bottom controls overlay */}
       <View style={[styles.bottomControls, { paddingBottom: insets.bottom + 16 }]}>
+        {/* Camera framing row: zoom toggle (left) + flip (right). Hidden during
+            the tutorial to keep the practice run focused. Both are disabled
+            mid-recording so the capture session isn't reconfigured under a
+            running clip. */}
+        {!tutorialActive && (
+          <View style={styles.cameraControlsRow}>
+            {hasUltraWide ? (
+              <View style={styles.zoomToggle}>
+                {(['0.5x', '1x'] as const).map((m) => (
+                  <Pressable
+                    key={m}
+                    onPress={() => selectZoom(m)}
+                    disabled={camera.isRecording}
+                    hitSlop={6}
+                    style={[styles.zoomPill, zoomMode === m && styles.zoomPillActive]}
+                  >
+                    <Text
+                      style={[
+                        styles.zoomPillText,
+                        zoomMode === m && styles.zoomPillTextActive,
+                      ]}
+                    >
+                      {m}
+                    </Text>
+                  </Pressable>
+                ))}
+              </View>
+            ) : (
+              <View />
+            )}
+
+            <Pressable
+              onPress={flipCamera}
+              disabled={camera.isRecording}
+              hitSlop={8}
+              style={styles.flipButton}
+            >
+              <SwitchCamera
+                size={20}
+                color={camera.isRecording ? theme.colors.textTertiary : '#fff'}
+              />
+            </Pressable>
+          </View>
+        )}
+
         {/* Action buttons row */}
         <View style={styles.actionRow}>
           <Pressable
@@ -1158,6 +1302,44 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   recordButtonContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cameraControlsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 24,
+    marginBottom: 18,
+  },
+  zoomToggle: {
+    flexDirection: 'row',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    borderRadius: 18,
+    padding: 3,
+    gap: 2,
+  },
+  zoomPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 15,
+  },
+  zoomPillActive: {
+    backgroundColor: 'rgba(255,255,255,0.18)',
+  },
+  zoomPillText: {
+    color: theme.colors.textTertiary,
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  zoomPillTextActive: {
+    color: '#fff',
+  },
+  flipButton: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
   },

@@ -1,0 +1,30 @@
+name: CI
+
+# Keeps main green: runs the verify gate (typecheck + tests) on every PR into
+# main and on pushes to main. Scoped to clippar_app so changes to the web app
+# or other parts of the monorepo don't trigger the mobile pipeline.
+on:
+  pull_request:
+    branches: [main]
+    paths: ['clippar_app/**']
+  push:
+    branches: [main]
+    paths: ['clippar_app/**']
+
+jobs:
+  verify:
+    name: typecheck + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: clippar_app
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: clippar_app/package-lock.json
+      # postinstall runs patch-package (re-applies the RNVM + expo-camera patches)
+      - run: npm ci
+      - run: npm run verify

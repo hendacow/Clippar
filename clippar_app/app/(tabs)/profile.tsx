@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, Alert, Switch } from 'react-native';
+import { View, Text, ScrollView, Pressable, Alert, Switch, Linking } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -34,7 +34,8 @@ import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { useOnboarding } from '@/contexts/OnboardingContext';
-import { getProfile, getRounds } from '@/lib/api';
+import { getProfile, getRounds, deleteAccount } from '@/lib/api';
+import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
 
@@ -160,6 +161,83 @@ export default function ProfileScreen() {
         },
       },
     ]);
+  };
+
+  // App Review 5.1.1(v): account deletion must be initiated fully in-app.
+  // Two-step confirm — the second alert spells out exactly what is destroyed.
+  const [deletingAccount, setDeletingAccount] = useState(false);
+
+  const runAccountDeletion = useCallback(async () => {
+    if (deletingAccount) return;
+    setDeletingAccount(true);
+    try {
+      await deleteAccount();
+      // Detach the RevenueCat customer so the deleted user's purchases don't
+      // stay aliased to a dead account. NOTE: this does NOT cancel an Apple
+      // subscription — Apple only lets the USER do that in Settings (handled
+      // by the warning step before we get here).
+      await iap.reset().catch(() => {});
+      await signOut();
+      router.replace('/(auth)/login');
+    } catch {
+      Alert.alert(
+        'Deletion failed',
+        'Something went wrong deleting your account. Please try again, or email support@clippar.com and we will delete it for you.'
+      );
+    } finally {
+      setDeletingAccount(false);
+    }
+  }, [deletingAccount, signOut]);
+
+  const confirmFinalDeletion = useCallback(async () => {
+    // If there's a live auto-renewing App Store subscription, deletion can't
+    // stop Apple from billing — only the user can cancel in iOS Settings.
+    // Warn explicitly and offer the manage-subscriptions shortcut.
+    const hasSub = await iap.hasActiveStoreSubscription().catch(() => false);
+    if (hasSub) {
+      Alert.alert(
+        'Cancel your subscription first',
+        'Deleting your account does NOT cancel your Clippar Pro subscription — Apple will keep charging you until you cancel it in your iPhone Settings. Open Settings to cancel, then come back to delete your account.',
+        [
+          { text: 'Open Settings', onPress: () => Linking.openURL('https://apps.apple.com/account/subscriptions') },
+          {
+            text: 'Delete anyway',
+            style: 'destructive',
+            onPress: runAccountDeletion,
+          },
+          { text: 'Keep my account', style: 'cancel' },
+        ]
+      );
+      return;
+    }
+    runAccountDeletion();
+  }, [runAccountDeletion]);
+
+  const handleDeleteAccount = () => {
+    Alert.alert(
+      'Delete Account?',
+      'This permanently deletes your account, all rounds, clips, and highlight reels from Clippar. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Continue',
+          style: 'destructive',
+          onPress: () =>
+            Alert.alert(
+              'Are you absolutely sure?',
+              'Your videos saved to your Photos library stay on your phone, but everything in your Clippar account is erased forever.',
+              [
+                { text: 'Keep my account', style: 'cancel' },
+                {
+                  text: 'Delete everything',
+                  style: 'destructive',
+                  onPress: confirmFinalDeletion,
+                },
+              ]
+            ),
+        },
+      ]
+    );
   };
 
   // Debug: smoke-test reachability of every round in Supabase so the user
@@ -349,7 +427,10 @@ export default function ProfileScreen() {
                 </Text>
               </View>
               <Pressable
-                onPress={() => Haptics.selectionAsync()}
+                onPress={() => {
+                  Haptics.selectionAsync();
+                  router.push('/paywall');
+                }}
                 style={{
                   paddingHorizontal: 14,
                   paddingVertical: 8,
@@ -430,13 +511,26 @@ export default function ProfileScreen() {
               subtitle="Photos mirroring, cloud backup, cache"
               onPress={() => router.push('/profile/storage-settings')}
             />
-            <Divider />
-            <SettingsRow
-              icon={<Activity size={18} color={theme.colors.textSecondary} />}
-              title="Trim Sandbox (debug)"
-              subtitle="Pick a video, see auto-trim output instantly"
-              onPress={() => router.push('/profile/trim-sandbox')}
-            />
+            {/* Debug harnesses: dev builds only — App Review rejects visible
+                developer UI in production (2.2 beta/demo content). */}
+            {__DEV__ && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Trim Sandbox (debug)"
+                  subtitle="Pick a video, see auto-trim output instantly"
+                  onPress={() => router.push('/profile/trim-sandbox')}
+                />
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Tracer Sim (debug)"
+                  subtitle="Synthetic GPS shots → rendered tracer arcs"
+                  onPress={() => router.push('/(dev)/tracer-sim')}
+                />
+              </>
+            )}
           </Card>
 
           {/* ---- UNITS ---- */}
@@ -597,12 +691,36 @@ export default function ProfileScreen() {
             />
           </Card>
 
+          {/* ---- LEGAL (App Review 5.1.1: privacy policy must be reachable
+                in-app; pairs with the App Store Connect metadata URL) ---- */}
+          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
+            <SettingsRow
+              icon={<ShieldCheck size={18} color={theme.colors.textTertiary} />}
+              title="Privacy Policy"
+              onPress={() => Linking.openURL('https://clippargolf.com/privacy')}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<HelpCircle size={18} color={theme.colors.textTertiary} />}
+              title="Terms of Service"
+              onPress={() => Linking.openURL('https://clippargolf.com/terms')}
+            />
+          </Card>
+
           {/* ---- SIGN OUT ---- */}
           <Button
             title="Sign Out"
             onPress={handleSignOut}
             variant="ghost"
             icon={<LogOut size={18} color={theme.colors.textSecondary} />}
+          />
+
+          {/* ---- DELETE ACCOUNT (App Review 5.1.1(v)) ---- */}
+          <Button
+            title={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
+            onPress={handleDeleteAccount}
+            variant="ghost"
+            icon={<Trash2 size={18} color={theme.colors.doubleBogey} />}
           />
 
           {/* App version */}

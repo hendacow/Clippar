@@ -10,6 +10,7 @@ import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
+import { useSalesFlowDone } from '@/lib/salesFlow';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
 import { OnboardingProvider } from '@/contexts/OnboardingContext';
@@ -60,22 +61,35 @@ function RootLayout() {
   const segments = useSegments();
   const router = useRouter();
   const [biometricChecked, setBiometricChecked] = useState(false);
+  // Cold-start sales funnel gate (feat/onboarding-flow). Disconnect by
+  // deleting lib/salesFlow + the (onboarding) route — this becomes a no-op.
+  const sales = useSalesFlowDone();
 
   // Auth gate. Standard expo-router pattern: watch the current route
   // segments + auth state, push the user into the right group.
+  //   - First-time signed-out visitor → cold-start sales funnel /(onboarding)
   //   - Signed-out user inside (tabs)/round/profile → bounce to /(auth)/login
-  //   - Signed-in user on any (auth) screen     → bounce to /(tabs)
-  // Wait for auth to finish loading so we don't redirect on a stale null
-  // user during cold start.
+  //   - Signed-in user on any (auth)/(onboarding) screen → bounce to /(tabs)
+  // Wait for auth + the sales flag to finish loading so we don't redirect on
+  // a stale null user during cold start.
   useEffect(() => {
-    if (loading) return;
+    if (loading || !sales.loaded) return;
     const inAuthGroup = segments[0] === '(auth)';
-    if (!user && !inAuthGroup) {
-      router.replace('/(auth)/login');
-    } else if (user && inAuthGroup) {
+    const inOnboardingGroup = segments[0] === '(onboarding)';
+    // Dev builds only: (dev) harness screens (tracer-sim, detection-ab) are
+    // reachable without sign-in so simulator automation can deep-link to them.
+    const inDevGroup = __DEV__ && segments[0] === '(dev)';
+    if (!user) {
+      // Brand-new visitor (cold from the Instagram ad) → sell first.
+      if (!sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup) {
+        router.replace('/(onboarding)');
+      } else if (sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup) {
+        router.replace('/(auth)/login');
+      }
+    } else if (user && (inAuthGroup || inOnboardingGroup)) {
       router.replace('/(tabs)');
     }
-  }, [user, loading, segments, router]);
+  }, [user, loading, sales.loaded, sales.done, segments, router]);
 
   useEffect(() => {
     if (loading) return;
@@ -152,11 +166,16 @@ function RootLayout() {
           >
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="(auth)" />
+            <Stack.Screen name="(onboarding)" />
             <Stack.Screen
               name="round"
               options={{ animation: 'slide_from_bottom' }}
             />
             <Stack.Screen name="profile" />
+            <Stack.Screen
+              name="paywall"
+              options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
+            />
           </Stack>
           <OnboardingHost />
         </BottomSheetModalProvider>

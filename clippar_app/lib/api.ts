@@ -1371,3 +1371,18 @@ export async function deleteCoursePreset(id: string): Promise<void> {
 
   if (error) throw error;
 }
+
+// ─── Account deletion (App Review 5.1.1(v)) ───
+
+/**
+ * Permanently delete the signed-in user's account via the delete-account
+ * edge function (storage + non-cascading rows + auth user). The caller is
+ * responsible for signing out locally afterwards.
+ */
+export async function deleteAccount(): Promise<void> {
+  const { data, error } = await supabase.functions.invoke('delete-account', {
+    method: 'POST',
+  });
+  if (error) throw error;
+  if (!data?.success) throw new Error(data?.error ?? 'Account deletion failed');
+}

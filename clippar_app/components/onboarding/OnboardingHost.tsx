@@ -1,6 +1,7 @@
 import { useEffect, useRef } from 'react';
 import { router } from 'expo-router';
 import { useOnboarding } from '@/contexts/OnboardingContext';
+import { useAuth } from '@/hooks/useAuth';
 import { OnboardingIntro } from './OnboardingIntro';
 import { SpotlightTour } from './SpotlightTour';
 
@@ -14,6 +15,7 @@ import { SpotlightTour } from './SpotlightTour';
  */
 export function OnboardingHost() {
   const { flags, completeIntro, skipIntro, startTour } = useOnboarding();
+  const { user } = useAuth();
 
   const introVisible = flags.loaded && !flags.introDone;
   const queuedTourStart = useRef(false);
@@ -26,6 +28,10 @@ export function OnboardingHost() {
     if (!flags.loaded) return;
     if (!flags.introDone) return;
     if (flags.tourDone) return;
+    // FIELD BUG: with no session, the auth gate bounces /(tabs) to the login
+    // screen and all five spotlight steps rendered over the email form,
+    // anchored to nothing. The tour only makes sense signed-in, on Home.
+    if (!user) return;
     if (queuedTourStart.current) return;
 
     queuedTourStart.current = true;

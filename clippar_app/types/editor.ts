@@ -19,6 +19,14 @@ export interface EditorClip {
   // Auto-trim boundaries in ORIGINAL video milliseconds
   autoTrimStartMs?: number;
   autoTrimEndMs?: number;
+  // Shot-tracer (GPS arc burn-in). Populated only by loadFromLocal when
+  // config.tracer.enabled — Supabase-loaded clips never have these, so all
+  // consumers must treat absence as "no tracer". tracerUri points at a
+  // rendered tracer_<UUID>.mp4 sibling of the trimmed file; tracerStatus
+  // follows the lifecycle null -> 'pending' -> 'done'|'skipped'|'failed'
+  // (plus 'stale' after trim/pairing changes).
+  tracerUri?: string;
+  tracerStatus?: string;
 }
 
 export interface EditorHoleSection {

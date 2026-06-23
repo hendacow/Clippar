@@ -90,6 +90,27 @@ async function migrateEditorColumns() {
     // saveToLibraryAsync). Used by photosRecovery on reinstall to re-hydrate
     // clip files from the user's Photos library when they're missing on disk.
     'ALTER TABLE local_clips ADD COLUMN photos_asset_id TEXT',
+    // Shot-tracer capture columns (config.tracer). Heading is the back-camera
+    // optical-axis azimuth sampled once at recording start (tripod = constant);
+    // is_true flags true vs magnetic north; calibration is iOS 0-3 compass
+    // accuracy (0 = unusable). Pitch is the camera's downward tilt in degrees
+    // (drives the per-clip horizon line). gps_accuracy_m is the horizontal
+    // accuracy of THIS clip's fix (gates pairing + the dynamic carry floor).
+    'ALTER TABLE local_clips ADD COLUMN camera_heading_deg REAL',
+    'ALTER TABLE local_clips ADD COLUMN camera_heading_is_true INTEGER',
+    'ALTER TABLE local_clips ADD COLUMN camera_heading_calibration INTEGER',
+    'ALTER TABLE local_clips ADD COLUMN camera_pitch_deg REAL',
+    'ALTER TABLE local_clips ADD COLUMN gps_accuracy_m REAL',
+    // Shot-tracer output columns. tracer_file_uri is a NEW rendered file
+    // (tracer_<UUID>.mp4) — the original/trimmed files are never rewritten.
+    // tracer_status lifecycle: NULL -> 'pending' -> 'done'|'skipped'|'failed';
+    // 'stale' whenever the clip's trim/file/pairing changes (re-rendered on
+    // next editor open). tracer_meta is a JSON blob (method, carryM, deltaDeg,
+    // skip reason, confidence flags).
+    'ALTER TABLE local_clips ADD COLUMN tracer_file_uri TEXT',
+    'ALTER TABLE local_clips ADD COLUMN tracer_status TEXT',
+    'ALTER TABLE local_clips ADD COLUMN tracer_meta TEXT',
+    'ALTER TABLE local_clips ADD COLUMN tracer_rendered_at TEXT',
     // Reel staleness flag — set to 1 whenever a clip in a round is edited
     // after the last successful compose. The round detail page shows a
     // "Re-compose reel" button when this is 1, so the user knows their
@@ -136,6 +157,24 @@ export async function updateClipEditorState(
   const fields: string[] = [];
   const values: (number | string)[] = [];
 
+  // Read the current trim/file values BEFORE writing so the tracer
+  // invalidation below can fire on real CHANGES only. The editor re-saves
+  // identical trim values on every open (FIX #8 full-swing override), and
+  // invalidating on those no-op writes destroyed every rendered tracer on
+  // the next editor visit (field bug: clip 330 rendered DONE, then went
+  // 'stale' minutes later without any user edit).
+  let before: {
+    trim_start_ms: number | null;
+    trim_end_ms: number | null;
+    file_uri: string | null;
+  } | null = null;
+  try {
+    before = await database.getFirstAsync(
+      'SELECT trim_start_ms, trim_end_ms, file_uri FROM local_clips WHERE id = ?',
+      clipId
+    );
+  } catch {}
+
   if (updates.trim_start_ms !== undefined) {
     fields.push('trim_start_ms = ?');
     values.push(updates.trim_start_ms);
@@ -172,6 +211,137 @@ export async function updateClipEditorState(
     `UPDATE local_clips SET ${fields.join(', ')} WHERE id = ?`,
     ...values
   );
+
+  // Tracer invalidation funnel: a file swap or trim change makes any rendered
+  // tracer wrong (its arc was burned for the OLD file/timeline). Null the
+  // tracer file and mark 'stale' so the next editor open re-renders it. All
+  // trim-save paths (editor updateTrim, preview.tsx, ScoreCollection
+  // handleTrimSave) land in this function, so this one hook covers them all.
+  // CHANGED values only — re-saving identical values must not invalidate.
+  const fileChanged =
+    updates.file_uri !== undefined &&
+    (before === null || updates.file_uri !== before.file_uri);
+  const trimChanged =
+    (updates.trim_start_ms !== undefined &&
+      (before === null || updates.trim_start_ms !== before.trim_start_ms)) ||
+    (updates.trim_end_ms !== undefined &&
+      (before === null || updates.trim_end_ms !== before.trim_end_ms));
+  if (fileChanged || trimChanged) {
+    await staleClipTracer(database, clipId);
+  }
+}
+
+/**
+ * Best-effort tracer invalidation for one clip: clear tracer_file_uri, set
+ * tracer_status='stale' (only when a tracer was ever attempted — NULL status
+ * stays NULL) and delete the orphaned tracer_<UUID>.mp4 from caches. Never
+ * throws — staleness must not fail the caller's edit.
+ */
+async function staleClipTracer(
+  database: SQLite.SQLiteDatabase,
+  clipId: number
+): Promise<void> {
+  try {
+    const row = await database.getFirstAsync<{ tracer_file_uri: string | null }>(
+      'SELECT tracer_file_uri FROM local_clips WHERE id = ?',
+      clipId
+    );
+    await database.runAsync(
+      `UPDATE local_clips SET tracer_file_uri = NULL, tracer_status = 'stale'
+       WHERE id = ? AND (tracer_file_uri IS NOT NULL OR tracer_status IS NOT NULL)`,
+      clipId
+    );
+    const oldUri = row?.tracer_file_uri;
+    if (oldUri && oldUri.startsWith('file://')) {
+      // Lazy require keeps this module free of the shot-detector native
+      // dependency at load time (same import-cycle concern noted on
+      // deleteLocalClip). Deletion is fire-and-forget.
+      const shotDetector =
+        require('../modules/shot-detector') as typeof import('../modules/shot-detector');
+      shotDetector.deleteFile(oldUri).catch(() => {});
+    }
+  } catch {
+    // Tracer columns may be missing on a failed migration — non-fatal.
+  }
+}
+
+/**
+ * Mark the IMMEDIATE same-hole predecessor's tracer stale. A clip's tracer
+ * arc is anchored to its same-hole SUCCESSOR's GPS (landing spot), so when a
+ * clip is deleted or moved to another hole, the clip just before it on that
+ * hole gains a different successor and its rendered arc no longer matches.
+ * Ordering matches getClipsForRound: (sort_order, shot_number) within a hole.
+ */
+async function markPredecessorTracerStale(
+  database: SQLite.SQLiteDatabase,
+  roundId: string,
+  holeNumber: number,
+  excludeClipId: number,
+  sortOrder: number,
+  shotNumber: number
+): Promise<void> {
+  try {
+    const pred = await database.getFirstAsync<{ id: number }>(
+      `SELECT id FROM local_clips
+       WHERE round_id = ? AND hole_number = ? AND id != ?
+         AND (sort_order < ? OR (sort_order = ? AND shot_number < ?))
+       ORDER BY sort_order DESC, shot_number DESC
+       LIMIT 1`,
+      roundId,
+      holeNumber,
+      excludeClipId,
+      sortOrder,
+      sortOrder,
+      shotNumber
+    );
+    if (pred) await staleClipTracer(database, pred.id);
+  } catch {
+    // Best-effort — never fail the caller's delete/move.
+  }
+}
+
+/**
+ * Persist shot-tracer output for a clip. Mirrors updateClipEditorState's
+ * dynamic field list; explicit `null` writes SQL NULL (e.g. clearing
+ * tracer_file_uri when marking a clip stale).
+ */
+export async function updateClipTracer(
+  clipId: number,
+  updates: {
+    tracer_file_uri?: string | null;
+    tracer_status?: string | null;
+    tracer_meta?: string | null;
+    tracer_rendered_at?: string | null;
+  }
+) {
+  const database = await getDatabase();
+  const fields: string[] = [];
+  const values: (string | number | null)[] = [];
+
+  if (updates.tracer_file_uri !== undefined) {
+    fields.push('tracer_file_uri = ?');
+    values.push(updates.tracer_file_uri);
+  }
+  if (updates.tracer_status !== undefined) {
+    fields.push('tracer_status = ?');
+    values.push(updates.tracer_status);
+  }
+  if (updates.tracer_meta !== undefined) {
+    fields.push('tracer_meta = ?');
+    values.push(updates.tracer_meta);
+  }
+  if (updates.tracer_rendered_at !== undefined) {
+    fields.push('tracer_rendered_at = ?');
+    values.push(updates.tracer_rendered_at);
+  }
+
+  if (fields.length === 0) return;
+  values.push(clipId);
+
+  await database.runAsync(
+    `UPDATE local_clips SET ${fields.join(', ')} WHERE id = ?`,
+    ...values
+  );
 }
 
 export async function saveLocalClip(clip: {
@@ -192,11 +362,18 @@ export async function saveLocalClip(clip: {
   trim_end_ms?: number;
   needs_trim?: number;
   photos_asset_id?: string | null;
+  // Shot-tracer capture metadata (config.tracer) — all optional/nullable so
+  // existing callers and tracer-disabled builds are unaffected.
+  camera_heading_deg?: number | null;
+  camera_heading_is_true?: number | null;
+  camera_heading_calibration?: number | null;
+  camera_pitch_deg?: number | null;
+  gps_accuracy_m?: number | null;
 }): Promise<number> {
   const database = await getDatabase();
   const result = await database.runAsync(
-    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id, camera_heading_deg, camera_heading_is_true, camera_heading_calibration, camera_pitch_deg, gps_accuracy_m)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     clip.round_id,
     clip.hole_number,
     clip.shot_number,
@@ -214,6 +391,11 @@ export async function saveLocalClip(clip: {
     clip.trim_end_ms ?? -1,
     clip.needs_trim ?? 0,
     clip.photos_asset_id ?? null,
+    clip.camera_heading_deg ?? null,
+    clip.camera_heading_is_true ?? null,
+    clip.camera_heading_calibration ?? null,
+    clip.camera_pitch_deg ?? null,
+    clip.gps_accuracy_m ?? null,
   );
   return result.lastInsertRowId;
 }
@@ -446,6 +628,20 @@ export async function getClipsForRound(roundId: string) {
     needs_trim: number;
     auto_trim_start_ms: number | null;
     auto_trim_end_ms: number | null;
+    // Shot-tracer pairing inputs + output (SELECT * already returns these;
+    // typed here so useEditorState's batch can consume them).
+    gps_latitude: number | null;
+    gps_longitude: number | null;
+    shot_type: string | null;
+    impact_time_ms: number | null;
+    camera_heading_deg: number | null;
+    camera_heading_is_true: number | null;
+    camera_heading_calibration: number | null;
+    camera_pitch_deg: number | null;
+    gps_accuracy_m: number | null;
+    tracer_file_uri: string | null;
+    tracer_status: string | null;
+    tracer_meta: string | null;
   }>(
     'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, sort_order, shot_number',
     roundId
@@ -630,13 +826,31 @@ export async function deleteLocalClip(
 ): Promise<{ fileUris: string[] }> {
   const database = await getDatabase();
   const row = await database.getFirstAsync<{
+    round_id: string;
+    hole_number: number;
+    sort_order: number;
+    shot_number: number;
     file_uri: string | null;
     trimmed_file_uri: string | null;
     original_file_uri: string | null;
+    tracer_file_uri: string | null;
   }>(
-    'SELECT file_uri, trimmed_file_uri, original_file_uri FROM local_clips WHERE id = ?',
+    'SELECT round_id, hole_number, sort_order, shot_number, file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips WHERE id = ?',
     clipId
   );
+  // The deleted clip's same-hole predecessor paired with THIS clip's GPS as
+  // its landing spot — its tracer no longer matches. Mark it stale before
+  // the row disappears.
+  if (row) {
+    await markPredecessorTracerStale(
+      database,
+      row.round_id,
+      row.hole_number,
+      clipId,
+      row.sort_order,
+      row.shot_number
+    );
+  }
   await database.runAsync('DELETE FROM local_clips WHERE id = ?', clipId);
   // Best-effort: a clip that was already queued for upload shouldn't fire
   // after deletion. The queue is keyed by round_id + clip metadata, so we
@@ -647,6 +861,7 @@ export async function deleteLocalClip(
     row?.file_uri,
     row?.trimmed_file_uri,
     row?.original_file_uri,
+    row?.tracer_file_uri,
   ].filter((u): u is string => !!u && u.startsWith('file://'));
   // De-dupe (trimmed often === file_uri) so we don't try to delete twice.
   return { fileUris: [...new Set(fileUris)] };
@@ -672,15 +887,16 @@ export async function resetRoundData(
     file_uri: string | null;
     trimmed_file_uri: string | null;
     original_file_uri: string | null;
+    tracer_file_uri: string | null;
   }>(
-    'SELECT file_uri, trimmed_file_uri, original_file_uri FROM local_clips WHERE round_id = ?',
+    'SELECT file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips WHERE round_id = ?',
     roundId
   );
   await database.runAsync('DELETE FROM local_clips WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_scores WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
   const fileUris = rows
-    .flatMap((r) => [r.file_uri, r.trimmed_file_uri, r.original_file_uri])
+    .flatMap((r) => [r.file_uri, r.trimmed_file_uri, r.original_file_uri, r.tracer_file_uri])
     .filter((u): u is string => !!u && u.startsWith('file://'));
   return { fileUris: [...new Set(fileUris)] };
 }
@@ -697,6 +913,37 @@ export async function updateClipHole(
   roundId: string
 ): Promise<void> {
   const database = await getDatabase();
+  // Tracer pairing is (hole, order)-based, so a hole move invalidates three
+  // arcs: the OLD hole's predecessor (lost this clip as its landing GPS),
+  // the moved clip itself (gets a different successor on the new hole), and
+  // the clip it lands after on the NEW hole (gains it as successor). All
+  // best-effort and no-ops while tracers are unrendered.
+  const oldPos = await database
+    .getFirstAsync<{ hole_number: number; sort_order: number; shot_number: number }>(
+      'SELECT hole_number, sort_order, shot_number FROM local_clips WHERE id = ?',
+      clipId
+    )
+    .catch(() => null);
+  if (oldPos) {
+    await markPredecessorTracerStale(
+      database,
+      roundId,
+      oldPos.hole_number,
+      clipId,
+      oldPos.sort_order,
+      oldPos.shot_number
+    );
+  }
+  await staleClipTracer(database, clipId);
+  const lastOnTarget = await database
+    .getFirstAsync<{ id: number }>(
+      'SELECT id FROM local_clips WHERE round_id = ? AND hole_number = ? AND id != ? ORDER BY sort_order DESC, shot_number DESC LIMIT 1',
+      roundId,
+      newHoleNumber,
+      clipId
+    )
+    .catch(() => null);
+  if (lastOnTarget) await staleClipTracer(database, lastOnTarget.id);
   // Place the moved clip after the last existing shot on the target hole.
   const maxRow = await database.getFirstAsync<{ max_shot: number | null }>(
     'SELECT MAX(shot_number) AS max_shot FROM local_clips WHERE round_id = ? AND hole_number = ?',

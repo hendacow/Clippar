@@ -5,6 +5,7 @@ import * as WebBrowser from 'expo-web-browser';
 import * as Linking from 'expo-linking';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import { supabase } from '@/lib/supabase';
+import { iap } from '@/lib/iap';
 
 // Required so the browser-based Google OAuth flow completes cleanly when the
 // system browser hands control back to the app. No-op when not in an auth
@@ -21,12 +22,16 @@ export function useAuth() {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
+      // Alias the RevenueCat customer to the Supabase user so StoreKit and
+      // web subscriptions resolve to the same person. Fire-and-forget.
+      if (session?.user) void iap.identify(session.user.id);
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
+      if (session?.user) void iap.identify(session.user.id);
     });
 
     return () => subscription.unsubscribe();

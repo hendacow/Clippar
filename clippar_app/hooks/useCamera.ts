@@ -3,31 +3,61 @@ import { Platform, InteractionManager } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
-import type { ShotTypeClassification } from 'shot-detector';
+import type { ShotTypeClassification, DetectionStrategy } from 'shot-detector';
 import {
   saveLocalClip,
   updateClipEditorState,
   markClipTrimmed,
   getSetting,
 } from '@/lib/storage';
-import { detectAndTrim, deleteFile } from 'shot-detector';
+import { detectAndTrim, deleteFile, getDevicePitchDeg } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
+import { logDetection } from '@/lib/detectionLog';
 
-// Read user-configured pre/post roll from SQLite, falling back to config defaults.
-// Mirrors useEditorState.getTrimSettings so live record uses the same numbers as import.
+// Resolve the active trim window (pre/post roll). Mirrors
+// useEditorState.getTrimSettings so live record uses the same numbers as import.
+//
+// FIX #8 — full-swing window must win over a stale saved override.
+// The DEFAULT is now config.trim.windows.fullSwing (2500/1500, ~4s total),
+// NOT the legacy defaultPreRollMs/defaultPostRollMs (3000/2000). A saved
+// 'trim_settings' override is only honored when the user EXPLICITLY opted into
+// the new window (parsed.window === 'fullSwing'). Overrides written before this
+// change carry no `window` marker (or carry the old 3000/2000 numbers), so they
+// are intentionally ignored here — otherwise they would silently shadow the new
+// fullSwing window and day-zero clips would keep trimming to the old length.
 async function loadTrimSettings(): Promise<{ preRollMs: number; postRollMs: number }> {
-  let preRollMs = config.trim.defaultPreRollMs;
-  let postRollMs = config.trim.defaultPostRollMs;
+  let { preRollMs, postRollMs } = config.trim.windows.fullSwing;
   try {
     const saved = await getSetting('trim_settings');
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (parsed.preRollMs) preRollMs = parsed.preRollMs;
-      if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+      // Only an explicit fullSwing-tagged override may replace the config window.
+      if (parsed.window === 'fullSwing') {
+        if (parsed.preRollMs) preRollMs = parsed.preRollMs;
+        if (parsed.postRollMs) postRollMs = parsed.postRollMs;
+      }
     }
   } catch {}
+  // Tracer hook (no-op at the default 0): a longer post-impact window keeps
+  // more ball flight in the trimmed clip for the arc draw-on. Gated on
+  // config.tracer.enabled so day-zero behavior is byte-identical. Mirrored in
+  // useEditorState.getTrimSettings so import re-trims match live record.
+  if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
+    postRollMs += config.tracer.extraPostRollMs;
+  }
   return { preRollMs, postRollMs };
+}
+
+// Resolve the configured detection strategy + options for the native dispatch.
+// Defaults come from config.detection; passed positionally to detectAndTrim so
+// the 6-arg native arity is always satisfied via the JS wrapper.
+function resolveDetection(
+  extraOptions?: Record<string, unknown>
+): { strategy: DetectionStrategy; optionsJson: string } {
+  const strategy = config.detection.strategy;
+  const options = { ...(config.detection.options ?? {}), ...(extraOptions ?? {}) };
+  return { strategy, optionsJson: JSON.stringify(options) };
 }
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -41,7 +71,23 @@ interface UseCameraParams {
   roundId: string;
   holeNumber: number;
   shotNumber: number;
-  getLocation?: () => Promise<{ latitude: number; longitude: number } | null>;
+  getLocation?: () => Promise<{
+    latitude: number;
+    longitude: number;
+    // Horizontal accuracy radius (m). Additive — useLocation now reports it;
+    // the tracer pipeline gates landing-spot pairing on it (gps_accuracy_m).
+    accuracy?: number | null;
+  } | null>;
+  /**
+   * Tracer capture: compass azimuth of the camera optical axis, sampled at
+   * record start (useLocation.getCurrentHeading — non-prompting per F13).
+   * Only fired when config.tracer.enabled && config.tracer.captureHeading.
+   */
+  getHeading?: () => Promise<{
+    headingDeg: number;
+    isTrue: boolean;
+    calibration: number;
+  } | null>;
   onClipSaved?: (clip: ClipMetadata) => void;
   onShotClassified?: (shotType: ShotTypeClassification) => void;
   /**
@@ -61,6 +107,7 @@ export function useCamera({
   holeNumber,
   shotNumber,
   getLocation,
+  getHeading,
   onClipSaved,
   onShotClassified,
   practice = false,
@@ -162,6 +209,68 @@ export function useCamera({
 
       const { roundId: rid, holeNumber: hole, shotNumber: shot } = paramsRef.current;
 
+      // Tracer capture (F2/F13): fire compass-heading + device-pitch sampling
+      // WITHOUT awaiting — getHeadingAsync needs ~0.5-1s of compass settle and
+      // CoreMotion needs a sample window, both of which overlap the multi-
+      // second recording instead of delaying it. The local consts are captured
+      // by this same closure, which awaits them (with a null timeout) at the
+      // save block after recordAsync resolves — no ref needed. Gated so
+      // tracer.enabled=false never touches the compass or CoreMotion.
+      const captureTracerPose =
+        config.tracer.enabled && config.tracer.captureHeading;
+      const headingPromise: Promise<{
+        headingDeg: number;
+        isTrue: boolean;
+        calibration: number;
+      } | null> =
+        captureTracerPose && getHeading
+          ? getHeading().catch(() => null)
+          : Promise.resolve(null);
+      const pitchPromise: Promise<number | null> = captureTracerPose
+        ? getDevicePitchDeg().catch(() => null)
+        : Promise.resolve(null);
+
+      // Make the iOS audio session record-capable BEFORE recordAsync.
+      //
+      // PRIMARY FIX (native): a patch-package patch to expo-camera's
+      // CameraSessionManager.updateSessionAudioIsMuted() now asserts
+      // AVAudioSession .playAndRecord + setActive(true) on the camera's own
+      // sessionQueue IMMEDIATELY before it attaches the mic AVCaptureDeviceInput
+      // (the exact point where -10868 / kAudioUnitErr_FormatNotSupported fired
+      // because react-native-volume-manager held the shared session in the
+      // record-hostile .ambient category). That native assertion is the load-
+      // bearing fix and is correctly ordered against the capture audio unit —
+      // something this JS code could never guarantee on its own. See
+      // patches/expo-camera+17.0.10.patch.
+      //
+      // The block below is now only a defensive belt-and-suspenders for the
+      // mid-round re-record case: the CameraView mounts once with a constant
+      // mute={false}, so the native just-in-time assertion runs at mount (and on
+      // mediaServicesWereReset), NOT on every record. If the user visits the
+      // editor between shots, PreviewPlayer flips the shared session to
+      // .playback; coming back to record, we re-assert a record-capable session
+      // here via expo-av so output/category state is sane before recordAsync.
+      // We use expo-av (allowsRecordingIOS:true, MixWithOthers) — the mirror of
+      // PreviewPlayer's playback reclaim — rather than RNVM.setCategory, so we
+      // do NOT disturb RNVM's active session or its outputVolume KVO (the volume
+      // channel that the AB-Shutter3 clicker uses to STOP recording must stay
+      // live). This is intentionally NON-fatal: the native patch already
+      // guarantees correctness, so any failure here is swallowed.
+      try {
+        const ExpoAV = require('expo-av') as typeof import('expo-av');
+        await ExpoAV.Audio.setAudioModeAsync({
+          allowsRecordingIOS: true,
+          playsInSilentModeIOS: true,
+          staysActiveInBackground: false,
+          interruptionModeIOS: ExpoAV.InterruptionModeIOS.MixWithOthers,
+          shouldDuckAndroid: false,
+          interruptionModeAndroid: ExpoAV.InterruptionModeAndroid.DoNotMix,
+          playThroughEarpieceAndroid: false,
+        });
+      } catch (err) {
+        console.log('[useCamera] pre-record setAudioMode (non-fatal):', err);
+      }
+
       // Small delay to ensure camera is ready (avoids "error while recording" on iOS)
       await new Promise((r) => setTimeout(r, 200));
 
@@ -189,7 +298,11 @@ export function useCamera({
         const durationSeconds = (Date.now() - recordingStartTime.current) / 1000;
 
         // Get GPS if available
-        let gps: { latitude: number; longitude: number } | null = null;
+        let gps: {
+          latitude: number;
+          longitude: number;
+          accuracy?: number | null;
+        } | null = null;
         if (getLocation) {
           try {
             gps = await getLocation();
@@ -197,6 +310,33 @@ export function useCamera({
             // GPS optional
           }
         }
+
+        // Tracer capture: the heading/pitch promises were fired at record
+        // start, so they're almost always settled by now. Bound the wait at
+        // 1500ms each — a compass that never settles becomes a null fix, not
+        // a hung save. Nulls are fine: the tracer pipeline gates on them.
+        const heading = await Promise.race([
+          headingPromise,
+          new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+        ]);
+        const pitchDeg = await Promise.race([
+          pitchPromise,
+          new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+        ]);
+
+        // TEMP tracer-capture diagnostic (remove after field validation):
+        // surfaces exactly what the sensors returned for this clip so we can
+        // confirm heading/pitch/GPS/accuracy land before going to the course.
+        console.log(
+          '[TRACER-CAPTURE]',
+          JSON.stringify({
+            gps: gps ? { lat: gps.latitude, lon: gps.longitude, accM: gps.accuracy ?? null } : null,
+            headingDeg: heading?.headingDeg ?? null,
+            headingTrue: heading?.isTrue ?? null,
+            headingCalibration: heading?.calibration ?? null,
+            pitchDownDeg: pitchDeg ?? null,
+          })
+        );
 
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
@@ -210,6 +350,11 @@ export function useCamera({
           original_file_uri: finalUri,
           gps_latitude: gps?.latitude,
           gps_longitude: gps?.longitude,
+          gps_accuracy_m: gps?.accuracy ?? undefined,
+          camera_heading_deg: heading?.headingDeg,
+          camera_heading_is_true: heading ? (heading.isTrue ? 1 : 0) : undefined,
+          camera_heading_calibration: heading?.calibration,
+          camera_pitch_deg: pitchDeg ?? undefined,
           duration_seconds: durationSeconds,
           auto_trimmed: 0,
           needs_trim: 1,
@@ -228,7 +373,19 @@ export function useCamera({
         InteractionManager.runAfterInteractions(() => {
           loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
           try {
-            const result = await detectAndTrim(finalUri, preRollMs, postRollMs);
+            // Forward the configured detection strategy + options. Live record
+            // processes one clip at a time with no inter-clip context ([]).
+            const { strategy, optionsJson } = resolveDetection();
+            const result = await detectAndTrim(
+              finalUri,
+              preRollMs,
+              postRollMs,
+              [],
+              strategy,
+              optionsJson
+            );
+            // A/B harness (additive, non-fatal): record a structured row.
+            void logDetection(clipId, result).catch(() => {});
             if (!clipId) return;
 
             if (result.found && result.trimmedUri) {
@@ -311,8 +468,25 @@ export function useCamera({
       isRecordingRef.current = false;
       setIsRecording(false);
       KeepAwake?.deactivateKeepAwake('recording');
+      // INTENTIONALLY do NOT restore the shared session to .ambient here.
+      //
+      // The mic AVCaptureDeviceInput stays attached to the AVCaptureSession
+      // between shots (mute is a constant false; the input is only removed when
+      // mute flips to true). If we flipped the shared session back to .ambient +
+      // setActive (which RNVM's setCategory('Ambient', true) does), a subsequent
+      // foreground / route-change / interruption could force the still-attached
+      // mic input to renegotiate against the record-hostile .ambient category and
+      // re-throw -10868 on the running session. Leaving the session in
+      // .playAndRecord (asserted natively at mount) is the safe steady state.
+      //
+      // RNVM's outputVolume KVO — the AB-Shutter3 clicker's volume channel —
+      // continues to fire under .playAndRecord, so the clicker still starts and
+      // stops recording. When the user navigates to the editor, PreviewPlayer
+      // explicitly reclaims a .playback session (expo-av), which is what makes
+      // reel previews audible; that reclaim works because we leave
+      // expo-camera's automaticallyConfiguresApplicationAudioSession = true.
     }
-  }, [getLocation, onClipSaved, onShotClassified]);
+  }, [getLocation, getHeading, onClipSaved, onShotClassified]);
 
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
