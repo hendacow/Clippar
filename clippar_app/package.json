@@ -15,7 +15,8 @@
     "metro:log": "APP_VARIANT=development expo start --tunnel > /tmp/metro-clippar.log 2>&1",
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
-    "verify": "npm run typecheck && npm run test"
+    "verify": "npm run typecheck && npm run test",
+    "done": "bash scripts/done.sh"
   },
   "dependencies": {
     "@expo/ngrok": "^4.1.3",

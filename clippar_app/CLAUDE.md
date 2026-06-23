@@ -31,6 +31,29 @@ code. Component/hook tests aren't scaffolded yet; verify UI via Expo Web instead
    audio session, LiDAR, haptics, IAP purchase. These need a dev build on a
    physical iPhone — the user device-tests and pastes logs.
 
+## The loop for every feature (MANDATORY)
+
+plan → pre-mortem → build → SEE it render → review → signal done
+
+1. **Plan + pre-mortem.** Write a short plan, then spawn a subagent to pre-mortem
+   it: "given this plan and these files, what could go wrong?" — regressions, edge
+   cases, security (RLS / secret keys), native/device pitfalls, anything a user
+   would see break. Fold its answers back into the plan before you code.
+2. **Build** to the plan.
+3. **See it actually render — `npm run verify` is NOT proof it works.** Run the
+   app in Expo Web (`npm run web:dev`) and confirm the change with your eyes on
+   the running site: use the preview tools (preview_start / preview_snapshot /
+   preview_click / preview_screenshot) — or Claude in Chrome on the localhost
+   URL — to open it, exercise the feature, and screenshot the proof. UI that is
+   native-only and can't render on web → defer that check to the user's device.
+4. **Reviewer subagent before finishing.** Spawn a fresh subagent to review your
+   diff against the pre-mortem list: is every "what could go wrong" item actually
+   handled? Did anything regress? Fix what it finds, then re-verify.
+5. **Signal done:** run `npm run done` as your final step (only when 1–4 are
+   genuinely complete). It runs the verify gate, sends Henry a desktop/push
+   notification with pass/fail + summary, and drops a result file the command
+   session reads to deliver him the full review.
+
 ## Hard-won gotchas (do not relearn these)
 
 - **Never debug camera / audio / tracer *renders* on the iOS simulator.** The
