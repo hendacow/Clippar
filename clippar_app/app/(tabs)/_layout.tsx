@@ -83,7 +83,7 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
   const currentOptions = descriptors[currentRoute.key]?.options;
   if ((currentOptions?.tabBarStyle as any)?.display === 'none') return null;
 
-  const getRoute = (name: string) => state.routes.find((r) => r.name === name);
+  const getRoute = (name: string) => state.routes.find((r: any) => r.name === name);
   const isFocused = (name: string) => state.routes[state.index].name === name;
 
   const handlePress = (routeName: string) => {
