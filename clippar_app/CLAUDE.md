@@ -7,12 +7,16 @@ Audience: casual Australian golfers.
 ## Definition of done (run before claiming a task complete)
 
 ```
-npm run verify      # typecheck (grows to include lint + tests)
+npm run verify      # typecheck + tests — CI runs this on every PR into main
 ```
 
 A change is NOT done until: `verify` is green, AND it's been verified at the right
 tier (below), AND — if it touches behaviour a user sees — confirmed working, not
 just compiling.
+
+Tests live in `tests/*.test.ts` (node:test + tsx, run with `npm test`) — for
+pure logic (GPS, scoring, trim, geometry). Add one when you touch that kind of
+code. Component/hook tests aren't scaffolded yet; verify UI via Expo Web instead.
 
 ## How to verify work — tiered, cheapest first
 
