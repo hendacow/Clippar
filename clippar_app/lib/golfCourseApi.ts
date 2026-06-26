@@ -66,9 +66,82 @@ export interface GolfCourseDetail {
 // ────────────────────────────────────────────────────────────
 
 /**
+ * Map the API's free-text country field to a 2-letter code.
+ * The /v1/search endpoint returns country as a full name nested under
+ * `location.country` (e.g. "Australia", "United States") — there is no
+ * top-level `country_code`. We normalise it so results can be ranked by
+ * country below.
+ */
+export function normalizeCountryCode(raw: unknown): string | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined;
+  const v = raw.trim().toLowerCase();
+  if (v === 'au' || v === 'australia') return 'AU';
+  if (v === 'us' || v === 'usa' || v === 'united states') return 'US';
+  if (v === 'gb' || v === 'uk' || v === 'united kingdom') return 'GB';
+  if (v === 'nz' || v === 'new zealand') return 'NZ';
+  if (v === 'ca' || v === 'canada') return 'CA';
+  // Already a 2-letter code? keep it uppercased. Otherwise pass the name through.
+  return v.length === 2 ? v.toUpperCase() : raw.trim();
+}
+
+/**
+ * Normalise the raw /v1/search course array into our result shape and rank
+ * by country. Pure (no network) so it can be unit-tested. The API can't
+ * filter by country, so we rank client-side: target country first, then
+ * untagged/ungeocoded courses (often local ones the API didn't tag), then
+ * everything else. Stable within each group to preserve API relevance order.
+ */
+export function normalizeAndRankCourses(
+  rawCourses: any[],
+  countryCode = 'AU',
+): GolfCourseSearchResult[] {
+  const want = countryCode.toUpperCase();
+
+  // Keep the *real* normalised country (may be undefined when the API didn't
+  // geocode the course) for ranking, separate from the result's `country`
+  // field which keeps the historical 'AU' fallback for downstream callers.
+  const mapped = (rawCourses ?? []).map((c: any) => {
+    // Country lives at `location.country` as a full name; there is no
+    // top-level `country_code`/`country`. Reading those (as before) made
+    // every result collapse to the 'AU' fallback.
+    const normalized = normalizeCountryCode(
+      c.location?.country ?? c.country_code ?? c.country,
+    );
+    const result: GolfCourseSearchResult = {
+      id: String(c.id),
+      name: c.club_name ?? c.course_name ?? c.name ?? 'Unknown',
+      city: c.city ?? c.location?.city ?? undefined,
+      state: c.state ?? c.location?.state ?? undefined,
+      country: normalized ?? 'AU',
+      holes: c.holes ?? c.num_holes ?? 18,
+      latitude: c.latitude ?? c.location?.latitude ?? undefined,
+      longitude: c.longitude ?? c.location?.longitude ?? undefined,
+    };
+    return { result, normalized };
+  });
+
+  const rank = (normalized: string | undefined): number => {
+    if (normalized === want) return 0; // target country
+    if (!normalized) return 1; // ungeocoded — often a local course untagged
+    return 2; // a different country
+  };
+  return mapped
+    .map((m, i) => ({ m, i }))
+    .sort((a, b) => rank(a.m.normalized) - rank(b.m.normalized) || a.i - b.i)
+    .map(({ m }) => m.result);
+}
+
+/**
  * Search for golf courses by name.
  * Calls GolfCourseAPI.com directly from the app.
  * Returns an empty array when no API key is configured (graceful degradation).
+ *
+ * GolfCourseAPI's /v1/search does a global full-text match and IGNORES any
+ * country filter — passing `country_code` does nothing, so a search for
+ * "Royal Melbourne" returns a US course ahead of the real Australian one.
+ * Since our audience is Australian golfers, we rank courses in `countryCode`
+ * first (stable within each group) so the relevant local course surfaces at
+ * the top of the dropdown instead of being buried under US noise.
  */
 export async function searchGolfCoursesLive(
   query: string,
@@ -78,7 +151,7 @@ export async function searchGolfCoursesLive(
   if (!apiKey) return [];
 
   try {
-    const url = `${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}&country_code=${countryCode}`;
+    const url = `${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}`;
     const res = await fetch(url, {
       headers: {
         // GolfCourseAPI uses the `Key` scheme, NOT `Bearer`. Passing
@@ -94,18 +167,9 @@ export async function searchGolfCoursesLive(
     }
 
     const data = await res.json();
-    // The API returns courses in various shapes -- normalize
+    // The API returns courses in various shapes -- normalize + rank AU-first.
     const courses = data.courses ?? data.results ?? [];
-    return courses.map((c: any) => ({
-      id: String(c.id),
-      name: c.club_name ?? c.course_name ?? c.name ?? 'Unknown',
-      city: c.city ?? c.location?.city ?? undefined,
-      state: c.state ?? c.location?.state ?? undefined,
-      country: c.country_code ?? c.country ?? 'AU',
-      holes: c.holes ?? c.num_holes ?? 18,
-      latitude: c.latitude ?? c.location?.latitude ?? undefined,
-      longitude: c.longitude ?? c.location?.longitude ?? undefined,
-    }));
+    return normalizeAndRankCourses(courses, countryCode);
   } catch (err) {
     console.warn('[GolfCourseAPI] Search error:', err);
     return [];
