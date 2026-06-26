@@ -34,10 +34,12 @@ Profile tab → **Delete Account** (red, bottom of the screen).
 
 Client code:
 - `app/(tabs)/profile.tsx` — UI + flow (`handleDeleteAccount`, `runAccountDeletion`).
-- `lib/api.ts` — `deleteAccount()` invokes the Edge Function.
+- `lib/api.ts` — `deleteAccount()` invokes the Edge Function; `linkAppleCredentials()`.
 - `lib/network.ts` — `isConnected()` offline guard.
 - `lib/localWipe.ts` — `wipeLocalUserData()` (SQLite + secure-store).
 - `lib/storage.ts` — `clearLocalDatabase()`.
+- `hooks/useAuth.ts` — `signInWithApple()` captures the Apple authorization code
+  and links it (see Sign-in-with-Apple revocation below).
 
 ---
 
@@ -64,6 +66,12 @@ function can't be aimed at anyone else.
 4. **RevenueCat subscriber** — best-effort `DELETE` so the dead account isn't
    tracked. Does **not** cancel an App Store subscription (see below). Skipped if
    `REVENUECAT_SECRET_KEY` is unset.
+4b. **Sign-in-with-Apple revocation** (`revokeAppleForUser`) — if the user linked
+   Apple (a refresh token is in `apple_credentials`) and Apple signing secrets are
+   configured, revoke the token at `https://appleid.apple.com/auth/revoke` using a
+   server-generated client secret, then delete the credentials row. Best-effort:
+   skipped cleanly for non-Apple users and never blocks deletion if Apple errors.
+   See the dedicated section below.
 5. **`profiles`**, then **`auth.admin.deleteUser`** — the account itself.
 
 **Why explicit deletes (not just the cascade):** the `auth.users → profiles`
@@ -78,14 +86,57 @@ success — so a retried/duplicated request can't fail.
 
 ### Verified
 
-- `deno check supabase/functions/delete-account/index.ts` — clean.
-- `deno test --allow-env supabase/functions/delete-account/index.test.ts` —
-  6 tests: table coverage, leaf-before-parent ordering, no-rounds path, storage
-  removal, idempotent "already gone", and a real failure throwing.
-  (Stub the env so the module's client constructs:
-  `SUPABASE_URL=http://localhost.test SUPABASE_SERVICE_ROLE_KEY=test deno test --allow-env …`)
+- `deno check` — clean for `delete-account`, `apple-link`, and `_shared/apple.ts`.
+- `deno test --allow-env --allow-net supabase/functions/` — 14 tests:
+  - delete-account (10): table coverage incl. `apple_credentials`,
+    leaf-before-parent ordering, no-rounds path, storage removal, idempotent
+    "already gone", real-failure throw, and the four `revokeAppleForUser` cases
+    (no env → skip, no stored token → skip, posts to `/auth/revoke`, swallows an
+    Apple error).
+  - `_shared/apple` (4): JWT payload decode, malformed-token reject, ES256 client
+    secret structure + signature verify, escaped-newline PEM tolerance.
+  - (Stub the env so the module's client constructs:
+    `SUPABASE_URL=http://localhost.test SUPABASE_SERVICE_ROLE_KEY=test deno test --allow-env --allow-net …`)
 - App side: `npm run verify` (typecheck + tests) green.
-- Device flow (Tier 3 — real StoreKit + a real account) is the user's to confirm.
+- **Device / Apple-sandbox steps the user must run** (can't be done here): sign in
+  with a real Apple ID on a dev build → confirm an `apple_credentials` row appears;
+  then delete the account and confirm the Apple ID no longer lists Clippar under
+  **Settings → Apple ID → Sign in with Apple** (revocation removes it). Tier-3.
+
+---
+
+## Sign-in-with-Apple token revocation
+
+Apple requires apps offering "Sign in with Apple" to **revoke the user's Apple
+token** when they delete their account (enforced under 5.1.1(v)). Revocation needs
+a token Apple issued, but the native sign-in (`signInWithIdToken`) only ever sees
+the **identity token** — never a refresh token. So we capture one at sign-in:
+
+1. **Sign-in (`hooks/useAuth.ts` → `lib/api.ts`).** `signInWithApple` keeps the
+   one-time `authorizationCode` from `AppleAuthentication.signInAsync` and, after
+   the Supabase sign-in succeeds, fire-and-forgets `linkAppleCredentials(code,
+   identityToken)`. This never blocks or fails sign-in.
+2. **Exchange + store (`supabase/functions/apple-link`).** Authenticated by the
+   user's Supabase JWT. Reads the `aud` (bundle id / client_id) and `sub` from the
+   identity token, allowlists the client_id, generates an ES256 client secret from
+   the `.p8`, exchanges the code at `https://appleid.apple.com/auth/token`, and
+   upserts the `refresh_token` + `client_id` into `apple_credentials` (service-role
+   only; migration `012`).
+3. **Revoke on deletion (`delete-account` → `revokeAppleForUser`).** Looks up the
+   stored token, generates a client secret for the **same** client_id, and POSTs to
+   `https://appleid.apple.com/auth/revoke` (`token_type_hint=refresh_token`) before
+   removing the row. Best-effort — a non-Apple user or an Apple outage never blocks
+   the data deletion.
+
+Crypto/helpers live in `supabase/functions/_shared/apple.ts` (client-secret JWT
+generation via Web Crypto, code exchange, revoke). No external dep; the `.p8` is
+the same key already used for SiwA login.
+
+**Limitation:** if the code exchange at sign-in fails (e.g. the code expired before
+`apple-link` ran, or Apple secrets weren't configured at the time), there's no
+refresh token to revoke later. The account + data are still fully deleted; only the
+Apple-side token revocation is skipped. Re-signing in re-links and stores a fresh
+token.
 
 ---
 
@@ -94,11 +145,16 @@ success — so a retried/duplicated request can't fail.
 These are **not** automated — run them against the Supabase project before relying
 on the feature in production.
 
-1. **Deploy the function:**
+1. **Apply the migration** that adds `apple_credentials` (service-role-only table):
+   ```bash
+   supabase db push        # or run supabase/migrations/012_apple_credentials.sql
+   ```
+2. **Deploy the functions:**
    ```bash
    supabase functions deploy delete-account
+   supabase functions deploy apple-link
    ```
-2. **Secrets** (Project → Edge Functions → Manage secrets, or CLI):
+3. **Secrets** (Project → Edge Functions → Manage secrets, or CLI):
    - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` — provided automatically by the
      platform for deployed functions; no action needed normally.
    - `REVENUECAT_SECRET_KEY` — **optional.** Set it to also detach the RevenueCat
@@ -107,12 +163,29 @@ on the feature in production.
      ```bash
      supabase secrets set REVENUECAT_SECRET_KEY=sk_xxx
      ```
-3. **JWT verification:** keep the function's "Verify JWT" setting **on** (default).
-   The function additionally re-validates the token with `auth.getUser`.
-4. **Smoke test** with a throwaway account: create it, add a round + clip, run the
+   - **Apple Sign-in revocation secrets** (required for SiwA revocation — without
+     them `apple-link` no-ops and `delete-account` skips revocation, both
+     gracefully). Reuse the **same `.p8` key, Key ID, and Team ID** already
+     configured for SiwA login in the Supabase dashboard (Auth → Providers →
+     Apple). See `SETUP_AUTH.md` §2.
+     ```bash
+     supabase secrets set APPLE_TEAM_ID=LBJUXXPJ6H
+     supabase secrets set APPLE_KEY_ID=<10-char key id of the .p8>
+     # the full .p8 PEM incl. the BEGIN/END lines:
+     supabase secrets set APPLE_PRIVATE_KEY="$(cat AuthKey_XXXXXXXXXX.p8)"
+     # optional override of the allowed bundle ids (defaults to the three below):
+     supabase secrets set APPLE_ALLOWED_CLIENT_IDS=com.clippar.app,com.clippar.app.dev,com.clippar.app.staging
+     ```
+     Note: for **native** Sign in with Apple the client_id is the app's **bundle
+     id** (not the Services ID used for web OAuth). The function reads it from the
+     identity token's `aud` and allowlists it, so dev/staging/prod all work.
+4. **JWT verification:** keep both functions' "Verify JWT" setting **on** (default).
+   Each also re-validates the token with `auth.getUser`.
+5. **Smoke test** with a throwaway account: create it, add a round + clip, run the
    in-app delete, then confirm in the dashboard that the `auth.users` row, the
-   `profiles`/`rounds`/`shots` rows, and the `clips`/`reels` storage objects are
-   all gone.
+   `profiles`/`rounds`/`shots`/`apple_credentials` rows, and the `clips`/`reels`
+   storage objects are all gone. For Apple users, also confirm the app is removed
+   from the Apple ID's "Sign in with Apple" list.
 
 ---
 
@@ -126,12 +199,11 @@ on the feature in production.
   limitation. We clear our *local* entitlement on delete, but the store
   subscription itself is the user's to cancel.
 
-- **Sign in with Apple token revocation (TODO).** Apple expects apps that offer
-  "Sign in with Apple" to revoke the user's tokens via the SiwA REST API on account
-  deletion. That needs the Services-ID client secret (a signed JWT) which isn't
-  wired up yet. Supabase deletion above fully removes the account and its data
-  regardless; token revocation is an additional Apple courtesy/requirement to
-  complete before/at submission. Tracked in `docs/APP_STORE_READINESS.md`.
+- **Sign in with Apple token revocation — DONE** (see the dedicated section
+  above). The only manual step is setting the `APPLE_TEAM_ID` / `APPLE_KEY_ID` /
+  `APPLE_PRIVATE_KEY` Edge Function secrets (same `.p8` as SiwA login) and applying
+  migration `012` + deploying the `apple-link` function. Until those secrets are
+  set the revocation no-ops gracefully (data deletion is unaffected).
 
 - **Stripe (web) payment records** are intentionally retained by Stripe as the
   accounting source of truth. The app's `hardware_orders` rows are deleted; the
