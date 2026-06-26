@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { checkSubscription, SubscriptionStatus } from '@/lib/subscription';
 import { supabase } from '@/lib/supabase';
+import { onSubscriptionChanged } from '@/lib/subscriptionEvents';
 
 export function useSubscription() {
   const [isSubscribed, setIsSubscribed] = useState(false);
@@ -31,6 +32,9 @@ export function useSubscription() {
 
   useEffect(() => {
     refresh();
+    // Re-check immediately after a purchase/restore so the UI reflects the
+    // new entitlement without waiting for a remount or the webhook.
+    return onSubscriptionChanged(refresh);
   }, [refresh]);
 
   return { isSubscribed, status, loading, refresh };
