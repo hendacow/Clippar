@@ -34,7 +34,14 @@ export const config = {
     enforceExportGate: false as boolean,
     // RevenueCat public SDK key (per-platform). Empty → lib/iap falls back
     // to the stub provider (Expo Go / binaries without the native module).
-    revenueCatIosKey: process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY || '',
+    // EXPO_PUBLIC_RC_IOS_KEY is the canonical name; the longer
+    // EXPO_PUBLIC_REVENUECAT_IOS_KEY is accepted as a legacy alias so existing
+    // EAS env vars keep working. Android later: add EXPO_PUBLIC_RC_ANDROID_KEY
+    // and a Platform.select — the lib/iap seam means no UI rewrite.
+    revenueCatIosKey:
+      process.env.EXPO_PUBLIC_RC_IOS_KEY ||
+      process.env.EXPO_PUBLIC_REVENUECAT_IOS_KEY ||
+      '',
     // RevenueCat entitlement identifier that unlocks everything.
     entitlementId: 'Clippar Pro',
   },

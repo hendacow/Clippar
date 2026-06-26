@@ -7,6 +7,7 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { Button } from '@/components/ui/Button';
 import { iap, type ProOffering, type ProPlan } from '@/lib/iap';
+import { emitSubscriptionChanged } from '@/lib/subscriptionEvents';
 
 /**
  * Clippar Pro paywall (App Review 3.1.1-compliant: StoreKit IAP only — no
@@ -38,6 +39,9 @@ export default function PaywallScreen() {
     try {
       await iap.purchase(selected);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // Optimistic refresh: entitlement is live now, so flip the UI before the
+      // webhook syncs the Supabase profile.
+      emitSubscriptionChanged();
       Alert.alert('Welcome to Clippar Pro!', 'Everything is unlocked. Go film something great.');
       router.back();
     } catch (err) {
@@ -52,6 +56,7 @@ export default function PaywallScreen() {
     setBusy(true);
     try {
       const restored = await iap.restore();
+      if (restored) emitSubscriptionChanged();
       Alert.alert(
         restored ? 'Purchases restored' : 'Nothing to restore',
         restored
