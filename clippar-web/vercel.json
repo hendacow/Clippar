@@ -3,6 +3,12 @@
   "outputDirectory": "public",
   "redirects": [
     {
+      "source": "/",
+      "has": [{ "type": "host", "value": "www.clippargolf.com" }],
+      "destination": "https://clippargolf.com/",
+      "permanent": true
+    },
+    {
       "source": "/:path*",
       "has": [{ "type": "host", "value": "www.clippargolf.com" }],
       "destination": "https://clippargolf.com/:path*",
