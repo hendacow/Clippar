@@ -6,6 +6,7 @@ import * as Linking from 'expo-linking';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import { supabase } from '@/lib/supabase';
 import { iap } from '@/lib/iap';
+import { linkAppleCredentials } from '@/lib/api';
 
 // Required so the browser-based Google OAuth flow completes cleanly when the
 // system browser hands control back to the app. No-op when not in an auth
@@ -121,6 +122,16 @@ export function useAuth() {
       token: credential.identityToken,
     });
     if (error) throw error;
+
+    // Capture the Apple refresh token so we can revoke it on account deletion
+    // (App Store 5.1.1(v)). The authorization code is one-time and only present
+    // here — hand it to the server fire-and-forget; never block sign-in on it.
+    if (credential.authorizationCode) {
+      void linkAppleCredentials(
+        credential.authorizationCode,
+        credential.identityToken
+      );
+    }
   }, []);
 
   return {

@@ -1386,3 +1386,33 @@ export async function deleteAccount(): Promise<void> {
   if (error) throw error;
   if (!data?.success) throw new Error(data?.error ?? 'Account deletion failed');
 }
+
+/**
+ * Capture the Apple refresh token at Sign-in-with-Apple time so the account can
+ * be revoked with Apple on deletion (App Store 5.1.1(v)). Hands the one-time
+ * authorization code + identity token to the apple-link edge function, which
+ * exchanges and stores the refresh token server-side.
+ *
+ * Best-effort and intentionally swallowing: this must never break sign-in. If
+ * it fails we simply won't have a token to revoke later (revocation is itself
+ * best-effort). Returns true only when the server confirms a link was stored.
+ */
+export async function linkAppleCredentials(
+  authorizationCode: string,
+  identityToken: string
+): Promise<boolean> {
+  try {
+    const { data, error } = await supabase.functions.invoke('apple-link', {
+      method: 'POST',
+      body: { authorizationCode, identityToken },
+    });
+    if (error) {
+      console.warn('[apple-link] failed:', error.message ?? error);
+      return false;
+    }
+    return data?.linked === true;
+  } catch (err) {
+    console.warn('[apple-link] error:', err);
+    return false;
+  }
+}
