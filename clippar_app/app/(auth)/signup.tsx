@@ -7,6 +7,7 @@ import {
   Platform,
   ScrollView,
   Pressable,
+  Linking,
 } from 'react-native';
 import { router } from 'expo-router';
 import { theme } from '@/constants/theme';
@@ -242,6 +243,29 @@ export default function SignUpScreen() {
                   Sign In
                 </Text>
               </Pressable>
+            </View>
+
+            {/* Legal — visible at sign-up per App Review 5.1.1 (and required
+                when a subscription is offered). Links open the canonical
+                policy pages hosted on the marketing site. */}
+            <View style={{ alignItems: 'center', marginTop: 4 }}>
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 12, textAlign: 'center' }}>
+                By creating an account you agree to our{' '}
+                <Text
+                  style={{ color: theme.colors.textSecondary, fontWeight: '600' }}
+                  onPress={() => Linking.openURL('https://clippargolf.com/terms')}
+                >
+                  Terms of Service
+                </Text>
+                {' '}and{' '}
+                <Text
+                  style={{ color: theme.colors.textSecondary, fontWeight: '600' }}
+                  onPress={() => Linking.openURL('https://clippargolf.com/privacy')}
+                >
+                  Privacy Policy
+                </Text>
+                .
+              </Text>
             </View>
           </View>
         </ScrollView>
