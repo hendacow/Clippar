@@ -1,6 +1,14 @@
 {
   "buildCommand": "",
   "outputDirectory": "public",
+  "redirects": [
+    {
+      "source": "/:path*",
+      "has": [{ "type": "host", "value": "www.clippargolf.com" }],
+      "destination": "https://clippargolf.com/:path*",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" }
   ],
