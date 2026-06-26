@@ -136,6 +136,23 @@ async function applyState(
   }
 }
 
+/**
+ * Constant-time secret comparison. Compares fixed-size SHA-256 digests so the
+ * check leaks neither the secret's bytes (no early-exit branch) nor its length.
+ */
+async function secretsMatch(a: string, b: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [da, db] = await Promise.all([
+    crypto.subtle.digest('SHA-256', enc.encode(a)),
+    crypto.subtle.digest('SHA-256', enc.encode(b)),
+  ]);
+  const ua = new Uint8Array(da);
+  const ub = new Uint8Array(db);
+  let diff = 0;
+  for (let i = 0; i < ua.length; i++) diff |= ua[i] ^ ub[i];
+  return diff === 0;
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method !== 'POST') return json({ error: 'Method not allowed' }, 405);
 
@@ -147,7 +164,8 @@ Deno.serve(async (req: Request) => {
     console.error('REVENUECAT_WEBHOOK_AUTH not set — rejecting');
     return json({ error: 'Server not configured' }, 500);
   }
-  if (req.headers.get('Authorization') !== expected) {
+  const provided = req.headers.get('Authorization') ?? '';
+  if (!(await secretsMatch(provided, expected))) {
     return json({ error: 'Unauthorized' }, 401);
   }
 
