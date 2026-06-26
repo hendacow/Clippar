@@ -1142,3 +1142,30 @@ export async function updateClipFileUris(
 // local_settings table. Onboarding flags reuse those — no separate
 // app_settings table needed.)
 
+/**
+ * Wipe every local table. Used by account deletion so a fresh sign-in (or a
+ * different user on the same device) starts from a clean slate — no leftover
+ * clips, rounds, scores, queued uploads, or settings from the deleted account.
+ *
+ * We DELETE rows rather than dropping the database file so the open handle
+ * stays valid and the schema survives for the next user. Best-effort per
+ * table: a missing table (older/failed migration) must not abort the wipe.
+ */
+export async function clearLocalDatabase(): Promise<void> {
+  const database = await getDatabase();
+  const tables = [
+    'local_clips',
+    'local_rounds',
+    'local_scores',
+    'local_upload_queue',
+    'local_settings',
+  ];
+  for (const table of tables) {
+    try {
+      await database.runAsync(`DELETE FROM ${table}`);
+    } catch {
+      // Table may not exist on a partially-migrated db — keep going.
+    }
+  }
+}
+

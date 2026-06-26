@@ -45,3 +45,6 @@ supabase/.temp/
 
 # Local backups
 *.bak
+
+# Deno lockfile generated when running Edge Function tests locally
+deno.lock

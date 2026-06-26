@@ -38,6 +38,9 @@ import { getProfile, getRounds, deleteAccount } from '@/lib/api';
 import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
+import { isConnected } from '@/lib/network';
+import { wipeLocalUserData } from '@/lib/localWipe';
+import { supabase } from '@/lib/supabase';
 
 interface ProfileRow {
   display_name: string | null;
@@ -171,12 +174,47 @@ export default function ProfileScreen() {
     if (deletingAccount) return;
     setDeletingAccount(true);
     try {
+      // Deletion needs connectivity — it calls the delete-account Edge
+      // Function. Block clearly rather than half-deleting or hanging.
+      if (!(await isConnected())) {
+        Alert.alert(
+          'You’re offline',
+          'Deleting your account needs an internet connection so we can erase your data from our servers. Reconnect and try again.'
+        );
+        return;
+      }
+
+      // Re-auth gate: refresh the session so the JWT the Edge Function will
+      // verify is current. If the refresh token is stale/expired we can't
+      // prove who the caller is — make them sign in again before deleting.
+      const { data: refreshed, error: refreshError } =
+        await supabase.auth.refreshSession();
+      if (refreshError || !refreshed?.session) {
+        Alert.alert(
+          'Please sign in again',
+          'Your session has expired. For your security, sign in again and then delete your account.',
+          [
+            {
+              text: 'Sign in',
+              onPress: async () => {
+                await signOut().catch(() => {});
+                router.replace('/(auth)/login');
+              },
+            },
+          ]
+        );
+        return;
+      }
+
       await deleteAccount();
       // Detach the RevenueCat customer so the deleted user's purchases don't
-      // stay aliased to a dead account. NOTE: this does NOT cancel an Apple
-      // subscription — Apple only lets the USER do that in Settings (handled
-      // by the warning step before we get here).
+      // stay aliased to a dead account, clearing the local Pro entitlement.
+      // NOTE: this does NOT cancel an Apple subscription — Apple only lets the
+      // USER do that in Settings (handled by the warning step before here).
       await iap.reset().catch(() => {});
+      // Erase local SQLite (rounds/clips/scores/queue/settings) + secure-store
+      // so the next sign-in on this device starts clean.
+      await wipeLocalUserData();
       await signOut();
       router.replace('/(auth)/login');
     } catch {
@@ -213,7 +251,17 @@ export default function ProfileScreen() {
     runAccountDeletion();
   }, [runAccountDeletion]);
 
-  const handleDeleteAccount = () => {
+  const handleDeleteAccount = async () => {
+    if (deletingAccount) return;
+    // Bail before the destructive confirm dialogs if we're obviously offline —
+    // deletion can't complete without reaching the server.
+    if (!(await isConnected())) {
+      Alert.alert(
+        'You’re offline',
+        'Deleting your account needs an internet connection so we can erase your data from our servers. Reconnect and try again.'
+      );
+      return;
+    }
     Alert.alert(
       'Delete Account?',
       'This permanently deletes your account, all rounds, clips, and highlight reels from Clippar. This cannot be undone.',
@@ -720,6 +768,9 @@ export default function ProfileScreen() {
             title={deletingAccount ? 'Deleting Account…' : 'Delete Account'}
             onPress={handleDeleteAccount}
             variant="ghost"
+            loading={deletingAccount}
+            disabled={deletingAccount}
+            textStyle={{ color: theme.colors.doubleBogey, fontWeight: '600' }}
             icon={<Trash2 size={18} color={theme.colors.doubleBogey} />}
           />
 
