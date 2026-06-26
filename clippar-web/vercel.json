@@ -1,6 +1,7 @@
 {
   "buildCommand": "",
   "outputDirectory": "public",
+  "cleanUrls": true,
   "redirects": [
     {
       "source": "/",
