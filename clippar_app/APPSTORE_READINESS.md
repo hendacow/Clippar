@@ -63,13 +63,6 @@ explicit `ios.privacyManifests` block declaring:
   (expo-file-system / expo-sqlite), `DiskSpace` `E174.1` (storage management),
   `SystemBootTime` `35F9.1` (React Native core / boost elapsed-time).
 
-### ✅ Remote push entitlement
-`lib/notifications.ts` calls `getExpoPushTokenAsync` (remote push), but the
-`expo-notifications` config plugin was absent — so the iOS `aps-environment`
-entitlement wasn't wired by config. Added the plugin. 📋 A push key must exist in
-EAS credentials for tokens to actually issue (see §C). No iOS usage string is
-required for push.
-
 ---
 
 ## B. Already correct (verified, no change needed)
@@ -110,19 +103,17 @@ Top priority first:
    that Clippar Pro can be exercised via sandbox) in App Store Connect → App
    Review Information. Reviewers cannot create swings on a real course, so also
    add review notes pointing at the in-app **sample round** / tour.
-4. 📋 **Apple Push key** in EAS credentials (`eas credentials` → iOS → Push Key)
-   so `getExpoPushTokenAsync` issues tokens and remote push works in production.
-5. 📋 **Screenshots** for required device sizes (6.7"/6.9" iPhone at minimum;
+4. 📋 **Screenshots** for required device sizes (6.7"/6.9" iPhone at minimum;
    the app is iPhone-only — `supportsTablet: false`), plus description, keywords,
    support URL, marketing URL, promotional text.
-6. 📋 **Age rating** questionnaire. Clippar has no objectionable content →
+5. 📋 **Age rating** questionnaire. Clippar has no objectionable content →
    expect 4+. Confirm.
-7. 📋 **Encryption compliance** — with `ITSAppUsesNonExemptEncryption=false` the
+6. 📋 **Encryption compliance** — with `ITSAppUsesNonExemptEncryption=false` the
    per-build prompt is skipped; no France declaration / yearly self-classification
    report is required (standard exempt encryption).
-8. 📋 **Confirm bundle id `com.clippar.app`** matches the registered app record
-   and that the production provisioning profile carries the Sign in with Apple,
-   Push, and (if used) Apple Pay capabilities.
+7. 📋 **Confirm bundle id `com.clippar.app`** matches the registered app record
+   and that the production provisioning profile carries the Sign in with Apple
+   and (if used) Apple Pay capabilities. (No Push capability — see "Future" below.)
 
 ---
 
@@ -165,6 +156,35 @@ ad-attribution or cross-app analytics SDK is ever added, revisit: add
 
 ---
 
+## Future / not in this PR — remote push notifications
+
+**Push is intentionally NOT enabled here.** The `expo-notifications` config
+plugin (which grants the iOS `aps-environment` / Remote Push entitlement) is
+deliberately omitted, because there is currently **no runtime push path**:
+
+- `registerForPushNotifications()` in `lib/notifications.ts` has **zero call
+  sites**.
+- There are **no notification listeners** (`addNotificationReceivedListener` /
+  `addNotificationResponseReceivedListener`) anywhere.
+- `app/profile/notifications.tsx` is local AsyncStorage preference toggles only.
+
+Shipping an `aps-environment` entitlement for a feature with no code path is an
+**unused capability** that invites App Review rejection — the opposite of this
+PR's goal. The dependency, `lib/notifications.ts`, and the `expo_push_token`
+column are left in place untouched for when push is built.
+
+**To enable push later (a separate PR):**
+1. Wire a real registration call site for `registerForPushNotifications()` and
+   add received/response listeners.
+2. Add the `expo-notifications` config plugin to `app.config.js` (grants
+   `aps-environment`).
+3. Add an **APNs key** in EAS credentials (`eas credentials` → iOS → Push Key) so
+   `getExpoPushTokenAsync` issues tokens.
+4. Add the Push capability to the production provisioning profile and update the
+   App Privacy declaration if push content is personalized.
+
+---
+
 ## E. expo-doctor — pre-existing, non-blocking
 
 `npx expo-doctor`: 14/18 pass. The 4 failures are **pre-existing** dependency
@@ -189,4 +209,4 @@ block submission; recommend a separate deps-hygiene pass:
   `ITSAppUsesNonExemptEncryption: false`.
 - `ios.privacyManifests`: **new** (tracking=false + 4 Required Reason APIs).
 - `expo-location` plugin: when-in-use string only; Always keys set to `false`.
-- `plugins`: **+** `expo-notifications` (aps-environment).
+- `plugins`: no push plugin added — remote push deferred (see "Future" above).

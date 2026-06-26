@@ -127,12 +127,13 @@ module.exports = () => ({
       'expo-video',
       'expo-sqlite',
       'expo-secure-store',
-      // Remote push: lib/notifications.ts calls getExpoPushTokenAsync, so the
-      // build needs the iOS `aps-environment` entitlement. The config plugin
-      // wires that up (and the Android notification channel/icon). A push key
-      // must exist in EAS credentials for tokens to issue — see
-      // APPSTORE_READINESS.md. No iOS usage string is required for push.
-      'expo-notifications',
+      // NOTE: expo-notifications is intentionally NOT a config plugin here.
+      // Remote push has no runtime path yet — registerForPushNotifications()
+      // in lib/notifications.ts has zero call sites and there are no listeners —
+      // so granting the iOS `aps-environment` entitlement would ship an unused
+      // capability (an App Review red flag). Add the plugin only once push is
+      // actually wired up (registration + handlers + an APNs key). See
+      // APPSTORE_READINESS.md → "Future / not in this PR".
       // Apple Sign-In — adds the entitlement and required iOS capability.
       // Required for App Store Guideline 4.8 once any third-party login
       // (Google etc.) is offered. iOS-only — no-op on Android/web.
