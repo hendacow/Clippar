@@ -765,6 +765,12 @@
   }
   footer .logo { font-size: 22px; }
   footer p { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
+  footer .footer-links { display: flex; gap: 22px; }
+  footer .footer-links a {
+    font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+    letter-spacing: 0.08em; text-decoration: none; transition: color 0.2s ease;
+  }
+  footer .footer-links a:hover { color: var(--green); }
 
   /* ── Success ── */
   .success-state { display: none; text-align: center; padding: 20px 0; }
@@ -1256,7 +1262,11 @@
 
 <footer>
   <div class="logo">CLIPPAR</div>
-  <p>&copy; 2025 Clippar &middot; clippargolf@gmail.com</p>
+  <nav class="footer-links">
+    <a href="/privacy">Privacy Policy</a>
+    <a href="/terms">Terms of Service</a>
+  </nav>
+  <p>&copy; 2026 Clippar &middot; clippargolf@gmail.com</p>
 </footer>
 
 <script>
