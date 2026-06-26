@@ -44,10 +44,57 @@ module.exports = () => ({
       bundleIdentifier: BUNDLE_ID,
       usesAppleSignIn: true,
       infoPlist: {
-        NSBluetoothAlwaysUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
-        NSBluetoothPeripheralUsageDescription: 'Clippar uses Bluetooth to connect to your shot clicker',
-        UIBackgroundModes: ['bluetooth-central'],
+        // Bluetooth: the only BLE use is connecting to the user's shot clicker
+        // (a remote) to mark shots hands-free while recording. iOS 13+ uses the
+        // "Always" key; the deprecated Peripheral key is kept for older iOS.
+        // NOTE: no background Bluetooth — the clicker is used in the foreground
+        // while recording, and useBLE.ts does not implement CoreBluetooth state
+        // restoration, so the `bluetooth-central` UIBackgroundMode was removed
+        // (Apple rejects unused background modes).
+        NSBluetoothAlwaysUsageDescription:
+          'Clippar connects to your shot clicker over Bluetooth so you can mark each shot hands-free while recording.',
+        NSBluetoothPeripheralUsageDescription:
+          'Clippar connects to your shot clicker over Bluetooth so you can mark each shot hands-free while recording.',
+        // Face ID: biometrics.ts gates app access with LocalAuthentication so
+        // only the owner can open the app and view their rounds/clips.
+        NSFaceIDUsageDescription:
+          'Clippar uses Face ID to unlock the app so only you can view your rounds and clips.',
+        // Standard HTTPS/TLS only — no proprietary/non-exempt encryption. Set
+        // so every TestFlight/App Store build skips the export-compliance prompt.
         ITSAppUsesNonExemptEncryption: false,
+      },
+      // Apple privacy manifest (PrivacyInfo.xcprivacy). Expo SDK 54 aggregates
+      // each library's bundled manifest at prebuild; this block adds the
+      // "Required Reason API" declarations for APIs the app + its deps touch:
+      //   • UserDefaults (CA92.1)      — @react-native-async-storage/async-storage
+      //   • File timestamp (C617.1)    — expo-file-system / expo-sqlite
+      //   • Disk space (E174.1)        — storage management / media writes
+      //   • System boot time (35F9.1)  — React Native core / boost elapsed-time
+      // Clippar collects no advertising identifier and does no cross-app
+      // tracking, so NSPrivacyTracking stays false and there are no tracking
+      // domains (see APPSTORE_READINESS.md → App Privacy / ATT).
+      privacyManifests: {
+        NSPrivacyTracking: false,
+        NSPrivacyTrackingDomains: [],
+        NSPrivacyCollectedDataTypes: [],
+        NSPrivacyAccessedAPITypes: [
+          {
+            NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryUserDefaults',
+            NSPrivacyAccessedAPITypeReasons: ['CA92.1'],
+          },
+          {
+            NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryFileTimestamp',
+            NSPrivacyAccessedAPITypeReasons: ['C617.1'],
+          },
+          {
+            NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryDiskSpace',
+            NSPrivacyAccessedAPITypeReasons: ['E174.1'],
+          },
+          {
+            NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategorySystemBootTime',
+            NSPrivacyAccessedAPITypeReasons: ['35F9.1'],
+          },
+        ],
       },
     },
     android: {
@@ -80,6 +127,12 @@ module.exports = () => ({
       'expo-video',
       'expo-sqlite',
       'expo-secure-store',
+      // Remote push: lib/notifications.ts calls getExpoPushTokenAsync, so the
+      // build needs the iOS `aps-environment` entitlement. The config plugin
+      // wires that up (and the Android notification channel/icon). A push key
+      // must exist in EAS credentials for tokens to issue — see
+      // APPSTORE_READINESS.md. No iOS usage string is required for push.
+      'expo-notifications',
       // Apple Sign-In — adds the entitlement and required iOS capability.
       // Required for App Store Guideline 4.8 once any third-party login
       // (Google etc.) is offered. iOS-only — no-op on Android/web.
@@ -103,8 +156,15 @@ module.exports = () => ({
       [
         'expo-location',
         {
-          locationAlwaysAndWhenInUsePermission:
-            'Clippar uses your location to match shots to holes on the course',
+          locationWhenInUsePermission:
+            'Clippar uses your location to match each shot to the right hole and measure shot distances on the course.',
+          // Clippar only reads location while you are actively recording a round
+          // (foreground): useLocation.ts calls requestForegroundPermissionsAsync
+          // and watchPositionAsync — never the background variants. Passing
+          // `false` deletes the unused "Always" Info.plist keys so the app does
+          // not request location access it never uses (an App Review red flag).
+          locationAlwaysAndWhenInUsePermission: false,
+          locationAlwaysPermission: false,
         },
       ],
       [
