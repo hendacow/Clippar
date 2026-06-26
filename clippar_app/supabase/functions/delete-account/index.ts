@@ -1,4 +1,9 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import {
+  generateAppleClientSecret,
+  getAppleConfig,
+  revokeAppleToken,
+} from '../_shared/apple.ts';
 
 /**
  * delete-account — App Review 5.1.1(v) in-app account deletion.
@@ -29,12 +34,14 @@ import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
  *   4. RevenueCat subscriber (best-effort) — detaches the customer but does
  *      NOT cancel an active App Store subscription (only the user can, in iOS
  *      Settings; the app warns them before reaching this point).
+ *   4b. Sign-in-with-Apple revocation (best-effort) — if the user linked Apple,
+ *      revoke their stored refresh token with Apple's /auth/revoke before the
+ *      apple_credentials row is removed. See revokeAppleForUser + _shared/apple.
  *   5. profiles, then auth.admin.deleteUser — the account itself.
  *
- * Sign in with Apple: Apple also expects token revocation via the SiwA REST
- * API (TODO: needs the Services-ID client secret; tracked in
- * ACCOUNT_DELETION.md). Supabase deletion below still fully removes the
- * account and its data.
+ * SiwA note: the refresh token is captured at sign-in by the apple-link function
+ * and the client_id is the app's BUNDLE ID (read from the identity token's aud),
+ * not the web Services ID. Revocation is best-effort and never blocks deletion.
  */
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
@@ -47,7 +54,10 @@ const supabase = createClient(
 export interface DeleteClient {
   from: (table: string) => {
     select: (cols: string) => {
-      eq: (col: string, val: string) => Promise<{ data: { id: string }[] | null }>;
+      eq: (
+        col: string,
+        val: string
+      ) => Promise<{ data: Record<string, string>[] | null }>;
     };
     delete: () => {
       eq: (col: string, val: string) => Promise<unknown>;
@@ -84,10 +94,52 @@ export function isAlreadyDeletedError(error: {
 }
 
 /**
+ * Sign-in-with-Apple token revocation (App Store 5.1.1(v)). Best-effort: if the
+ * user linked Apple (a refresh token is stored) and Apple signing is configured,
+ * revoke the token with Apple before the account row disappears. Never throws —
+ * a revoke failure must not block the data deletion the user asked for.
+ *
+ * Returns true when a token was found and a revoke request was attempted (so the
+ * caller knows there was Apple state), false when there was nothing to do.
+ */
+export async function revokeAppleForUser(
+  client: DeleteClient,
+  userId: string
+): Promise<boolean> {
+  const appleConfig = getAppleConfig();
+  if (!appleConfig) return false; // feature not configured
+  let row: Record<string, string> | undefined;
+  try {
+    const { data } = await client
+      .from('apple_credentials')
+      .select('refresh_token, client_id')
+      .eq('user_id', userId);
+    row = (data ?? [])[0];
+  } catch (err) {
+    console.error('apple revoke: lookup failed', err);
+    return false;
+  }
+  if (!row?.refresh_token || !row?.client_id) return false;
+  try {
+    const clientSecret = await generateAppleClientSecret(appleConfig, row.client_id);
+    await revokeAppleToken({
+      token: row.refresh_token,
+      clientId: row.client_id,
+      clientSecret,
+      tokenTypeHint: 'refresh_token',
+    });
+  } catch (err) {
+    // Log and carry on — Apple being unreachable can't strand the deletion.
+    console.error('apple revoke failed', err);
+  }
+  return true;
+}
+
+/**
  * Erase every trace of `userId` and delete the auth user. Pure with respect to
- * its `client` arg (no module globals beyond the RevenueCat env read), so it's
- * unit-testable. Returns nothing on success; throws only on a hard auth-delete
- * failure that isn't "already gone".
+ * its `client` arg (no module globals beyond the RevenueCat/Apple env reads),
+ * so it's unit-testable. Returns nothing on success; throws only on a hard
+ * auth-delete failure that isn't "already gone".
  */
 export async function purgeAndDeleteUser(
   client: DeleteClient,
@@ -144,6 +196,12 @@ export async function purgeAndDeleteUser(
       console.error('revenuecat subscriber delete failed', err);
     }
   }
+
+  // 4b. Sign-in-with-Apple revocation — revoke the stored refresh token with
+  //     Apple BEFORE the credentials row is removed, then delete the row. Both
+  //     best-effort; the row also cascades on the auth-user delete below.
+  await revokeAppleForUser(client, userId);
+  await client.from('apple_credentials').delete().eq('user_id', userId);
 
   // 5. The profile + the auth user. Deleting the auth user also cascades
   //    profiles, but we delete the profile first so a partial earlier run
