@@ -13,16 +13,24 @@
  * The anchor is IMPACT TIME, never the start press. The golfer presses start
  * AT THE BAG, then walks 5–20s+ to the ball. Anchoring at the start press can
  * median onto the previous filming spot 50–150m away. So estimateShotFix takes
- * an arbitrary ABSOLUTE anchorTs: the definitive anchor is
- * `recording_start_ts + impact_time_ms`; the fallback anchor is recording STOP.
- * Both use the same stationary window (pre-heavy: setup dwell before impact,
- * tight post to avoid the walk-away) — only the ANCHOR differs. The raw fix
- * series is persisted so the fix can be re-derived at impact time after
- * detectAndTrim lands (GPS_ESTIMATOR_VERSION gates re-processing).
+ * an arbitrary ABSOLUTE anchorTs, and the two anchor types use DIFFERENT
+ * windows (reconciled with the plan; see estimateAtImpact / estimateAtStop):
+ *   • IMPACT anchor (`recording_start_ts + impact_time_ms`): [impact−15s,
+ *     impact+10s] — a tight pre-window so a long walk's bag cluster can't leak
+ *     in (bag need only be >15s before impact to be excluded).
+ *   • STOP fallback (recording STOP, used until impact_time_ms lands): [stop−25s,
+ *     stop+10s] — a wider look-back to reach the impact/setup dwell from the
+ *     stop press. These are `config.tracer.gps.windowPreSec` (25) /
+ *     `windowPostSec` (10).
+ * The tight +10s post is safe at both anchors: the golfer walking away is
+ * excluded by the speed gate, not the window. The raw fix series is persisted
+ * so the fix can be re-derived at impact time after detectAndTrim lands
+ * (GPS_ESTIMATOR_VERSION gates re-processing).
  *
  * Window/threshold constants come from `config.tracer.gps` (owned by the
- * scaffold). Estimator-internal constants that the scaffold does not expose
- * (ring horizon, decorrelation time, series cap, widen step) live here.
+ * scaffold). The impact pre-window (15s) has no config field, so it lives here.
+ * Estimator-internal constants the scaffold does not expose (ring horizon,
+ * decorrelation time, series cap, widen step) live here too.
  */
 import { config } from '../constants/config';
 
@@ -31,6 +39,9 @@ const RING_SEC = 180; // ring buffer horizon (task S2 spec)
 const DECORREL_SEC = 15; // multipath decorrelates on ~15s, not per-fix (plan §2)
 const SERIES_CAP_N = 60; // persist at most this many raw fixes per shot (S4)
 const WIDEN_STEP_SEC = 10; // grow the pre-window by this each widen pass
+/** IMPACT-anchor pre-window (plan A1: [impact−15s, …]). config.tracer.gps has
+ *  no impact-pre field — windowPreSec/windowPostSec are the STOP-anchor pair. */
+const IMPACT_PRE_SEC = 15;
 
 /** Bump when the estimator math changes so persisted fixes can be re-derived. */
 export const GPS_ESTIMATOR_VERSION = 1;
@@ -62,8 +73,8 @@ export interface GpsConfig {
  */
 export const DEFAULT_GPS_CONFIG: GpsConfig = {
   warmupSec: 15,
-  windowPreSec: 25,
-  windowPostSec: 3,
+  windowPreSec: 25, // STOP-anchor pre-window (impact uses IMPACT_PRE_SEC=15)
+  windowPostSec: 10, // shared post-window (plan A1: +10s at both anchors)
   widenPreSec: 45,
   stationarySpeedMax: 0.7,
   fixAccMax: 20,
@@ -285,6 +296,32 @@ export class GpsSession {
       },
       reason: null,
     };
+  }
+
+  /**
+   * A1 definitive anchor: estimate at IMPACT time with the tight
+   * [impact−IMPACT_PRE_SEC, impact+windowPostSec] window. Call this once
+   * detectAndTrim lands impact_time_ms (anchor = recording_start_ts + impact).
+   */
+  estimateAtImpact(anchorTs: number): ShotFixResult {
+    return this.estimateShotFix(anchorTs, {
+      preSec: IMPACT_PRE_SEC,
+      postSec: this.cfg.windowPostSec,
+      source: 'impact',
+    });
+  }
+
+  /**
+   * A1 fallback anchor: estimate at recording STOP with the wider
+   * [stop−windowPreSec, stop+windowPostSec] window. Used at save time before
+   * impact_time_ms is known.
+   */
+  estimateAtStop(anchorTs: number): ShotFixResult {
+    return this.estimateShotFix(anchorTs, {
+      preSec: this.cfg.windowPreSec,
+      postSec: this.cfg.windowPostSec,
+      source: 'stop-fallback',
+    });
   }
 
   /**

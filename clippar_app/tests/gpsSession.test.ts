@@ -159,8 +159,8 @@ test('A1: impact-anchored estimate lands on the BALL, not the pre-walk BAG clust
   const impactMs = 43_000; // impact 43s later, standing at the ball
   const impactAnchor = recordingStartTs + impactMs; // 50_000
 
-  const impact = s.estimateShotFix(impactAnchor);
-  const startPress = s.estimateShotFix(recordingStartTs); // what a start-press impl does
+  const impact = s.estimateAtImpact(impactAnchor);
+  const startPress = s.estimateAtImpact(recordingStartTs); // start-press impl, same estimator
 
   assert.ok(impact.fix && startPress.fix);
   // Impact anchor → the BALL (~120m). This is exactly the assertion a
@@ -176,4 +176,28 @@ test('A1: impact-anchored estimate lands on the BALL, not the pre-walk BAG clust
   );
   // The two anchors resolve to clusters ~120m apart — the whole point of A1.
   assert.ok(metersNorth(impact.fix!.lat, startPress.fix!.lat) > 50);
+});
+
+test('impact vs stop anchor use their own windows (15/10 vs 25/10)', () => {
+  const s = new GpsSession();
+  const anchor = 60_000;
+  // 6 stationary fixes at [anchor−5s .. anchor] at P0 (0m) — enough that the
+  // impact window (15s pre) does NOT widen.
+  for (let i = 0; i < 6; i++) s.addFix(fix(55_000 + i * 1000, 0, 4, 0));
+  // 3 stationary fixes at ~anchor−20s at P1 (+30m) — inside the STOP 25s
+  // pre-window but OUTSIDE the IMPACT 15s pre-window.
+  for (let i = 0; i < 3; i++) s.addFix(fix(40_000 + i * 1000, 30, 4, 0));
+
+  const impact = s.estimateAtImpact(anchor);
+  const stop = s.estimateAtStop(anchor);
+  assert.ok(impact.fix && stop.fix);
+
+  // Impact window excludes the anchor−20s cluster entirely.
+  assert.equal(impact.fix!.fixCount, 6);
+  assert.equal(impact.fix!.source, 'impact');
+  assert.ok(metersNorth(impact.fix!.lat, BASE_LAT) < 2, 'impact ignores the −20s cluster');
+
+  // Stop window reaches back far enough to include it.
+  assert.equal(stop.fix!.fixCount, 9);
+  assert.equal(stop.fix!.source, 'stop-fallback');
 });
