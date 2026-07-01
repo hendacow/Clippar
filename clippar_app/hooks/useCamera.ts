@@ -7,13 +7,46 @@ import type { ShotTypeClassification, DetectionStrategy } from 'shot-detector';
 import {
   saveLocalClip,
   updateClipEditorState,
+  updateClipGpsFix,
   markClipTrimmed,
   getSetting,
 } from '@/lib/storage';
 import { detectAndTrim, deleteFile, getDevicePitchDeg } from 'shot-detector';
 import { config } from '@/constants/config';
+import { gpsSession } from '@/lib/gpsSession';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { logDetection } from '@/lib/detectionLog';
+
+/**
+ * A8: capture device pitch + roll. Prefers the native getDeviceAttitude() →
+ * {pitchDownDeg, rollDeg} when available (feature-detected so this predates the
+ * native delta); otherwise getDevicePitchDeg() with roll = null. Never throws.
+ */
+async function captureAttitude(): Promise<{ pitchDeg: number | null; rollDeg: number | null }> {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const mod = require('shot-detector') as {
+      getDeviceAttitude?: () => Promise<{ pitchDownDeg?: number | null; rollDeg?: number | null } | null>;
+    };
+    if (typeof mod.getDeviceAttitude === 'function') {
+      const a = await mod.getDeviceAttitude();
+      return { pitchDeg: a?.pitchDownDeg ?? null, rollDeg: a?.rollDeg ?? null };
+    }
+  } catch {
+    /* fall through to pitch-only */
+  }
+  try {
+    const pitchDeg = await getDevicePitchDeg();
+    return { pitchDeg: pitchDeg ?? null, rollDeg: null };
+  } catch {
+    return { pitchDeg: null, rollDeg: null };
+  }
+}
+
+/** Serialize the ring slice for persistence (gps_fix_series), null when empty. */
+function serializeSeries(series: unknown[]): string | null {
+  return series.length ? JSON.stringify(series) : null;
+}
 
 // Resolve the active trim window (pre/post roll). Mirrors
 // useEditorState.getTrimSettings so live record uses the same numbers as import.
@@ -226,9 +259,13 @@ export function useCamera({
         captureTracerPose && getHeading
           ? getHeading().catch(() => null)
           : Promise.resolve(null);
-      const pitchPromise: Promise<number | null> = captureTracerPose
-        ? getDevicePitchDeg().catch(() => null)
-        : Promise.resolve(null);
+      // A8 (camera-angle robustness): capture pitch AND roll. Prefer the native
+      // getDeviceAttitude() → {pitchDownDeg, rollDeg} when the shot-detector
+      // module provides it (may land after this branch); feature-detected at
+      // runtime, so this compiles + runs before that native delta ships,
+      // falling back to getDevicePitchDeg() with roll = null.
+      const attitudePromise: Promise<{ pitchDeg: number | null; rollDeg: number | null }> =
+        captureTracerPose ? captureAttitude() : Promise.resolve({ pitchDeg: null, rollDeg: null });
 
       // Make the iOS audio session record-capable BEFORE recordAsync.
       //
@@ -295,15 +332,38 @@ export function useCamera({
       // Recording stopped — process the clip
       if (video?.uri) {
         const finalUri = video.uri;
-        const durationSeconds = (Date.now() - recordingStartTime.current) / 1000;
+        const stopTs = Date.now();
+        const startTs = recordingStartTime.current; // absolute start-press ts
+        const durationSeconds = (stopTs - startTs) / 1000;
 
-        // Get GPS if available
-        let gps: {
-          latitude: number;
-          longitude: number;
-          accuracy?: number | null;
-        } | null = null;
-        if (getLocation) {
+        // GPS (Tracer V2): the continuous gpsSession ring replaces v1's fatal
+        // one-shot capture. At SAVE we can only use the STOP fallback anchor —
+        // impact_time_ms isn't known until detectAndTrim runs — so we estimate
+        // at stop now and RE-DERIVE at the definitive impact anchor below (A1).
+        // Prod (tracer disabled) keeps the exact one-shot getLocation path so
+        // its behaviour is byte-identical.
+        let gps: { latitude: number; longitude: number; accuracy?: number | null } | null = null;
+        let stopFix: import('@/lib/gpsSession').ShotFix | null = null;
+        let fixSeriesJson: string | null = null;
+        if (config.tracer.enabled) {
+          const r = gpsSession.estimateAtStop(stopTs);
+          console.log(
+            '[GPS-RING]',
+            JSON.stringify({
+              call: 'stop-fallback',
+              anchor: stopTs,
+              ok: !!r.fix,
+              reason: r.reason,
+              effAcc: r.fix ? Math.round(r.fix.effAccM * 10) / 10 : null,
+              n: r.fix?.fixCount ?? 0,
+            })
+          );
+          if (r.fix) {
+            stopFix = r.fix;
+            gps = { latitude: r.fix.lat, longitude: r.fix.lon, accuracy: r.fix.effAccM };
+          }
+          fixSeriesJson = serializeSeries(gpsSession.seriesAround(stopTs));
+        } else if (getLocation) {
           try {
             gps = await getLocation();
           } catch {
@@ -311,7 +371,7 @@ export function useCamera({
           }
         }
 
-        // Tracer capture: the heading/pitch promises were fired at record
+        // Tracer capture: the heading/attitude promises were fired at record
         // start, so they're almost always settled by now. Bound the wait at
         // 1500ms each — a compass that never settles becomes a null fix, not
         // a hung save. Nulls are fine: the tracer pipeline gates on them.
@@ -319,10 +379,14 @@ export function useCamera({
           headingPromise,
           new Promise<null>((r) => setTimeout(() => r(null), 1500)),
         ]);
-        const pitchDeg = await Promise.race([
-          pitchPromise,
-          new Promise<null>((r) => setTimeout(() => r(null), 1500)),
+        const attitude = await Promise.race([
+          attitudePromise,
+          new Promise<{ pitchDeg: number | null; rollDeg: number | null }>((r) =>
+            setTimeout(() => r({ pitchDeg: null, rollDeg: null }), 1500)
+          ),
         ]);
+        const pitchDeg = attitude.pitchDeg;
+        const rollDeg = attitude.rollDeg;
 
         // TEMP tracer-capture diagnostic (remove after field validation):
         // surfaces exactly what the sensors returned for this clip so we can
@@ -331,10 +395,13 @@ export function useCamera({
           '[TRACER-CAPTURE]',
           JSON.stringify({
             gps: gps ? { lat: gps.latitude, lon: gps.longitude, accM: gps.accuracy ?? null } : null,
+            gpsSource: stopFix?.source ?? null,
+            gpsFixCount: stopFix?.fixCount ?? null,
             headingDeg: heading?.headingDeg ?? null,
             headingTrue: heading?.isTrue ?? null,
             headingCalibration: heading?.calibration ?? null,
             pitchDownDeg: pitchDeg ?? null,
+            rollDeg: rollDeg ?? null,
           })
         );
 
@@ -355,6 +422,16 @@ export function useCamera({
           camera_heading_is_true: heading ? (heading.isTrue ? 1 : 0) : undefined,
           camera_heading_calibration: heading?.calibration,
           camera_pitch_deg: pitchDeg ?? undefined,
+          camera_roll_deg: rollDeg ?? undefined,
+          // Tracer V2 GPS backbone columns (null on the prod one-shot path).
+          gps_eff_acc_m: stopFix?.effAccM,
+          gps_fix_count: stopFix?.fixCount,
+          gps_window_sec: stopFix?.windowSec,
+          gps_source: stopFix?.source,
+          gps_fix_series: fixSeriesJson,
+          gps_estimator_version: stopFix?.estimatorVersion,
+          recording_start_ts: config.tracer.enabled ? startTs : undefined,
+          recording_stop_ts: config.tracer.enabled ? stopTs : undefined,
           duration_seconds: durationSeconds,
           auto_trimmed: 0,
           needs_trim: 1,
@@ -433,6 +510,35 @@ export function useCamera({
               // Assume swing for hole-advance purposes; the auto-advance logic
               // is tolerant of bogus classifications across many clips.
               onShotClassified?.('swing');
+            }
+
+            // A1: re-derive the GPS fix at the DEFINITIVE impact anchor now that
+            // impact_time_ms is known. The stop-fallback saved above uses a
+            // wider/later window; the impact anchor (start-press ts + impact) is
+            // tighter and correct — this is the fix that saves the feature.
+            // `startTs` is the absolute start-press ts captured for THIS clip
+            // (not recordingStartTime.current, which the next shot may overwrite).
+            if (config.tracer.enabled && result.impactTimeMs != null) {
+              const impactAnchor = startTs + result.impactTimeMs;
+              const r2 = gpsSession.estimateAtImpact(impactAnchor);
+              console.log(
+                '[GPS-RING]',
+                JSON.stringify({
+                  call: 'impact',
+                  anchor: impactAnchor,
+                  ok: !!r2.fix,
+                  reason: r2.reason,
+                  effAcc: r2.fix ? Math.round(r2.fix.effAccM * 10) / 10 : null,
+                  n: r2.fix?.fixCount ?? 0,
+                })
+              );
+              if (r2.fix) {
+                await updateClipGpsFix(
+                  clipId,
+                  r2.fix,
+                  serializeSeries(gpsSession.seriesAround(impactAnchor))
+                ).catch(() => {});
+              }
             }
           } catch (err) {
             console.log('[ShotDetector] Detection error (non-fatal):', err);
