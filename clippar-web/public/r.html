@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Watch my Clippar golf reel</title>
+<meta name="description" content="A cinematic golf highlight reel, auto-made by Clippar — every shot, remembered.">
+<meta name="theme-color" content="#07100a">
+<meta name="robots" content="noindex">
+
+<!-- ── Open Graph / Twitter (static, branded — per-reel dynamic OG needs SSR, out of scope) ── -->
+<meta property="og:type" content="video.other">
+<meta property="og:site_name" content="Clippar">
+<meta property="og:url" content="https://clippargolf.com/">
+<meta property="og:title" content="Watch my Clippar golf reel">
+<meta property="og:description" content="A cinematic golf highlight reel, auto-made by Clippar — every shot, remembered. Tap to watch.">
+<meta property="og:image" content="https://clippargolf.com/og-image.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Clippar — Every Shot. Remembered.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Watch my Clippar golf reel">
+<meta name="twitter:description" content="A cinematic golf highlight reel, auto-made by Clippar. Tap to watch.">
+<meta name="twitter:image" content="https://clippargolf.com/og-image.png">
+
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  :root {
+    --bg: #07100a;
+    --bg2: #0d1a10;
+    --bg3: #111f14;
+    --green: #a8e63d;
+    --green-dim: #6fa828;
+    --white: #f0f4ee;
+    --muted: #7a9178;
+    --border: rgba(168,230,61,0.15);
+    --card: rgba(255,255,255,0.03);
+    --birdie: #a8e63d;
+    --bogey: #ff7366;
+    --font-display: 'Bebas Neue', sans-serif;
+    --font-body: 'DM Sans', sans-serif;
+    --font-mono: 'DM Mono', monospace;
+  }
+  html { -webkit-text-size-adjust: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--white);
+    font-family: var(--font-body);
+    min-height: 100dvh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 20px 18px calc(28px + env(safe-area-inset-bottom));
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* Subtle radial glow behind the phone */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: radial-gradient(60% 45% at 50% 22%, rgba(168,230,61,0.10), transparent 70%);
+    pointer-events: none; z-index: 0;
+  }
+  .wrap { position: relative; z-index: 1; width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: center; }
+
+  .brandbar { width: 100%; display: flex; justify-content: center; margin-bottom: 18px; }
+  .brandbar .logo { font-family: var(--font-display); font-size: 30px; letter-spacing: 0.06em; color: var(--white); }
+
+  /* Phone frame */
+  .phone {
+    width: 100%;
+    aspect-ratio: 9 / 16;
+    max-height: 68vh;
+    background: #000;
+    border-radius: 30px;
+    border: 1px solid var(--border);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55), inset 0 0 0 3px rgba(0,0,0,0.6);
+    overflow: hidden;
+    position: relative;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .phone video { width: 100%; height: 100%; object-fit: cover; background: #000; display: block; }
+
+  /* Loading + error states inside/around the frame */
+  .state {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 32px 24px; gap: 12px; height: 100%;
+  }
+  .spinner {
+    width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid rgba(168,230,61,0.2); border-top-color: var(--green);
+    animation: spin 0.8s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .state .emoji { font-size: 34px; }
+  .state h2 { font-family: var(--font-display); font-size: 30px; letter-spacing: 0.02em; color: var(--white); }
+  .state p { color: var(--muted); font-size: 14px; max-width: 260px; }
+
+  /* Meta under the video */
+  .meta { width: 100%; text-align: center; margin-top: 22px; }
+  .course { font-family: var(--font-display); font-size: clamp(30px, 8vw, 42px); letter-spacing: 0.02em; line-height: 1; }
+  .stats { display: flex; justify-content: center; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+  .chip {
+    font-family: var(--font-mono); font-size: 12px; letter-spacing: 0.04em;
+    color: var(--white); background: var(--card); border: 1px solid var(--border);
+    padding: 7px 12px; border-radius: 999px; display: inline-flex; gap: 6px; align-items: center;
+  }
+  .chip .k { color: var(--muted); }
+  .chip.par-under .v { color: var(--birdie); }
+  .chip.par-over .v { color: var(--bogey); }
+
+  .madewith { margin-top: 26px; text-align: center; }
+  .madewith .tag { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--muted); }
+  .madewith .tag b { color: var(--green); font-weight: 500; }
+
+  .cta {
+    display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+    margin-top: 14px;
+    background: var(--green); color: #07100a;
+    font-family: var(--font-body); font-weight: 700; font-size: 15px;
+    padding: 14px 28px; border-radius: 999px;
+    box-shadow: 0 8px 24px rgba(168,230,61,0.25);
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+  }
+  .cta:hover { transform: translateY(-1px); box-shadow: 0 10px 30px rgba(168,230,61,0.35); }
+  .subtle { margin-top: 12px; font-size: 12px; color: var(--muted); }
+
+  .hidden { display: none !important; }
+
+  @media (min-height: 780px) { .phone { max-height: 62vh; } }
+</style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="brandbar"><a class="logo" href="https://clippargolf.com/">CLIPPAR</a></div>
+
+    <!-- Phone frame: holds loading → video OR error -->
+    <div class="phone" id="phone">
+      <div class="state" id="loading">
+        <div class="spinner"></div>
+        <p>Loading reel…</p>
+      </div>
+
+      <video id="video" class="hidden" muted playsinline loop autoplay controls preload="metadata"></video>
+
+      <div class="state hidden" id="error">
+        <div class="emoji">⛳️</div>
+        <h2>This reel isn't available</h2>
+        <p id="error-msg">This link may have expired, been unpublished, or isn't a valid reel.</p>
+      </div>
+    </div>
+
+    <!-- Meta (shown on success) -->
+    <div class="meta hidden" id="meta">
+      <div class="course" id="course">Golf Round</div>
+      <div class="stats" id="stats"></div>
+    </div>
+
+    <!-- Made with Clippar + CTA (always shown) -->
+    <div class="madewith">
+      <div class="tag">Made with <b>Clippar</b></div>
+      <a class="cta" id="cta" href="https://clippargolf.com/">Make your own reel</a>
+      <div class="subtle">AI golf highlight reels — every shot, remembered.</div>
+    </div>
+  </div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Environment: localhost → DEV Supabase; live site → PROD Supabase.
+  // Both anon keys are publishable (safe to embed). The SERVICE ROLE key
+  // lives ONLY in the get-shared-reel edge function, never here.
+  var isLocal = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  var SUPABASE = isLocal
+    ? {
+        url: 'https://punkaoeuityovwljpyag.supabase.co',
+        anon: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB1bmthb2V1aXR5b3Z3bGpweWFnIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMjU5MjAsImV4cCI6MjA5MjgwMTkyMH0.B-WN5irJYuLTq6qaMMxuqzJ9DS46-rnWH7MsCuDx9dA'
+      }
+    : {
+        url: 'https://xdefwnqyjffgclzqmvax.supabase.co',
+        anon: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhkZWZ3bnF5amZmZ2NsenFtdmF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzc5Mjk3MjMsImV4cCI6MjA5MzUwNTcyM30.USaNDFxFwPammYu4i3qbXFFYdSRENraNBCvs2o0DM0c'
+      };
+
+  var $ = function (id) { return document.getElementById(id); };
+
+  function showError(msg) {
+    $('loading').classList.add('hidden');
+    $('video').classList.add('hidden');
+    $('error').classList.remove('hidden');
+    if (msg) $('error-msg').textContent = msg;
+  }
+
+  // Extract the share token from the path (/r/<token>) with a ?token= fallback
+  // (covers hitting /r.html directly during local testing without the rewrite).
+  function getToken() {
+    var parts = location.pathname.split('/').filter(Boolean); // ['r','<token>']
+    if (parts.length >= 2 && parts[0] === 'r' && parts[1] !== 'r.html') {
+      return decodeURIComponent(parts[1]);
+    }
+    var q = new URLSearchParams(location.search).get('token');
+    return q ? q.trim() : null;
+  }
+
+  function fmtToPar(n) {
+    if (n === null || n === undefined) return null;
+    if (n === 0) return 'E';
+    return n > 0 ? '+' + n : String(n);
+  }
+
+  function fmtDate(iso) {
+    if (!iso) return null;
+    var d = new Date(iso);
+    if (isNaN(d.getTime())) return null;
+    try {
+      return d.toLocaleDateString('en-AU', { day: 'numeric', month: 'short', year: 'numeric' });
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function renderSuccess(data) {
+    // Video
+    var v = $('video');
+    v.src = data.reelUrl;
+    v.classList.remove('hidden');
+    $('loading').classList.add('hidden');
+    // Autoplay (muted) — browsers allow it; ignore rejection.
+    var p = v.play();
+    if (p && p.catch) p.catch(function () {});
+
+    // Course name
+    if (data.courseName) $('course').textContent = data.courseName;
+
+    // Stat chips
+    var stats = $('stats');
+    stats.innerHTML = '';
+    if (data.totalScore !== null && data.totalScore !== undefined) {
+      var c1 = document.createElement('div');
+      c1.className = 'chip';
+      c1.innerHTML = '<span class="k">Score</span><span class="v">' + data.totalScore + '</span>';
+      stats.appendChild(c1);
+    }
+    var toPar = fmtToPar(data.scoreToPar);
+    if (toPar !== null) {
+      var c2 = document.createElement('div');
+      c2.className = 'chip ' + (data.scoreToPar < 0 ? 'par-under' : data.scoreToPar > 0 ? 'par-over' : '');
+      c2.innerHTML = '<span class="k">To par</span><span class="v">' + toPar + '</span>';
+      stats.appendChild(c2);
+    }
+    var when = fmtDate(data.playedAt);
+    if (when) {
+      var c3 = document.createElement('div');
+      c3.className = 'chip';
+      c3.innerHTML = '<span class="v">' + when + '</span>';
+      stats.appendChild(c3);
+    }
+    $('meta').classList.remove('hidden');
+  }
+
+  function load() {
+    var token = getToken();
+    if (!token) {
+      showError("This link doesn't include a reel to watch.");
+      return;
+    }
+
+    var url = SUPABASE.url + '/functions/v1/get-shared-reel?token=' + encodeURIComponent(token);
+    fetch(url, {
+      method: 'GET',
+      headers: { apikey: SUPABASE.anon, Authorization: 'Bearer ' + SUPABASE.anon }
+    })
+      .then(function (res) {
+        return res.json().then(function (body) { return { ok: res.ok, body: body }; });
+      })
+      .then(function (r) {
+        if (!r.ok || !r.body || !r.body.reelUrl) {
+          showError(r.body && r.body.error ? r.body.error : null);
+          return;
+        }
+        renderSuccess(r.body);
+      })
+      .catch(function () {
+        showError('We couldn’t load this reel. Check your connection and try again.');
+      });
+  }
+
+  load();
+})();
+</script>
+</body>
+</html>
