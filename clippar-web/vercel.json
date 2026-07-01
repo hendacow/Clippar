@@ -18,7 +18,7 @@
   ],
   "rewrites": [
     { "source": "/api/(.*)", "destination": "/api/$1" },
-    { "source": "/r/:token", "destination": "/r.html" }
+    { "source": "/r/:token", "destination": "/r" }
   ],
   "headers": [
     {
