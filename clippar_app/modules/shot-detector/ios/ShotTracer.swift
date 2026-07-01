@@ -19,9 +19,27 @@ import QuartzCore
 // reduce the odds but cannot *structurally* prevent overlap (save/share/
 // recompose paths, AppState churn). This gate makes concurrent export sessions
 // impossible regardless of JS state: each export path calls
-// `tracerExportSerialGate.wait()` immediately before creating its export session
-// and `.signal()`s in a `defer` that covers every return path.
+// `acquireTracerExportGate(promise)` immediately before creating its export
+// session and `.signal()`s in a `defer` that covers every return path.
 let tracerExportSerialGate = DispatchSemaphore(value: 1)
+
+/// Acquire the serial export gate with a hard 300s ceiling. Returns `true` when
+/// acquired — the caller MUST balance it with exactly one
+/// `tracerExportSerialGate.signal()` (via `defer`). On timeout it rejects
+/// `promise` with `ERR_EXPORT_GATE_TIMEOUT` and returns `false` WITHOUT
+/// acquiring (so the caller must NOT signal): cheap insurance so a wedged /
+/// never-completing export surfaces loudly instead of silently blocking every
+/// future export forever. 300s comfortably exceeds any real single-clip render
+/// or full-round reel compose.
+func acquireTracerExportGate(_ promise: Promise) -> Bool {
+    if tracerExportSerialGate.wait(timeout: .now() + 300) == .timedOut {
+        promise.reject(Exception(
+            name: "ERR_EXPORT_GATE_TIMEOUT",
+            description: "Export gate not acquired within 300s — another export appears wedged"))
+        return false
+    }
+    return true
+}
 
 // ============================================================================
 // MARK: - GPS Shot Tracer (additive — gated end-to-end by config.tracer.enabled)
@@ -1143,8 +1161,9 @@ extension ShotDetectorModule {
             // concurrently with composeReelOnDevice's. Released in a defer that
             // covers every return below (session-create failure, export error,
             // success). Held only around the actual export, not the composition
-            // build above, to minimize serialization.
-            tracerExportSerialGate.wait()
+            // build above, to minimize serialization. 300s timeout → reject
+            // loudly rather than wedge every future export behind a stuck one.
+            guard acquireTracerExportGate(promise) else { return }
             defer { tracerExportSerialGate.signal() }
 
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!

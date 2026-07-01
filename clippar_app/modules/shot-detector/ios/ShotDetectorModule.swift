@@ -1557,6 +1557,14 @@ public class ShotDetectorModule: Module {
             videoComposition.instructions = instructions
 
             // Export stitched composition
+            // A6: this is a third AVAssetExportSession with a custom
+            // AVVideoComposition — gate it with the SAME module-level serial
+            // gate as render + composeReel so no two exports overlap. Acquired
+            // just before the export (not the composition build above); 300s
+            // timeout → reject loudly rather than wedge.
+            guard acquireTracerExportGate(promise) else { return }
+            defer { tracerExportSerialGate.signal() }
+
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("stitch_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
@@ -2189,8 +2197,8 @@ public class ShotDetectorModule: Module {
             // AVAssetExportSession can never run concurrently with a tracer
             // renderTracerOnClip export. Released in a defer covering every
             // return below. Held only around the export, not the composition
-            // build above.
-            tracerExportSerialGate.wait()
+            // build above. 300s timeout → reject loudly rather than wedge.
+            guard acquireTracerExportGate(promise) else { return }
             defer { tracerExportSerialGate.signal() }
 
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
