@@ -178,6 +178,12 @@ export type BallLaunchResult = {
   direction: { dx: number; dy: number } | null;
   /** Full accumulated winner trajectory, capped at 60 points. */
   points: Array<{ x: number; y: number; tMs: number }>;
+  /** v2 (ADDITIVE): Vision's parabola-smoothed (projected) track for the same
+   *  winner, capped at 60 points, same bottom-left convention and `tMs` as
+   *  `points`. The denoised series JS fits its quadratic against. May be shorter
+   *  than `points` or empty (Vision reported no projectedPoints, or an older
+   *  native build predating this field — hence optional for graceful degrade). */
+  projectedPoints?: Array<{ x: number; y: number; tMs: number }>;
   /** F8a: a blob WAS seen in the launch ROI but failed the upward-displacement
    *  filter (grounded/topped roll) — JS must skip with reason 'grounded'. */
   groundedEvidence: boolean;
@@ -214,6 +220,37 @@ export type TracerRenderSpec = {
   labelText?: string;
 };
 
+/**
+ * v2 render spec: ONE time-sampled polyline (no visual seam at the two-segment
+ * handoff), rendered natively as a strokeEnd keyframe animation paced by real
+ * flight timing. Superset of the v1 spec's styling. Built in lib/tracerV2.ts.
+ *
+ * Coords normalized, bottom-left origin, display-oriented (same convention as
+ * TracerRenderSpec). Invariants the native side ENFORCES (I11b, rejects with
+ * ERR_TRACER_SPEC otherwise): `samples` has >=2 entries, `tSec` strictly
+ * increasing, first `tSec` is 0, last `tSec` equals `animDurationSec` (so its
+ * keyTime is exactly 1.0), all coords finite, non-degenerate polyline.
+ */
+export type TracerRenderSpecV2 = {
+  samples: Array<{ x: number; y: number; tSec: number }>;
+  animStartSec: number;
+  animDurationSec: number;
+  /** Same fields as the v1 TracerRenderSpec styling; all optional. */
+  styling?: {
+    color?: string;
+    coreColor?: string;
+    lineWidthPx?: number;
+    midWidthPx?: number;
+    glowWidthPx?: number;
+    cometHead?: boolean;
+  };
+  /** Pill label drawn at the apex (highest sample) once the arc peaks. */
+  labelText?: string;
+  /** Crash-bisect ladder flags (tracer-sim only), same semantics as v1. */
+  debugBareExport?: boolean;
+  debugNoShadow?: boolean;
+};
+
 export type TracerRenderResult = {
   /** file:///...caches/tracer_<UUID>.mp4, or null when native is unavailable. */
   tracerUri: string | null;
@@ -236,8 +273,12 @@ type NativeModuleType = {
   getMemoryStats(): Promise<MemoryStats>;
   detectBallLaunch(videoUri: string, impactTimeMs: number, optionsJson: string): Promise<BallLaunchResult>;
   renderTracerOnClip(videoUri: string, specJson: string): Promise<{ tracerUri: string; durationMs: number }>;
+  /** Sync capability probe; ABSENT on native builds predating tracer v2. */
+  tracerNativeCapabilities?(): { renderV2?: boolean; projectedPoints?: boolean };
   getCameraFovDeg(): Promise<{ hFovLandscapeDeg: number | null }>;
   getDevicePitchDeg(): Promise<{ pitchDownDeg: number | null }>;
+  /** A8: pitch + roll from one gravity sample. ABSENT on pre-A8 native builds. */
+  getDeviceAttitude?(): Promise<{ pitchDownDeg: number | null; rollDeg: number | null }>;
   addListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): { remove(): void };
   removeListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): void;
 };
@@ -538,6 +579,7 @@ export async function detectBallLaunch(
       launchPoint: null,
       direction: null,
       points: [],
+      projectedPoints: [],
       groundedEvidence: false,
       poseAnchor: null,
       confidence: 0,
@@ -578,6 +620,75 @@ export async function renderTracer(
 }
 
 /**
+ * Whether the loaded native build understands the v2 TracerRenderSpecV2
+ * (time-sampled polyline). False on Expo Go and on native builds predating
+ * tracer v2 — the `tracerNativeCapabilities` probe is absent there, so a v2
+ * spec would be misparsed as an invalid v1 spec and hard-rejected. Callers use
+ * this to feature-detect and fall back to the v1 5-point path.
+ */
+export function nativeSupportsTracerV2(): boolean {
+  if (!nativeModule || typeof nativeModule.tracerNativeCapabilities !== "function") {
+    return false;
+  }
+  try {
+    return nativeModule.tracerNativeCapabilities().renderV2 === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Render a v2 (time-sampled polyline) tracer, gracefully degrading to the v1
+ * 5-point Bezier path when the native build lacks v2 parsing.
+ *
+ * Feature-detect (never trial-and-error): if `nativeSupportsTracerV2()` we send
+ * the v2 spec; otherwise, if a `v1FallbackSpec` was supplied, we send that to
+ * the unchanged `renderTracerOnClip`; otherwise we return `{ tracerUri: null }`
+ * (old build, no fallback available — caller skips the render, never crashes).
+ *
+ * This never masks a genuinely-invalid v2 spec: on a v2-capable build the native
+ * side hard-rejects a malformed spec with ERR_TRACER_SPEC and that error
+ * propagates — we only downgrade when native lacks v2 support entirely.
+ *
+ * @param videoUri Clip to burn the tracer onto.
+ * @param v2Spec   The v2 spec (object; serialized here) OR a pre-encoded JSON
+ *                 string.
+ * @param v1FallbackSpec Optional v1 spec (object or JSON string) used only when
+ *                 native lacks v2 support.
+ */
+export async function renderTracerV2(
+  videoUri: string,
+  v2Spec: TracerRenderSpecV2 | string,
+  v1FallbackSpec?: TracerRenderSpec | string | null
+): Promise<TracerRenderResult> {
+  if (!nativeModule || typeof nativeModule.renderTracerOnClip !== "function") {
+    console.warn(
+      "[ShotDetector] renderTracerOnClip not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return { tracerUri: null, durationMs: 0 };
+  }
+
+  const encode = (s: unknown): string => (typeof s === "string" ? s : JSON.stringify(s));
+
+  if (nativeSupportsTracerV2()) {
+    return renderTracer(videoUri, encode(v2Spec));
+  }
+
+  // Native predates v2: fall back to the v1 5-point spec if the caller gave one.
+  if (v1FallbackSpec != null) {
+    console.warn(
+      "[ShotDetector] native lacks tracer v2 — falling back to the v1 5-point render spec."
+    );
+    return renderTracer(videoUri, encode(v1FallbackSpec));
+  }
+
+  console.warn(
+    "[ShotDetector] native lacks tracer v2 and no v1 fallback spec was provided — skipping tracer render."
+  );
+  return { tracerUri: null, durationMs: 0 };
+}
+
+/**
  * Back wide camera's 1920x1080-format videoFieldOfView — the LANDSCAPE
  * (long-axis) horizontal FOV in degrees. tracerMath converts it to the
  * portrait horizontal FOV. Null on simulator / no matching format / older
@@ -604,4 +715,35 @@ export async function getDevicePitchDeg(): Promise<number | null> {
 
   const result = await nativeModule.getDevicePitchDeg();
   return result?.pitchDownDeg ?? null;
+}
+
+/**
+ * A8 (camera-angle robustness): one-shot pitch + roll from a single CoreMotion
+ * gravity sample.
+ *
+ * - `pitchDownDeg`: downward tilt of the camera optical axis (positive = tilted
+ *   down), same value as getDevicePitchDeg.
+ * - `rollDeg`: sideways tilt of the portrait phone about the screen normal.
+ *   POSITIVE = clockwise screen rotation as seen facing the screen (right edge
+ *   dips down). ~0° when level.
+ *
+ * Graceful degrade: on native builds predating A8 the native function is absent,
+ * so `rollDeg` comes back `null` (and `pitchDownDeg` falls back to the existing
+ * getDevicePitchDeg). Either field is also `null` on a junk sample / ~1s
+ * timeout / simulator. The JS math lane de-rotates the detected sample points by
+ * `rollDeg` before building the spec; a `null` roll simply means "assume level".
+ */
+export async function getDeviceAttitude(): Promise<{
+  pitchDownDeg: number | null;
+  rollDeg: number | null;
+}> {
+  if (nativeModule && typeof nativeModule.getDeviceAttitude === "function") {
+    const result = await nativeModule.getDeviceAttitude();
+    return {
+      pitchDownDeg: result?.pitchDownDeg ?? null,
+      rollDeg: result?.rollDeg ?? null,
+    };
+  }
+  // Pre-A8 native (or Expo Go): keep pitch working, report no roll.
+  return { pitchDownDeg: await getDevicePitchDeg(), rollDeg: null };
 }

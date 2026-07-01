@@ -204,6 +204,24 @@ public class ShotDetectorModule: Module {
         AsyncFunction("getDevicePitchDeg") { (promise: Promise) in
             self.getDevicePitchDegImpl(promise: promise)
         }
+
+        // A8: one-shot pitch + roll from the same gravity sample (camera-angle
+        // robustness). getDevicePitchDeg above is kept unchanged for compat.
+        AsyncFunction("getDeviceAttitude") { (promise: Promise) in
+            self.getDeviceAttitudeImpl(promise: promise)
+        }
+
+        // Synchronous capability probe for graceful JS feature-detection. Older
+        // native builds lack this function entirely, so the JS wrapper's
+        // `typeof nativeModule.tracerNativeCapabilities === "function"` check is
+        // false there and it falls back to the v1 5-point render spec.
+        //   renderV2:      renderTracerOnClip understands TracerRenderSpecV2
+        //                  (time-sampled polyline).
+        //   projectedPoints: detectBallLaunch emits the additive projectedPoints
+        //                  denoised track.
+        Function("tracerNativeCapabilities") { () -> [String: Any] in
+            return ["renderV2": true, "projectedPoints": true]
+        }
     }
 
     // MARK: - Passthrough Trim (zero re-encode)
@@ -1539,6 +1557,14 @@ public class ShotDetectorModule: Module {
             videoComposition.instructions = instructions
 
             // Export stitched composition
+            // A6: this is a third AVAssetExportSession with a custom
+            // AVVideoComposition — gate it with the SAME module-level serial
+            // gate as render + composeReel so no two exports overlap. Acquired
+            // just before the export (not the composition build above); 300s
+            // timeout → reject loudly rather than wedge.
+            guard acquireTracerExportGate(promise) else { return }
+            defer { tracerExportSerialGate.signal() }
+
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("stitch_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
@@ -2166,6 +2192,15 @@ public class ShotDetectorModule: Module {
             }
 
             // ---- Export ----
+            // A6: acquire the module-level serial export gate (declared in
+            // ShotTracer.swift) before creating the export session, so this reel
+            // AVAssetExportSession can never run concurrently with a tracer
+            // renderTracerOnClip export. Released in a defer covering every
+            // return below. Held only around the export, not the composition
+            // build above. 300s timeout → reject loudly rather than wedge.
+            guard acquireTracerExportGate(promise) else { return }
+            defer { tracerExportSerialGate.signal() }
+
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("reel_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
