@@ -1036,6 +1036,11 @@ export default function RecordScreen() {
           }}
           mode="video"
           videoQuality="1080p"
+          // Tracer v2 assumes a STATIONARY scene with a constant FOV — OIS/EIS
+          // would warp the frame geometry the arc math projects against (and
+          // the horizon anchor). Turn hardware/software stabilization off so
+          // captured pixels map straight to the projection model.
+          videoStabilizationMode="off"
           mute={false}
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
