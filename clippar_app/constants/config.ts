@@ -1,3 +1,5 @@
+import { variantIsDev } from '../lib/variant';
+
 export const config = {
   supabase: {
     url: process.env.EXPO_PUBLIC_SUPABASE_URL!,
@@ -84,11 +86,13 @@ export const config = {
   tracer: {
     // Master kill switch. Every tracer code path (capture, detect, geometry,
     // render, playback switching) is gated on this so the app is byte-identical
-    // with it off. OFF for the v1 production build — the tracer has not yet
-    // passed a real-round field test, so prod ships stock behavior. Flip to
-    // true (clippar-dev only) to resume field testing; originals are never
-    // modified, so this is a pure on/off with no data risk.
-    enabled: false as boolean,
+    // with it off. v2: gated to the development (clippar-dev) build only via
+    // variantIsDev(), so staging and production stay byte-identical stock
+    // behavior while v2 field-tests in dev. variantIsDev() is node-safe (see
+    // lib/variant.ts) so config.ts stays importable under plain node (tests /
+    // simulate-tracer). Originals are never modified — a pure on/off, no data
+    // risk.
+    enabled: variantIsDev() as boolean,
     // Sub-gate within `enabled` for compass-heading capture at record start.
     captureHeading: true as boolean,
     // DEBUG OFF-SWITCH for the evidence gates, so street tests (no club, no
@@ -144,6 +148,48 @@ export const config = {
     // Added to the fullSwing postRollMs (capture + re-trim) when enabled, so
     // future clips keep more ball flight. 0 = no-op; set 2000 for cinematic.
     extraPostRollMs: 0,
+
+    // ── v2 GPS backbone (lib/gpsSession.ts, lib/tracerV2.ts) ──
+    // The estimator turns the ~1Hz ring buffer into one accuracy-weighted
+    // per-shot fix + effAcc + tier. See plan Pillar 1 / A1 / A2 / A3.
+    gps: {
+      warmupSec: 15, // first N seconds after start/resume excluded as junk
+      windowPreSec: 25, // stationary window before the anchor (impact/stop)
+      windowPostSec: 3, // stationary window after the anchor
+      widenPreSec: 45, // widen the pre-window when too few fixes land
+      stationarySpeedMax: 0.7, // m/s — above this the golfer is walking
+      fixAccMax: 20, // m — drop fixes reporting worse horizontalAccuracy
+      minFixes: 5, // fewer accepted fixes than this → widen / degrade
+      effAccFloor: 2.5, // m — honest precision ceiling; don't chase sub-meter
+      safetyFactor: 1.2, // iOS accuracy is optimistic; multipath decorrelates
+      tier1EffAccM: 5, // Tier 1 needs both endpoints ≤ this
+      tier2EffAccM: 10, // Tier 2 needs both endpoints ≤ this
+      tier2RelSigma: 0.1, // Tier 2 needs σ_d/carry ≤ this
+      staleSec: 10, // all fixes older than this → gps-stale (never cached)
+      filmSpotOffsetVarM: 3, // A2: phone-behind-ball offset folded into σ_d
+    },
+
+    // ── v2 two-segment arc shaping (lib/tracerV2.ts) ──
+    // Pseudo-gravity / apex / launch caps for the closed-form synthetic
+    // segment. See plan Pillar 4 / A4.
+    arc: {
+      gMax: 1.5, // cap on |g_down / g_up| so the descent can't spike
+      tUpFracMax: 0.7, // t_up ≤ this × t_rem, else re-solve y_apex
+      tRemMin: 0.8, // s — minimum remaining flight time to shape a segment
+      kApexLo: 0.13, // apex = lerp(kApexLo, kApexHi, vy0-norm) × carry
+      kApexHi: 0.22,
+      vy0Lo: 0.35, // normalized climb range the apex lerp maps across
+      vy0Hi: 0.9,
+    },
+
+    // ── v2 estimator / prior config (lib/tracerV2.ts) ──
+    v2: {
+      // Last-resort synthetic carries per shot-type bucket (R3/R4 rungs).
+      priorCarries: { drive: 200, iron: 140, wedge: 60 },
+      bagMountHeightM: 1.0, // replaces tripod 1.35; phone rides the bag
+      estimatorVersion: 1, // bumped when the estimator changes (persisted/clip)
+      allowPriorOnlyArc: true, // R4 (nothing usable) — dev-only escape hatch
+    },
   },
   export: {
     defaultResolution: '1080p' as const,
