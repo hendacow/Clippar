@@ -1527,4 +1527,93 @@ extension ShotDetectorModule {
             finish(nil)
         }
     }
+
+    // ========================================================================
+    // MARK: getDeviceAttitude — one-shot CoreMotion pitch + roll (A8)
+    // ========================================================================
+
+    /// A8 (camera-angle robustness): one-shot pitch-down AND roll of the phone,
+    /// both derived from the SAME static gravity vector as getDevicePitchDeg
+    /// (which is left unchanged for compat). Resolves
+    /// `{ pitchDownDeg, rollDeg }`, each independently null on a junk sample or
+    /// after the ~1s timeout. The JS math lane uses `rollDeg` to de-rotate the
+    /// detected sample points before fitting, so a phone mounted a few degrees
+    /// off-level still yields a level arc; the polyline renderer itself is
+    /// angle-agnostic and needs no change.
+    ///
+    /// pitchDownDeg: identical derivation to getDevicePitchDeg —
+    ///   sin(pitchDown) = -gz/|g| (positive = camera tilted down toward ground).
+    ///
+    /// rollDeg: sideways tilt of the PORTRAIT phone about the screen-normal
+    ///   (device z) axis. Device axes are x=screen-right, y=screen-top,
+    ///   z=out-of-screen-toward-viewer; upright portrait reads g≈(0,-1,0).
+    ///   roll = atan2(gx, -gy).
+    ///   SIGN CONVENTION: POSITIVE = CLOCKWISE screen rotation as seen when
+    ///   FACING the screen (equivalently: the phone's RIGHT edge dips DOWN, which
+    ///   projects gravity onto +x → gx>0 → positive roll). Upright reads ~0°.
+    ///   Stable for the near-upright golf-mount use (small pitch); it degrades
+    ///   only when the phone is pitched toward vertical, where the xy-projection
+    ///   of gravity shrinks — irrelevant for a normal mounted-camera angle.
+    internal func getDeviceAttitudeImpl(promise: Promise) {
+        let manager = CMMotionManager()
+        let stateQueue = DispatchQueue(label: "clippar.tracer.attitude")
+        var resolved = false
+
+        // Same deliberate temporary retain cycle + timeout-guaranteed finish as
+        // getDevicePitchDeg.
+        func finish(pitch: Double?, roll: Double?) {
+            stateQueue.async {
+                guard !resolved else { return }
+                resolved = true
+                manager.stopDeviceMotionUpdates()
+                manager.stopAccelerometerUpdates()
+                var payload: [String: Any] = [:]
+                if let p = pitch, p.isFinite { payload["pitchDownDeg"] = p } else { payload["pitchDownDeg"] = NSNull() }
+                if let r = roll, r.isFinite { payload["rollDeg"] = r } else { payload["rollDeg"] = NSNull() }
+                promise.resolve(payload)
+            }
+        }
+
+        /// Returns (pitchDownDeg, rollDeg) from a gravity sample, or nil for a
+        /// junk read (|g| far from 1). Both angles come from the one vector.
+        func attitude(gx: Double, gy: Double, gz: Double) -> (Double, Double)? {
+            let norm = (gx * gx + gy * gy + gz * gz).squareRoot()
+            guard norm > 0.5 && norm < 1.5 else { return nil }
+            let s = max(-1.0, min(1.0, -gz / norm))
+            let pitch = asin(s) * 180.0 / Double.pi
+            // Positive = clockwise (right edge down) when facing the screen.
+            let roll = atan2(gx, -gy) * 180.0 / Double.pi
+            return (pitch, roll)
+        }
+
+        let motionQueue = OperationQueue()
+        motionQueue.maxConcurrentOperationCount = 1
+
+        if manager.isDeviceMotionAvailable {
+            manager.deviceMotionUpdateInterval = 0.05
+            manager.startDeviceMotionUpdates(to: motionQueue) { motion, _ in
+                guard let g = motion?.gravity else { return }
+                if let (pitch, roll) = attitude(gx: g.x, gy: g.y, gz: g.z) {
+                    finish(pitch: pitch, roll: roll)
+                }
+            }
+        } else if manager.isAccelerometerAvailable {
+            // Raw accelerometer ~= gravity on a static mounted phone.
+            manager.accelerometerUpdateInterval = 0.05
+            manager.startAccelerometerUpdates(to: motionQueue) { data, _ in
+                guard let a = data?.acceleration else { return }
+                if let (pitch, roll) = attitude(gx: a.x, gy: a.y, gz: a.z) {
+                    finish(pitch: pitch, roll: roll)
+                }
+            }
+        } else {
+            finish(pitch: nil, roll: nil)
+            return
+        }
+
+        // ~1s timeout -> both null (TS falls back per field).
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 1.0) {
+            finish(pitch: nil, roll: nil)
+        }
+    }
 }

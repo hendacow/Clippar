@@ -205,6 +205,12 @@ public class ShotDetectorModule: Module {
             self.getDevicePitchDegImpl(promise: promise)
         }
 
+        // A8: one-shot pitch + roll from the same gravity sample (camera-angle
+        // robustness). getDevicePitchDeg above is kept unchanged for compat.
+        AsyncFunction("getDeviceAttitude") { (promise: Promise) in
+            self.getDeviceAttitudeImpl(promise: promise)
+        }
+
         // Synchronous capability probe for graceful JS feature-detection. Older
         // native builds lack this function entirely, so the JS wrapper's
         // `typeof nativeModule.tracerNativeCapabilities === "function"` check is

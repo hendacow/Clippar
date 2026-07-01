@@ -277,6 +277,8 @@ type NativeModuleType = {
   tracerNativeCapabilities?(): { renderV2?: boolean; projectedPoints?: boolean };
   getCameraFovDeg(): Promise<{ hFovLandscapeDeg: number | null }>;
   getDevicePitchDeg(): Promise<{ pitchDownDeg: number | null }>;
+  /** A8: pitch + roll from one gravity sample. ABSENT on pre-A8 native builds. */
+  getDeviceAttitude?(): Promise<{ pitchDownDeg: number | null; rollDeg: number | null }>;
   addListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): { remove(): void };
   removeListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): void;
 };
@@ -713,4 +715,35 @@ export async function getDevicePitchDeg(): Promise<number | null> {
 
   const result = await nativeModule.getDevicePitchDeg();
   return result?.pitchDownDeg ?? null;
+}
+
+/**
+ * A8 (camera-angle robustness): one-shot pitch + roll from a single CoreMotion
+ * gravity sample.
+ *
+ * - `pitchDownDeg`: downward tilt of the camera optical axis (positive = tilted
+ *   down), same value as getDevicePitchDeg.
+ * - `rollDeg`: sideways tilt of the portrait phone about the screen normal.
+ *   POSITIVE = clockwise screen rotation as seen facing the screen (right edge
+ *   dips down). ~0° when level.
+ *
+ * Graceful degrade: on native builds predating A8 the native function is absent,
+ * so `rollDeg` comes back `null` (and `pitchDownDeg` falls back to the existing
+ * getDevicePitchDeg). Either field is also `null` on a junk sample / ~1s
+ * timeout / simulator. The JS math lane de-rotates the detected sample points by
+ * `rollDeg` before building the spec; a `null` roll simply means "assume level".
+ */
+export async function getDeviceAttitude(): Promise<{
+  pitchDownDeg: number | null;
+  rollDeg: number | null;
+}> {
+  if (nativeModule && typeof nativeModule.getDeviceAttitude === "function") {
+    const result = await nativeModule.getDeviceAttitude();
+    return {
+      pitchDownDeg: result?.pitchDownDeg ?? null,
+      rollDeg: result?.rollDeg ?? null,
+    };
+  }
+  // Pre-A8 native (or Expo Go): keep pitch working, report no roll.
+  return { pitchDownDeg: await getDevicePitchDeg(), rollDeg: null };
 }
