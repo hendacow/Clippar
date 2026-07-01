@@ -1,4 +1,5 @@
 import * as SQLite from 'expo-sqlite';
+import { BASE_TABLES_SQL, CLIP_TABLE_MIGRATIONS } from './clipMigrations';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
@@ -13,129 +14,15 @@ export async function getDatabase(): Promise<SQLite.SQLiteDatabase> {
 
 async function initTables() {
   if (!db) return;
-  await db.execAsync(`
-    CREATE TABLE IF NOT EXISTS local_clips (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      round_id TEXT NOT NULL,
-      hole_number INTEGER NOT NULL,
-      shot_number INTEGER NOT NULL,
-      file_uri TEXT NOT NULL,
-      gps_latitude REAL,
-      gps_longitude REAL,
-      duration_seconds REAL,
-      timestamp TEXT NOT NULL,
-      uploaded INTEGER DEFAULT 0,
-      upload_retry_count INTEGER DEFAULT 0,
-      remote_clip_id TEXT,
-      trim_start_ms INTEGER DEFAULT 0,
-      trim_end_ms INTEGER DEFAULT -1,
-      is_excluded INTEGER DEFAULT 0,
-      sort_order INTEGER DEFAULT 0
-    );
-
-    CREATE TABLE IF NOT EXISTS local_rounds (
-      id TEXT PRIMARY KEY,
-      course_name TEXT NOT NULL,
-      course_id TEXT,
-      current_hole INTEGER DEFAULT 1,
-      current_shot INTEGER DEFAULT 1,
-      status TEXT DEFAULT 'in_progress',
-      started_at TEXT NOT NULL,
-      finished_at TEXT
-    );
-
-    CREATE TABLE IF NOT EXISTS local_scores (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      round_id TEXT NOT NULL,
-      hole_number INTEGER NOT NULL,
-      strokes INTEGER NOT NULL,
-      putts INTEGER DEFAULT 0,
-      penalty_strokes INTEGER DEFAULT 0,
-      is_pickup INTEGER DEFAULT 0,
-      par INTEGER DEFAULT 4,
-      UNIQUE(round_id, hole_number)
-    );
-  `);
+  // Base schema lives in lib/clipMigrations.ts (pure SQL, no native import) so
+  // the migration set is exercisable in CI against real SQLite (see S4/V4).
+  await db.execAsync(BASE_TABLES_SQL);
 }
 
 // Migrate existing databases to add new columns
 async function migrateEditorColumns() {
   if (!db) return;
-  const migrations = [
-    'ALTER TABLE local_clips ADD COLUMN trim_start_ms INTEGER DEFAULT 0',
-    'ALTER TABLE local_clips ADD COLUMN trim_end_ms INTEGER DEFAULT -1',
-    'ALTER TABLE local_clips ADD COLUMN is_excluded INTEGER DEFAULT 0',
-    'ALTER TABLE local_clips ADD COLUMN sort_order INTEGER DEFAULT 0',
-    // Auto-trim columns (Phase 1)
-    'ALTER TABLE local_clips ADD COLUMN trimmed_file_uri TEXT',
-    'ALTER TABLE local_clips ADD COLUMN original_file_uri TEXT',
-    'ALTER TABLE local_clips ADD COLUMN auto_trimmed INTEGER DEFAULT 0',
-    'ALTER TABLE local_clips ADD COLUMN trim_confidence REAL',
-    'ALTER TABLE local_clips ADD COLUMN impact_time_ms REAL',
-    // Lazy-trim flag (Phase 2: import saves URI only, editor trims later)
-    'ALTER TABLE local_clips ADD COLUMN needs_trim INTEGER DEFAULT 0',
-    // Auto-trim boundaries relative to original video (for full-timeline trimmer)
-    'ALTER TABLE local_clips ADD COLUMN auto_trim_start_ms INTEGER',
-    'ALTER TABLE local_clips ADD COLUMN auto_trim_end_ms INTEGER',
-    // Shot type classification: 'swing' | 'putt' | null (unknown)
-    "ALTER TABLE local_clips ADD COLUMN shot_type TEXT",
-    // Last upload error (string) when background upload fails — surfaces a
-    // "Retry upload" affordance in the library. NULL when no error.
-    'ALTER TABLE local_clips ADD COLUMN upload_error TEXT',
-    // Timestamp of most recent upload attempt (ISO string). Used to throttle
-    // auto-retry so we don't burn battery on a clip that keeps failing.
-    'ALTER TABLE local_clips ADD COLUMN last_upload_attempt_at TEXT',
-    // Photos library asset id (iOS localIdentifier / Android uri). Captured
-    // at import time (from picker) or at mirror time (from MediaLibrary
-    // saveToLibraryAsync). Used by photosRecovery on reinstall to re-hydrate
-    // clip files from the user's Photos library when they're missing on disk.
-    'ALTER TABLE local_clips ADD COLUMN photos_asset_id TEXT',
-    // Shot-tracer capture columns (config.tracer). Heading is the back-camera
-    // optical-axis azimuth sampled once at recording start (tripod = constant);
-    // is_true flags true vs magnetic north; calibration is iOS 0-3 compass
-    // accuracy (0 = unusable). Pitch is the camera's downward tilt in degrees
-    // (drives the per-clip horizon line). gps_accuracy_m is the horizontal
-    // accuracy of THIS clip's fix (gates pairing + the dynamic carry floor).
-    'ALTER TABLE local_clips ADD COLUMN camera_heading_deg REAL',
-    'ALTER TABLE local_clips ADD COLUMN camera_heading_is_true INTEGER',
-    'ALTER TABLE local_clips ADD COLUMN camera_heading_calibration INTEGER',
-    'ALTER TABLE local_clips ADD COLUMN camera_pitch_deg REAL',
-    'ALTER TABLE local_clips ADD COLUMN gps_accuracy_m REAL',
-    // Shot-tracer output columns. tracer_file_uri is a NEW rendered file
-    // (tracer_<UUID>.mp4) — the original/trimmed files are never rewritten.
-    // tracer_status lifecycle: NULL -> 'pending' -> 'done'|'skipped'|'failed';
-    // 'stale' whenever the clip's trim/file/pairing changes (re-rendered on
-    // next editor open). tracer_meta is a JSON blob (method, carryM, deltaDeg,
-    // skip reason, confidence flags).
-    'ALTER TABLE local_clips ADD COLUMN tracer_file_uri TEXT',
-    'ALTER TABLE local_clips ADD COLUMN tracer_status TEXT',
-    'ALTER TABLE local_clips ADD COLUMN tracer_meta TEXT',
-    'ALTER TABLE local_clips ADD COLUMN tracer_rendered_at TEXT',
-    // Reel staleness flag — set to 1 whenever a clip in a round is edited
-    // after the last successful compose. The round detail page shows a
-    // "Re-compose reel" button when this is 1, so the user knows their
-    // trim / reorder / exclude changes haven't been applied to the saved
-    // reel yet.
-    'ALTER TABLE local_rounds ADD COLUMN reel_stale INTEGER DEFAULT 0',
-    // Settings table
-    `CREATE TABLE IF NOT EXISTS local_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL
-    )`,
-    // Persistent queue of rounds/clips that need to be uploaded to Supabase
-    // so the work survives app kill / restart / offline periods. Each row is
-    // a round waiting to have its clips streamed up.
-    `CREATE TABLE IF NOT EXISTS local_upload_queue (
-      round_id TEXT PRIMARY KEY,
-      course_name TEXT,
-      mode TEXT DEFAULT 'local-only',
-      status TEXT DEFAULT 'pending',
-      last_error TEXT,
-      attempt_count INTEGER DEFAULT 0,
-      created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
-    )`,
-  ];
+  const migrations = CLIP_TABLE_MIGRATIONS;
   for (const sql of migrations) {
     try { await db.execAsync(sql + ';'); } catch {} // column/table already exists
   }
@@ -368,12 +255,24 @@ export async function saveLocalClip(clip: {
   camera_heading_is_true?: number | null;
   camera_heading_calibration?: number | null;
   camera_pitch_deg?: number | null;
+  camera_roll_deg?: number | null; // A8: device roll at capture (null if unavailable)
   gps_accuracy_m?: number | null;
+  // Tracer V2 GPS backbone (S4). All optional/nullable so pre-v2 callers and
+  // tracer-disabled builds are unaffected. gps_fix_series is a JSON string
+  // (RawFix[], ≤60) captured around the anchor for lazy re-derivation (A1).
+  gps_eff_acc_m?: number | null;
+  gps_fix_count?: number | null;
+  gps_window_sec?: number | null;
+  gps_source?: string | null;
+  gps_fix_series?: string | null;
+  gps_estimator_version?: number | null;
+  recording_start_ts?: number | null;
+  recording_stop_ts?: number | null;
 }): Promise<number> {
   const database = await getDatabase();
   const result = await database.runAsync(
-    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id, camera_heading_deg, camera_heading_is_true, camera_heading_calibration, camera_pitch_deg, gps_accuracy_m)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id, camera_heading_deg, camera_heading_is_true, camera_heading_calibration, camera_pitch_deg, camera_roll_deg, gps_accuracy_m, gps_eff_acc_m, gps_fix_count, gps_window_sec, gps_source, gps_fix_series, gps_estimator_version, recording_start_ts, recording_stop_ts)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     clip.round_id,
     clip.hole_number,
     clip.shot_number,
@@ -395,9 +294,58 @@ export async function saveLocalClip(clip: {
     clip.camera_heading_is_true ?? null,
     clip.camera_heading_calibration ?? null,
     clip.camera_pitch_deg ?? null,
+    clip.camera_roll_deg ?? null,
     clip.gps_accuracy_m ?? null,
+    clip.gps_eff_acc_m ?? null,
+    clip.gps_fix_count ?? null,
+    clip.gps_window_sec ?? null,
+    clip.gps_source ?? null,
+    clip.gps_fix_series ?? null,
+    clip.gps_estimator_version ?? null,
+    clip.recording_start_ts ?? null,
+    clip.recording_stop_ts ?? null,
   );
   return result.lastInsertRowId;
+}
+
+/**
+ * Update a clip's GPS-fix columns after a re-estimation (A1: re-derived at
+ * impact time once detectAndTrim lands impact_time_ms). Writes both the v2
+ * columns and the v1 gps_latitude/longitude/gps_accuracy_m mirror so older
+ * readers keep working. Best-effort; callers swallow failures.
+ */
+export async function updateClipGpsFix(
+  clipId: number,
+  fix: {
+    lat: number;
+    lon: number;
+    effAccM: number;
+    fixCount: number;
+    windowSec: number;
+    source: string;
+    estimatorVersion: number;
+  },
+  fixSeriesJson?: string | null
+): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    `UPDATE local_clips SET
+       gps_latitude = ?, gps_longitude = ?, gps_accuracy_m = ?,
+       gps_eff_acc_m = ?, gps_fix_count = ?, gps_window_sec = ?,
+       gps_source = ?, gps_estimator_version = ?,
+       gps_fix_series = COALESCE(?, gps_fix_series)
+     WHERE id = ?`,
+    fix.lat,
+    fix.lon,
+    fix.effAccM,
+    fix.effAccM,
+    fix.fixCount,
+    fix.windowSec,
+    fix.source,
+    fix.estimatorVersion,
+    fixSeriesJson ?? null,
+    clipId
+  );
 }
 
 /**
