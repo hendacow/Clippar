@@ -204,6 +204,18 @@ public class ShotDetectorModule: Module {
         AsyncFunction("getDevicePitchDeg") { (promise: Promise) in
             self.getDevicePitchDegImpl(promise: promise)
         }
+
+        // Synchronous capability probe for graceful JS feature-detection. Older
+        // native builds lack this function entirely, so the JS wrapper's
+        // `typeof nativeModule.tracerNativeCapabilities === "function"` check is
+        // false there and it falls back to the v1 5-point render spec.
+        //   renderV2:      renderTracerOnClip understands TracerRenderSpecV2
+        //                  (time-sampled polyline).
+        //   projectedPoints: detectBallLaunch emits the additive projectedPoints
+        //                  denoised track.
+        Function("tracerNativeCapabilities") { () -> [String: Any] in
+            return ["renderV2": true, "projectedPoints": true]
+        }
     }
 
     // MARK: - Passthrough Trim (zero re-encode)
@@ -2166,6 +2178,15 @@ public class ShotDetectorModule: Module {
             }
 
             // ---- Export ----
+            // A6: acquire the module-level serial export gate (declared in
+            // ShotTracer.swift) before creating the export session, so this reel
+            // AVAssetExportSession can never run concurrently with a tracer
+            // renderTracerOnClip export. Released in a defer covering every
+            // return below. Held only around the export, not the composition
+            // build above.
+            tracerExportSerialGate.wait()
+            defer { tracerExportSerialGate.signal() }
+
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("reel_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)

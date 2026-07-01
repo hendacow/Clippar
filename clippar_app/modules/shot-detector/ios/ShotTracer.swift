@@ -6,6 +6,24 @@ import UIKit
 import QuartzCore
 
 // ============================================================================
+// MARK: - A6 (MANDATORY): module-level serial export gate
+// ============================================================================
+//
+// A single binary semaphore, shared module-wide (default `internal` visibility,
+// so both this file's renderTracerOnClipImpl AND ShotDetectorModule.swift's
+// composeReelOnDevice reference the same instance). Both build an
+// AVMutableComposition with a custom AVVideoComposition + Core-Animation tool
+// and run an AVAssetExportSession; two of those in flight at once race the
+// shared encoder and intermittently fail (seen as -11838 /
+// AVErrorOperationNotSupportedForAsset and partial writes). JS-side batch flags
+// reduce the odds but cannot *structurally* prevent overlap (save/share/
+// recompose paths, AppState churn). This gate makes concurrent export sessions
+// impossible regardless of JS state: each export path calls
+// `tracerExportSerialGate.wait()` immediately before creating its export session
+// and `.signal()`s in a `defer` that covers every return path.
+let tracerExportSerialGate = DispatchSemaphore(value: 1)
+
+// ============================================================================
 // MARK: - GPS Shot Tracer (additive — gated end-to-end by config.tracer.enabled)
 // ============================================================================
 //
@@ -143,6 +161,110 @@ private struct TracerRenderSpec {
     }
 }
 
+/// v2 (ADDITIVE): the time-sampled polyline render spec. Superset shape:
+/// `{ samples:[{x,y,tSec}], animStartSec, animDurationSec, styling{...same
+/// fields as v1}, labelText }` (+ the same top-level debug flags as v1 for the
+/// crash-bisect ladder). A `samples` array is what distinguishes it from the v1
+/// 5-point Bezier spec — its ABSENCE means "this is a v1 spec, use that parser"
+/// (fallback path, kept one release). Its PRESENCE means strict validation
+/// (invariant I11b, A6): any violation is a HARD reject (`ERR_TRACER_SPEC`),
+/// never a silent v1 downgrade and never a CAKeyframeAnimation that no-ops.
+private struct TracerRenderSpecV2 {
+    struct Sample { let x: CGFloat; let y: CGFloat; let tSec: Double }
+    let samples: [Sample]
+    let animStartSec: Double
+    let animDurationSec: Double
+    // Styling — same fields/defaults as the v1 TracerRenderSpec.
+    var color: String = "#FF3B1F"
+    var coreColor: String = "#FFD9A0"
+    var lineWidthPx: CGFloat = 4
+    var midWidthPx: CGFloat = 8
+    var glowWidthPx: CGFloat = 16
+    var cometHead: Bool = true
+    var labelText: String? = nil
+    var debugBareExport: Bool = false
+    var debugNoShadow: Bool = false
+
+    enum ParseResult {
+        case notV2                 // no `samples` array → fall back to v1 parser
+        case invalid(String)       // `samples` present but violates I11b → reject
+        case ok(TracerRenderSpecV2)
+    }
+
+    static func parse(json: String) -> ParseResult {
+        guard !json.isEmpty,
+              let data = json.data(using: .utf8),
+              let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return .notV2
+        }
+        // Identity: a V2 spec carries a `samples` array. Absent → v1 fallback.
+        guard let rawSamples = obj["samples"] as? [[String: Any]] else {
+            return .notV2
+        }
+        guard let start = (obj["animStartSec"] as? NSNumber)?.doubleValue,
+              let dur = (obj["animDurationSec"] as? NSNumber)?.doubleValue,
+              start.isFinite, start >= 0, dur.isFinite, dur > 0 else {
+            return .invalid("V2 spec: animStartSec/animDurationSec missing or non-finite/non-positive")
+        }
+        // Need at least a 2-point polyline; CAKeyframeAnimation needs >=2 keys.
+        guard rawSamples.count >= 2 else {
+            return .invalid("V2 spec: need >=2 samples, got \(rawSamples.count)")
+        }
+        var samples: [Sample] = []
+        samples.reserveCapacity(rawSamples.count)
+        var prevT = -Double.greatestFiniteMagnitude
+        for (i, s) in rawSamples.enumerated() {
+            guard let x = (s["x"] as? NSNumber)?.doubleValue,
+                  let y = (s["y"] as? NSNumber)?.doubleValue,
+                  let t = (s["tSec"] as? NSNumber)?.doubleValue,
+                  x.isFinite, y.isFinite, t.isFinite else {
+                return .invalid("V2 spec: sample \(i) has missing/non-finite x/y/tSec")
+            }
+            // I11b: tSec STRICTLY increasing (equal keyTimes glitch the keyframe).
+            if t <= prevT {
+                return .invalid("V2 spec: sample \(i) tSec \(t) not strictly greater than previous \(prevT)")
+            }
+            prevT = t
+            samples.append(Sample(x: CGFloat(x), y: CGFloat(y), tSec: t))
+        }
+        // I11b: first t == 0 (keyTimes must start at 0).
+        if abs(samples.first!.tSec) > 1e-6 {
+            return .invalid("V2 spec: first sample tSec must be 0, got \(samples.first!.tSec)")
+        }
+        // I11b: last keyTime == exactly 1.0 (tSec.last must equal animDurationSec).
+        let lastKeyTime = samples.last!.tSec / dur
+        if abs(lastKeyTime - 1.0) > 1e-6 {
+            return .invalid("V2 spec: last keyTime \(lastKeyTime) != 1.0 (tSec.last \(samples.last!.tSec) must equal animDurationSec \(dur))")
+        }
+        // Non-degenerate polyline — a zero-length path makes every arc-length
+        // fraction 0 and the strokeEnd draw-on silently no-ops.
+        var arc = 0.0
+        for i in 1..<samples.count {
+            let dx = Double(samples[i].x - samples[i - 1].x)
+            let dy = Double(samples[i].y - samples[i - 1].y)
+            arc += (dx * dx + dy * dy).squareRoot()
+        }
+        if !(arc > 1e-9) {
+            return .invalid("V2 spec: degenerate polyline (zero arc length)")
+        }
+
+        var spec = TracerRenderSpecV2(samples: samples, animStartSec: start, animDurationSec: dur)
+        if let styling = obj["styling"] as? [String: Any] {
+            if let v = styling["color"] as? String { spec.color = v }
+            if let v = styling["coreColor"] as? String { spec.coreColor = v }
+            if let v = (styling["lineWidthPx"] as? NSNumber)?.doubleValue, v > 0 { spec.lineWidthPx = CGFloat(v) }
+            if let v = (styling["midWidthPx"] as? NSNumber)?.doubleValue, v > 0 { spec.midWidthPx = CGFloat(v) }
+            if let v = (styling["glowWidthPx"] as? NSNumber)?.doubleValue, v > 0 { spec.glowWidthPx = CGFloat(v) }
+            if let v = styling["cometHead"] as? Bool { spec.cometHead = v }
+        }
+        if let v = obj["labelText"] as? String, !v.isEmpty, v.count <= 12 { spec.labelText = v }
+        // Same top-level crash-bisect flags as v1 (tracer-sim ladder).
+        if let v = obj["debugBareExport"] as? Bool { spec.debugBareExport = v }
+        if let v = obj["debugNoShadow"] as? Bool { spec.debugNoShadow = v }
+        return .ok(spec)
+    }
+}
+
 /// Parse "#RRGGBB" into UIColor at the given alpha; falls back to the design's
 /// tracer orange (#FF3B1F) on malformed input so a bad config can't crash a render.
 private func tracerColor(_ hex: String, alpha: CGFloat) -> UIColor {
@@ -185,6 +307,13 @@ private struct TracerLaunchSeed {
 private struct TrajectoryCandidate {
     var points: [CGPoint]
     var timesMs: [Double]
+    // S8 (v2, ADDITIVE): the newest projectedPoint per advanced frame — Vision's
+    // parabola-smoothed track, kept in lockstep with `points` for JS quadratic
+    // fitting. This is the *projectedPoints* property (NOT equationCoefficients,
+    // which is x-parameterized and ill-conditioned down the flight). ALL gate
+    // logic (F8a/F9/F10, radius band, confidence) stays on `points` — untouched.
+    var projPoints: [CGPoint]
+    var projTimesMs: [Double]
     var maxConfidence: Float
     var lastRadius: CGFloat
     var startMs: Double   // observation timeRange.start at first sighting
@@ -380,9 +509,20 @@ extension ShotDetectorModule {
                     pointPayload.append(["x": Double(p.x), "y": Double(p.y), "tMs": w.timesMs[i]])
                 }
 
-                print("[Clippar.Tracer] detectBallLaunch OK method=vision points=\(w.points.count) conf=\(String(format: "%.2f", w.maxConfidence)) radius=\(String(format: "%.4f", w.lastRadius)) fedFrames=\(fedFrames) elapsedSec=\(String(format: "%.1f", elapsed))")
+                // S8 (ADDITIVE): the denoised projected track, same cap/convention
+                // as `points`. May be shorter than `points` (or empty) if Vision
+                // reported no projectedPoints; JS treats it as best-effort.
+                var projectedPayload: [[String: Any]] = []
+                projectedPayload.reserveCapacity(min(60, w.projPoints.count))
+                for (i, p) in w.projPoints.enumerated() {
+                    if i >= 60 { break }
+                    projectedPayload.append(["x": Double(p.x), "y": Double(p.y), "tMs": w.projTimesMs[i]])
+                }
+
+                print("[Clippar.Tracer] detectBallLaunch OK method=vision points=\(w.points.count) projected=\(w.projPoints.count) conf=\(String(format: "%.2f", w.maxConfidence)) radius=\(String(format: "%.4f", w.lastRadius)) fedFrames=\(fedFrames) elapsedSec=\(String(format: "%.1f", elapsed))")
                 self.resolveBallLaunch(promise, found: true, method: "vision",
                                        launchPoint: first, direction: direction, points: pointPayload,
+                                       projectedPoints: projectedPayload,
                                        groundedEvidence: groundedEvidence, poseAnchor: seed.poseAnchor,
                                        confidence: Double(w.maxConfidence), width: width, height: height)
                 return
@@ -409,6 +549,7 @@ extension ShotDetectorModule {
     private func resolveBallLaunch(
         _ promise: Promise, found: Bool, method: String,
         launchPoint: CGPoint?, direction: CGPoint?, points: [[String: Any]],
+        projectedPoints: [[String: Any]] = [],
         groundedEvidence: Bool, poseAnchor: CGPoint?, confidence: Double,
         width: Double, height: Double
     ) {
@@ -416,6 +557,8 @@ extension ShotDetectorModule {
             "found": found,
             "method": method,
             "points": points,
+            // S8 (ADDITIVE): purely additive key — v1 JS consumers ignore it.
+            "projectedPoints": projectedPoints,
             "groundedEvidence": groundedEvidence,
             "confidence": confidence,
             "width": width,
@@ -448,6 +591,8 @@ extension ShotDetectorModule {
         let detected = obs.detectedPoints.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
         guard !detected.isEmpty else { return }
         let radius = CGFloat(obs.movingAverageRadius)
+        // S8 (ADDITIVE): newest projected (parabola-smoothed) point this frame.
+        let newestProjected: CGPoint? = obs.projectedPoints.last.map { CGPoint(x: CGFloat($0.x), y: CGFloat($0.y)) }
 
         if var c = candidates[obs.uuid] {
             if let newest = detected.last {
@@ -460,6 +605,11 @@ extension ShotDetectorModule {
                 if advanced {
                     c.points.append(newest)
                     c.timesMs.append(tMs)
+                    // Keep the projected track in lockstep with the detected one.
+                    if let np = newestProjected {
+                        c.projPoints.append(np)
+                        c.projTimesMs.append(tMs)
+                    }
                 }
             }
             c.maxConfidence = max(c.maxConfidence, obs.confidence)
@@ -478,8 +628,17 @@ extension ShotDetectorModule {
                 let f = n > 1 ? Double(k) / Double(n - 1) : 1.0
                 times.append(startMs + f * (tMs - startMs))
             }
+            // Seed the projected track with this frame's newest projected point
+            // (if any) at the sighting time; later frames append in lockstep.
+            var projPoints: [CGPoint] = []
+            var projTimesMs: [Double] = []
+            if let np = newestProjected {
+                projPoints.append(np)
+                projTimesMs.append(tMs)
+            }
             candidates[obs.uuid] = TrajectoryCandidate(
                 points: detected, timesMs: times,
+                projPoints: projPoints, projTimesMs: projTimesMs,
                 maxConfidence: obs.confidence, lastRadius: radius,
                 startMs: startMs, lastMs: tMs)
         }
@@ -696,10 +855,33 @@ extension ShotDetectorModule {
             autoreleasepool {
             let startTime = CACurrentMediaTime()
 
-            guard let spec = TracerRenderSpec(json: specJson) else {
-                promise.reject(Exception(name: "ERR_TRACER_SPEC", description: "Invalid TracerRenderSpec JSON"))
+            // Parse: v2 (time-sampled polyline) takes precedence; the v1 5-point
+            // Bezier parser is the fallback (kept one release). A `samples` array
+            // that is PRESENT but violates I11b is a HARD reject (ERR_TRACER_SPEC,
+            // A6) — never a silent v1 downgrade, never a no-op animation.
+            var v2Spec: TracerRenderSpecV2? = nil
+            var v1Spec: TracerRenderSpec? = nil
+            switch TracerRenderSpecV2.parse(json: specJson) {
+            case .ok(let s):
+                v2Spec = s
+            case .invalid(let reason):
+                promise.reject(Exception(name: "ERR_TRACER_SPEC", description: reason))
                 return
+            case .notV2:
+                guard let s = TracerRenderSpec(json: specJson) else {
+                    promise.reject(Exception(name: "ERR_TRACER_SPEC", description: "Invalid TracerRenderSpec JSON"))
+                    return
+                }
+                v1Spec = s
             }
+
+            // Common anim + styling fields (both spec shapes carry these). The
+            // rest of the pipeline (composition, export, landmine guards) is
+            // spec-shape-agnostic; only the overlay-layer construction branches.
+            let animStartSec = v2Spec?.animStartSec ?? v1Spec!.animStartSec
+            let animDurationSec = v2Spec?.animDurationSec ?? v1Spec!.animDurationSec
+            let debugBareExport = v2Spec?.debugBareExport ?? v1Spec!.debugBareExport
+
             let fileURL = self.resolveFileURL(videoUri)
             guard FileManager.default.fileExists(atPath: fileURL.path) else {
                 promise.reject(Exception(name: "ERR_FILE_NOT_FOUND", description: "Video file not found: \(fileURL.path)"))
@@ -713,8 +895,8 @@ extension ShotDetectorModule {
             let durationSec = CMTimeGetSeconds(asset.duration)
             // Defense-in-depth: JS pre-checks minAnimSec; a draw starting at
             // the very end would export a clip with an invisible tracer.
-            guard spec.animStartSec < durationSec - 0.4 else {
-                promise.reject(Exception(name: "ERR_TRACER_ANIM_WINDOW", description: "animStartSec \(spec.animStartSec) too close to clip end (\(String(format: "%.2f", durationSec))s)"))
+            guard animStartSec < durationSec - 0.4 else {
+                promise.reject(Exception(name: "ERR_TRACER_ANIM_WINDOW", description: "animStartSec \(animStartSec) too close to clip end (\(String(format: "%.2f", durationSec))s)"))
                 return
             }
 
@@ -757,8 +939,17 @@ extension ShotDetectorModule {
             parentLayer.addSublayer(videoLayer)
 
             // Diagnostic bare export: video only, no overlay layers (see
-            // TracerRenderSpec.debugBareExport).
-            if !spec.debugBareExport {
+            // debugBareExport). Same flag/semantics for v1 and v2.
+            if !debugBareExport {
+
+            if let v2 = v2Spec {
+                // v2 overlay: time-sampled polyline + strokeEnd/comet keyframes +
+                // 3-band width taper + apex pill. Same bottom-left convention and
+                // beginTime discipline as v1.
+                self.buildTracerV2Overlay(
+                    v2, into: parentLayer, renderSize: renderSize,
+                    beginTime: AVCoreAnimationBeginTimeAtZero + animStartSec)
+            } else if let spec = v1Spec {
 
             // Spec coords are normalized, display-oriented, BOTTOM-LEFT origin —
             // the SAME convention as AVVideoCompositionCoreAnimationTool, so
@@ -918,6 +1109,8 @@ extension ShotDetectorModule {
                 parentLayer.addSublayer(pill)
             }
 
+            } // end v1 overlay branch (else if let spec = v1Spec)
+
             } // end !debugBareExport
 
             // ---- Video composition ----
@@ -945,6 +1138,15 @@ extension ShotDetectorModule {
             videoComposition.instructions = [instruction]
 
             // ---- Export (composeReelOnDevice pattern) ----
+            // A6: acquire the module-level serial export gate before creating the
+            // export session, so this AVAssetExportSession can never run
+            // concurrently with composeReelOnDevice's. Released in a defer that
+            // covers every return below (session-create failure, export error,
+            // success). Held only around the actual export, not the composition
+            // build above, to minimize serialization.
+            tracerExportSerialGate.wait()
+            defer { tracerExportSerialGate.signal() }
+
             let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
                 .appendingPathComponent("tracer_\(UUID().uuidString).mp4")
             try? FileManager.default.removeItem(at: outputURL)
@@ -1005,13 +1207,213 @@ extension ShotDetectorModule {
             }
 
             let elapsed = CACurrentMediaTime() - startTime
-            print("[Clippar.Tracer] OK render animStart=\(String(format: "%.2f", spec.animStartSec)) animDur=\(String(format: "%.2f", spec.animDurationSec)) durationSec=\(String(format: "%.1f", durationSec)) elapsedSec=\(String(format: "%.1f", elapsed)) out=\(outputURL.lastPathComponent)")
+            print("[Clippar.Tracer] OK render kind=\(v2Spec != nil ? "v2" : "v1") animStart=\(String(format: "%.2f", animStartSec)) animDur=\(String(format: "%.2f", animDurationSec)) durationSec=\(String(format: "%.1f", durationSec)) elapsedSec=\(String(format: "%.1f", elapsed)) out=\(outputURL.lastPathComponent)")
 
             promise.resolve([
                 "tracerUri": outputURL.absoluteString,
                 "durationMs": durationSec * 1000.0,
             ] as [String: Any])
             } // autoreleasepool
+        }
+    }
+
+    // ========================================================================
+    // MARK: buildTracerV2Overlay — time-sampled polyline (v2 render delta)
+    // ========================================================================
+
+    /// Builds the v2 tracer overlay into `parentLayer`. Preconditions (already
+    /// enforced by TracerRenderSpecV2.parse / I11b): >=2 finite samples, tSec
+    /// strictly increasing, first tSec 0, last keyTime exactly 1.0, non-zero arc
+    /// length. Coordinate convention is identical to v1: normalized, display-
+    /// oriented, BOTTOM-LEFT origin → a pure scale to render pixels with NO
+    /// y-flip (AVVideoCompositionCoreAnimationTool's convention).
+    private func buildTracerV2Overlay(
+        _ v2: TracerRenderSpecV2,
+        into parentLayer: CALayer,
+        renderSize: CGSize,
+        beginTime: CFTimeInterval
+    ) {
+        // Bottom-left → pixel scale, no y-flip (matches v1's `px`).
+        func px(_ s: TracerRenderSpecV2.Sample) -> CGPoint {
+            CGPoint(x: s.x * renderSize.width, y: s.y * renderSize.height)
+        }
+        let pts = v2.samples.map { px($0) }
+
+        // ONE polyline path via addLine over the samples — the seamless handoff
+        // track fit in JS.
+        let path = UIBezierPath()
+        path.move(to: pts[0])
+        for i in 1..<pts.count { path.addLine(to: pts[i]) }
+
+        // strokeEnd keyframe pacing: values = CUMULATIVE ARC-LENGTH FRACTIONS,
+        // keyTimes = tSec/animDurationSec (calculationMode .linear). This paces
+        // the draw-on by real flight timing rather than uniformly along the path.
+        var cum = [CGFloat](repeating: 0, count: pts.count)
+        var total: CGFloat = 0
+        for i in 1..<pts.count {
+            let dx = pts[i].x - pts[i - 1].x
+            let dy = pts[i].y - pts[i - 1].y
+            total += (dx * dx + dy * dy).squareRoot()
+            cum[i] = total
+        }
+        // total > 0 guaranteed by parse (degenerate polyline rejected).
+        let fractions: [CGFloat] = cum.map { total > 0 ? $0 / total : 0 }
+        var keyTimes: [NSNumber] = v2.samples.map { NSNumber(value: $0.tSec / v2.animDurationSec) }
+        // Pin the endpoints EXACTLY (parse validated them within 1e-6); CA
+        // requires keyTimes[0]==0 and keyTimes[last]==1 or the animation glitches.
+        keyTimes[0] = 0.0
+        keyTimes[keyTimes.count - 1] = 1.0
+
+        let widthScale = renderSize.width / 1080.0
+        let baseColor = tracerColor(v2.color, alpha: 1.0)
+
+        // 3-band width taper: split the stroke stack into thirds of the path
+        // (by arc-length fraction) at 100% / 60% / 35% of the base widths, so the
+        // tracer thins from launch to tip. Each band is the SAME polyline clipped
+        // to its third via a static strokeStart plus a strokeEnd keyframe whose
+        // values are the global fractions CLAMPED to [fLo, fHi] — so the taper
+        // still draws on continuously and in lockstep with real timing.
+        let bandWidthMul: [CGFloat] = [1.0, 0.6, 0.35]
+        var glowLayers: [CAShapeLayer] = []
+        var midLayers: [CAShapeLayer] = []
+        var coreLayers: [CAShapeLayer] = []
+
+        for band in 0..<3 {
+            let fLo = CGFloat(band) / 3.0
+            let fHi = CGFloat(band + 1) / 3.0
+            let mul = bandWidthMul[band]
+            // Clamp the shared fraction values into this band's [fLo, fHi] range.
+            let bandValues: [NSNumber] = fractions.map {
+                NSNumber(value: Double(min(max($0, fLo), fHi)))
+            }
+
+            func bandLayer(width: CGFloat, color: UIColor) -> CAShapeLayer {
+                let layer = CAShapeLayer()
+                layer.path = path.cgPath
+                layer.strokeColor = color.cgColor
+                layer.fillColor = nil
+                layer.lineWidth = max(0.5, width * mul)
+                layer.lineCap = .round
+                layer.lineJoin = .round
+                layer.strokeStart = fLo          // static: this band's slice
+                layer.strokeEnd = fLo            // hidden until the draw reaches it
+                let draw = CAKeyframeAnimation(keyPath: "strokeEnd")
+                draw.values = bandValues
+                draw.keyTimes = keyTimes
+                draw.calculationMode = .linear
+                draw.beginTime = beginTime
+                draw.duration = v2.animDurationSec
+                draw.fillMode = .forwards
+                draw.isRemovedOnCompletion = false
+                layer.add(draw, forKey: "tracerDrawV2")
+                return layer
+            }
+
+            // 16/8/4px @1080 base, same colors/alphas as v1.
+            glowLayers.append(bandLayer(width: v2.glowWidthPx * widthScale, color: tracerColor(v2.color, alpha: 0.45)))
+            midLayers.append(bandLayer(width: v2.midWidthPx * widthScale, color: tracerColor(v2.color, alpha: 0.6)))
+            let core = bandLayer(width: v2.lineWidthPx * widthScale, color: tracerColor(v2.coreColor, alpha: 0.75))
+            // Shadows rasterize through the animation tool (CIFilter blur does NOT).
+            if !v2.debugNoShadow {
+                core.shadowColor = baseColor.cgColor
+                core.shadowRadius = 8.0 * widthScale
+                core.shadowOpacity = 0.9
+                core.shadowOffset = .zero
+            }
+            coreLayers.append(core)
+        }
+        // Global z-order: all glow (bottom) → all mid → all core (top).
+        for l in glowLayers { parentLayer.addSublayer(l) }
+        for l in midLayers { parentLayer.addSublayer(l) }
+        for l in coreLayers { parentLayer.addSublayer(l) }
+
+        // Comet head: position keyframes over the SAME samples/keyTimes so the
+        // dot rides the drawing tip; fades out over 0.25s after the draw (v1).
+        if v2.cometHead {
+            let diameter = 10.0 * widthScale
+            let dot = CALayer()
+            dot.bounds = CGRect(x: 0, y: 0, width: diameter, height: diameter)
+            dot.cornerRadius = diameter / 2.0
+            dot.backgroundColor = tracerColor(v2.coreColor, alpha: 1.0).cgColor
+            if !v2.debugNoShadow {
+                dot.shadowColor = baseColor.cgColor
+                dot.shadowRadius = 8.0 * widthScale
+                dot.shadowOpacity = 0.9
+                dot.shadowOffset = .zero
+            }
+            dot.position = pts[0]
+            dot.opacity = 0 // hidden before launch; opacity keyframes below
+
+            let move = CAKeyframeAnimation(keyPath: "position")
+            move.values = pts.map { NSValue(cgPoint: $0) }
+            move.keyTimes = keyTimes
+            move.calculationMode = .linear
+            move.beginTime = beginTime
+            move.duration = v2.animDurationSec
+            move.fillMode = .forwards
+            move.isRemovedOnCompletion = false
+            dot.add(move, forKey: "cometMoveV2")
+
+            let totalFade = v2.animDurationSec + 0.25
+            let fade = CAKeyframeAnimation(keyPath: "opacity")
+            fade.values = [1.0, 1.0, 0.0]
+            fade.keyTimes = [0.0, NSNumber(value: v2.animDurationSec / totalFade), 1.0]
+            fade.beginTime = beginTime
+            fade.duration = totalFade
+            fade.fillMode = .forwards
+            fade.isRemovedOnCompletion = false
+            dot.add(fade, forKey: "cometFadeV2")
+
+            parentLayer.addSublayer(dot)
+        }
+
+        // Apex distance pill — EXACTLY as v1, positioned at the highest sample
+        // (max y; bottom-left origin so up = +y). CATextLayer renders upright
+        // with NO transform.
+        if let labelText = v2.labelText {
+            var apexPx = pts[0]
+            for p in pts where p.y > apexPx.y { apexPx = p }
+
+            let fontSize = 44.0 * widthScale
+            let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+            let textSize = (labelText as NSString).size(withAttributes: [.font: font])
+            let padH = 22.0 * widthScale
+            let padV = 12.0 * widthScale
+            let pillW = textSize.width + padH * 2
+            let pillH = textSize.height + padV * 2
+
+            let pill = CALayer()
+            pill.bounds = CGRect(x: 0, y: 0, width: pillW, height: pillH)
+            pill.backgroundColor = UIColor.black.withAlphaComponent(0.55).cgColor
+            pill.cornerRadius = pillH / 2.0
+            pill.masksToBounds = true
+
+            let text = CATextLayer()
+            text.string = labelText
+            text.font = font
+            text.fontSize = fontSize
+            text.alignmentMode = .center
+            text.foregroundColor = UIColor.white.cgColor
+            text.contentsScale = 2.0
+            text.bounds = CGRect(x: 0, y: 0, width: textSize.width + 4, height: textSize.height + 2)
+            text.position = CGPoint(x: pillW / 2, y: pillH / 2)
+            pill.addSublayer(text)
+
+            let cx = min(max(apexPx.x, pillW / 2 + 8), renderSize.width - pillW / 2 - 8)
+            let cy = min(apexPx.y + pillH * 1.2, renderSize.height - pillH / 2 - 8)
+            pill.position = CGPoint(x: cx, y: cy)
+            pill.opacity = 0
+
+            let labelIn = CABasicAnimation(keyPath: "opacity")
+            labelIn.fromValue = 0.0
+            labelIn.toValue = 1.0
+            labelIn.beginTime = beginTime + v2.animDurationSec * 0.55
+            labelIn.duration = 0.3
+            labelIn.fillMode = .forwards
+            labelIn.isRemovedOnCompletion = false
+            pill.add(labelIn, forKey: "labelFadeIn")
+
+            parentLayer.addSublayer(pill)
         }
     }
 
