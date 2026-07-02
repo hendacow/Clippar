@@ -98,8 +98,13 @@ module.exports = () => ({
       [
         'expo-location',
         {
-          locationAlwaysAndWhenInUsePermission:
-            'Clippar uses your location to match shots to holes on the course',
+          // v1 uses foreground location only (nearby-course search in
+          // components/record/CourseSearch.tsx via hooks/useLocation.ts, which
+          // calls requestForegroundPermissionsAsync). No background/Always use,
+          // so declare When-In-Use only — declaring "Always" without using it
+          // is an App Review rejection risk.
+          locationWhenInUsePermission:
+            'Clippar uses your location to find nearby golf courses',
         },
       ],
       [
