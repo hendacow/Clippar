@@ -45,6 +45,13 @@ export interface EditorState {
   outro: EditorClip | null;
   loading: boolean;
   error: string | null;
+  // A6: batch-level export lock — true for the FULL duration of
+  // processAllTracers (the F14 existence scan through the last candidate),
+  // not just while an individual clip shows tracerStatus === 'pending'.
+  // Export/save/share/recompose gate on this instead of inferring "a tracer
+  // batch might be running" from per-clip state. Per-clip 'pending' stays
+  // for badges only. Always false when config.tracer.enabled is off.
+  isTracerBatchRunning: boolean;
 }
 
 /**

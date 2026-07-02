@@ -583,13 +583,17 @@ export default function EditorScreen() {
   const isTrimming = untrimmedCount > 0;
   const hasUntrimmedClips = isTrimming;
 
-  // F17: while any tracer render is pending, Export / per-hole save+share /
+  // A6: while the tracer batch is running, Export / per-hole save+share /
   // multi-select must wait — composeReel and the tracer batch would
   // otherwise run concurrent AVAssetExportSessions, and the output would be
-  // missing arcs about to land. tracerStatus is only populated when
-  // config.tracer.enabled, so this is 0 (and all gates inert) day-zero.
-  const tracerPendingCount = allClips.filter((c) => c.tracerStatus === 'pending').length;
-  const isTracing = tracerPendingCount > 0;
+  // missing arcs about to land. Gates on the explicit batch-level flag (set
+  // for the FULL processAllTracers run, F14 scan through the last
+  // candidate) rather than inferring "a batch might be running" from
+  // per-clip tracerStatus === 'pending' — per-clip 'pending' still drives
+  // the individual "Tracing..." badges below, just not this export gate.
+  // isTracerBatchRunning is only ever true when config.tracer.enabled, so
+  // this is false (and all gates inert) day-zero.
+  const isTracing = state.isTracerBatchRunning;
 
   // Start processAllUntrimmed once when loading finishes (guarded by ref)
   const trimStartedRef = useRef(false);

@@ -474,6 +474,59 @@ export async function setSetting(key: string, value: string | null): Promise<voi
   );
 }
 
+// ────────────────────────────────────────────────────────────
+// Tracer V2 dev settings (S11) — dev-build-only overrides layered on top of
+// config.tracer. Read once per processAllTracers batch; written by the
+// profile dev-settings screen (variantIsDev()-gated, so these keys are never
+// written outside a dev build — but reads stay safe unconditionally, since an
+// absent/'0' key is a no-op override).
+// ────────────────────────────────────────────────────────────
+
+const SETTING_TRACER_DISABLED = 'tracer_v2_disabled';
+const SETTING_TRACER_DEFAULT_CARRY_M = 'tracer_v2_default_carry_m';
+const SETTING_TRACER_SHOW_LABEL = 'tracer_v2_show_distance_label';
+
+export interface TracerDevSettings {
+  /** Runtime kill switch layered on top of config.tracer.enabled — lets a dev
+   *  turn tracer processing off mid-round without a rebuild. */
+  disabled: boolean;
+  /** S11: feeds the R3/R4 prior when GPS carry is unusable. Null = use the
+   *  built-in per-bucket prior (config.tracer.v2.priorCarries). */
+  defaultCarryM: number | null;
+  /** Off suppresses the burned-in distance pill even when the GPS tier would
+   *  otherwise earn one — default ON (unset key). */
+  showDistanceLabel: boolean;
+}
+
+export async function getTracerDevSettings(): Promise<TracerDevSettings> {
+  const [disabled, carryRaw, labelRaw] = await Promise.all([
+    getSetting(SETTING_TRACER_DISABLED),
+    getSetting(SETTING_TRACER_DEFAULT_CARRY_M),
+    getSetting(SETTING_TRACER_SHOW_LABEL),
+  ]);
+  const carryM = carryRaw !== null ? Number(carryRaw) : NaN;
+  return {
+    disabled: disabled === '1',
+    defaultCarryM: Number.isFinite(carryM) && carryM > 0 ? carryM : null,
+    showDistanceLabel: labelRaw !== '0',
+  };
+}
+
+export async function setTracerDisabled(disabled: boolean): Promise<void> {
+  await setSetting(SETTING_TRACER_DISABLED, disabled ? '1' : '0');
+}
+
+export async function setTracerDefaultCarryM(carryM: number | null): Promise<void> {
+  await setSetting(
+    SETTING_TRACER_DEFAULT_CARRY_M,
+    carryM != null && carryM > 0 ? String(Math.round(carryM)) : null
+  );
+}
+
+export async function setTracerShowDistanceLabel(show: boolean): Promise<void> {
+  await setSetting(SETTING_TRACER_SHOW_LABEL, show ? '1' : '0');
+}
+
 export async function getUnuploadedClips(roundId: string) {
   const database = await getDatabase();
   return database.getAllAsync<{
@@ -533,6 +586,20 @@ export async function markClipTrimmed(
     autoTrimStartMs !== null && autoTrimEndMs !== null
       ? Math.max(0, (autoTrimEndMs - autoTrimStartMs) / 1000)
       : null;
+
+  // Read position (for predecessor staling) BEFORE the update — this is a
+  // no-op SELECT on the common first-trim path (nothing to stale yet), but
+  // covers a clip being RE-trimmed after its tracer already rendered: the
+  // file/timeline this markClipTrimmed call writes invalidates whatever
+  // arc was burned onto the OLD trimmed file. Best-effort; never blocks the
+  // trim write.
+  const pos = await database
+    .getFirstAsync<{ round_id: string; hole_number: number; sort_order: number; shot_number: number }>(
+      'SELECT round_id, hole_number, sort_order, shot_number FROM local_clips WHERE id = ?',
+      clipId
+    )
+    .catch(() => null);
+
   await database.runAsync(
     `UPDATE local_clips SET
       file_uri = ?,
@@ -554,6 +621,25 @@ export async function markClipTrimmed(
     durationSeconds,
     clipId
   );
+
+  // S10.5 invalidation fix: this clip's own tracer (if any) was rendered
+  // against the OLD file/timeline and no longer matches (staleClipTracer is
+  // a no-op when tracer_status was never set, so the common first-trim path
+  // costs nothing extra). The same-hole PREDECESSOR's tracer is anchored to
+  // THIS clip's GPS/impact as its landing spot, so it staled too — shot N's
+  // carry depends on shot N+1's fix, which a re-trim's later GPS
+  // re-derivation (updateClipGpsFix) can change.
+  await staleClipTracer(database, clipId);
+  if (pos) {
+    await markPredecessorTracerStale(
+      database,
+      pos.round_id,
+      pos.hole_number,
+      clipId,
+      pos.sort_order,
+      pos.shot_number
+    );
+  }
 }
 
 export async function getClipsForRound(roundId: string) {
@@ -586,7 +672,20 @@ export async function getClipsForRound(roundId: string) {
     camera_heading_is_true: number | null;
     camera_heading_calibration: number | null;
     camera_pitch_deg: number | null;
+    // A8: mount roll at capture (null on pre-A8 clips / builds).
+    camera_roll_deg: number | null;
     gps_accuracy_m: number | null;
+    // S10: v2 GPS backbone columns — the impact-anchored re-derivation +
+    // decideTracerPlan both need these (SELECT * already returns them; typed
+    // here so the batch can consume them without a raw cast).
+    gps_eff_acc_m: number | null;
+    gps_fix_count: number | null;
+    gps_window_sec: number | null;
+    gps_source: string | null;
+    gps_fix_series: string | null;
+    gps_estimator_version: number | null;
+    recording_start_ts: number | null;
+    recording_stop_ts: number | null;
     tracer_file_uri: string | null;
     tracer_status: string | null;
     tracer_meta: string | null;

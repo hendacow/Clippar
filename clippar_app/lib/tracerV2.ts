@@ -1050,6 +1050,215 @@ function buildWholeFlightVisible(
   };
 }
 
+// ════════════════════════════════════════════════════════════════════════
+// S10 — decideTracerPlan: pure orchestration decision (rung ladder + hard
+// vetoes). Wires computeShotCarry's tier/label output into the fallback
+// ladder from the plan (§2): R0/R1 (GPS-tiered + real vision), R2 (GPS-tiered
+// + weak/no vision, synthetic anchor), R3 (vision-anchored, GPS unusable —
+// includes last-shot-of-hole, which has no successor fix by construction),
+// R4 (dev-only allowPriorOnlyArc escape when NOTHING is usable). Only 5 hard
+// vetoes exist and are never faked: putt, no-impact, grounded (ONLY when
+// groundedEvidence AND found:false — a grounded decoy can coexist with a real
+// found ball), anim-too-short, no-anchor. The old v1 GPS skip reasons
+// (gps-accuracy / carry-min / carry-max / bearing-delta / no-next-gps /
+// no-heading) are GONE as skips in v2 — they only ever demote the GPS tier
+// (via computeShotCarry) or leave gpsTier null, never veto the render.
+// ════════════════════════════════════════════════════════════════════════
+
+export type TracerRung = 'R0' | 'R1' | 'R2' | 'R3' | 'R4';
+export type TracerCarrySource = 'gps' | 'prior' | 'user';
+export type TracerHardVeto = 'putt' | 'no-impact' | 'grounded' | 'anim-too-short' | 'no-anchor';
+
+/**
+ * The subset of a `local_clips` row decideTracerPlan needs — either the
+ * clip's own row or its same-hole successor. Plain data (no SQLite import),
+ * so tests build fixtures as literal objects.
+ *
+ * NOTE on bypass (debugForceTrace / gpsOnlyTrace): when the caller's evidence
+ * gates are bypassed and `impact_time_ms` was null, the caller substitutes a
+ * synthetic anchor (clip midpoint) into this field BEFORE calling
+ * decideTracerPlan — the function always trusts `impact_time_ms` as given.
+ */
+export interface TracerPlanRow {
+  shot_type: string | null;
+  impact_time_ms: number | null;
+  auto_trim_start_ms: number | null;
+  duration_seconds: number | null;
+  gps_latitude: number | null;
+  gps_longitude: number | null;
+  /** v2 estimator effAcc (preferred). */
+  gps_eff_acc_m: number | null;
+  /** v1 mirror / pre-v2 raw one-shot accuracy (fallback when eff_acc is null). */
+  gps_accuracy_m: number | null;
+  camera_heading_deg: number | null;
+  camera_heading_calibration: number | null;
+}
+
+/**
+ * Minimal ball-detection signal decideTracerPlan needs to pick a rung —
+ * deliberately NOT the full BallLaunchResult (width/height/points arrays
+ * etc.) so fixtures stay one-liners. `undefined` = detection hasn't run yet
+ * (a PRE-detection call — only the vision-independent vetoes below are
+ * decidable; the caller uses this to skip a clip BEFORE paying for the
+ * Vision pass); `null` = detection was intentionally skipped (gpsOnlyTrace).
+ */
+export interface TracerVisionSignal {
+  found: boolean;
+  method: 'vision' | 'none';
+  groundedEvidence: boolean;
+  poseAnchor: { x: number; y: number } | null;
+  pointCount: number;
+}
+
+export interface TracerPlanSensors {
+  vision: TracerVisionSignal | null | undefined;
+  /** config.tracer.debugForceTrace || config.tracer.gpsOnlyTrace — suppresses
+   *  the putt and grounded vetoes (never anim-too-short or no-anchor). */
+  bypassEvidence?: boolean;
+  /** A3: the 3-click penalty gesture (or any pairing break) severed this
+   *  clip's successor GPS from being a valid landing — forces GPS Tier3. */
+  brokenChain?: boolean;
+  /** A3: seconds between this clip and its successor; caps Tier1→Tier2. */
+  interClipGapSec?: number | null;
+  /** A3: this clip's classified shot bucket, for the carry-plausibility gate. */
+  shotBucket?: ShotBucket | null;
+  /** S11 dev setting: user-entered default club carry. When set, R3/R4's
+   *  prior-driven carrySource is 'user' instead of 'prior' (built-in bucket
+   *  average) — purely a tracer_meta provenance flag; buildArcSpecV2 still
+   *  derives the actual meters from TRACER_PRIORS/config.tracer.v2.priorCarries. */
+  userDefaultCarryM?: number | null;
+}
+
+export interface TracerPlan {
+  rung: TracerRung;
+  carrySource: TracerCarrySource;
+  gpsTier: CarryTier | null;
+  skipReason?: TracerHardVeto;
+  /** The computed GPS carry (when both fixes were usable), for tracer_meta —
+   *  callers don't need to re-derive it. Null before GPS was evaluated
+   *  (vetoed pre-GPS) or when either fix was missing. */
+  carry: ShotCarry | null;
+}
+
+function rowToShotFix(row: TracerPlanRow): ShotFix | null {
+  if (row.gps_latitude === null || row.gps_longitude === null) return null;
+  const effAccM = row.gps_eff_acc_m ?? row.gps_accuracy_m;
+  if (effAccM === null || !Number.isFinite(effAccM)) return null;
+  return { lat: row.gps_latitude, lon: row.gps_longitude, effAccM };
+}
+
+const vetoResult = (
+  skipReason: TracerHardVeto,
+  gpsTier: CarryTier | null = null,
+  carry: ShotCarry | null = null,
+): TracerPlan => ({ rung: 'R3', carrySource: 'prior', gpsTier, skipReason, carry });
+
+/**
+ * S10 orchestration decision. Pure — no I/O, no native calls. Checks the 5
+ * hard vetoes (in F5-ish order: putt → no-impact → anim-too-short, all
+ * decidable from `row` alone → grounded → no-anchor, both needing
+ * `sensors.vision`), then picks a rung from the GPS tier (computeShotCarry)
+ * × vision-quality matrix (plan §2 fallback ladder).
+ *
+ * Called TWICE in practice: once with `sensors.vision = undefined` so the
+ * batch loop can skip a clip (putt/no-impact/anim-too-short) BEFORE running
+ * the expensive Vision pass, then again with the real `TracerVisionSignal`
+ * once detection has run, for the final rung.
+ */
+export function decideTracerPlan(
+  row: TracerPlanRow,
+  nextRow: TracerPlanRow | null,
+  sensors: TracerPlanSensors,
+): TracerPlan {
+  const bypass = sensors.bypassEvidence ?? false;
+
+  // ── Hard veto 1: putt — never synthesize a flight over a putt. ──
+  if (row.shot_type === 'putt' && !bypass) return vetoResult('putt');
+
+  // ── Hard veto 2: no-impact — nothing to anchor timing on. ──
+  if (row.impact_time_ms === null) return vetoResult('no-impact');
+
+  // ── Hard veto 3: anim-too-short — pure timing, decidable pre-vision. ──
+  const impactInClipMs = row.impact_time_ms - (row.auto_trim_start_ms ?? 0);
+  const clipDurationSec = row.duration_seconds ?? 0;
+  const animStartSec = impactInClipMs / 1000 + config.tracer.headDelaySec;
+  const maxAnimSec = clipDurationSec - animStartSec - 0.3;
+  if (impactInClipMs < 0 || maxAnimSec < config.tracer.minAnimSec) {
+    return vetoResult('anim-too-short');
+  }
+
+  // ── GPS carry (own fix + same-hole successor fix; null successor covers
+  //    the last-shot-of-hole case by construction — R3 by design). ──
+  const ownFix = rowToShotFix(row);
+  const succFix = nextRow ? rowToShotFix(nextRow) : null;
+  const carry: ShotCarry | null =
+    ownFix && succFix
+      ? computeShotCarry(ownFix, succFix, row.camera_heading_deg, {
+          headingCalibration: row.camera_heading_calibration,
+          shotType: sensors.shotBucket ?? null,
+          interClipGapSec: sensors.interClipGapSec ?? null,
+          brokenChain: sensors.brokenChain ?? false,
+        })
+      : null;
+  const gpsTier: CarryTier | null = carry?.tier ?? null;
+  const gpsUsable = gpsTier === 1 || gpsTier === 2;
+
+  // ── Pre-detection call: only the vision-independent vetoes above are
+  //    decidable. Return a provisional rung (ignored by the caller except
+  //    for `skipReason`, which is undefined here) so the batch loop knows
+  //    whether to bother running detectBallLaunch at all. ──
+  if (sensors.vision === undefined) {
+    const carrySource: TracerCarrySource = gpsUsable
+      ? 'gps'
+      : sensors.userDefaultCarryM != null
+        ? 'user'
+        : 'prior';
+    return {
+      rung: gpsTier === 1 ? 'R0' : gpsTier === 2 ? 'R1' : 'R3',
+      carrySource,
+      gpsTier,
+      carry,
+    };
+  }
+
+  const vision = sensors.vision; // TracerVisionSignal | null (null = gpsOnlyTrace)
+
+  // ── Hard veto 4: grounded — a blob was observed but never gained altitude
+  //    (topped/rolling), AND no real ball was separately found. Never
+  //    synthesize a flying arc over a rolling ball. ──
+  if (!bypass && vision?.groundedEvidence === true && vision.found === false) {
+    return vetoResult('grounded', gpsTier, carry);
+  }
+
+  const visionFound = !!vision && vision.found && vision.method === 'vision';
+  const hasPoseAnchor = !!vision?.poseAnchor;
+  const hasAnyPoints = (vision?.pointCount ?? 0) >= 1;
+  const nothingVisual = !visionFound && !hasPoseAnchor && !hasAnyPoints;
+
+  // ── Hard veto 5 / R4: truly nothing to anchor on AND GPS is unusable.
+  //    allowPriorOnlyArc (dev-only) is the ONLY escape — else veto. ──
+  if (nothingVisual && !gpsUsable) {
+    if (!config.tracer.v2.allowPriorOnlyArc) return vetoResult('no-anchor', gpsTier, carry);
+    const carrySource: TracerCarrySource = sensors.userDefaultCarryM != null ? 'user' : 'prior';
+    return { rung: 'R4', carrySource, gpsTier, carry };
+  }
+
+  // ── Rung matrix: GPS tier × vision quality. ──
+  let rung: TracerRung;
+  if (gpsTier === 1 && visionFound) rung = 'R0';
+  else if (gpsTier === 2 && visionFound) rung = 'R1';
+  else if (gpsUsable) rung = 'R2'; // Tier1/2 + weak/no vision — GPS drives it
+  else rung = 'R3'; // GPS unusable but SOME anchor exists (vision or pose)
+
+  const carrySource: TracerCarrySource = gpsUsable
+    ? 'gps'
+    : sensors.userDefaultCarryM != null
+      ? 'user'
+      : 'prior';
+
+  return { rung, carrySource, gpsTier, carry };
+}
+
 /** D6 — nothing usable. A short, straight, NaN-free stub the caller can veto. */
 function degenerateStub(
   input: BuildArcInputV2,
