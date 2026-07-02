@@ -18,7 +18,6 @@ import {
   bucketForCarry,
   apexHeightM,
   hangTimeSec,
-  projectLanding,
   TRACER_PRIORS,
   type ShotBucket,
 } from './tracerMath';
@@ -514,16 +513,13 @@ function rotVec(
  * this rescales them so the LAST sample's tSec == the returned animDurationSec
  * EXACTLY (so keyTimes = tSec/animDuration are ≤ 1 with last == 1.0 — the
  * native parser rejects anything else with ERR_TRACER_SPEC). When the natural
- * total exceeds the clip's post-impact window, the SYNTHETIC portion (t >
- * thSec) is time-compressed to fit while the detected segment keeps real
- * timing; if even the detected segment overruns, the whole timeline is scaled.
+ * total exceeds the clip's post-impact window, the WHOLE timeline is scaled
+ * UNIFORMLY to fit: uniform scaling preserves the seam velocity ratio (both
+ * sides ×1/scale) so there is no playback-speed jump at the detected→synthetic
+ * handoff — a synthetic-only compression would speed up only half the arc.
  * Mutates `samples` in place. x/y are untouched, so the arc SHAPE is unchanged.
  */
-function finalizeTiming(
-  samples: TracerSampleV2[],
-  _thSec: number,
-  maxAnimSec: number,
-): number {
+function finalizeTiming(samples: TracerSampleV2[], maxAnimSec: number): number {
   const natural = samples[samples.length - 1].tSec;
   // UNIFORM time-scale (not synthetic-only): scaling the whole timeline equally
   // preserves the seam velocity RATIO (both sides ×1/scale), so there is no
@@ -898,7 +894,7 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
 
   // B1 timing: compress the synthetic segment so the LAST sample tSec ==
   // animDurationSec EXACTLY and every keyTime ≤ 1 (native rejects otherwise).
-  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
+  const animDurationSec = finalizeTiming(samples, input.maxAnimSec);
 
   const meta: TracerMetaV2 = {
     tier: input.carry.tier,
@@ -1009,7 +1005,7 @@ function buildWholeFlightVisible(
     vIn = rotVec(vIn.x, vIn.y, cR, sR);
     vOut = rotVec(vOut.x, vOut.y, cR, sR);
   }
-  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
+  const animDurationSec = finalizeTiming(samples, input.maxAnimSec);
 
   return {
     samples,
@@ -1074,7 +1070,7 @@ function degenerateStub(
       tSec: s * dur,
     });
   }
-  const animDurationSec = finalizeTiming(samples, 0, input.maxAnimSec);
+  const animDurationSec = finalizeTiming(samples, input.maxAnimSec);
   return {
     samples,
     animStartSec: input.animStartSec,
@@ -1187,7 +1183,7 @@ function buildOffAxisDegrade(
     });
   }
   samples[0] = { x: p0.x, y: p0.y, tSec: 0 };
-  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
+  const animDurationSec = finalizeTiming(samples, input.maxAnimSec);
   return {
     samples,
     animStartSec: input.animStartSec,

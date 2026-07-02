@@ -192,10 +192,6 @@ export const config = {
       // F8b lateral-sign override fires only when the LATERAL curvature residual
       // (x-only, so vertical gravity sag never counts) exceeds this.
       f8bCurvatureMin: 0.02,
-      // A4 damp-blend window (s): the V_h clamp / lateral straightening ramps in
-      // over the first this-many seconds AFTER the handoff, leaving the detected
-      // segment untouched and keeping C1 exact at the seam.
-      dampBlendSec: 0.15,
       // A4 clamp ceiling on screen vertical handoff velocity, per bucket
       // (normalized screen-heights / sec).
       vyMaxNorm: { drive: 1.6, iron: 1.8, wedge: 2.2 },
