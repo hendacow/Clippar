@@ -171,6 +171,8 @@ export const config = {
       tier1EffAccM: 5, // Tier 1 needs both endpoints ≤ this
       tier2EffAccM: 10, // Tier 2 needs both endpoints ≤ this
       tier2RelSigma: 0.1, // Tier 2 needs σ_d/carry ≤ this
+      tier1CarryMinM: 20, // Tier 1 carry range floor
+      tier1CarryMaxM: 350, // Tier 1 carry range ceiling
       staleSec: 10, // all fixes older than this → gps-stale (never cached)
       filmSpotOffsetVarM: 3, // A2: phone-behind-ball offset folded into σ_d
     },
@@ -179,13 +181,27 @@ export const config = {
     // Pseudo-gravity / apex / launch caps for the closed-form synthetic
     // segment. See plan Pillar 4 / A4.
     arc: {
-      gMax: 1.5, // cap on |g_down / g_up| so the descent can't spike
+      gMax: 1.5, // cap on |g_down / g_up|; when it binds the descent EXTENDS
+      // (t_down lengthens) to still hit the landing smoothly — never teleports.
       tUpFracMax: 0.7, // t_up ≤ this × t_rem, else re-solve y_apex
       tRemMin: 0.8, // s — minimum remaining flight time to shape a segment
       kApexLo: 0.13, // apex = lerp(kApexLo, kApexHi, vy0-norm) × carry
       kApexHi: 0.22,
       vy0Lo: 0.35, // normalized climb range the apex lerp maps across
       vy0Hi: 0.9,
+      // F8b lateral-sign override fires only when the LATERAL curvature residual
+      // (x-only, so vertical gravity sag never counts) exceeds this.
+      f8bCurvatureMin: 0.02,
+      // A4 clamp ceiling on screen vertical handoff velocity, per bucket
+      // (normalized screen-heights / sec).
+      vyMaxNorm: { drive: 1.6, iron: 1.8, wedge: 2.2 },
+      // Huber residual scale (normalized screen units) for endpoint robustifying.
+      huberK: 0.04,
+      // D4 whole-flight-visible: when the handoff is already at/near the landing
+      // (|P_h.y − y_land| ≤ this) or descending, skip the synthetic apex and just
+      // fade the detected flight out over `wholeFlightTailSec`.
+      wholeFlightYTol: 0.03,
+      wholeFlightTailSec: 0.2,
     },
 
     // ── v2 estimator / prior config (lib/tracerV2.ts) ──

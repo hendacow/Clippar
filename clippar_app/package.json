@@ -14,7 +14,9 @@
     "web:dev": "APP_VARIANT=development expo start --web",
     "metro:log": "APP_VARIANT=development expo start --tunnel > /tmp/metro-clippar.log 2>&1",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/*.test.ts",
+    "test:unit": "node --import tsx --test tests/*.test.ts",
+    "test:sim": "tsx scripts/simulate-tracer.ts",
+    "test": "npm run test:unit && npm run test:sim",
     "verify": "npm run typecheck && npm run test",
     "done": "bash scripts/done.sh"
   },
