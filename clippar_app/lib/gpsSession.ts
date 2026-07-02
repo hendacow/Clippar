@@ -96,7 +96,9 @@ export interface RawFix {
   course: number; // degrees, course-over-ground (persisted; unused by estimator)
 }
 
-export type GpsFixSource = 'impact' | 'stop-fallback' | 'widened';
+/** The anchor the fix was derived at. Provenance; `widened` is a SEPARATE flag
+ *  (not overloaded onto source) so a widened impact fix reads 'impact' + true. */
+export type GpsFixSource = 'impact' | 'stop-fallback';
 
 export interface ShotFix {
   lat: number;
@@ -106,6 +108,10 @@ export interface ShotFix {
   windowSec: number;
   medianAccM: number;
   source: GpsFixSource;
+  /** True when the window was widened past its base pre-window to reach
+   *  minFixes. Persisted (gps_source = e.g. 'impact+widened') so a fix that
+   *  scraped the minimum is auditable in the field walk. */
+  widened: boolean;
   estimatorVersion: number;
 }
 
@@ -127,6 +133,18 @@ export interface EstimateOpts {
   postSec?: number;
   /** Label the source when the caller knows it (impact vs stop-fallback). */
   source?: GpsFixSource;
+  /**
+   * IMPACT-anchor guard (B1): when widening past the base pre-window, stop the
+   * moment a walking (speed-gated) fix is hit scanning backward — never median
+   * across the walk onto the previous (bag) cluster. Below minFixes after the
+   * barrier we degrade (return null) rather than widen further.
+   */
+  movementBarrier?: boolean;
+}
+
+/** gps_source column value: anchor + widened provenance (B2). */
+export function fixSourceLabel(fix: ShotFix): string {
+  return fix.widened ? `${fix.source}+widened` : fix.source;
 }
 
 // ── pure math helpers (exported for direct unit tests) ──────────────────────
@@ -200,6 +218,18 @@ export class GpsSession {
     this.warmupUntilTs = nowTs + this.cfg.warmupSec * 1000;
   }
 
+  /**
+   * True when the ring holds no usable recent history (empty, or the newest fix
+   * is older than staleSec). SF1: the record tab should only re-arm warm-up when
+   * the ring is cold — re-warming on every focus would invalidate a perfectly
+   * good minute of fixes just because the user tabbed away and back.
+   */
+  isCold(nowTs: number): boolean {
+    if (this.buf.length === 0) return true;
+    const newest = Math.max(...this.buf.map((f) => f.ts));
+    return newest < nowTs - this.cfg.staleSec * 1000;
+  }
+
   reset(): void {
     this.buf = [];
     this.warmupUntilTs = 0;
@@ -217,6 +247,13 @@ export class GpsSession {
   private isStationary(f: RawFix): boolean {
     // speed < 0 means "unknown" from CoreLocation — don't assume stationary.
     return f.speed >= 0 && f.speed <= this.cfg.stationarySpeedMax && f.acc <= this.cfg.fixAccMax;
+  }
+
+  /** A definitely-moving fix (the golfer walking) — the impact movement barrier
+   *  (B1). Distinct from "not stationary" (which also covers inaccurate fixes):
+   *  a merely inaccurate fix is skipped, a WALKING fix stops the backward scan. */
+  private isWalking(f: RawFix): boolean {
+    return f.speed >= 0 && f.speed > this.cfg.stationarySpeedMax;
   }
 
   /**
@@ -245,7 +282,7 @@ export class GpsSession {
    * gps-stale — NEVER a cached fix.
    */
   estimateShotFix(anchorTs: number, opts: EstimateOpts = {}): ShotFixResult {
-    if (this.buf.length === 0) return { fix: null, reason: 'gps-stale' };
+    if (this.buf.length === 0) return { fix: null, reason: 'no-fix' };
 
     // Hard staleness: the closest fix to the anchor must be within staleSec. If
     // GPS froze before the shot, every fix predates the anchor by >staleSec and
@@ -255,22 +292,20 @@ export class GpsSession {
 
     const basePre = opts.preSec ?? this.cfg.windowPreSec;
     const postSec = opts.postSec ?? this.cfg.windowPostSec;
-    const maxPre = Math.max(basePre, this.cfg.widenPreSec);
 
-    let selected: RawFix[] = [];
-    let widened = false;
-    for (let pre = basePre; pre <= maxPre; pre += WIDEN_STEP_SEC) {
-      const lo = anchorTs - pre * 1000;
-      const hi = anchorTs + postSec * 1000;
-      selected = this.buf.filter(
-        (f) => this.isWarm(f.ts) && f.ts >= lo && f.ts <= hi && this.isStationary(f)
-      );
-      widened = pre > basePre; // reflects the window that produced `selected`
-      if (selected.length >= this.cfg.minFixes) break;
+    const sel = opts.movementBarrier
+      ? this.selectImpact(anchorTs, basePre, postSec)
+      : this.selectWidening(anchorTs, basePre, postSec);
+
+    // SF2: distinguish "no stationary fix in the window" (no-fix) from the
+    // staleness case above (fixes exist but are old → gps-stale). For the impact
+    // barrier, degrading below minFixes is also 'no-fix' — never widen onto bag.
+    if (sel.selected.length === 0) return { fix: null, reason: 'no-fix' };
+    if (opts.movementBarrier && sel.selected.length < this.cfg.minFixes) {
+      return { fix: null, reason: 'no-fix' };
     }
 
-    if (selected.length === 0) return { fix: null, reason: 'gps-stale' };
-
+    const selected = sel.selected;
     const accs = selected.map((f) => f.acc);
     const lat = weightedMedian(selected.map((f) => ({ value: f.lat, acc: f.acc })));
     const lon = weightedMedian(selected.map((f) => ({ value: f.lon, acc: f.acc })));
@@ -282,7 +317,6 @@ export class GpsSession {
     const windowSec = Math.max(1, spanSec);
     const effAccM = computeEffAcc(medianAccM, selected.length, windowSec, this.cfg);
 
-    const source: GpsFixSource = opts.source ?? (widened ? 'widened' : 'impact');
     return {
       fix: {
         lat,
@@ -291,7 +325,8 @@ export class GpsSession {
         fixCount: selected.length,
         windowSec,
         medianAccM,
-        source,
+        source: opts.source ?? 'impact',
+        widened: sel.widened,
         estimatorVersion: GPS_ESTIMATOR_VERSION,
       },
       reason: null,
@@ -299,15 +334,72 @@ export class GpsSession {
   }
 
   /**
+   * STOP-anchor (and generic) selection: take the base window, then widen the
+   * pre-window toward widenPreSec until ≥ minFixes. May span a movement gap —
+   * acceptable for the wider stop fallback, NOT for the impact anchor (B1).
+   */
+  private selectWidening(anchorTs: number, basePre: number, postSec: number): {
+    selected: RawFix[];
+    widened: boolean;
+  } {
+    const maxPre = Math.max(basePre, this.cfg.widenPreSec);
+    let selected: RawFix[] = [];
+    let widened = false;
+    for (let pre = basePre; pre <= maxPre; pre += WIDEN_STEP_SEC) {
+      const lo = anchorTs - pre * 1000;
+      const hi = anchorTs + postSec * 1000;
+      selected = this.buf.filter(
+        (f) => this.isWarm(f.ts) && f.ts >= lo && f.ts <= hi && this.isStationary(f)
+      );
+      widened = pre > basePre;
+      if (selected.length >= this.cfg.minFixes) break;
+    }
+    return { selected, widened };
+  }
+
+  /**
+   * IMPACT-anchor selection with the movement barrier (B1). Take the base
+   * [anchor−basePre, anchor+postSec] stationary window; if it's short, widen
+   * BACKWARD past basePre but STOP at the first walking fix — so a long walk's
+   * bag cluster can never be medianed in. Merely-inaccurate fixes are skipped
+   * (they aren't a movement gap). The caller degrades to null below minFixes.
+   */
+  private selectImpact(anchorTs: number, basePre: number, postSec: number): {
+    selected: RawFix[];
+    widened: boolean;
+  } {
+    const lo = anchorTs - basePre * 1000;
+    const hi = anchorTs + postSec * 1000;
+    const base = this.buf.filter(
+      (f) => this.isWarm(f.ts) && f.ts >= lo && f.ts <= hi && this.isStationary(f)
+    );
+    if (base.length >= this.cfg.minFixes) return { selected: base, widened: false };
+
+    // Widen backward from the base edge, newest-first, until a walking fix.
+    const widenLo = anchorTs - Math.max(basePre, this.cfg.widenPreSec) * 1000;
+    const back = this.buf
+      .filter((f) => this.isWarm(f.ts) && f.ts < lo && f.ts >= widenLo)
+      .sort((a, b) => b.ts - a.ts);
+    const extra: RawFix[] = [];
+    for (const f of back) {
+      if (this.isWalking(f)) break; // movement barrier — never cross the walk
+      if (this.isStationary(f)) extra.push(f);
+    }
+    return { selected: [...base, ...extra], widened: extra.length > 0 };
+  }
+
+  /**
    * A1 definitive anchor: estimate at IMPACT time with the tight
-   * [impact−IMPACT_PRE_SEC, impact+windowPostSec] window. Call this once
-   * detectAndTrim lands impact_time_ms (anchor = recording_start_ts + impact).
+   * [impact−IMPACT_PRE_SEC, impact+windowPostSec] window + movement barrier.
+   * Call this once detectAndTrim lands impact_time_ms
+   * (anchor = recording_start_ts + impact).
    */
   estimateAtImpact(anchorTs: number): ShotFixResult {
     return this.estimateShotFix(anchorTs, {
       preSec: IMPACT_PRE_SEC,
       postSec: this.cfg.windowPostSec,
       source: 'impact',
+      movementBarrier: true,
     });
   }
 

@@ -117,7 +117,10 @@ export function useGpsSession(enabled: boolean): GpsHealth {
     useCallback(() => {
       focusedRef.current = true;
       if (isActive) {
-        gpsSession.markWarmup(Date.now());
+        // SF1: only re-arm warm-up when the ring is actually cold. Re-warming on
+        // every tab focus would throw away a warm minute of fixes (tab away →
+        // back → record within 8s used to read gps-stale).
+        if (gpsSession.isCold(Date.now())) gpsSession.markWarmup(Date.now());
         void startWatch(Location.Accuracy.BestForNavigation);
       }
       return () => {

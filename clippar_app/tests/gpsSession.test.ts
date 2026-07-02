@@ -5,7 +5,9 @@ import {
   DEFAULT_GPS_CONFIG,
   computeEffAcc,
   weightedMedian,
+  fixSourceLabel,
   type RawFix,
+  type ShotFix,
 } from '../lib/gpsSession';
 
 // ── helpers ─────────────────────────────────────────────────────────────────
@@ -73,15 +75,80 @@ test('stale → null, NEVER a cached fix', () => {
   assert.equal(r.reason, 'gps-stale');
 });
 
-test('window widening when < minFixes in the base window; source=widened', () => {
+test('window widening when < minFixes in the base window; widened=true', () => {
   const s = new GpsSession();
   const anchor = 50_000;
   for (let i = 0; i < 3; i++) s.addFix(fix(48_000 + i * 1000, 0, 4, 0)); // in base window + satisfies staleness
   for (let i = 0; i < 3; i++) s.addFix(fix(12_000 + i * 1000, 0, 5, 0)); // only reached after widening
-  const r = s.estimateShotFix(anchor);
+  const r = s.estimateShotFix(anchor); // non-barrier (stop-style) widening
   assert.ok(r.fix);
   assert.ok(r.fix!.fixCount >= 5, `expected ≥5 fixes after widening, got ${r.fix!.fixCount}`);
-  assert.equal(r.fix!.source, 'widened');
+  assert.equal(r.fix!.widened, true);
+});
+
+// ── B1: impact widening must not cross the walk onto the bag ──────────────────
+test('B1: impact anchor never medians onto the bag across the walk (degrades instead)', () => {
+  const s = new GpsSession();
+  // The reviewer's scenario: hurried shot — 25 open-sky BAG fixes (acc 4) → 18s
+  // walk → only 3 canopy BALL fixes (acc 12). 1/acc² weighting would PREFER the
+  // bag (fix ~120m off at a plausible-looking effAcc). The movement barrier must
+  // forbid crossing the walk: degrade to null, never the bag.
+  const impact = 60_000;
+  for (let t = 0; t <= 24; t++) s.addFix(fix(t * 1000, 0, 4, 0)); // BAG (open sky)
+  for (let t = 25; t <= 42; t++) s.addFix(fix(t * 1000, 120 * ((t - 25) / 17), 6, 1.5)); // WALK
+  for (let t = 58; t <= 60; t++) s.addFix(fix(t * 1000, 120, 12, 0)); // BALL (canopy, only 3)
+
+  const r = s.estimateAtImpact(impact);
+  // Never the bag — that is the whole guarantee.
+  assert.ok(
+    !(r.fix && metersNorth(r.fix.lat, BASE_LAT) < 30),
+    'impact fix must never land on the pre-walk bag cluster'
+  );
+  // With only 3 ball fixes it degrades to no-fix; if it ever returns a fix it
+  // must be the ball.
+  if (r.fix) {
+    assert.ok(metersNorth(r.fix.lat, BASE_LAT + north(120)) < 15, 'a returned fix must be the ball');
+  } else {
+    assert.equal(r.reason, 'no-fix');
+  }
+});
+
+// ── B2: widened provenance is a real, persisted flag ─────────────────────────
+test('B2: fixSourceLabel composes anchor + widened provenance', () => {
+  const mk = (source: 'impact' | 'stop-fallback', widened: boolean): ShotFix => ({
+    lat: 0, lon: 0, effAccM: 3, fixCount: 6, windowSec: 20, medianAccM: 3,
+    source, widened, estimatorVersion: 1,
+  });
+  assert.equal(fixSourceLabel(mk('impact', false)), 'impact');
+  assert.equal(fixSourceLabel(mk('impact', true)), 'impact+widened');
+  assert.equal(fixSourceLabel(mk('stop-fallback', true)), 'stop-fallback+widened');
+});
+
+test('B2: an impact fix that reaches past its base window flags widened=true', () => {
+  const s = new GpsSession();
+  const impact = 60_000;
+  // Sparse stationary dwell, NO walk between clusters: 3 in the base window,
+  // 3 just before it → the barrier widens (no walking fix to stop it).
+  for (const t of [46, 53, 59]) s.addFix(fix(t * 1000, 0, 4, 0)); // base [45,70]
+  for (const t of [38, 41, 44]) s.addFix(fix(t * 1000, 0, 4, 0)); // before base, no walk
+  const r = s.estimateAtImpact(impact);
+  assert.ok(r.fix);
+  assert.equal(r.fix!.widened, true);
+  assert.equal(fixSourceLabel(r.fix!), 'impact+widened');
+});
+
+// ── SF2: no-fix vs gps-stale ─────────────────────────────────────────────────
+test('SF2: no-fix when fixes exist near the anchor but none are stationary', () => {
+  const s = new GpsSession();
+  for (let t = 25; t <= 35; t++) s.addFix(fix(t * 1000, 0, 5, 2.0)); // all walking
+  const r = s.estimateShotFix(30_000);
+  assert.equal(r.fix, null);
+  assert.equal(r.reason, 'no-fix');
+
+  // Contrast: fixes exist but are all far older than the anchor → gps-stale.
+  const s2 = new GpsSession();
+  for (let t = 0; t <= 9; t++) s2.addFix(fix(t * 1000, 0, 4, 0));
+  assert.equal(s2.estimateShotFix(30_000).reason, 'gps-stale');
 });
 
 test('property sweep: computeEffAcc monotone in acc (↑) and N/span (↓)', () => {

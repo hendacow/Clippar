@@ -13,7 +13,7 @@ import {
 } from '@/lib/storage';
 import { detectAndTrim, deleteFile, getDevicePitchDeg } from 'shot-detector';
 import { config } from '@/constants/config';
-import { gpsSession } from '@/lib/gpsSession';
+import { gpsSession, fixSourceLabel } from '@/lib/gpsSession';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { logDetection } from '@/lib/detectionLog';
 
@@ -235,7 +235,14 @@ export function useCamera({
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       isRecordingRef.current = true;
       setIsRecording(true);
-      recordingStartTime.current = Date.now();
+      // B3: capture the press timestamp as a CLOSURE-LOCAL. recordAsync takes
+      // 5–10s to finalize and stopRecording re-enables presses eagerly, so a
+      // fast next-shot press overwrites recordingStartTime.current before this
+      // clip's save/detect blocks read it. `pressTs` is immutable for THIS clip
+      // and is what the A1 impact anchor (pressTs + impact_time_ms) uses; the
+      // ref is still updated for any other consumer.
+      const pressTs = Date.now();
+      recordingStartTime.current = pressTs;
 
       // Keep screen awake
       KeepAwake?.activateKeepAwakeAsync('recording');
@@ -333,7 +340,7 @@ export function useCamera({
       if (video?.uri) {
         const finalUri = video.uri;
         const stopTs = Date.now();
-        const startTs = recordingStartTime.current; // absolute start-press ts
+        const startTs = pressTs; // B3: this clip's immutable press ts (closure-local)
         const durationSeconds = (stopTs - startTs) / 1000;
 
         // GPS (Tracer V2): the continuous gpsSession ring replaces v1's fatal
@@ -427,7 +434,7 @@ export function useCamera({
           gps_eff_acc_m: stopFix?.effAccM,
           gps_fix_count: stopFix?.fixCount,
           gps_window_sec: stopFix?.windowSec,
-          gps_source: stopFix?.source,
+          gps_source: stopFix ? fixSourceLabel(stopFix) : undefined, // B2: e.g. 'stop-fallback+widened'
           gps_fix_series: fixSeriesJson,
           gps_estimator_version: stopFix?.estimatorVersion,
           recording_start_ts: config.tracer.enabled ? startTs : undefined,
@@ -535,7 +542,7 @@ export function useCamera({
               if (r2.fix) {
                 await updateClipGpsFix(
                   clipId,
-                  r2.fix,
+                  { ...r2.fix, source: fixSourceLabel(r2.fix) }, // B2: persist 'impact[+widened]'
                   serializeSeries(gpsSession.seriesAround(impactAnchor))
                 ).catch(() => {});
               }
