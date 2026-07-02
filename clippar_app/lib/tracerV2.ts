@@ -134,7 +134,8 @@ export function computeShotCarry(
   let tierReason: string | null = null;
   const effAccOk1 = a <= g.tier1EffAccM && b <= g.tier1EffAccM;
   const effAccOk2 = a <= g.tier2EffAccM && b <= g.tier2EffAccM;
-  const carryInTier1Range = carryM >= 20 && carryM <= 350;
+  const carryInTier1Range =
+    carryM >= g.tier1CarryMinM && carryM <= g.tier1CarryMaxM;
   const relSigma = carryM > 0 ? sigmaD / carryM : Infinity;
 
   if (effAccOk1 && sigmaGps <= g.tier1EffAccM && carryInTier1Range) {
@@ -215,9 +216,14 @@ export interface DetectedFit {
   vy0: number;
   /** Sign of net lateral drift over the kept window. */
   latSign: -1 | 0 | 1;
-  /** Max perpendicular deviation of the track from its p0→ph chord, normalized
-   *  by chord length (F8b curvature residual). */
+  /** F8b curvature residual — LATERAL-only (max deviation of x(t) from the
+   *  x-chord, normalized by the 2D chord length). Purely lateral so vertical
+   *  gravity sag is NOT mistaken for a draw/fade. */
   curvatureResidual: number;
+  /** Quadratic-in-time fit coefficients [c0,c1,c2] for x and y (time relative
+   *  to launch, seconds). Lets buildArcSpecV2 sample the REAL detected curve as
+   *  segment 1 (untouched), rather than re-pinning it. */
+  coeff: { x: [number, number, number]; y: [number, number, number] };
   /** Points kept after trailing-trim + robust weighting (for diagnostics). */
   keptCount: number;
 }
@@ -231,7 +237,7 @@ export interface DegenerateFit {
 
 export type FitResult = DetectedFit | DegenerateFit;
 
-const HUBER_K = 0.04; // normalized-screen residual scale for endpoint robustifying
+const HUBER_K = config.tracer.arc.huberK; // normalized-screen residual scale
 
 /**
  * Fit the detected ball track: trim the trailing 20% of points (roll/decay
@@ -350,20 +356,14 @@ export function fitDetectedTrack(points: TrackPoint[]): FitResult {
   const latSign: -1 | 0 | 1 =
     Math.abs(netDx) < 1e-4 ? 0 : netDx > 0 ? 1 : -1;
 
-  // Curvature residual: max perpendicular distance of kept points from the
-  // p0→ph chord, normalized by chord length (F8b).
-  const chordDx = ph.x - p0.x;
-  const chordDy = ph.y - p0.y;
-  const chordLen = Math.hypot(chordDx, chordDy);
-  let maxPerp = 0;
-  if (chordLen > 1e-6) {
-    for (let i = 0; i < kept.length; i++) {
-      const perp =
-        Math.abs(chordDx * (p0.y - Y[i]) - (p0.x - X[i]) * chordDy) / chordLen;
-      if (perp > maxPerp) maxPerp = perp;
-    }
-  }
-  const curvatureResidual = chordLen > 1e-6 ? maxPerp / chordLen : 0;
+  // F8b curvature residual — LATERAL ONLY. Deviation of x(t) from the straight
+  // x-chord (x-linear interp), normalized by the 2D chord length. Because it
+  // reads x alone, vertical gravity sag (a bend in y) contributes nothing, so
+  // a laterally-straight shot never trips the override. The analytic max
+  // deviation of a quadratic from its chord is |c2|·thSec²/4.
+  const chordLen = Math.hypot(ph.x - p0.x, ph.y - p0.y);
+  const maxLatDev = (Math.abs(fx.c2) * thSec * thSec) / 4;
+  const curvatureResidual = chordLen > 1e-6 ? maxLatDev / chordLen : 0;
 
   return {
     degenerate: false,
@@ -374,6 +374,10 @@ export function fitDetectedTrack(points: TrackPoint[]): FitResult {
     vy0,
     latSign,
     curvatureResidual,
+    coeff: {
+      x: [fx.c0, fx.c1, fx.c2],
+      y: [fy.c0, fy.c1, fy.c2],
+    },
     keptCount: kept.length,
   };
 }
@@ -398,10 +402,18 @@ export interface TracerMetaV2 {
   /** The arc's actual landing target (== last sample; may differ from the raw
    *  GPS projection when F8b flips the lateral sign). */
   endpoint: { x: number; y: number };
-  /** Handoff continuity witnesses (for C0/C1 invariants). */
+  /** Handoff continuity witnesses. vHandoffIn = the RAW detected fit velocity
+   *  at the handoff; vHandoffOut = the EFFECTIVE velocity segment 2 leaves with
+   *  (== the polyline seam velocity). They are equal when neither the A4 V_h
+   *  clamp nor the lateral straightening is active, and differ (out ≤ in) when
+   *  one is — never restated from a single source. */
   handoff: { x: number; y: number };
   vHandoffIn: { x: number; y: number };
   vHandoffOut: { x: number; y: number };
+  /** True when segment 1 was RE-PINNED to exit at the effective handoff (the A4
+   *  clamp or lateral straightening bent the tail of the detected segment toward
+   *  the effective handoff). When false, segment 1 is the raw detected curve. */
+  seg1Repinned: boolean;
   /** Solved vertical pseudo-gravities + phase split. */
   gUp: number;
   gDown: number;
@@ -465,7 +477,10 @@ export interface BuildArcInputV2 {
 }
 
 /** Portrait frame aspect (W/H) — roll rotation is done in pixel-aspect space so
- *  a screen tilt doesn't distort in normalized coords (9:16). */
+ *  a screen tilt doesn't distort in normalized coords.
+ *  NOTE: hardcoded 9:16 — the app records portrait only. If a landscape/other
+ *  capture mode is ever added, this must become an input (width/height from the
+ *  clip) or roll compensation will distort. Tracked for post-acceptance. */
 const FRAME_ASPECT = 9 / 16;
 
 function rotAboutCenter(
@@ -494,13 +509,39 @@ function rotVec(
   };
 }
 
-const VY_MAX_NORM: Record<ShotBucket, number> = {
-  // A4 clamp on V_h.y (normalized screen-heights / sec). Generous — only trims
-  // a genuinely noisy endpoint; the apex bound (I11a) is enforced separately.
-  drive: 1.6,
-  iron: 1.8,
-  wedge: 2.2,
-};
+/**
+ * B1 timing finalizer. The samples carry natural times in [0, naturalTotal];
+ * this rescales them so the LAST sample's tSec == the returned animDurationSec
+ * EXACTLY (so keyTimes = tSec/animDuration are ≤ 1 with last == 1.0 — the
+ * native parser rejects anything else with ERR_TRACER_SPEC). When the natural
+ * total exceeds the clip's post-impact window, the SYNTHETIC portion (t >
+ * thSec) is time-compressed to fit while the detected segment keeps real
+ * timing; if even the detected segment overruns, the whole timeline is scaled.
+ * Mutates `samples` in place. x/y are untouched, so the arc SHAPE is unchanged.
+ */
+function finalizeTiming(
+  samples: TracerSampleV2[],
+  _thSec: number,
+  maxAnimSec: number,
+): number {
+  const natural = samples[samples.length - 1].tSec;
+  // UNIFORM time-scale (not synthetic-only): scaling the whole timeline equally
+  // preserves the seam velocity RATIO (both sides ×1/scale), so there is no
+  // playback-speed jump at the detected→synthetic handoff — a synthetic-only
+  // compression would speed up only half the arc. x/y are untouched (shape
+  // unchanged); only the clock compresses to fit the clip.
+  const scale = natural > maxAnimSec && natural > 1e-9 ? maxAnimSec / natural : 1;
+  if (scale !== 1) for (const s of samples) s.tSec *= scale;
+  let animDur = Math.min(natural, maxAnimSec);
+  // strictly increasing, then pin the last sample to animDur EXACTLY so every
+  // keyTime = tSec/animDur ≤ 1 with last == 1.0.
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i].tSec <= samples[i - 1].tSec) samples[i].tSec = samples[i - 1].tSec + 1e-5;
+  }
+  animDur = Math.max(animDur, samples[samples.length - 1].tSec);
+  samples[samples.length - 1].tSec = animDur;
+  return clamp(animDur, 0.01, maxAnimSec + 1e-9);
+}
 
 /** Map an apex height (meters) to a normalized y above the horizon anchor. */
 function apexToNormY(
@@ -639,82 +680,111 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
   );
 
   const hangS = hangTimeSec(apexM);
-
-  // Normalized apex y target, kept strictly above the handoff.
-  let yApexTarget = apexToNormY(
-    apexM,
-    carryM,
-    input.horizonY,
-    input.camHeightM,
-    input.vFovPortraitDeg,
-  );
-  yApexTarget = Math.max(yApexTarget, ph.y + 0.02);
-
-  // ── Vertical solve (piecewise quadratic in time) ──
-  // Total remaining flight time from the handoff.
-  const totalSyntheticIdeal = Math.max(hangS - thSec, arc.tRemMin);
-  // Fit inside the clip's post-impact window.
-  const maxSynthetic = Math.max(input.maxAnimSec - thSec, arc.tRemMin);
-  const tRem = Math.max(Math.min(totalSyntheticIdeal, maxSynthetic), arc.tRemMin);
-
-  // A4 clamp on the ascent velocity (continuity preserved; when inactive
-  // vHandoffOut == V_h exactly). Damp-blend is applied in the sampler below.
-  const vyMax = VY_MAX_NORM[bucket];
-  const vYsolve = clamp(vh.y, 0, vyMax);
-
-  // t_up so the apex reaches yApexTarget with v=0 there (apex condition):
-  //   y_apex = P_h.y + 0.5 · vY · t_up  → t_up = 2·(Δ)/vY.
-  let dyUp = Math.max(yApexTarget - ph.y, 1e-4);
-  let tUp: number;
-  let yApex: number;
-  if (vYsolve > 1e-6) {
-    tUp = (2 * dyUp) / vYsolve;
-    const tUpCap = arc.tUpFracMax * tRem;
-    if (tUp > tUpCap) {
-      // Continuity outranks the apex prior: keep vY, cap t_up, re-solve apex.
-      tUp = tUpCap;
-      yApex = ph.y + 0.5 * vYsolve * tUp;
-    } else {
-      yApex = yApexTarget;
-    }
-  } else {
-    // No upward velocity (degenerate/flat handoff): give a minimal ascent so
-    // the arc still peaks, capped by t_rem.
-    tUp = Math.min(0.3 * tRem, arc.tUpFracMax * tRem);
-    yApex = Math.max(ph.y + 0.02, yApexTarget);
-  }
-  tUp = clamp(tUp, 1e-3, arc.tUpFracMax * tRem);
-  dyUp = Math.max(yApex - ph.y, 1e-4);
-  // g_up from the apex condition v(t_up)=0 with initial vY: g_up = vY / t_up
-  // when vY drives it, else derived from the height over t_up².
-  const gUpRaw = vYsolve > 1e-6 ? vYsolve / tUp : (2 * dyUp) / (tUp * tUp);
-  const gUp = gUpRaw;
-
-  // Descent: from (yApex, v=0) at tUp to yLand at tRem.
   const yLand = input.landing.y;
-  const tDown = Math.max(tRem - tUp, 1e-3);
-  // g_down capped so the descent can't spike past gMax·g_up (plan arc.gMax).
-  let gDown = (2 * (yApex - yLand)) / (tDown * tDown);
-  const gDownCap = arc.gMax * Math.max(gUp, 1e-6);
-  if (Number.isFinite(gDownCap) && gDown > gDownCap) gDown = gDownCap;
-  if (!Number.isFinite(gDown)) gDown = 0;
+  const parallaxEstimate = clamp(input.camHeightM / Math.max(carryM, 20), 0, 0.2);
+  // Raw detected handoff velocity (pre-clamp) — the honest C1 witness.
+  const rawVh = !input.fit.degenerate
+    ? { x: input.fit.vh.x, y: input.fit.vh.y }
+    : { x: vh.x, y: vh.y };
 
-  // ── Lateral solve (single cubic Hermite, Fritsch–Carlson guarded) ──
+  // A4 clamp on the ascent velocity, ideal synthetic time, and the t_up cap.
+  const vyMax = arc.vyMaxNorm[bucket];
+  const vYsolve = clamp(vh.y, 0, vyMax);
+  let tRem = Math.max(hangS - thSec, arc.tRemMin);
+  const tUpCap = arc.tUpFracMax * tRem;
+  // Best apex reachable while PRESERVING continuity (keep vYsolve, cap t_up).
+  const yApexContMax = ph.y + 0.5 * vYsolve * tUpCap;
+  // The prior apex height (before any landing floor) — if the detected handoff
+  // is already at/above it, the ball has finished climbing (or flown out the
+  // top of frame), so there's no meaningful synthetic ascent to add.
+  const yApexPrior = apexToNormY(apexM, carryM, input.horizonY, input.camHeightM, input.vFovPortraitDeg);
+
+  // ── B2 / D4 — whole-flight-visible / detected-too-weak. Do NOT fabricate a
+  //    synthetic apex-to-GPS-landing when it would be invalid or discontinuous:
+  //    • no upward screen velocity at the handoff (already peaked/descending) —
+  //      a synthetic "ascent" would plunge (wrong sign) then jump; OR
+  //    • already at the landing height / almost no flight time left; OR
+  //    • the detected climb is too weak to lift the ball above the (screen)
+  //      landing within the continuity/speed bound — forcing the GPS landing
+  //      would teleport the endpoint.
+  //    Instead render the REAL detected flight + a short linear fade tail. ──
+  if (
+    !input.fit.degenerate &&
+    (rawVh.y <= 1e-3 ||
+      Math.abs(ph.y - yLand) <= arc.wholeFlightYTol ||
+      hangS - thSec <= 0.3 ||
+      yApexContMax <= yLand + arc.wholeFlightYTol ||
+      ph.y >= yApexPrior - arc.wholeFlightYTol)
+  ) {
+    return buildWholeFlightVisible(input, {
+      carryM,
+      bucket,
+      apexM,
+      hangS,
+      curvatureResidual,
+      latSignFit,
+      parallaxEstimate,
+      rollDeg: rollDegRaw,
+      N,
+    });
+  }
+
+  // Apex y target, floored to clear BOTH the handoff and the landing so there
+  // is always a real descent (no apex-below-landing → forced-endpoint teleport).
+  const yApexFloor = Math.max(ph.y, yLand) + 0.02;
+  let yApexTarget = apexToNormY(apexM, carryM, input.horizonY, input.camHeightM, input.vFovPortraitDeg);
+  yApexTarget = Math.max(yApexTarget, yApexFloor);
+
+  // Ascent: t_up so the apex reaches yApexTarget with v=0 (t_up=2Δ/vY), capped
+  // at tUpFracMax·tRem (continuity outranks the apex prior → re-solve apex, but
+  // never below the landing floor).
+  const dyUp = Math.max(yApexTarget - ph.y, 1e-4);
+  let tUp = (2 * dyUp) / vYsolve;
+  let yApex: number;
+  if (tUp > tUpCap) {
+    tUp = tUpCap;
+    yApex = Math.max(ph.y + 0.5 * vYsolve * tUp, yApexFloor);
+  } else {
+    yApex = yApexTarget;
+  }
+  tUp = clamp(tUp, 1e-3, Math.max(tUpCap, 1e-3));
+  // Launch velocity that reaches yApex at t_up with v=0 there. This equals
+  // vYsolve whenever the landing floor didn't raise the apex (D1 real-fit path,
+  // where the D4 gate already guaranteed the apex clears the landing); it is
+  // only boosted for prior-driven / degenerate arcs, which have no real detected
+  // handoff velocity to stay continuous with.
+  const v0 = (2 * (yApex - ph.y)) / tUp;
+  const gUp = v0 / tUp; // apex condition v(t_up)=0
+
+  // Descent to yLand. If the required g_down would exceed gMax·g_up, keep it AT
+  // the cap and EXTEND t_down so the parabola still lands EXACTLY on yLand
+  // (MAJOR 1 — no forced-endpoint teleport). Then finalize t_rem = t_up+t_down.
+  const dropDown = Math.max(yApex - yLand, 0);
+  let tDown = Math.max(tRem - tUp, 1e-3);
+  let gDown = (2 * dropDown) / (tDown * tDown);
+  const gDownCap = arc.gMax * Math.max(gUp, 1e-6);
+  if (gDown > gDownCap && gDownCap > 0 && dropDown > 0) {
+    gDown = gDownCap;
+    tDown = Math.sqrt((2 * dropDown) / gDown); // extend to reach yLand smoothly
+  }
+  if (!Number.isFinite(gDown)) gDown = 0;
+  tRem = tUp + tDown; // final synthetic duration
+
+  // ── Lateral solve (single cubic Hermite, effective handoff keeps it monotone) ──
   const straightBow =
     input.carry.deltaDeg !== null && Math.abs(input.carry.deltaDeg) < 8;
 
-  // F8b: vision overrides the GPS lateral SIGN only on genuine CURVATURE
-  // evidence beyond what the mount parallax can explain (a low-curvature drift
-  // is treated as parallax and does NOT flip the side — see the effective
-  // handoff below). When it does override, keep the GPS magnitude, flip side.
-  const parallaxEstimate = clamp(input.camHeightM / Math.max(carryM, 20), 0, 0.2);
+  // F8b: vision overrides the GPS lateral SIGN only on genuine LATERAL curvature
+  // (curvatureResidual is x-only, so vertical gravity sag never trips it) beyond
+  // what the mount parallax can explain. When it overrides, keep the GPS
+  // magnitude, flip to the detected side.
   let lateralSource: 'gps' | 'vision' = 'gps';
   let override = false;
   let xLand = input.landing.x;
   const driftMag = Math.abs(ph.x - p0.x);
   if (
     !input.fit.degenerate &&
-    curvatureResidual > 0.02 &&
+    curvatureResidual > arc.f8bCurvatureMin &&
     driftMag > parallaxEstimate &&
     latSignFit !== 0 &&
     input.carry.deltaDeg !== null &&
@@ -727,117 +797,91 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
   xLand = clamp(xLand, -0.3, 1.3);
 
   // Effective handoff lateral. To guarantee a MONOTONE lateral path (no sign
-  // reversal / S-curve) AND C1 continuity, both segments share one handoff:
-  //   • phEffX: the detected handoff x, clamped to lie between launch and
-  //     landing (drift that overshoots the wrong side is parallax/noise —
-  //     suppressed, matching A4's straight-shot-misread-as-fade correction).
-  //   • vhEffX: the detected lateral velocity, kept only if it points TOWARD
-  //     the landing and capped to the Fritsch–Carlson bound (α = m0/Δ ≤ 3) so
-  //     the Hermite is monotone by construction and never triggers the guard.
+  // reversal / S-curve), the handoff x is clamped into the launch→landing
+  // interval and the lateral velocity is kept only if it points toward the
+  // landing (capped to the Fritsch–Carlson bound α≤3). Segment 1 is then
+  // RE-PINNED to exit at this effective handoff — so when the clamp or straighten
+  // is active, the tail of the detected segment is bent toward it (meta.
+  // seg1Repinned = true); otherwise segment 1 == the raw detected curve.
   const dirL = Math.abs(xLand - p0.x) < 1e-6 ? 0 : Math.sign(xLand - p0.x);
   const phEffX =
-    dirL === 0
-      ? p0.x
-      : clamp(ph.x, Math.min(p0.x, xLand), Math.max(p0.x, xLand));
+    dirL === 0 ? p0.x : clamp(ph.x, Math.min(p0.x, xLand), Math.max(p0.x, xLand));
   const dXseg2 = xLand - phEffX;
   let vhEffX = 0;
   if (dirL !== 0 && Math.sign(vh.x) === dirL && Math.abs(dXseg2) > 1e-6) {
     const fcCap = (3 * Math.abs(dXseg2)) / Math.max(tRem, 1e-6);
     vhEffX = dirL * Math.min(Math.abs(vh.x), fcCap);
   }
-  // One effective handoff velocity, honored by BOTH segments (C1 exact).
-  const vhEff = { x: vhEffX, y: vYsolve };
-  const vHandoffIn = { x: vhEff.x, y: vhEff.y };
+  const vYeff = v0; // both segments enter/exit vertically at v0 (== vYsolve
+  // unless a prior-driven apex was floored above the landing)
+  const seg1Repinned =
+    !input.fit.degenerate &&
+    (Math.abs(phEffX - ph.x) > 1e-9 ||
+      Math.abs(vhEffX - rawVh.x) > 1e-9 ||
+      Math.abs(vYeff - rawVh.y) > 1e-9);
 
-  // Hermite over s∈[0,1] (mapped to τ∈[0,tRem]): start tangent = vhEffX·tRem
-  // (chain rule), end tangent = 0 (x'=0 at landing). α∈[0,3] ⇒ monotone.
+  // Hermite over s∈[0,1] (mapped to τ∈[0,tRem]): start tangent = vhEffX·tRem,
+  // end tangent 0. α∈[0,3] ⇒ monotone.
   const x0 = phEffX;
   const x1 = xLand;
   const m0 = vhEffX * tRem;
   const m1 = 0;
-  const vHandoffOutX = m0 / tRem; // == vhEffX; lateral velocity leaving handoff
 
-  // ── Sample the polyline: segment 1 (detected, real timing) then segment 2
-  //    (synthetic), one strictly-increasing time series. ──
-  // Segment-1 sample count proportional to its time share.
+  // ── Sample: segment 1 (re-pinned to exit at (phEffX, ph.y) with velocity
+  //    (vhEffX, vYeff)) then segment 2 (synthetic). ──
   const totalDur = thSec + tRem;
   const seg1N =
     thSec > 1e-3 ? clamp(Math.round((thSec / totalDur) * N), 2, N - 4) : 0;
   const seg2N = N - seg1N;
-
   const samples: TracerSampleV2[] = [];
-
-  // Segment 1: the real detected span, as a quadratic-in-time pinned to
-  //   pos(0)=p0, pos(thSec)=(phEffX, ph.y), AND vel(thSec)=vhEff
-  // so segment 1 EXITS the handoff at exactly the effective handoff velocity —
-  // this is what makes C1 continuity hold against segment 2 (which enters at
-  // the same velocity). Solving: c0 = p0 ; c2 = (p0 + vEff·th − pEff)/th² ;
-  // c1 = vEff − 2·c2·th. (phEffX == detected ph.x whenever the drift is
-  // toward the landing; vhEff.y == detected vh.y whenever the A4 clamp is off.)
   const th = thSec;
-  const phX = phEffX;
   const phY = ph.y;
-  const c2x = th > 1e-6 ? (p0.x + vhEff.x * th - phX) / (th * th) : 0;
-  const c2y = th > 1e-6 ? (p0.y + vhEff.y * th - phY) / (th * th) : 0;
-  const c1x = vhEff.x - 2 * c2x * th;
-  const c1y = vhEff.y - 2 * c2y * th;
+  const c2x = th > 1e-6 ? (p0.x + vhEffX * th - phEffX) / (th * th) : 0;
+  const c2y = th > 1e-6 ? (p0.y + vYeff * th - phY) / (th * th) : 0;
+  const c1x = vhEffX - 2 * c2x * th;
+  const c1y = vYeff - 2 * c2y * th;
   for (let i = 0; i < seg1N; i++) {
-    const frac = seg1N > 1 ? i / (seg1N - 1) : 0;
-    const t = frac * th;
-    samples.push({
-      x: p0.x + c1x * t + c2x * t * t,
-      y: p0.y + c1y * t + c2y * t * t,
-      tSec: t,
-    });
+    const t = (seg1N > 1 ? i / (seg1N - 1) : 0) * th;
+    samples.push({ x: p0.x + c1x * t + c2x * t * t, y: p0.y + c1y * t + c2y * t * t, tSec: t });
   }
-
-  // Segment 2: synthetic. τ ∈ (0, tRem]. Vertical piecewise-quadratic (enters
-  // at vYsolve, apex at tUp, exact landing at tRem); lateral one Hermite.
-  for (let i = 1; i <= seg2N; i++) {
-    const tau = (i / seg2N) * tRem;
-    // Vertical:
-    let y: number;
-    if (tau <= tUp) {
-      y = phY + vYsolve * tau - 0.5 * gUp * tau * tau;
-    } else {
-      const td = tau - tUp;
-      y = yApex - 0.5 * gDown * td * td;
-    }
-    // Lateral Hermite in s = tau/tRem.
+  // Sample the ascent and descent SEPARATELY (each with ≥2 points) so the apex
+  // is always resolved — a single uniform grid can skip a short ascent (tiny
+  // t_up), leaving an under-sampled peak and a spurious seam-velocity spike.
+  const ascN = clamp(Math.round(seg2N * (tUp / tRem)), 2, seg2N - 2);
+  const descN = seg2N - ascN;
+  const hermiteX = (tau: number) => {
     const s = tau / tRem;
     const s2 = s * s;
     const s3 = s2 * s;
-    const h00 = 2 * s3 - 3 * s2 + 1;
-    const h10 = s3 - 2 * s2 + s;
-    const h01 = -2 * s3 + 3 * s2;
-    const h11 = s3 - s2;
-    const x = h00 * x0 + h10 * m0 + h01 * x1 + h11 * m1;
-    samples.push({ x, y, tSec: thSec + tau });
+    return (
+      (2 * s3 - 3 * s2 + 1) * x0 +
+      (s3 - 2 * s2 + s) * m0 +
+      (-2 * s3 + 3 * s2) * x1 +
+      (s3 - s2) * m1
+    );
+  };
+  for (let i = 1; i <= ascN; i++) {
+    const tau = (i / ascN) * tUp;
+    samples.push({ x: hermiteX(tau), y: phY + vYeff * tau - 0.5 * gUp * tau * tau, tSec: thSec + tau });
   }
-
-  // Force EXACT endpoints (guards float drift): first = p0/launch, last = land.
-  if (samples.length) {
-    samples[0] = { x: p0.x, y: p0.y, tSec: 0 };
-    samples[samples.length - 1] = { x: xLand, y: yLand, tSec: totalDur };
+  for (let i = 1; i <= descN; i++) {
+    const td = (i / descN) * tDown;
+    const tau = tUp + td;
+    samples.push({ x: hermiteX(tau), y: yApex - 0.5 * gDown * td * td, tSec: thSec + tau });
   }
+  samples[0] = { x: p0.x, y: p0.y, tSec: 0 };
+  samples[samples.length - 1] = { x: xLand, y: yLand, tSec: totalDur };
 
-  // Ensure strictly-increasing tSec (I11b precursor) — dedupe any coincident.
-  for (let i = 1; i < samples.length; i++) {
-    if (samples[i].tSec <= samples[i - 1].tSec) {
-      samples[i].tSec = samples[i - 1].tSec + 1e-4;
-    }
-  }
-
-  // ── A8 roll compensation: the arc was solved in the gravity-aligned frame;
-  //    rotate ALL output samples (and the handoff/endpoint/velocity witnesses)
-  //    by rollDeg about frame center, in pixel-aspect space, so it matches the
-  //    tilted world. Rotation is rigid (linear) → C1 and horizon-relative apex
-  //    are preserved; only screen-space x-monotonicity is (correctly) no longer
-  //    guaranteed once the frame is tilted. ──
+  // Honest handoff witnesses: RAW detected velocity IN, EFFECTIVE velocity OUT
+  // (== the polyline seam velocity). Equal ⇔ no clamp/straighten was needed.
   let hf = { x: phEffX, y: ph.y };
   let ep = { x: xLand, y: yLand };
-  let vIn = { x: vHandoffIn.x, y: vHandoffIn.y };
-  let vOut = { x: vHandoffOutX, y: vYsolve };
+  let vIn = { x: rawVh.x, y: rawVh.y };
+  let vOut = { x: vhEffX, y: vYeff };
+
+  // ── A8 roll: rotate x/y of every sample + the witnesses about frame center in
+  //    pixel-aspect space (tSec untouched). Rigid → C1 + horizon-relative apex
+  //    preserved. ──
   if (rollDegRaw !== 0) {
     const rollRad = (rollDegRaw * Math.PI) / 180;
     const cosR = Math.cos(rollRad);
@@ -852,11 +896,9 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
     vOut = rotVec(vOut.x, vOut.y, cosR, sinR);
   }
 
-  const animDurationSec = clamp(
-    Math.min(totalDur, input.maxAnimSec),
-    0.01,
-    input.maxAnimSec,
-  );
+  // B1 timing: compress the synthetic segment so the LAST sample tSec ==
+  // animDurationSec EXACTLY and every keyTime ≤ 1 (native rejects otherwise).
+  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
 
   const meta: TracerMetaV2 = {
     tier: input.carry.tier,
@@ -870,6 +912,7 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
     handoff: { x: round2(hf.x), y: round2(hf.y) },
     vHandoffIn: { x: vIn.x, y: vIn.y },
     vHandoffOut: { x: vOut.x, y: vOut.y },
+    seg1Repinned,
     gUp: round2(gUp),
     gDown: round2(gDown),
     tUpSec: round2(tUp),
@@ -902,6 +945,115 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
   };
 }
 
+/**
+ * D4 — whole-flight-visible. The detected ball has no upward screen velocity at
+ * the handoff (already peaked/descending) or is already at the landing height,
+ * so we do NOT fabricate a synthetic apex. Render the REAL detected flight
+ * (untouched — seg1Repinned stays false) plus a short LINEAR fade tail that
+ * continues the detected velocity. C1 is exact (the tail leaves at the detected
+ * V_h). The GPS carry label is kept (distance is still valid).
+ */
+function buildWholeFlightVisible(
+  input: BuildArcInputV2,
+  ctx: {
+    carryM: number;
+    bucket: ShotBucket;
+    apexM: number;
+    hangS: number;
+    curvatureResidual: number;
+    latSignFit: -1 | 0 | 1;
+    parallaxEstimate: number;
+    rollDeg: number;
+    N: number;
+  },
+): TracerRenderSpecV2 {
+  const { tracer } = config;
+  const arc = tracer.arc;
+  const fit = input.fit as DetectedFit; // non-degenerate (caller-guaranteed)
+  const N = clamp(ctx.N, 60, 90);
+  const thSec = Math.max(fit.thSec, 1e-3);
+  const evalX = (t: number) => fit.coeff.x[0] + fit.coeff.x[1] * t + fit.coeff.x[2] * t * t;
+  const evalY = (t: number) => fit.coeff.y[0] + fit.coeff.y[1] * t + fit.coeff.y[2] * t * t;
+  const vhx = fit.coeff.x[1] + 2 * fit.coeff.x[2] * thSec;
+  const vhy = fit.coeff.y[1] + 2 * fit.coeff.y[2] * thSec;
+  const ph = { x: evalX(thSec), y: evalY(thSec) };
+
+  const tail = clamp(arc.wholeFlightTailSec, 0.1, Math.max(input.maxAnimSec - thSec, 0.1));
+  const seg1N = clamp(Math.round((thSec / (thSec + tail)) * N), 2, N - 2);
+  const seg2N = N - seg1N;
+  const samples: TracerSampleV2[] = [];
+  for (let i = 0; i < seg1N; i++) {
+    const t = (i / (seg1N - 1)) * thSec; // REAL detected curve, untouched
+    samples.push({ x: evalX(t), y: evalY(t), tSec: t });
+  }
+  for (let i = 1; i <= seg2N; i++) {
+    const tau = (i / seg2N) * tail; // linear tail continuing detected velocity
+    samples.push({ x: ph.x + vhx * tau, y: ph.y + vhy * tau, tSec: thSec + tau });
+  }
+  samples[0] = { x: evalX(0), y: evalY(0), tSec: 0 };
+
+  let hf = { x: ph.x, y: ph.y };
+  let ep = { x: samples[samples.length - 1].x, y: samples[samples.length - 1].y };
+  let vIn = { x: vhx, y: vhy };
+  let vOut = { x: vhx, y: vhy }; // linear tail leaves at exactly V_h → C1 exact
+  if (ctx.rollDeg !== 0) {
+    const rr = (ctx.rollDeg * Math.PI) / 180;
+    const cR = Math.cos(rr);
+    const sR = Math.sin(rr);
+    for (let i = 0; i < samples.length; i++) {
+      const r = rotAboutCenter(samples[i].x, samples[i].y, cR, sR);
+      samples[i] = { x: r.x, y: r.y, tSec: samples[i].tSec };
+    }
+    hf = rotAboutCenter(hf.x, hf.y, cR, sR);
+    ep = rotAboutCenter(ep.x, ep.y, cR, sR);
+    vIn = rotVec(vIn.x, vIn.y, cR, sR);
+    vOut = rotVec(vOut.x, vOut.y, cR, sR);
+  }
+  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
+
+  return {
+    samples,
+    animStartSec: input.animStartSec,
+    animDurationSec,
+    styling: {
+      color: tracer.color,
+      coreColor: tracer.coreColor,
+      lineWidthPx: tracer.lineWidthPx,
+      midWidthPx: tracer.midWidthPx,
+      glowWidthPx: tracer.glowWidthPx,
+      cometHead: tracer.cometHead,
+    },
+    labelText: input.carry.labelText,
+    meta: {
+      tier: input.carry.tier,
+      labelText: input.carry.labelText,
+      bucket: ctx.bucket,
+      carryM: round2(ctx.carryM),
+      apexM: round2(ctx.apexM),
+      hangS: round2(ctx.hangS),
+      degenerate: 'D4',
+      endpoint: { x: ep.x, y: ep.y },
+      handoff: { x: round2(hf.x), y: round2(hf.y) },
+      vHandoffIn: { x: vIn.x, y: vIn.y },
+      vHandoffOut: { x: vOut.x, y: vOut.y },
+      seg1Repinned: false, // detected segment untouched
+      gUp: 0,
+      gDown: 0,
+      tUpSec: 0,
+      tRemSec: round2(tail),
+      parallaxEstimate: round2(ctx.parallaxEstimate),
+      curvatureResidual: round2(ctx.curvatureResidual),
+      override: false,
+      lateralSource: 'vision',
+      straightBow: input.carry.deltaDeg !== null && Math.abs(input.carry.deltaDeg) < 8,
+      latSign: ctx.latSignFit,
+      rollDeg: ctx.rollDeg,
+      rollExceeded: false,
+      offAxis: false,
+    },
+  };
+}
+
 /** D6 — nothing usable. A short, straight, NaN-free stub the caller can veto. */
 function degenerateStub(
   input: BuildArcInputV2,
@@ -922,10 +1074,11 @@ function degenerateStub(
       tSec: s * dur,
     });
   }
+  const animDurationSec = finalizeTiming(samples, 0, input.maxAnimSec);
   return {
     samples,
     animStartSec: input.animStartSec,
-    animDurationSec: dur,
+    animDurationSec,
     styling: {
       color: tracer.color,
       coreColor: tracer.coreColor,
@@ -943,10 +1096,11 @@ function degenerateStub(
       apexM: 0,
       hangS: round2(hangTimeSec(0)),
       degenerate: 'D6',
-      endpoint: { x: land.x, y: land.y },
+      endpoint: { x: samples[samples.length - 1].x, y: samples[samples.length - 1].y },
       handoff: { x: round2(anchor.x), y: round2(anchor.y) },
       vHandoffIn: { x: 0, y: 0 },
       vHandoffOut: { x: 0, y: 0 },
+      seg1Repinned: false,
       gUp: 0,
       gDown: 0,
       tUpSec: 0,
@@ -1033,15 +1187,11 @@ function buildOffAxisDegrade(
     });
   }
   samples[0] = { x: p0.x, y: p0.y, tSec: 0 };
-  for (let i = 1; i < samples.length; i++) {
-    if (samples[i].tSec <= samples[i - 1].tSec) samples[i].tSec = samples[i - 1].tSec + 1e-4;
-  }
-
-  const dur = clamp(Math.min(thSec + tail, input.maxAnimSec), 0.2, input.maxAnimSec);
+  const animDurationSec = finalizeTiming(samples, thSec, input.maxAnimSec);
   return {
     samples,
     animStartSec: input.animStartSec,
-    animDurationSec: dur,
+    animDurationSec,
     styling: {
       color: tracer.color,
       coreColor: tracer.coreColor,
@@ -1063,6 +1213,7 @@ function buildOffAxisDegrade(
       handoff: { x: round2(ph.x), y: round2(ph.y) },
       vHandoffIn: { x: vx, y: vy },
       vHandoffOut: { x: vx * 0.5, y: vy },
+      seg1Repinned: false,
       gUp: 0,
       gDown: round2(gTail),
       tUpSec: 0,

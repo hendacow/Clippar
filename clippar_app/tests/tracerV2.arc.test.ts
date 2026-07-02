@@ -103,6 +103,33 @@ function buildFrom(opts: {
   return { fit, carry, landing, spec: buildArcSpecV2(input) };
 }
 
+// Velocity of the polyline across the segment-1→segment-2 seam, computed from
+// the ACTUAL samples (not meta) — for non-tautological C1 / speed-ratio checks.
+// The seam is located by the sample nearest meta.handoff (robust to timeline
+// compression, which shifts tSec but not the seam's spatial position).
+function seamVels(spec: {
+  samples: { x: number; y: number; tSec: number }[];
+  meta: { handoff: { x: number; y: number } };
+}) {
+  const h = spec.meta.handoff;
+  let k = 0;
+  let best = Infinity;
+  for (let i = 0; i < spec.samples.length; i++) {
+    const d = Math.hypot(spec.samples[i].x - h.x, spec.samples[i].y - h.y);
+    if (d < best) {
+      best = d;
+      k = i;
+    }
+  }
+  const fd = (a: { x: number; y: number; tSec: number }, b: typeof a) => {
+    const dt = b.tSec - a.tSec || 1e-9;
+    return { x: (b.x - a.x) / dt, y: (b.y - a.y) / dt };
+  };
+  const before = k > 0 ? fd(spec.samples[k - 1], spec.samples[k]) : null;
+  const after = k < spec.samples.length - 1 ? fd(spec.samples[k], spec.samples[k + 1]) : null;
+  return { before, after, k };
+}
+
 // ── fitDetectedTrack ──
 
 test('fitDetectedTrack: recovers a clean quadratic track; handoff velocity finite', () => {
@@ -137,14 +164,20 @@ test('fitDetectedTrack: span < 150ms → degenerate', () => {
 
 // ── Invariants I1–I10 + I11a on a nominal arc ──
 
-test('I1/I2 C0+C1 continuity at handoff < 1e-9 (well-behaved inputs)', () => {
+test('I1/I2 C0+C1 continuity at handoff (well-behaved: raw == effective)', () => {
   // Drift agrees with the landing side (+x) and vy is below the A4 clamp, so
-  // neither the Fritsch–Carlson guard nor the V_h.y clamp is active → C1 exact.
+  // neither the straightening nor the V_h.y clamp is active → raw handoff
+  // velocity == effective, and segment 1 is NOT re-pinned.
   const { spec } = buildFrom({ vx: 0.04, vy: 0.4, thSec: 0.4, carryM: 150, deltaDeg: 12 });
   const m = spec.meta;
-  // C1: segment-1 exits the handoff at V_h; segment-2 enters at V_h.
-  assert.ok(Math.abs(m.vHandoffIn.x - m.vHandoffOut.x) < 1e-9, `C1x ${m.vHandoffIn.x} vs ${m.vHandoffOut.x}`);
-  assert.ok(Math.abs(m.vHandoffIn.y - m.vHandoffOut.y) < 1e-9, `C1y ${m.vHandoffIn.y} vs ${m.vHandoffOut.y}`);
+  assert.equal(m.seg1Repinned, false);
+  // meta witnesses (raw IN vs effective OUT) coincide because nothing clamped.
+  assert.ok(Math.abs(m.vHandoffIn.x - m.vHandoffOut.x) < 1e-9, `metaC1x ${m.vHandoffIn.x} vs ${m.vHandoffOut.x}`);
+  assert.ok(Math.abs(m.vHandoffIn.y - m.vHandoffOut.y) < 1e-9, `metaC1y ${m.vHandoffIn.y} vs ${m.vHandoffOut.y}`);
+  // C1 on the ACTUAL polyline (not meta): the seam velocity is continuous.
+  const { before, after } = seamVels(spec);
+  assert.ok(before && after, 'seam found');
+  assert.ok(Math.abs(before!.x - after!.x) < 0.05 && Math.abs(before!.y - after!.y) < 0.05, `polyC1 ${JSON.stringify(before)} vs ${JSON.stringify(after)}`);
   // C0: a sample sits exactly at the handoff position.
   const near = spec.samples.reduce((best, s) =>
     Math.abs(s.x - m.handoff.x) + Math.abs(s.y - m.handoff.y) <
@@ -195,12 +228,22 @@ test('I6 no lateral sign reversal: x is monotone across the whole arc', () => {
   }
 });
 
-test('I7 cross-handoff speed ratio < 1.3', () => {
-  const { spec } = buildFrom({ vx: 0.2, vy: 0.9, carryM: 200 });
-  const m = spec.meta;
-  const inSpd = Math.hypot(m.vHandoffIn.x, m.vHandoffIn.y);
-  const outSpd = Math.hypot(m.vHandoffOut.x, m.vHandoffOut.y);
+test('I7 cross-handoff speed ratio < 1.3 (raw fit IN vs effective OUT)', () => {
+  const { spec, fit } = buildFrom({ vx: 0.2, vy: 0.9, carryM: 200, thSec: 0.4 });
+  assert.equal(fit.degenerate, false);
+  if (fit.degenerate) return;
+  // vHandoffIn is the RAW detected fit velocity; vHandoffOut the EFFECTIVE
+  // (clamped) synthetic entry — different sources, so this is not tautological.
+  const inSpd = Math.hypot(fit.vh.x, fit.vh.y);
+  assert.ok(Math.abs(spec.meta.vHandoffIn.x - fit.vh.x) < 1e-9, 'vHandoffIn == raw fit');
+  const outSpd = Math.hypot(spec.meta.vHandoffOut.x, spec.meta.vHandoffOut.y);
   assert.ok(outSpd / Math.max(inSpd, 1e-9) < 1.3, `ratio ${outSpd / inSpd}`);
+  // And the actual polyline has no gross velocity jump at the seam.
+  const { before, after } = seamVels(spec);
+  if (before && after) {
+    const r = Math.hypot(after.x, after.y) / Math.max(Math.hypot(before.x, before.y), 1e-9);
+    assert.ok(r < 2.0, `polyline seam jump ${r}`);
+  }
 });
 
 test('I8 tSec strictly increasing, first == 0 (I11b precursor)', () => {
@@ -293,61 +336,78 @@ test('F8b: |deltaDeg| < 8° flags a straight-bow', () => {
 
 // ── Property sweep: carry × deltaDeg × vy0 × vx × t_h ──
 
-test('property sweep: invariants hold across carry×delta×vy0×vx×t_h', () => {
+test('property sweep: invariants hold across carry×delta×vy0×vx×t_h×maxAnim', () => {
   const carries = [25, 80, 150, 230, 300];
   const deltas = [-60, -25, 0, 25, 60];
-  const vys = [0.15, 0.5, 0.9, 1.2]; // normalized climb → screen vertical vel
+  const vys = [0.15, 0.5, 0.9, 1.2]; // launch climb; handoff vy = vy − 0.3·th
   const vxs = [-0.3, 0, 0.3];
   const ths = [0.15, 0.6, 1.5];
+  const maxAnims = [0.8, 1.5, 3, 6.5]; // B1: short clips must not over-run
   let count = 0;
   for (const carryM of carries)
     for (const deltaDeg of deltas)
       for (const vy of vys)
         for (const vx of vxs)
-          for (const thSec of ths) {
-            count++;
-            const { spec } = buildFrom({ carryM, deltaDeg, vx, vy, thSec });
-            const b = bucketForCarry(carryM);
-            const p = TRACER_PRIORS[b];
-            const tag = `c${carryM} d${deltaDeg} vy${vy} vx${vx} th${thSec}`;
+          for (const thSec of ths)
+            for (const maxAnimSec of maxAnims) {
+              count++;
+              const { spec, fit } = buildFrom({ carryM, deltaDeg, vx, vy, thSec, maxAnimSec });
+              const b = bucketForCarry(carryM);
+              const p = TRACER_PRIORS[b];
+              const tag = `c${carryM} d${deltaDeg} vy${vy} vx${vx} th${thSec} max${maxAnimSec}`;
 
-            // finite + in-frame-ish
-            for (const s of spec.samples) {
-              assert.ok(
-                Number.isFinite(s.x) && Number.isFinite(s.y) && Number.isFinite(s.tSec),
-                `NaN @ ${tag}`,
-              );
+              for (const s of spec.samples) {
+                assert.ok(Number.isFinite(s.x) && Number.isFinite(s.y) && Number.isFinite(s.tSec), `NaN @ ${tag}`);
+              }
+              // strictly increasing time, first 0
+              assert.equal(spec.samples[0].tSec, 0, `t0 @ ${tag}`);
+              for (let i = 1; i < spec.samples.length; i++) {
+                assert.ok(spec.samples[i].tSec > spec.samples[i - 1].tSec, `tSec @ ${tag}`);
+              }
+              // B1: last tSec EXACTLY == animDurationSec, every keyTime ≤ 1, and
+              // animDurationSec ≤ maxAnimSec (else native ERR_TRACER_SPEC).
+              const last = spec.samples[spec.samples.length - 1];
+              assert.ok(Math.abs(last.tSec - spec.animDurationSec) < 1e-9, `lastT==animDur @ ${tag}: ${last.tSec} vs ${spec.animDurationSec}`);
+              assert.ok(spec.animDurationSec <= maxAnimSec + 1e-6, `animDur≤max @ ${tag}`);
+              for (const s of spec.samples) assert.ok(s.tSec / spec.animDurationSec <= 1 + 1e-9, `keyTime≤1 @ ${tag}`);
+              // exact endpoint (== meta.endpoint; F8b may flip the side)
+              assert.ok(Math.abs(last.x - spec.meta.endpoint.x) < 1e-6 && Math.abs(last.y - spec.meta.endpoint.y) < 1e-6, `endpoint @ ${tag}`);
+              // apex bounds / I11a
+              assert.ok(spec.meta.apexM >= p.apexLoM - 1e-9 && spec.meta.apexM <= p.apexHiM * 1.5 + 1e-9, `apex @ ${tag}: ${spec.meta.apexM}`);
+              // B2: vertical strictly one-peak (rise then fall) for EVERY case —
+              // no wrong-sign plunge/jump.
+              const ys = spec.samples.map((s) => s.y);
+              let pk = 0;
+              for (let i = 1; i < ys.length; i++) if (ys[i] > ys[pk]) pk = i;
+              for (let i = 1; i <= pk; i++) assert.ok(ys[i] - ys[i - 1] >= -1e-6, `rise @ ${tag} i${i}`);
+              for (let i = pk + 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] <= 1e-6, `fall @ ${tag} i${i}`);
+              // MAJOR 1: no endpoint teleport. A real descent steepens smoothly
+              // (last step ≈ the adjacent step); the gDown-cap teleport bug made
+              // the forced endpoint jump ~14× the prior step. Assert the last
+              // step is within 3× the previous step (catches teleports, allows
+              // smooth steepening).
+              const steps: number[] = [];
+              for (let i = 1; i < spec.samples.length; i++) steps.push(Math.hypot(spec.samples[i].x - spec.samples[i - 1].x, spec.samples[i].y - spec.samples[i - 1].y));
+              const nS = steps.length;
+              assert.ok(steps[nS - 1] <= 3 * steps[nS - 2] + 1e-6, `endpoint teleport @ ${tag}: last ${steps[nS - 1].toFixed(4)} vs prev ${steps[nS - 2].toFixed(4)}`);
+              // cross-handoff speed ratio (I7): effective synthetic entry speed
+              // vs the RAW detected fit speed. Non-tautological — vHandoffIn is
+              // the raw fit velocity, vHandoffOut the effective (clamped/
+              // straightened) one; the clamp only ever reduces, so ratio ≤ 1.
+              // Only meaningful with a real detected→synthetic seam.
+              if (!fit.degenerate) {
+                const inSpd = Math.hypot(spec.meta.vHandoffIn.x, spec.meta.vHandoffIn.y);
+                const outSpd = Math.hypot(spec.meta.vHandoffOut.x, spec.meta.vHandoffOut.y);
+                assert.ok(outSpd / Math.max(inSpd, 1e-9) < 1.3, `speedratio @ ${tag}: ${outSpd / inSpd}`);
+              }
+              // no lateral sign reversal
+              const xs = spec.samples.map((s) => s.x);
+              const dir = Math.sign(xs[xs.length - 1] - xs[0]) || 1;
+              for (let i = 1; i < xs.length; i++) {
+                assert.ok((xs[i] - xs[i - 1]) * dir >= -1e-4, `lateral reversal @ ${tag} i${i}`);
+              }
             }
-            // strictly increasing time, first 0
-            assert.equal(spec.samples[0].tSec, 0, `t0 @ ${tag}`);
-            for (let i = 1; i < spec.samples.length; i++) {
-              assert.ok(spec.samples[i].tSec > spec.samples[i - 1].tSec, `tSec @ ${tag}`);
-            }
-            // exact endpoint: the arc lands exactly on its target (which F8b may
-            // have flipped to the detected side — compare against meta.endpoint).
-            const last = spec.samples[spec.samples.length - 1];
-            assert.ok(
-              Math.abs(last.x - spec.meta.endpoint.x) < 1e-6 &&
-                Math.abs(last.y - spec.meta.endpoint.y) < 1e-6,
-              `endpoint @ ${tag}`,
-            );
-            // apex bounds / I11a
-            assert.ok(
-              spec.meta.apexM >= p.apexLoM - 1e-9 && spec.meta.apexM <= p.apexHiM * 1.5 + 1e-9,
-              `apex @ ${tag}: ${spec.meta.apexM}`,
-            );
-            // cross-handoff speed ratio < 1.3
-            const inSpd = Math.hypot(spec.meta.vHandoffIn.x, spec.meta.vHandoffIn.y);
-            const outSpd = Math.hypot(spec.meta.vHandoffOut.x, spec.meta.vHandoffOut.y);
-            assert.ok(outSpd / Math.max(inSpd, 1e-9) < 1.3, `speedratio @ ${tag}`);
-            // no lateral sign reversal
-            const xs = spec.samples.map((s) => s.x);
-            const dir = Math.sign(xs[xs.length - 1] - xs[0]) || 1;
-            for (let i = 1; i < xs.length; i++) {
-              assert.ok((xs[i] - xs[i - 1]) * dir >= -1e-4, `lateral reversal @ ${tag} i${i}`);
-            }
-          }
-  assert.ok(count === 5 * 5 * 4 * 3 * 3, `swept ${count}`);
+  assert.ok(count === 5 * 5 * 4 * 3 * 3 * 4, `swept ${count}`);
 });
 
 // ════════════════════════════════════════════════════════════════════════
@@ -424,11 +484,24 @@ test('A8 roll×pitch×deltaDeg sweep: rotated-arc invariants hold', () => {
         const last = specR.samples[specR.samples.length - 1];
         assert.ok(Math.abs(last.x - er.x) < 1e-6 && Math.abs(last.y - er.y) < 1e-6, `last==endpoint @ ${tag}`);
 
-        // (2) C1 continuity preserved under rotation
+        // (2) C1 preserved under rotation: both handoff velocity witnesses
+        //     rotate consistently (rotation is linear → any continuity gap is
+        //     preserved). Vector rotation about the origin in aspect space.
+        const rr = (rollDeg * Math.PI) / 180;
+        const cV = Math.cos(rr), sV = Math.sin(rr), aspV = 9 / 16;
+        const rotV = (v: { x: number; y: number }) => ({
+          x: v.x * cV - (v.y * sV) / aspV,
+          y: v.x * sV * aspV + v.y * cV,
+        });
+        const rIn = rotV(spec0.meta.vHandoffIn);
+        const rOut = rotV(spec0.meta.vHandoffOut);
         assert.ok(
-          Math.abs(specR.meta.vHandoffIn.x - specR.meta.vHandoffOut.x) < 1e-9 &&
-            Math.abs(specR.meta.vHandoffIn.y - specR.meta.vHandoffOut.y) < 1e-9,
-          `C1 under rotation @ ${tag}`,
+          Math.abs(specR.meta.vHandoffIn.x - rIn.x) < 1e-9 && Math.abs(specR.meta.vHandoffIn.y - rIn.y) < 1e-9,
+          `vIn rotates @ ${tag}`,
+        );
+        assert.ok(
+          Math.abs(specR.meta.vHandoffOut.x - rOut.x) < 1e-9 && Math.abs(specR.meta.vHandoffOut.y - rOut.y) < 1e-9,
+          `vOut rotates @ ${tag}`,
         );
 
         // (3) horizon-relative apex unchanged: apexM invariant, and the apex
@@ -501,4 +574,112 @@ test('A8 null roll is treated as 0 (no rotation, no crash)', () => {
   });
   assert.equal(spec.meta.rollDeg, 0);
   assert.equal(spec.meta.offAxis, false);
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Reviewer repro regressions (B1 / B2 / B3 / MAJOR 1)
+// ════════════════════════════════════════════════════════════════════════
+
+test('B1 repro: thSec=0.6, maxAnimSec=1.0 → last tSec == animDurationSec, keyTimes ≤ 1', () => {
+  const { spec } = buildFrom({ thSec: 0.6, maxAnimSec: 1.0, carryM: 150, vx: 0.05, vy: 0.5 });
+  const last = spec.samples[spec.samples.length - 1];
+  assert.ok(Math.abs(last.tSec - spec.animDurationSec) < 1e-9, `last ${last.tSec} vs animDur ${spec.animDurationSec}`);
+  assert.ok(spec.animDurationSec <= 1.0 + 1e-6, `animDur ${spec.animDurationSec} > maxAnim`);
+  for (const s of spec.samples) assert.ok(s.tSec / spec.animDurationSec <= 1 + 1e-9, `keyTime>1 @ ${s.tSec}`);
+});
+
+test('B1 sweep: last tSec == animDurationSec exactly for maxAnim ∈ {0.8,1.5,3,6.5}', () => {
+  for (const maxAnimSec of [0.8, 1.5, 3, 6.5])
+    for (const thSec of [0.15, 0.6, 1.5]) {
+      const { spec } = buildFrom({ thSec, maxAnimSec, carryM: 150 });
+      const last = spec.samples[spec.samples.length - 1];
+      assert.ok(Math.abs(last.tSec - spec.animDurationSec) < 1e-9, `max${maxAnimSec} th${thSec}: ${last.tSec} vs ${spec.animDurationSec}`);
+      assert.ok(spec.animDurationSec <= maxAnimSec + 1e-6);
+    }
+});
+
+test('B2 repro: vy=0.15, th=1.5 (handoff vy goes negative) → vertical monotone, no jump', () => {
+  const { spec } = buildFrom({ vy: 0.15, thSec: 1.5, vx: 0.05, carryM: 150 });
+  const ys = spec.samples.map((s) => s.y);
+  let pk = 0;
+  for (let i = 1; i < ys.length; i++) if (ys[i] > ys[pk]) pk = i;
+  for (let i = 1; i <= pk; i++) assert.ok(ys[i] - ys[i - 1] >= -1e-6, `rise break @${i}`);
+  for (let i = pk + 1; i < ys.length; i++) assert.ok(ys[i] - ys[i - 1] <= 1e-6, `fall break @${i}`);
+  // No mid-arc teleport: the reported bug jumped 1.34–1.49 screen-heights.
+  let maxJump = 0;
+  for (let i = 1; i < ys.length; i++) maxJump = Math.max(maxJump, Math.abs(ys[i] - ys[i - 1]));
+  assert.ok(maxJump < 0.2, `max vertical step ${maxJump}`);
+});
+
+test('B3 negative: laterally-straight track (gravity sag only) does NOT trip F8b override', () => {
+  for (const thSec of [1.0, 1.2, 1.4]) {
+    // x strictly linear (no lateral curve); y has strong gravity sag.
+    const track: TrackPoint[] = [];
+    for (let i = 0; i < 12; i++) {
+      const t = (i / 11) * thSec;
+      track.push({ x: 0.5 + 0.02 * t, y: 0.2 + 0.6 * t - 0.5 * 0.9 * t * t, tMs: t * 1000 });
+    }
+    const fit = fitDetectedTrack(track);
+    assert.equal(fit.degenerate, false);
+    if (fit.degenerate) continue;
+    assert.ok(fit.curvatureResidual <= 0.02, `th${thSec}: lateral curvRes ${fit.curvatureResidual} should be ~0 for gravity sag`);
+    // GPS lands left; detected drift is a hair right (parallax). Override must
+    // NOT fire (no real lateral curvature) → endpoint stays on the GPS side.
+    const spec = buildArcSpecV2({
+      fit,
+      carry: mkCarry(150, -20, 1),
+      landing: landingFor(150, -20),
+      horizonY: HORIZON,
+      vFovPortraitDeg: VFOV,
+      camHeightM: CAMH,
+      animStartSec: 0.1,
+      maxAnimSec: 6.5,
+    });
+    assert.equal(spec.meta.override, false, `th${thSec}: override fired on gravity sag`);
+  }
+});
+
+test('B3 positive: a genuine curving fade DOES trip F8b override', () => {
+  // x has real quadratic curvature (a fade): drifts right then curves; GPS says
+  // left. Strong lateral curvature + drift beyond parallax → override fires.
+  const thSec = 1.2;
+  const track: TrackPoint[] = [];
+  for (let i = 0; i < 12; i++) {
+    const t = (i / 11) * thSec;
+    const s = t / thSec;
+    track.push({ x: 0.5 + 0.28 * s * s, y: 0.2 + 0.6 * t - 0.5 * 0.4 * t * t, tMs: t * 1000 });
+  }
+  const fit = fitDetectedTrack(track);
+  assert.equal(fit.degenerate, false);
+  if (fit.degenerate) return;
+  assert.ok(fit.curvatureResidual > 0.02, `curvRes ${fit.curvatureResidual} should exceed 0.02 for a fade`);
+  const spec = buildArcSpecV2({
+    fit,
+    carry: mkCarry(150, -20, 1), // GPS says LEFT, vision curves RIGHT
+    landing: landingFor(150, -20),
+    horizonY: HORIZON,
+    vFovPortraitDeg: VFOV,
+    camHeightM: CAMH,
+    animStartSec: 0.1,
+    maxAnimSec: 6.5,
+  });
+  assert.equal(spec.meta.override, true, 'override should fire on a genuine fade');
+  assert.equal(spec.meta.lateralSource, 'vision');
+});
+
+test('MAJOR 1: gDown never exceeds the gMax·gUp cap, and the endpoint is not teleported', () => {
+  // Sweep params that push toward a steep descent (high apex, close landing).
+  for (const carryM of [50, 90, 150, 260])
+    for (const vy of [0.5, 0.9, 1.2])
+      for (const thSec of [0.3, 0.6]) {
+        const { spec } = buildFrom({ carryM, vy, thSec, deltaDeg: 5, maxAnimSec: 6.5 });
+        if (spec.meta.degenerate !== 'D1') continue;
+        // cap respected (+0.02 for the round2 on the exposed meta values)
+        assert.ok(spec.meta.gDown <= 1.5 * spec.meta.gUp + 0.02, `c${carryM} vy${vy} th${thSec}: gDown ${spec.meta.gDown} > 1.5·gUp ${spec.meta.gUp}`);
+        // no endpoint teleport: last step within 3× the previous step
+        const s = spec.samples;
+        const lastStep = Math.hypot(s[s.length - 1].x - s[s.length - 2].x, s[s.length - 1].y - s[s.length - 2].y);
+        const prevStep = Math.hypot(s[s.length - 2].x - s[s.length - 3].x, s[s.length - 2].y - s[s.length - 3].y);
+        assert.ok(lastStep <= 3 * prevStep + 1e-6, `c${carryM} vy${vy} th${thSec}: teleport last ${lastStep} vs prev ${prevStep}`);
+      }
 });
