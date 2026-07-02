@@ -1345,6 +1345,31 @@ extension ShotDetectorModule {
         for l in glowLayers { parentLayer.addSublayer(l) }
         for l in midLayers { parentLayer.addSublayer(l) }
         for l in coreLayers { parentLayer.addSublayer(l) }
+        // True by construction (the addSublayer calls above already ran) — kept
+        // as an explicit field so a future refactor that guards those calls
+        // can't silently drop it from the log without this going false.
+        let addedToOverlay = (parentLayer.sublayers?.count ?? 0) >= (glowLayers.count + midLayers.count + coreLayers.count)
+
+        // Diagnostic for the "done but no visible arc" bug hunt: dumps the exact
+        // pixel geometry + layer-tree state a v2 render produced, so a device
+        // log can immediately show whether the sample coordinates are off-frame
+        // (outside [0, renderSize]) vs. genuinely on-frame but not drawing (a
+        // real layer/keyframe bug). Correlate with the JS-side [TRACER-V2] line
+        // for the same clip. Cheap (one print), left unconditional — same
+        // pattern as the existing "[Clippar.Tracer] OK render" summary line.
+        var apexPxForLog = pts[0]
+        for p in pts where p.y > apexPxForLog.y { apexPxForLog = p }
+        func fmtPx(_ p: CGPoint) -> String { "(\(String(format: "%.1f", p.x)),\(String(format: "%.1f", p.y)))" }
+        print(
+            "[TRACER-V2-RENDER] sampleCount=\(pts.count)" +
+            " firstSamplePx=\(fmtPx(pts[0]))" +
+            " lastSamplePx=\(fmtPx(pts[pts.count - 1]))" +
+            " apexSamplePx=\(fmtPx(apexPxForLog))" +
+            " renderSize=(\(Int(renderSize.width))x\(Int(renderSize.height)))" +
+            " strokeKeyframeCount=\(keyTimes.count)" +
+            " layersAdded=\(glowLayers.count + midLayers.count + coreLayers.count)" +
+            " addedToOverlay=\(addedToOverlay)"
+        )
 
         // Comet head: position keyframes over the SAME samples/keyTimes so the
         // dot rides the drawing tip; fades out over 0.25s after the draw (v1).
