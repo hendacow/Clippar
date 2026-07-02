@@ -683,3 +683,59 @@ test('MAJOR 1: gDown never exceeds the gMax·gUp cap, and the endpoint is not te
         assert.ok(lastStep <= 3 * prevStep + 1e-6, `c${carryM} vy${vy} th${thSec}: teleport last ${lastStep} vs prev ${prevStep}`);
       }
 });
+
+// ════════════════════════════════════════════════════════════════════════
+// Apex height — TV-style exaggeration (must clear the horizon like v1)
+// ════════════════════════════════════════════════════════════════════════
+
+// Reproduce the prior-driven straight-shot path (the case that read flat: apex
+// on the horizon at ~0.58). The screen apex must now sit WELL above the horizon,
+// comparable to v1's ~0.74–0.85.
+function priorArc(carryM: number, deltaDeg = 0) {
+  const vFov = 62;
+  const horizonY = computeHorizonY(5, vFov); // ≈ 0.573
+  const landing = projectLanding({
+    deltaDeg,
+    carryM,
+    horizonY,
+    hFovPortraitDeg: portraitHFovDeg(62),
+    vFovPortraitDeg: vFov,
+    tripodHeightM: 1.0,
+  });
+  const spec = buildArcSpecV2({
+    fit: { degenerate: true, reason: 'D2', points: [] },
+    carry: mkCarry(carryM, deltaDeg, 1),
+    landing,
+    horizonY,
+    vFovPortraitDeg: vFov,
+    camHeightM: 1.0,
+    animStartSec: 2.55,
+    maxAnimSec: 6.0,
+    poseAnchor: { x: 0.5, y: 0.2 },
+  });
+  const apexY = Math.max(...spec.samples.map((s) => s.y));
+  return { spec, apexY, horizonY, landingY: landing.y };
+}
+
+test('apex height: straight 100m apex sits ~0.74–0.80 (well above horizon), not flat on it', () => {
+  const { apexY, horizonY } = priorArc(100);
+  assert.ok(apexY >= 0.74 && apexY <= 0.82, `apexY ${apexY} not in [0.74,0.82]`);
+  // clears the horizon by a healthy TV-style margin (old flat arc was ~+0.01)
+  assert.ok(apexY - horizonY >= 0.18, `apex only ${(apexY - horizonY).toFixed(3)} above horizon`);
+});
+
+test('apex height: clears the horizon by a good margin across carries 60–200m', () => {
+  for (const carryM of [60, 100, 140, 200]) {
+    const { apexY, horizonY, landingY } = priorArc(carryM);
+    assert.ok(apexY - horizonY >= 0.15, `carry ${carryM}: apex only ${(apexY - horizonY).toFixed(3)} above horizon`);
+    assert.ok(apexY > landingY + 0.1, `carry ${carryM}: apex ${apexY} not clearly above landing ${landingY}`);
+    assert.ok(apexY <= 0.92, `carry ${carryM}: apex ${apexY} off the top of frame`);
+  }
+});
+
+test('apex height: descent still lands EXACTLY on the GPS landing (endpoint unchanged)', () => {
+  const { spec, landingY } = priorArc(100);
+  const last = spec.samples[spec.samples.length - 1];
+  assert.ok(Math.abs(last.y - landingY) < 1e-6, `endpoint y ${last.y} vs landing ${landingY}`);
+  assert.ok(Math.abs(last.x - spec.meta.endpoint.x) < 1e-6);
+});
