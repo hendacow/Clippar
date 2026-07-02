@@ -39,6 +39,8 @@ import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
+import { useGpsSession } from '@/hooks/useGpsSession';
+import { variantIsDev } from '@/lib/variant';
 import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from '@/lib/storage';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset } from '@/lib/api';
@@ -60,6 +62,10 @@ export default function RecordScreen() {
   const shutter = useShutter();
   const round = useRound();
   const { getCurrentLocation, getCurrentHeading } = useLocation();
+  // Tracer V2: drive the continuous GPS ring while this tab is focused and
+  // surface health for the chip (S5). Gated on tracer.enabled (dev only), so
+  // prod never starts a location watcher. Replaces the one-shot save-path fix.
+  const gpsHealth = useGpsSession(config.tracer.enabled);
   const [courseName, setCourseName] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | undefined>();
   const [courseHoles, setCourseHoles] = useState<HoleData[] | undefined>();
@@ -1096,6 +1102,47 @@ export default function RecordScreen() {
           {shutter.connected ? 'Clicker' : 'No Clicker'}
         </Text>
       </View>
+
+      {/* GPS health chip (Tracer V2, dev builds only) — top left, below the
+          Options gear. green ≤5m / yellow ≤10m / red / "GPS locking…". Lets us
+          eyeball the live effective accuracy while walking a hole. */}
+      {variantIsDev() && (
+        <View
+          style={{
+            position: 'absolute',
+            top: insets.top + 132,
+            left: 12,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 6,
+            backgroundColor: 'rgba(0,0,0,0.5)',
+            paddingHorizontal: 10,
+            paddingVertical: 6,
+            borderRadius: 16,
+          }}
+        >
+          <View
+            style={{
+              width: 8,
+              height: 8,
+              borderRadius: 4,
+              backgroundColor:
+                gpsHealth.state === 'green'
+                  ? '#34C759'
+                  : gpsHealth.state === 'yellow'
+                    ? '#FFCC00'
+                    : gpsHealth.state === 'red'
+                      ? '#FF4444'
+                      : '#8E8E93',
+            }}
+          />
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 11, fontWeight: '600' }}>
+            {gpsHealth.state === 'locking' || gpsHealth.effAccM == null
+              ? 'GPS locking…'
+              : `GPS ${gpsHealth.effAccM.toFixed(1)}m`}
+          </Text>
+        </View>
+      )}
 
       {/* Recording settings gear — top left, under the shutter badge.
           Hidden during the tutorial to keep the practice run focused. */}

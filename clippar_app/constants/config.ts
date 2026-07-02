@@ -154,8 +154,14 @@ export const config = {
     // per-shot fix + effAcc + tier. See plan Pillar 1 / A1 / A2 / A3.
     gps: {
       warmupSec: 15, // first N seconds after start/resume excluded as junk
-      windowPreSec: 25, // stationary window before the anchor (impact/stop)
-      windowPostSec: 3, // stationary window after the anchor
+      windowPreSec: 25, // STOP-anchor stationary window before the anchor
+      // MERGE-NOTE (Lane A / feat/tracer-v2-gps): these are the STOP-anchor
+      // window. Reconciled with plan A1 [stop−25s, stop+10s] → windowPostSec is
+      // 10 (was 3). The IMPACT anchor uses a tighter 15s pre-window
+      // (IMPACT_PRE_SEC in lib/gpsSession.ts; no config field) plus this same
+      // +10s post. Scaffold owns this block — folding this one value in per
+      // reviewer direction; flag on merge.
+      windowPostSec: 10, // stationary window after the anchor (both anchor types)
       widenPreSec: 45, // widen the pre-window when too few fixes land
       stationarySpeedMax: 0.7, // m/s — above this the golfer is walking
       fixAccMax: 20, // m — drop fixes reporting worse horizontalAccuracy

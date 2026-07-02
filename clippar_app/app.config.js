@@ -158,12 +158,15 @@ module.exports = () => ({
         'expo-location',
         {
           locationWhenInUsePermission:
-            'Clippar uses your location to match each shot to the right hole and measure shot distances on the course.',
-          // Clippar only reads location while you are actively recording a round
-          // (foreground): useLocation.ts calls requestForegroundPermissionsAsync
-          // and watchPositionAsync — never the background variants. Passing
-          // `false` deletes the unused "Always" Info.plist keys so the app does
-          // not request location access it never uses (an App Review red flag).
+            'Clippar uses your location during your round to measure how far you hit each shot and match shots to the right hole.',
+          // Foreground / when-in-use ONLY. The Tracer V2 GPS backbone
+          // (hooks/useGpsSession.ts) runs a continuous watchPositionAsync while
+          // the record tab is focused, and useLocation.ts requests foreground
+          // permission — neither ever uses the background variants. Passing
+          // `false` deletes the unused "Always" Info.plist keys (no Always
+          // prompt, no background location modes) — an App Review red flag
+          // otherwise. There are also NO UIBackgroundModes anywhere in this
+          // config, so iOS suspends GPS in the background as intended.
           locationAlwaysAndWhenInUsePermission: false,
           locationAlwaysPermission: false,
         },
