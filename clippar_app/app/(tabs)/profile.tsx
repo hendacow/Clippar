@@ -25,6 +25,7 @@ import {
   ShieldCheck,
   Activity,
   HardDrive,
+  Radar,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -41,6 +42,7 @@ import { processUploadQueue } from '@/lib/uploadQueue';
 import { isConnected } from '@/lib/network';
 import { wipeLocalUserData } from '@/lib/localWipe';
 import { supabase } from '@/lib/supabase';
+import { variantIsDev } from '@/lib/variant';
 
 interface ProfileRow {
   display_name: string | null;
@@ -576,6 +578,19 @@ export default function ProfileScreen() {
                   title="Tracer Sim (debug)"
                   subtitle="Synthetic GPS shots → rendered tracer arcs"
                   onPress={() => router.push('/(dev)/tracer-sim')}
+                />
+              </>
+            )}
+            {/* S11: tracer field-testing knobs — hidden unless variantIsDev()
+                (the clippar-dev build variant), not just any __DEV__ build. */}
+            {variantIsDev() && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Radar size={18} color={theme.colors.textSecondary} />}
+                  title="Tracer Dev Settings"
+                  subtitle="On/off, default carry, debug bypasses"
+                  onPress={() => router.push('/profile/tracer-dev-settings')}
                 />
               </>
             )}
