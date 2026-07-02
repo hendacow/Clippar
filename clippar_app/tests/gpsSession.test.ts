@@ -113,6 +113,30 @@ test('B1: impact anchor never medians onto the bag across the walk (degrades ins
   }
 });
 
+test('B1: a speed-blind walk (speed = -1 under canopy) still never reaches the bag', () => {
+  const s = new GpsSession();
+  // The bag IS provably stationary (speed 0, tight acc — would be preferred by
+  // 1/acc²) and within reach of the widen window, but the WALK between it and
+  // the ball is speed-blind (CoreLocation reports -1 under canopy). Pre-fix, the
+  // backward scan skipped those unknown-speed walk fixes and reached the bag.
+  // Now unknown speed is a barrier, so it degrades instead.
+  const impact = 60_000;
+  for (let t = 16; t <= 24; t++) s.addFix(fix(t * 1000, 0, 4, 0)); // BAG (stationary, reachable)
+  for (let t = 25; t <= 44; t++) s.addFix(fix(t * 1000, 120 * ((t - 25) / 19), 6, -1)); // WALK, speed unknown
+  for (let t = 58; t <= 60; t++) s.addFix(fix(t * 1000, 120, 12, 0)); // BALL (only 3)
+
+  const r = s.estimateAtImpact(impact);
+  assert.ok(
+    !(r.fix && metersNorth(r.fix.lat, BASE_LAT) < 30),
+    'speed-blind walk must still never land on the bag'
+  );
+  if (r.fix) {
+    assert.ok(metersNorth(r.fix.lat, BASE_LAT + north(120)) < 15, 'a returned fix must be the ball');
+  } else {
+    assert.equal(r.reason, 'no-fix');
+  }
+});
+
 // ── B2: widened provenance is a real, persisted flag ─────────────────────────
 test('B2: fixSourceLabel composes anchor + widened provenance', () => {
   const mk = (source: 'impact' | 'stop-fallback', widened: boolean): ShotFix => ({

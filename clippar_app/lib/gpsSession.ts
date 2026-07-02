@@ -382,7 +382,11 @@ export class GpsSession {
       .sort((a, b) => b.ts - a.ts);
     const extra: RawFix[] = [];
     for (const f of back) {
-      if (this.isWalking(f)) break; // movement barrier — never cross the walk
+      // Movement barrier — never cross the walk. Unknown speed (CoreLocation
+      // reports -1 under heavy canopy) is treated AS a barrier: "can't prove
+      // not-walking → stop", else a fully speed-blind walk lets the scan skip
+      // through to the bag again.
+      if (f.speed < 0 || this.isWalking(f)) break;
       if (this.isStationary(f)) extra.push(f);
     }
     return { selected: [...base, ...extra], widened: extra.length > 0 };
