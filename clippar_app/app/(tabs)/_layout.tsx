@@ -18,6 +18,13 @@ import { RecordingProvider, useRecordingContext } from '@/contexts/RecordingCont
 const RECORD_SIZE = 58;
 const PILL_HEIGHT = 68;
 
+// The hardware Shop (mount + clicker via Stripe) is hidden for the v1 App Store
+// launch: its Stripe backend (create-payment-intent + stripe-webhook) isn't
+// deployed yet, so a live Shop tab would be a dead end in review. To bring it
+// back post-launch: deploy those functions, confirm the live Stripe key, then
+// flip this to true.
+const SHOP_ENABLED = false;
+
 function RecordCTAButton({
   focused,
   onPress,
@@ -110,19 +117,22 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
     >
       {/* Floating pill */}
       <View style={styles.pill}>
-        {/* Left group: Rounds + Shop (flex:2 so each tab matches the single
-            right-side tab in width — keeps the bar visually symmetrical) */}
-        <View style={[styles.tabGroup, styles.tabGroupLeft]}>
+        {/* Left group: Rounds (+ Shop when enabled). flex weights by item count
+            so every tab cell is the same width as the single right-side tab and
+            the bar stays visually symmetrical. */}
+        <View style={[styles.tabGroup, { flex: SHOP_ENABLED ? 2 : 1 }]}>
           <Pressable style={styles.tabItem} onPress={() => handlePress('index')}>
             <View ref={roundsRef} onLayout={roundsOnLayout}>
               <Home size={22} color={tintColor('index')} />
             </View>
             <Text style={[styles.tabLabel, { color: tintColor('index') }]}>Rounds</Text>
           </Pressable>
-          <Pressable style={styles.tabItem} onPress={() => handlePress('shop')}>
-            <ShoppingBag size={22} color={tintColor('shop')} />
-            <Text style={[styles.tabLabel, { color: tintColor('shop') }]}>Shop</Text>
-          </Pressable>
+          {SHOP_ENABLED && (
+            <Pressable style={styles.tabItem} onPress={() => handlePress('shop')}>
+              <ShoppingBag size={22} color={tintColor('shop')} />
+              <Text style={[styles.tabLabel, { color: tintColor('shop') }]}>Shop</Text>
+            </Pressable>
+          )}
         </View>
 
         {/* Record button sits inside the pill, in the center slot */}
@@ -198,10 +208,8 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-evenly',
   },
-  // Weight groups by item count so every tab cell is the same width
-  tabGroupLeft: {
-    flex: 2,
-  },
+  // Weight groups by item count so every tab cell is the same width.
+  // (Left group's flex is set inline since it depends on SHOP_ENABLED.)
   tabGroupRight: {
     flex: 1,
   },
@@ -232,7 +240,12 @@ export default function TabLayout() {
       >
         <Tabs.Screen name="index" options={{ title: 'Rounds' }} />
         <Tabs.Screen name="record" options={{ title: 'Record' }} />
-        <Tabs.Screen name="shop" options={{ title: 'Shop' }} />
+        {/* href: null removes Shop from the navigator when disabled, so it's
+            not reachable via deep link either (belt-and-braces for v1). */}
+        <Tabs.Screen
+          name="shop"
+          options={{ title: 'Shop', href: SHOP_ENABLED ? undefined : null }}
+        />
         <Tabs.Screen name="profile" options={{ title: 'Profile' }} />
       </Tabs>
     </RecordingProvider>
