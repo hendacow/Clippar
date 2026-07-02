@@ -539,21 +539,17 @@ function finalizeTiming(samples: TracerSampleV2[], maxAnimSec: number): number {
   return clamp(animDur, 0.01, maxAnimSec + 1e-9);
 }
 
-/** Map an apex height (meters) to a normalized y above the horizon anchor. */
-function apexToNormY(
-  apexM: number,
-  carryM: number,
-  horizonY: number,
-  camHeightM: number,
-  vFovPortraitDeg: number,
-): number {
-  const halfH = Math.tan((vFovPortraitDeg * Math.PI) / 360);
-  const y =
-    horizonY +
-    Math.tan(Math.atan2(apexM - camHeightM, 0.6 * Math.max(carryM, 20))) /
-      (2 * Math.max(halfH, 1e-6));
-  return y;
-}
+/**
+ * Effective camera height (m) used ONLY for the exaggerated on-screen apex.
+ * A physically-accurate projection from the real ~1 m bag camera foreshortens
+ * the apex so hard it sits right on the horizon and the arc reads flat/low.
+ * v1 (lib/tracerMath.ts) projects the bucket apex prior through a ~1.35 m
+ * reference and that exaggeration is what reads as a real TV/Toptracer arc.
+ * We reproduce v1's apex-Y with this reference; apexM (meters) and the physical
+ * projection are untouched — this is a VISUAL height only.
+ */
+const VISUAL_APEX_REF_M = 1.35;
+
 
 /**
  * Build the two-segment arc: real detected segment 1 (fit sampled at its own
@@ -683,34 +679,35 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
     ? { x: input.fit.vh.x, y: input.fit.vh.y }
     : { x: vh.x, y: vh.y };
 
-  // A4 clamp on the ascent velocity, ideal synthetic time, and the t_up cap.
   const vyMax = arc.vyMaxNorm[bucket];
   const vYsolve = clamp(vh.y, 0, vyMax);
-  let tRem = Math.max(hangS - thSec, arc.tRemMin);
-  const tUpCap = arc.tUpFracMax * tRem;
-  // Best apex reachable while PRESERVING continuity (keep vYsolve, cap t_up).
-  const yApexContMax = ph.y + 0.5 * vYsolve * tUpCap;
-  // The prior apex height (before any landing floor) — if the detected handoff
-  // is already at/above it, the ball has finished climbing (or flown out the
-  // top of frame), so there's no meaningful synthetic ascent to add.
-  const yApexPrior = apexToNormY(apexM, carryM, input.horizonY, input.camHeightM, input.vFovPortraitDeg);
 
-  // ── B2 / D4 — whole-flight-visible / detected-too-weak. Do NOT fabricate a
-  //    synthetic apex-to-GPS-landing when it would be invalid or discontinuous:
-  //    • no upward screen velocity at the handoff (already peaked/descending) —
-  //      a synthetic "ascent" would plunge (wrong sign) then jump; OR
-  //    • already at the landing height / almost no flight time left; OR
-  //    • the detected climb is too weak to lift the ball above the (screen)
-  //      landing within the continuity/speed bound — forcing the GPS landing
-  //      would teleport the endpoint.
-  //    Instead render the REAL detected flight + a short linear fade tail. ──
+  // ── v1-STYLE VISUAL APEX ──
+  // Reproduce v1's exaggerated on-screen apex (see VISUAL_APEX_REF_M): project
+  // the bucket apex PRIOR through the pinhole with v1's reference height so the
+  // apex clears the horizon by the same margin v1 does (~0.2 above it / ~0.55
+  // above the launch), then floor it clear of the launch and landing and keep
+  // it inside the frame. This is a SCREEN height only — apexM (meters) is
+  // untouched, so the physical bounds (I4/I11a) are unaffected.
+  const halfH = Math.tan((input.vFovPortraitDeg * Math.PI) / 360);
+  const yApexV1 =
+    input.horizonY +
+    Math.tan(Math.atan2(apexHeightM(carryM) - VISUAL_APEX_REF_M, 0.6 * Math.max(carryM, 20))) /
+      (2 * Math.max(halfH, 1e-6));
+  const yApexFloor = Math.max(ph.y + 0.12, yLand + 0.05);
+  const yApex = clamp(Math.max(yApexV1, yApexFloor), yApexFloor, 0.92);
+
+  // ── B2 / D4 — whole-flight-visible. Do NOT fabricate a synthetic apex when
+  //    it would be invalid: no upward screen velocity (already peaked/descending
+  //    → a synthetic ascent would plunge then jump), already at the landing
+  //    height / no flight time left, or the handoff is already at/above the
+  //    (visual) apex. Instead render the real detected flight + a short tail. ──
   if (
     !input.fit.degenerate &&
     (rawVh.y <= 1e-3 ||
       Math.abs(ph.y - yLand) <= arc.wholeFlightYTol ||
       hangS - thSec <= 0.3 ||
-      yApexContMax <= yLand + arc.wholeFlightYTol ||
-      ph.y >= yApexPrior - arc.wholeFlightYTol)
+      ph.y >= yApex - arc.wholeFlightYTol)
   ) {
     return buildWholeFlightVisible(input, {
       carryM,
@@ -725,46 +722,22 @@ export function buildArcSpecV2(input: BuildArcInputV2): TracerRenderSpecV2 {
     });
   }
 
-  // Apex y target, floored to clear BOTH the handoff and the landing so there
-  // is always a real descent (no apex-below-landing → forced-endpoint teleport).
-  const yApexFloor = Math.max(ph.y, yLand) + 0.02;
-  let yApexTarget = apexToNormY(apexM, carryM, input.horizonY, input.camHeightM, input.vFovPortraitDeg);
-  yApexTarget = Math.max(yApexTarget, yApexFloor);
+  // Ascent: reach the high visual apex while KEEPING the handoff velocity
+  // vYsolve (→ C1 exact, cross-handoff speed ratio = 1). A low bag-launch needs
+  // a long, gentle rise to a high apex, so t_up is NOT capped — t_rem simply
+  // grows, and finalizeTiming later compresses the natural timeline into the
+  // clip, so the SHAPE (apex height) is preserved regardless of natural length.
+  const dyUp = Math.max(yApex - ph.y, 1e-4);
+  const tUp = (2 * dyUp) / Math.max(vYsolve, 1e-4);
+  const gUp = vYsolve / tUp; // apex condition v(t_up)=0 ⇒ apex == yApex
+  const v0 = vYsolve; // handoff velocity preserved (no boost)
 
-  // Ascent: t_up so the apex reaches yApexTarget with v=0 (t_up=2Δ/vY), capped
-  // at tUpFracMax·tRem (continuity outranks the apex prior → re-solve apex, but
-  // never below the landing floor).
-  const dyUp = Math.max(yApexTarget - ph.y, 1e-4);
-  let tUp = (2 * dyUp) / vYsolve;
-  let yApex: number;
-  if (tUp > tUpCap) {
-    tUp = tUpCap;
-    yApex = Math.max(ph.y + 0.5 * vYsolve * tUp, yApexFloor);
-  } else {
-    yApex = yApexTarget;
-  }
-  tUp = clamp(tUp, 1e-3, Math.max(tUpCap, 1e-3));
-  // Launch velocity that reaches yApex at t_up with v=0 there. This equals
-  // vYsolve whenever the landing floor didn't raise the apex (D1 real-fit path,
-  // where the D4 gate already guaranteed the apex clears the landing); it is
-  // only boosted for prior-driven / degenerate arcs, which have no real detected
-  // handoff velocity to stay continuous with.
-  const v0 = (2 * (yApex - ph.y)) / tUp;
-  const gUp = v0 / tUp; // apex condition v(t_up)=0
-
-  // Descent to yLand. If the required g_down would exceed gMax·g_up, keep it AT
-  // the cap and EXTEND t_down so the parabola still lands EXACTLY on yLand
-  // (MAJOR 1 — no forced-endpoint teleport). Then finalize t_rem = t_up+t_down.
-  const dropDown = Math.max(yApex - yLand, 0);
-  let tDown = Math.max(tRem - tUp, 1e-3);
-  let gDown = (2 * dropDown) / (tDown * tDown);
-  const gDownCap = arc.gMax * Math.max(gUp, 1e-6);
-  if (gDown > gDownCap && gDownCap > 0 && dropDown > 0) {
-    gDown = gDownCap;
-    tDown = Math.sqrt((2 * dropDown) / gDown); // extend to reach yLand smoothly
-  }
-  if (!Number.isFinite(gDown)) gDown = 0;
-  tRem = tUp + tDown; // final synthetic duration
+  // Descent as steep as allowed (real/TV arcs drop steeper than they rise):
+  // g_down at the gMax·g_up cap, t_down solved so it lands EXACTLY on yLand.
+  const dropDown = Math.max(yApex - yLand, 1e-4);
+  const gDown = arc.gMax * Math.max(gUp, 1e-9);
+  const tDown = Math.sqrt((2 * dropDown) / gDown);
+  const tRem = tUp + tDown; // final synthetic duration (grown to reach the apex)
 
   // ── Lateral solve (single cubic Hermite, effective handoff keeps it monotone) ──
   const straightBow =
