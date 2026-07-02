@@ -30,10 +30,15 @@ export function useGpsSession(enabled: boolean): GpsHealth {
   const subRef = useRef<Location.LocationSubscription | null>(null);
   const focusedRef = useRef(false);
   const lastLogRef = useRef(0);
+  // Monotonic generation: every stopWatch/startWatch bumps it so an in-flight
+  // start (awaiting permission / watchPositionAsync) can detect it was
+  // superseded and tear its own subscription down instead of leaking it.
+  const genRef = useRef(0);
 
   const isActive = enabled && Platform.OS !== 'web';
 
   const stopWatch = useCallback(() => {
+    genRef.current++; // invalidate any start still awaiting
     try {
       subRef.current?.remove();
     } catch {
@@ -47,6 +52,7 @@ export function useGpsSession(enabled: boolean): GpsHealth {
       if (!isActive) return;
       // Only ever hold ONE subscription; restart cleanly on accuracy changes.
       stopWatch();
+      const gen = genRef.current; // this start's generation
       try {
         // Non-prompting check first; request (the single when-in-use prompt)
         // only if not already granted. Foreground permission only.
@@ -54,9 +60,9 @@ export function useGpsSession(enabled: boolean): GpsHealth {
         if (!granted) {
           granted = (await Location.requestForegroundPermissionsAsync()).status === 'granted';
         }
-        if (!granted) return;
+        if (!granted || gen !== genRef.current) return; // superseded while awaiting
 
-        subRef.current = await Location.watchPositionAsync(
+        const sub = await Location.watchPositionAsync(
           { accuracy, distanceInterval: 0, timeInterval: 1000 },
           (loc) => {
             gpsSession.addFix({
@@ -89,6 +95,16 @@ export function useGpsSession(enabled: boolean): GpsHealth {
             }
           }
         );
+        // A newer start/stop landed while we were awaiting — don't leak this one.
+        if (gen !== genRef.current) {
+          try {
+            sub.remove();
+          } catch {
+            /* already gone */
+          }
+          return;
+        }
+        subRef.current = sub;
       } catch (err) {
         console.log('[useGpsSession] watch start failed (non-fatal):', err);
       }
