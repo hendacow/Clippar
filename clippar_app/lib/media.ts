@@ -70,6 +70,36 @@ export async function resolveAssetUri(uri: string): Promise<string> {
 }
 
 /**
+ * Ensure documentDirectory/clips/ exists — ONCE per app session (memoized).
+ *
+ * NEVER call getInfoAsync on the clips directory: on iOS the legacy module
+ * recursively sizes the directory's contents, so the "does it exist" check
+ * costs seconds once the folder holds a round's worth of video (measured
+ * ~3.5s/call with ~40 clips — 12 parallel imports serialized on the native
+ * module queue into a 42s stall). makeDirectoryAsync with intermediates:true
+ * is mkdir -p: cheap, and a no-op when the directory already exists.
+ */
+let clipsDirReady: Promise<string> | null = null;
+function ensureClipsDir(): Promise<string> {
+  if (!clipsDirReady) {
+    const dir = `${FileSystemLegacy!.documentDirectory}clips/`;
+    // intermediates:true is mkdir -p — succeeds when the dir already exists,
+    // so a rejection here is a REAL failure. Don't cache it (the memoization
+    // would otherwise turn one transient error into permanent copy failures);
+    // reset and rethrow so persistAsset's catch falls back to the source uri
+    // and the next call retries.
+    clipsDirReady = FileSystemLegacy!
+      .makeDirectoryAsync(dir, { intermediates: true })
+      .then(() => dir)
+      .catch((err) => {
+        clipsDirReady = null;
+        throw err;
+      });
+  }
+  return clipsDirReady;
+}
+
+/**
  * Copy an asset into our app's documentDirectory so it survives iOS
  * tmp-directory eviction and app reinstalls (where the tmp copy is wiped).
  * Use this if you need the strongest durability guarantee; resolveAssetUri
@@ -78,33 +108,43 @@ export async function resolveAssetUri(uri: string): Promise<string> {
 export async function persistAsset(uri: string, filename: string): Promise<string> {
   if (!FileSystemLegacy) return uri;
 
+  const t0 = Date.now();
+  let method = 'none';
   try {
     const resolved = await resolveAssetUri(uri);
-    const dir = `${FileSystemLegacy.documentDirectory}clips/`;
-    const dirInfo = await FileSystemLegacy.getInfoAsync(dir);
-    if (!dirInfo.exists) {
-      await FileSystemLegacy.makeDirectoryAsync(dir, { intermediates: true });
-    }
+    const dir = await ensureClipsDir();
+    // No per-clip dest existence check: filenames embed Date.now() so they're
+    // unique by construction, and every getInfoAsync is a trip through the
+    // serialized native queue we just got burned by.
     const dest = `${dir}${filename}`;
-    const destInfo = await FileSystemLegacy.getInfoAsync(dest);
-    if (destInfo.exists) return dest;
-    await FileSystemLegacy.copyAsync({ from: resolved, to: dest });
-
-    // Best-effort cleanup of the ImagePicker cache copy. Without this iOS
-    // hangs onto a duplicate of every imported video under
-    // `Library/Caches/ImagePicker/` until the OS decides to purge — which
-    // in practice can take days. We just copied the bytes into
-    // documentDirectory, so the cache copy is dead weight.
-    if (
+    // When the source is the picker's own cache copy (Library/Caches/ImagePicker
+    // or /tmp) it lives on the SAME sandbox volume as documentDirectory, and we
+    // were going to delete it right after copying anyway — so MOVE (an O(1)
+    // rename) instead of copying every byte of the video. For a 12-clip import
+    // this turns hundreds of MB of file copying into a handful of renames, which
+    // is the dominant cost of import. Sources outside our sandbox (e.g. a Photos
+    // localUri we don't own, which moveAsync also can't cross volumes to) are
+    // copied as before.
+    const inAppCache =
       resolved.includes('/Library/Caches/ImagePicker/') ||
-      resolved.includes('/tmp/')
-    ) {
+      resolved.includes('/tmp/');
+    if (inAppCache) {
       try {
-        await FileSystemLegacy.deleteAsync(resolved, { idempotent: true });
+        await FileSystemLegacy.moveAsync({ from: resolved, to: dest });
+        method = 'move';
       } catch {
-        // Cache file may already be gone — ignore.
+        // Rare cross-volume / locked-file edge case — fall back to copy+delete.
+        await FileSystemLegacy.copyAsync({ from: resolved, to: dest });
+        method = 'copy-fallback';
+        try {
+          await FileSystemLegacy.deleteAsync(resolved, { idempotent: true });
+        } catch {}
       }
+    } else {
+      await FileSystemLegacy.copyAsync({ from: resolved, to: dest });
+      method = 'copy';
     }
+    console.log(`[persistAsset] ${method} ${Date.now() - t0}ms`);
     return dest;
   } catch (err) {
     console.warn('[media] persistAsset failed for', uri, err);

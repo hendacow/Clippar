@@ -1516,6 +1516,61 @@ public class ShotDetectorModule: Module {
                 ])
             }
 
+            // ---- Passthrough fast path ----
+            // When every clip shares dimensions + orientation (always true for
+            // camera recordings and our own trim outputs, which are themselves
+            // passthrough copies of camera footage), no per-clip transform is
+            // needed — so skip the AVVideoComposition entirely and export with
+            // Passthrough: a container-level sample copy, ZERO re-encode.
+            // 100 clips stitch in seconds instead of minutes. Mixed formats
+            // (e.g. imported Photos videos with different resolutions) fall
+            // through to the legacy re-encode below, as does ANY passthrough
+            // failure (codec quirks like -11838) — nothing is ever lost.
+            let uniformFormat = !clipSegments.isEmpty && clipSegments.allSatisfy {
+                $0.naturalSize == clipSegments[0].naturalSize && $0.transform == clipSegments[0].transform
+            }
+            if uniformFormat {
+                // Composition tracks default to identity; carry the source
+                // orientation so players rotate portrait footage correctly.
+                videoTrack.preferredTransform = clipSegments[0].transform
+                let ptURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+                    .appendingPathComponent("stitch_\(UUID().uuidString).mp4")
+                try? FileManager.default.removeItem(at: ptURL)
+                if let ptSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) {
+                    ptSession.outputURL = ptURL
+                    ptSession.outputFileType = .mp4
+                    ptSession.shouldOptimizeForNetworkUse = true
+                    let ptSem = DispatchSemaphore(value: 0)
+                    ptSession.exportAsynchronously { ptSem.signal() }
+                    while ptSession.status == .waiting || ptSession.status == .exporting {
+                        Thread.sleep(forTimeInterval: 0.2)
+                        self.sendEvent("onStitchProgress", [
+                            "phase": "exporting",
+                            "current": clipUris.count,
+                            "total": clipUris.count,
+                            "percent": 50.0 + Double(ptSession.progress) * 50.0,
+                        ])
+                    }
+                    ptSem.wait()
+                    if ptSession.status == .completed {
+                        let elapsed = CACurrentMediaTime() - startTime
+                        let totalDuration = CMTimeGetSeconds(insertTime)
+                        print("[Clippar.Stitch] passthrough OK clips=\(clipUris.count) durationSec=\(String(format: "%.1f", totalDuration)) elapsedSec=\(String(format: "%.2f", elapsed))")
+                        promise.resolve([
+                            "stitchedUri": ptURL.absoluteString,
+                            "durationMs": totalDuration * 1000.0,
+                            "clipCount": clipUris.count,
+                        ] as [String: Any])
+                        return
+                    }
+                    print("[Clippar.Stitch] passthrough failed (\(ptSession.error?.localizedDescription ?? "status \(ptSession.status.rawValue)")) — falling back to re-encode")
+                    try? FileManager.default.removeItem(at: ptURL)
+                    // Restore identity so the legacy path's per-clip transforms
+                    // aren't double-applied on top of a rotated track.
+                    videoTrack.preferredTransform = .identity
+                }
+            }
+
             // Build per-clip video composition with individual transforms
             let videoComposition = AVMutableVideoComposition()
             videoComposition.renderSize = renderSize
@@ -1658,6 +1713,725 @@ public class ShotDetectorModule: Module {
         let holes: [ScorecardHole]
     }
 
+    // MARK: - Fast reel compose (segment-parallel + passthrough concat)
+    //
+    // The legacy compose path (below) exports the ENTIRE reel through one
+    // AVAssetExportSession whose AVVideoCompositionCoreAnimationTool carries
+    // the full-round scorecard tree — a full-screen container per hole,
+    // hundreds of layers. For a 100-shot round that's ~7 minutes of video
+    // re-encoded at roughly realtime: ~8 minutes of wall clock.
+    //
+    // Fast path:
+    //   1. Group clips into per-hole segments (scorecard hole ranges;
+    //      fixed-size chunks when there's no scorecard).
+    //   2. Export segments CONCURRENTLY (3 at a time), each carrying only its
+    //      own hole's small static card — cheap for the animation tool.
+    //   3. Concatenate segments with AVAssetExportPresetPassthrough: a
+    //      container-level copy, no re-encode.
+    //   4. Music: audio-only mixed export (M4A honors audioMix and audio
+    //      encodes at many× realtime), then a passthrough mux of untouched
+    //      video + mixed audio.
+    //
+    // Every helper throws on failure; composeReelOnDevice falls back to the
+    // legacy single-session path, so the fast path can never lose a reel.
+
+    private struct FastParsedClip {
+        let url: URL
+        let sourceRange: CMTimeRange
+        let naturalSize: CGSize
+        let transform: CGAffineTransform
+        let hasAudio: Bool
+        let durationSec: Double
+    }
+
+    private struct FastComposeError: Error, CustomStringConvertible {
+        let stage: String
+        let message: String
+        // Underlying NSError code when an export session failed (0 otherwise).
+        // -11847 (AVErrorOperationInterrupted, e.g. app backgrounded) must
+        // REJECT rather than fall back — the legacy path would just die the
+        // same death 8 minutes later.
+        var code: Int = 0
+        var description: String { "\(stage): \(message) (code \(code))" }
+    }
+
+    /// Parse the JS clip dictionaries into concrete trim ranges. Mirrors the
+    /// legacy parse loop (clamping, zero-length skip, renderSize from the
+    /// first usable clip) exactly.
+    private func fastParseClips(_ clips: [[String: Any]]) throws -> (parsed: [FastParsedClip], renderSize: CGSize) {
+        var parsed: [FastParsedClip] = []
+        var renderSize = CGSize(width: 1080, height: 1920)
+        for (index, clipDict) in clips.enumerated() {
+            guard let uri = clipDict["uri"] as? String else {
+                throw FastComposeError(stage: "parse", message: "clip \(index) missing uri")
+            }
+            let fileURL = resolveFileURL(uri)
+            guard FileManager.default.fileExists(atPath: fileURL.path) else {
+                throw FastComposeError(stage: "parse", message: "clip \(index) not found: \(fileURL.path)")
+            }
+            let asset = AVURLAsset(url: fileURL)
+            guard let videoTrack = asset.tracks(withMediaType: .video).first else {
+                throw FastComposeError(stage: "parse", message: "clip \(index) has no video track")
+            }
+            let assetDurationMs = CMTimeGetSeconds(asset.duration) * 1000.0
+            let trimStartMs = (clipDict["trimStartMs"] as? Double) ?? 0
+            let rawTrimEndMs = (clipDict["trimEndMs"] as? Double) ?? -1
+            let effectiveStartMs = max(0, min(trimStartMs, assetDurationMs))
+            let effectiveEndMs: Double = rawTrimEndMs < 0 ? assetDurationMs : min(rawTrimEndMs, assetDurationMs)
+            let trimDurationMs = max(0, effectiveEndMs - effectiveStartMs)
+            if trimDurationMs <= 0 { continue }
+            if parsed.isEmpty {
+                let size = videoTrack.naturalSize
+                let t = videoTrack.preferredTransform
+                let isPortrait = abs(t.b) == 1.0 && abs(t.c) == 1.0
+                renderSize = isPortrait ? CGSize(width: size.height, height: size.width) : size
+            }
+            parsed.append(FastParsedClip(
+                url: fileURL,
+                sourceRange: CMTimeRange(
+                    start: CMTime(seconds: effectiveStartMs / 1000.0, preferredTimescale: 600),
+                    duration: CMTime(seconds: trimDurationMs / 1000.0, preferredTimescale: 600)
+                ),
+                naturalSize: videoTrack.naturalSize,
+                transform: videoTrack.preferredTransform,
+                hasAudio: !asset.tracks(withMediaType: .audio).isEmpty,
+                durationSec: trimDurationMs / 1000.0
+            ))
+        }
+        guard !parsed.isEmpty else {
+            throw FastComposeError(stage: "parse", message: "no non-empty clips")
+        }
+        return (parsed, renderSize)
+    }
+
+    /// Group parsed clips into per-hole segments by matching each clip's reel
+    /// timeline midpoint against the scorecard's hole ranges (JS computed
+    /// those ranges from the same cumulative durations). No scorecard →
+    /// fixed-size chunks so parallelism still applies.
+    private func fastGroupSegments(
+        _ parsed: [FastParsedClip],
+        scorecard: ScorecardData?
+    ) -> [(holeIndex: Int?, clips: [FastParsedClip])] {
+        guard let sc = scorecard, !sc.holes.isEmpty else {
+            let chunkSize = 6
+            var chunks: [(holeIndex: Int?, clips: [FastParsedClip])] = []
+            var i = 0
+            while i < parsed.count {
+                let end = min(i + chunkSize, parsed.count)
+                chunks.append((holeIndex: nil, clips: Array(parsed[i..<end])))
+                i = end
+            }
+            return chunks
+        }
+        var perHole: [[FastParsedClip]] = Array(repeating: [], count: sc.holes.count)
+        var cursorMs: Double = 0
+        for clip in parsed {
+            let midMs = cursorMs + clip.durationSec * 500.0
+            var holeIdx = sc.holes.count - 1
+            for (i, hole) in sc.holes.enumerated() where midMs >= hole.startMs && midMs < hole.endMs {
+                holeIdx = i
+                break
+            }
+            perHole[holeIdx].append(clip)
+            cursorMs += clip.durationSec * 1000.0
+        }
+        var segments: [(holeIndex: Int?, clips: [FastParsedClip])] = []
+        for (i, clips) in perHole.enumerated() where !clips.isEmpty {
+            segments.append((holeIndex: i, clips: clips))
+        }
+        return segments
+    }
+
+    /// The full scorecard card for ONE hole's state, as a static layer tree.
+    /// Layout is a line-for-line replica of the legacy whole-reel overlay —
+    /// but with only this hole's dynamic layers and no cross-hole fade
+    /// animations (segments cut exactly at hole boundaries, so the card
+    /// state changes at the cut just like the legacy fades did).
+    private func fastBuildHoleCard(sc: ScorecardData, index: Int, renderSize: CGSize) -> CALayer {
+        let container = CALayer()
+        container.frame = CGRect(origin: .zero, size: renderSize)
+
+        let scale = UIScreen.main.scale
+        let cardWidth: CGFloat = renderSize.width * 0.94
+        let cardX: CGFloat = (renderSize.width - cardWidth) / 2
+        let cardHeight: CGFloat = renderSize.height * 0.18
+        let topPadding: CGFloat = renderSize.height * 0.04
+        let cardY: CGFloat = renderSize.height - cardHeight - topPadding
+        let inset: CGFloat = renderSize.width * 0.018
+        let rowGap: CGFloat = cardHeight * 0.05
+        let row1Height: CGFloat = cardHeight * 0.20
+        let row2Height: CGFloat = cardHeight * 0.42
+        let row3Height: CGFloat = cardHeight * 0.30
+        let row1Y: CGFloat = cardY + cardHeight - row1Height - inset
+        let row2Y: CGFloat = row1Y - row2Height - rowGap
+        let row3Y: CGFloat = row2Y - row3Height - rowGap
+
+        let bgLayer = CALayer()
+        bgLayer.frame = CGRect(x: cardX, y: cardY, width: cardWidth, height: cardHeight)
+        bgLayer.backgroundColor = UIColor(white: 0, alpha: 0.45).cgColor
+        bgLayer.cornerRadius = 18
+        bgLayer.borderWidth = 1
+        bgLayer.borderColor = UIColor(white: 1, alpha: 0.12).cgColor
+        container.addSublayer(bgLayer)
+
+        let courseText = CATextLayer()
+        courseText.string = sc.courseName
+        courseText.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
+        courseText.fontSize = renderSize.width * 0.022
+        courseText.foregroundColor = UIColor(white: 1, alpha: 0.55).cgColor
+        courseText.alignmentMode = .left
+        courseText.truncationMode = .end
+        courseText.contentsScale = scale
+        courseText.frame = CGRect(
+            x: cardX + inset, y: row1Y,
+            width: cardWidth * 0.55, height: row1Height
+        )
+        container.addSublayer(courseText)
+
+        let stripX = cardX + inset
+        let stripWidth = cardWidth - inset * 2
+        let cellWidth = stripWidth / CGFloat(max(1, sc.holes.count))
+        for (cellIdx, hole) in sc.holes.enumerated() {
+            let cellX = stripX + cellWidth * CGFloat(cellIdx)
+            let holeNumLayer = CATextLayer()
+            holeNumLayer.string = "\(hole.holeNumber)"
+            holeNumLayer.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
+            holeNumLayer.fontSize = renderSize.width * 0.018
+            holeNumLayer.foregroundColor = UIColor(white: 1, alpha: 0.4).cgColor
+            holeNumLayer.alignmentMode = .center
+            holeNumLayer.contentsScale = scale
+            holeNumLayer.frame = CGRect(
+                x: cellX, y: row2Y + row2Height * 0.65,
+                width: cellWidth, height: row2Height * 0.30
+            )
+            container.addSublayer(holeNumLayer)
+
+            let parLabel = CATextLayer()
+            parLabel.string = "\(hole.par)"
+            parLabel.font = UIFont.systemFont(ofSize: 1, weight: .regular) as CTFont
+            parLabel.fontSize = renderSize.width * 0.014
+            parLabel.foregroundColor = UIColor(white: 1, alpha: 0.25).cgColor
+            parLabel.alignmentMode = .center
+            parLabel.contentsScale = scale
+            parLabel.frame = CGRect(
+                x: cellX, y: row2Y + row2Height * 0.05,
+                width: cellWidth, height: row2Height * 0.25
+            )
+            container.addSublayer(parLabel)
+        }
+
+        let hole = sc.holes[index]
+        var cumulativeScore = 0
+        var cumulativePar = 0
+        for i in 0...index {
+            cumulativeScore += sc.holes[i].strokes
+            cumulativePar += sc.holes[i].par
+        }
+        let cumulativeStp = cumulativeScore - cumulativePar
+
+        let stpColor: UIColor
+        if cumulativeStp < 0 {
+            stpColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+        } else if cumulativeStp == 0 {
+            stpColor = UIColor.white
+        } else {
+            stpColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+        }
+
+        let totalLabel = CATextLayer()
+        totalLabel.string = "TOTAL"
+        totalLabel.font = UIFont.systemFont(ofSize: 1, weight: .semibold) as CTFont
+        totalLabel.fontSize = renderSize.width * 0.018
+        totalLabel.foregroundColor = UIColor(white: 1, alpha: 0.5).cgColor
+        totalLabel.alignmentMode = .right
+        totalLabel.contentsScale = scale
+        totalLabel.frame = CGRect(
+            x: cardX + cardWidth * 0.55, y: row1Y + row1Height * 0.15,
+            width: cardWidth * 0.18, height: row1Height * 0.7
+        )
+        container.addSublayer(totalLabel)
+
+        let totalNumber = CATextLayer()
+        totalNumber.string = "\(cumulativeScore)"
+        totalNumber.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+        totalNumber.fontSize = renderSize.width * 0.024
+        totalNumber.foregroundColor = UIColor.white.cgColor
+        totalNumber.alignmentMode = .right
+        totalNumber.contentsScale = scale
+        totalNumber.frame = CGRect(
+            x: cardX + cardWidth * 0.74, y: row1Y + row1Height * 0.10,
+            width: cardWidth * 0.10, height: row1Height * 0.85
+        )
+        container.addSublayer(totalNumber)
+
+        let stpString: String
+        if cumulativeStp < 0 { stpString = "\(cumulativeStp)" }
+        else if cumulativeStp == 0 { stpString = "E" }
+        else { stpString = "+\(cumulativeStp)" }
+
+        let badgeWidth: CGFloat = cardWidth * 0.10
+        let badgeHeight: CGFloat = row1Height * 0.85
+        let badgeBG = CALayer()
+        badgeBG.frame = CGRect(
+            x: cardX + cardWidth - inset - badgeWidth, y: row1Y + row1Height * 0.075,
+            width: badgeWidth, height: badgeHeight
+        )
+        badgeBG.backgroundColor = stpColor.withAlphaComponent(0.22).cgColor
+        badgeBG.cornerRadius = badgeHeight / 2
+        container.addSublayer(badgeBG)
+
+        let badgeText = CATextLayer()
+        badgeText.string = stpString
+        badgeText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+        badgeText.fontSize = renderSize.width * 0.018
+        badgeText.foregroundColor = stpColor.cgColor
+        badgeText.alignmentMode = .center
+        badgeText.contentsScale = scale
+        badgeText.frame = CGRect(
+            x: badgeBG.frame.minX, y: badgeBG.frame.minY + badgeHeight * 0.18,
+            width: badgeWidth, height: badgeHeight * 0.7
+        )
+        container.addSublayer(badgeText)
+
+        for (cellIdx, h) in sc.holes.enumerated() {
+            let isPlayed = cellIdx <= index
+            let cellX = stripX + cellWidth * CGFloat(cellIdx)
+            if cellIdx == index {
+                let highlight = CALayer()
+                highlight.frame = CGRect(
+                    x: cellX + cellWidth * 0.06, y: row2Y,
+                    width: cellWidth * 0.88, height: row2Height
+                )
+                highlight.backgroundColor = UIColor(white: 1, alpha: 0.10).cgColor
+                highlight.cornerRadius = 8
+                container.addSublayer(highlight)
+            }
+            let cellSTP = h.strokes - h.par
+            let cellColor: UIColor
+            if !isPlayed {
+                cellColor = UIColor(white: 1, alpha: 0.25)
+            } else if cellSTP < 0 {
+                cellColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+            } else if cellSTP == 0 {
+                cellColor = UIColor.white
+            } else {
+                cellColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+            }
+            let cellScore = CATextLayer()
+            cellScore.string = isPlayed ? "\(h.strokes)" : "-"
+            cellScore.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+            cellScore.fontSize = renderSize.width * 0.022
+            cellScore.foregroundColor = cellColor.cgColor
+            cellScore.alignmentMode = .center
+            cellScore.contentsScale = scale
+            cellScore.frame = CGRect(
+                x: cellX, y: row2Y + row2Height * 0.30,
+                width: cellWidth, height: row2Height * 0.40
+            )
+            container.addSublayer(cellScore)
+        }
+
+        let holeBigText = CATextLayer()
+        holeBigText.string = "Hole \(hole.holeNumber)"
+        holeBigText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+        holeBigText.fontSize = renderSize.width * 0.030
+        holeBigText.foregroundColor = UIColor.white.cgColor
+        holeBigText.alignmentMode = .left
+        holeBigText.contentsScale = scale
+        holeBigText.frame = CGRect(
+            x: cardX + inset, y: row3Y + row3Height * 0.10,
+            width: cardWidth * 0.30, height: row3Height * 0.85
+        )
+        container.addSublayer(holeBigText)
+
+        let holeParBigText = CATextLayer()
+        holeParBigText.string = "Par \(hole.par)"
+        holeParBigText.font = UIFont.systemFont(ofSize: 1, weight: .medium) as CTFont
+        holeParBigText.fontSize = renderSize.width * 0.020
+        holeParBigText.foregroundColor = UIColor(white: 1, alpha: 0.5).cgColor
+        holeParBigText.alignmentMode = .left
+        holeParBigText.contentsScale = scale
+        holeParBigText.frame = CGRect(
+            x: cardX + cardWidth * 0.32, y: row3Y + row3Height * 0.20,
+            width: cardWidth * 0.20, height: row3Height * 0.7
+        )
+        container.addSublayer(holeParBigText)
+
+        let holeStp = hole.strokes - hole.par
+        let holeStpColor: UIColor
+        if holeStp < 0 {
+            holeStpColor = UIColor(red: 0.29, green: 0.87, blue: 0.5, alpha: 1)
+        } else if holeStp == 0 {
+            holeStpColor = UIColor.white
+        } else {
+            holeStpColor = UIColor(red: 1.0, green: 0.45, blue: 0.4, alpha: 1)
+        }
+        let holeStrokesText = CATextLayer()
+        holeStrokesText.string = "\(hole.strokes)"
+        holeStrokesText.font = UIFont.systemFont(ofSize: 1, weight: .heavy) as CTFont
+        holeStrokesText.fontSize = renderSize.width * 0.034
+        holeStrokesText.foregroundColor = holeStpColor.cgColor
+        holeStrokesText.alignmentMode = .right
+        holeStrokesText.contentsScale = scale
+        holeStrokesText.frame = CGRect(
+            x: cardX + cardWidth * 0.6, y: row3Y + row3Height * 0.05,
+            width: cardWidth * 0.4 - inset, height: row3Height * 0.9
+        )
+        container.addSublayer(holeStrokesText)
+
+        return container
+    }
+
+    /// Export one segment (a hole's clips) with its static card burned in.
+    private func fastExportSegment(
+        clips: [FastParsedClip],
+        overlay: CALayer?,
+        renderSize: CGSize,
+        outputURL: URL
+    ) throws {
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw FastComposeError(stage: "segment", message: "could not create video track")
+        }
+        var audioTrack: AVMutableCompositionTrack? = nil
+        var insertTime = CMTime.zero
+        var instructions: [AVMutableVideoCompositionInstruction] = []
+
+        for clip in clips {
+            let asset = AVURLAsset(url: clip.url)
+            guard let srcVideo = asset.tracks(withMediaType: .video).first else { continue }
+            do {
+                try videoTrack.insertTimeRange(clip.sourceRange, of: srcVideo, at: insertTime)
+            } catch {
+                throw FastComposeError(stage: "segment", message: "insert failed: \(error.localizedDescription)")
+            }
+            if clip.hasAudio, let srcAudio = asset.tracks(withMediaType: .audio).first {
+                if audioTrack == nil {
+                    audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                }
+                try? audioTrack?.insertTimeRange(clip.sourceRange, of: srcAudio, at: insertTime)
+            }
+            let instruction = AVMutableVideoCompositionInstruction()
+            instruction.timeRange = CMTimeRange(start: insertTime, duration: clip.sourceRange.duration)
+            let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: videoTrack)
+            layerInstruction.setTransform(
+                computeFillTransform(naturalSize: clip.naturalSize, preferredTransform: clip.transform, renderSize: renderSize),
+                at: insertTime
+            )
+            instruction.layerInstructions = [layerInstruction]
+            instructions.append(instruction)
+            insertTime = CMTimeAdd(insertTime, clip.sourceRange.duration)
+        }
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.renderSize = renderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.instructions = instructions
+        if let overlay = overlay {
+            let parentLayer = CALayer()
+            let videoLayer = CALayer()
+            parentLayer.frame = CGRect(origin: .zero, size: renderSize)
+            videoLayer.frame = CGRect(origin: .zero, size: renderSize)
+            parentLayer.addSublayer(videoLayer)
+            parentLayer.addSublayer(overlay)
+            videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
+                postProcessingAsVideoLayer: videoLayer,
+                in: parentLayer
+            )
+        }
+
+        try? FileManager.default.removeItem(at: outputURL)
+        // Same preset rationale as the legacy path: 1920x1080 forces H.264
+        // SDR — HighestQuality + animation tool on HEVC/HDR source hits
+        // -11838. Segments must also be format-uniform for the passthrough
+        // concat, which this preset guarantees.
+        guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPreset1920x1080) else {
+            throw FastComposeError(stage: "segment", message: "could not create export session")
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.videoComposition = videoComposition
+        session.shouldOptimizeForNetworkUse = false
+
+        let sem = DispatchSemaphore(value: 0)
+        session.exportAsynchronously { sem.signal() }
+        sem.wait()
+        guard session.status == .completed else {
+            throw FastComposeError(
+                stage: "segment",
+                message: session.error?.localizedDescription ?? "status \(session.status.rawValue)",
+                code: (session.error as NSError?)?.code ?? 0
+            )
+        }
+    }
+
+    /// Concatenate the (format-uniform) segment files without re-encoding.
+    private func fastPassthroughConcat(segmentURLs: [URL], outputURL: URL) throws -> CMTime {
+        let composition = AVMutableComposition()
+        guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw FastComposeError(stage: "concat", message: "could not create video track")
+        }
+        var audioTrack: AVMutableCompositionTrack? = nil
+        var insertTime = CMTime.zero
+        for url in segmentURLs {
+            let asset = AVURLAsset(url: url)
+            guard let srcVideo = asset.tracks(withMediaType: .video).first else {
+                throw FastComposeError(stage: "concat", message: "segment missing video track: \(url.lastPathComponent)")
+            }
+            let range = CMTimeRange(start: .zero, duration: asset.duration)
+            do {
+                try videoTrack.insertTimeRange(range, of: srcVideo, at: insertTime)
+            } catch {
+                throw FastComposeError(stage: "concat", message: "insert failed: \(error.localizedDescription)")
+            }
+            if let srcAudio = asset.tracks(withMediaType: .audio).first {
+                if audioTrack == nil {
+                    audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                }
+                try? audioTrack?.insertTimeRange(range, of: srcAudio, at: insertTime)
+            }
+            insertTime = CMTimeAdd(insertTime, asset.duration)
+        }
+
+        try? FileManager.default.removeItem(at: outputURL)
+        guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
+            throw FastComposeError(stage: "concat", message: "could not create passthrough session")
+        }
+        session.outputURL = outputURL
+        session.outputFileType = .mp4
+        session.shouldOptimizeForNetworkUse = true
+        let sem = DispatchSemaphore(value: 0)
+        session.exportAsynchronously { sem.signal() }
+        sem.wait()
+        guard session.status == .completed else {
+            throw FastComposeError(
+                stage: "concat",
+                message: session.error?.localizedDescription ?? "status \(session.status.rawValue)",
+                code: (session.error as NSError?)?.code ?? 0
+            )
+        }
+        return insertTime
+    }
+
+    /// Mix music under the reel audio WITHOUT re-encoding video: audio-only
+    /// mixed export (M4A preset honors audioMix), then a passthrough mux of
+    /// the untouched concat video + the mixed audio.
+    private func fastMixMusic(concatURL: URL, musicURL: URL, totalDuration: CMTime, outputURL: URL) throws {
+        let concatAsset = AVURLAsset(url: concatURL)
+        let musicAsset = AVURLAsset(url: musicURL)
+
+        let audioComp = AVMutableComposition()
+        var clipAudioTrack: AVMutableCompositionTrack? = nil
+        if let srcAudio = concatAsset.tracks(withMediaType: .audio).first {
+            clipAudioTrack = audioComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            try? clipAudioTrack?.insertTimeRange(
+                CMTimeRange(start: .zero, duration: concatAsset.duration),
+                of: srcAudio, at: .zero
+            )
+        }
+        guard let srcMusic = musicAsset.tracks(withMediaType: .audio).first,
+              let musicTrack = audioComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw FastComposeError(stage: "music", message: "music track unavailable")
+        }
+        // Loop music to cover the full reel — same behavior as legacy.
+        var musicInsert = CMTime.zero
+        while CMTimeCompare(musicInsert, totalDuration) < 0 {
+            let remaining = CMTimeSubtract(totalDuration, musicInsert)
+            let insertDuration = CMTimeMinimum(musicAsset.duration, remaining)
+            try? musicTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: insertDuration),
+                of: srcMusic, at: musicInsert
+            )
+            musicInsert = CMTimeAdd(musicInsert, insertDuration)
+        }
+        // Same mix as legacy: clips 80%, music 30% with a 2s tail fade.
+        let mix = AVMutableAudioMix()
+        var params: [AVMutableAudioMixInputParameters] = []
+        if let clipAudio = clipAudioTrack {
+            let p = AVMutableAudioMixInputParameters(track: clipAudio)
+            p.setVolume(0.8, at: .zero)
+            params.append(p)
+        }
+        let mp = AVMutableAudioMixInputParameters(track: musicTrack)
+        mp.setVolume(0.3, at: .zero)
+        let fadeStart = CMTimeSubtract(totalDuration, CMTime(seconds: 2.0, preferredTimescale: 600))
+        mp.setVolumeRamp(
+            fromStartVolume: 0.3, toEndVolume: 0.0,
+            timeRange: CMTimeRange(start: fadeStart, duration: CMTime(seconds: 2.0, preferredTimescale: 600))
+        )
+        params.append(mp)
+        mix.inputParameters = params
+
+        let mixedURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reel_audio_\(UUID().uuidString).m4a")
+        try? FileManager.default.removeItem(at: mixedURL)
+        defer { try? FileManager.default.removeItem(at: mixedURL) }
+        guard let audioSession = AVAssetExportSession(asset: audioComp, presetName: AVAssetExportPresetAppleM4A) else {
+            throw FastComposeError(stage: "music", message: "could not create audio export session")
+        }
+        audioSession.outputURL = mixedURL
+        audioSession.outputFileType = .m4a
+        audioSession.audioMix = mix
+        let semA = DispatchSemaphore(value: 0)
+        audioSession.exportAsynchronously { semA.signal() }
+        semA.wait()
+        guard audioSession.status == .completed else {
+            throw FastComposeError(
+                stage: "music",
+                message: audioSession.error?.localizedDescription ?? "audio mix failed",
+                code: (audioSession.error as NSError?)?.code ?? 0
+            )
+        }
+
+        let muxComp = AVMutableComposition()
+        guard let vSrc = concatAsset.tracks(withMediaType: .video).first,
+              let vDst = muxComp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw FastComposeError(stage: "mux", message: "video track unavailable")
+        }
+        do {
+            try vDst.insertTimeRange(CMTimeRange(start: .zero, duration: concatAsset.duration), of: vSrc, at: .zero)
+        } catch {
+            throw FastComposeError(stage: "mux", message: error.localizedDescription)
+        }
+        let mixedAsset = AVURLAsset(url: mixedURL)
+        if let aSrc = mixedAsset.tracks(withMediaType: .audio).first,
+           let aDst = muxComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            try? aDst.insertTimeRange(CMTimeRange(start: .zero, duration: mixedAsset.duration), of: aSrc, at: .zero)
+        }
+        try? FileManager.default.removeItem(at: outputURL)
+        guard let muxSession = AVAssetExportSession(asset: muxComp, presetName: AVAssetExportPresetPassthrough) else {
+            throw FastComposeError(stage: "mux", message: "could not create mux session")
+        }
+        muxSession.outputURL = outputURL
+        muxSession.outputFileType = .mp4
+        muxSession.shouldOptimizeForNetworkUse = true
+        let semM = DispatchSemaphore(value: 0)
+        muxSession.exportAsynchronously { semM.signal() }
+        semM.wait()
+        guard muxSession.status == .completed else {
+            throw FastComposeError(
+                stage: "mux",
+                message: muxSession.error?.localizedDescription ?? "mux failed",
+                code: (muxSession.error as NSError?)?.code ?? 0
+            )
+        }
+    }
+
+    /// Orchestrator. Throws on any failure — the caller falls back to the
+    /// legacy single-session export, so this can never lose a reel.
+    private func composeReelFast(
+        clips: [[String: Any]],
+        scorecard: ScorecardData?,
+        musicUri: String?,
+        promise: Promise,
+        startTime: CFTimeInterval
+    ) throws {
+        let (parsed, renderSize) = try fastParseClips(clips)
+        let segments = fastGroupSegments(parsed, scorecard: scorecard)
+        print("[Clippar.Compose] FAST path: \(parsed.count) clips → \(segments.count) segments renderSize=\(renderSize)")
+        sendEvent("onStitchProgress", [
+            "phase": "composing", "current": 0, "total": clips.count, "percent": 10.0,
+        ])
+
+        let tmpDir = FileManager.default.temporaryDirectory
+        let segmentURLs: [URL] = segments.indices.map {
+            tmpDir.appendingPathComponent("reel_seg_\($0)_\(UUID().uuidString).mp4")
+        }
+        defer { segmentURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        // Export segments concurrently. Each session holds a full
+        // decode + CoreAnimation-composite + encode pipeline, so adapt the
+        // worker count to memory headroom (same policy as the JS trim pool):
+        // a jetsam kill here has NO fallback — the whole app dies.
+        let availableMB = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
+        let segmentConcurrency = availableMB > 1500 ? 3 : (availableMB > 700 ? 2 : 1)
+        print("[Clippar.Compose] FAST segment concurrency=\(segmentConcurrency) (availableMB=\(String(format: "%.0f", availableMB)))")
+        let gate = DispatchSemaphore(value: segmentConcurrency)
+        let group = DispatchGroup()
+        let stateQueue = DispatchQueue(label: "clippar.fastcompose.state")
+        var firstError: Error? = nil
+        var completedSegments = 0
+
+        for (i, segment) in segments.enumerated() {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                defer { group.leave() }
+                gate.wait()
+                defer { gate.signal() }
+                if (stateQueue.sync { firstError != nil }) { return }
+                autoreleasepool {
+                    let overlay: CALayer?
+                    if let sc = scorecard, let holeIndex = segment.holeIndex {
+                        overlay = self.fastBuildHoleCard(sc: sc, index: holeIndex, renderSize: renderSize)
+                    } else {
+                        overlay = nil
+                    }
+                    do {
+                        try self.fastExportSegment(
+                            clips: segment.clips, overlay: overlay,
+                            renderSize: renderSize, outputURL: segmentURLs[i]
+                        )
+                        stateQueue.sync {
+                            completedSegments += 1
+                            let pct = 10.0 + 75.0 * Double(completedSegments) / Double(segments.count)
+                            self.sendEvent("onStitchProgress", [
+                                "phase": "exporting",
+                                "current": completedSegments,
+                                "total": segments.count,
+                                "percent": pct,
+                            ])
+                        }
+                    } catch {
+                        stateQueue.sync { if firstError == nil { firstError = error } }
+                    }
+                }
+            }
+        }
+        group.wait()
+        if let err = (stateQueue.sync { firstError }) { throw err }
+
+        let concatURL = tmpDir.appendingPathComponent("reel_concat_\(UUID().uuidString).mp4")
+        defer { try? FileManager.default.removeItem(at: concatURL) }
+        let totalDuration = try fastPassthroughConcat(segmentURLs: segmentURLs, outputURL: concatURL)
+        sendEvent("onStitchProgress", [
+            "phase": "exporting", "current": segments.count, "total": segments.count, "percent": 92.0,
+        ])
+
+        let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("reel_\(UUID().uuidString).mp4")
+        try? FileManager.default.removeItem(at: outputURL)
+
+        var hasMusic = false
+        if let musicUriStr = musicUri, !musicUriStr.isEmpty {
+            let musicURL = resolveFileURL(musicUriStr)
+            if FileManager.default.fileExists(atPath: musicURL.path) {
+                try fastMixMusic(concatURL: concatURL, musicURL: musicURL, totalDuration: totalDuration, outputURL: outputURL)
+                hasMusic = true
+            }
+        }
+        if !hasMusic {
+            do {
+                try FileManager.default.moveItem(at: concatURL, to: outputURL)
+            } catch {
+                throw FastComposeError(stage: "finalize", message: error.localizedDescription)
+            }
+        }
+
+        let elapsed = CACurrentMediaTime() - startTime
+        let durationSec = CMTimeGetSeconds(totalDuration)
+        print("[Clippar.Compose] FAST OK clips=\(parsed.count) segments=\(segments.count) durationSec=\(String(format: "%.1f", durationSec)) music=\(hasMusic) elapsedSec=\(String(format: "%.1f", elapsed)) out=\(outputURL.lastPathComponent)")
+        sendEvent("onStitchProgress", [
+            "phase": "exporting", "current": segments.count, "total": segments.count, "percent": 100.0,
+        ])
+        promise.resolve([
+            "reelUri": outputURL.absoluteString,
+            "durationMs": durationSec * 1000.0,
+            "clipCount": parsed.count,
+            "hasOverlay": scorecard != nil,
+            "hasMusic": hasMusic,
+        ] as [String: Any])
+    }
+
     private func composeReelOnDevice(clips: [[String: Any]], scorecardJson: String, musicUri: String?, promise: Promise) {
         DispatchQueue.global(qos: .userInitiated).async {
             let startTime = CACurrentMediaTime()
@@ -1674,6 +2448,51 @@ public class ShotDetectorModule: Module {
             var scorecard: ScorecardData?
             if let jsonData = scorecardJson.data(using: .utf8) {
                 scorecard = try? JSONDecoder().decode(ScorecardData.self, from: jsonData)
+            }
+
+            // ---- FAST PATH ----
+            // Segment-parallel export + passthrough concat (helpers above).
+            // Falls back to the legacy single-session export below on most
+            // errors, so the fast path can never lose a reel. Exception:
+            // -11847 (export interrupted — app backgrounded) REJECTS instead,
+            // because the legacy path would just die the same death after
+            // another 8 minutes of doomed re-encoding.
+            //
+            // Same UIKit background-task protection as the legacy export so a
+            // brief app switch doesn't immediately kill the segment exports.
+            var fastBgTaskId: UIBackgroundTaskIdentifier = .invalid
+            DispatchQueue.main.sync {
+                fastBgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ClipparReelComposeFast") {
+                    print("[Clippar.Compose] fast-path background task expiring — segment exports will fail with -11847")
+                }
+            }
+            let endFastBgTask = {
+                if fastBgTaskId != .invalid {
+                    DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(fastBgTaskId) }
+                    fastBgTaskId = .invalid
+                }
+            }
+            do {
+                try self.composeReelFast(
+                    clips: clips,
+                    scorecard: scorecard,
+                    musicUri: musicUri,
+                    promise: promise,
+                    startTime: startTime
+                )
+                endFastBgTask()
+                return
+            } catch {
+                endFastBgTask()
+                if let fastErr = error as? FastComposeError, fastErr.code == -11847 {
+                    print("[Clippar.Compose] fast path interrupted (backgrounded) — rejecting, no legacy detour")
+                    promise.reject(Exception(
+                        name: "ERR_COMPOSE_INTERRUPTED",
+                        description: "Reel compose was interrupted (app backgrounded). Keep Clippar in the foreground and try again."
+                    ))
+                    return
+                }
+                print("[Clippar.Compose] fast path failed — falling back to legacy single-session export. error=\(error)")
             }
 
             // Build the composition
