@@ -1747,7 +1747,12 @@ public class ShotDetectorModule: Module {
     private struct FastComposeError: Error, CustomStringConvertible {
         let stage: String
         let message: String
-        var description: String { "\(stage): \(message)" }
+        // Underlying NSError code when an export session failed (0 otherwise).
+        // -11847 (AVErrorOperationInterrupted, e.g. app backgrounded) must
+        // REJECT rather than fall back — the legacy path would just die the
+        // same death 8 minutes later.
+        var code: Int = 0
+        var description: String { "\(stage): \(message) (code \(code))" }
     }
 
     /// Parse the JS clip dictionaries into concrete trim ranges. Mirrors the
@@ -2152,7 +2157,11 @@ public class ShotDetectorModule: Module {
         session.exportAsynchronously { sem.signal() }
         sem.wait()
         guard session.status == .completed else {
-            throw FastComposeError(stage: "segment", message: session.error?.localizedDescription ?? "status \(session.status.rawValue)")
+            throw FastComposeError(
+                stage: "segment",
+                message: session.error?.localizedDescription ?? "status \(session.status.rawValue)",
+                code: (session.error as NSError?)?.code ?? 0
+            )
         }
     }
 
@@ -2195,7 +2204,11 @@ public class ShotDetectorModule: Module {
         session.exportAsynchronously { sem.signal() }
         sem.wait()
         guard session.status == .completed else {
-            throw FastComposeError(stage: "concat", message: session.error?.localizedDescription ?? "status \(session.status.rawValue)")
+            throw FastComposeError(
+                stage: "concat",
+                message: session.error?.localizedDescription ?? "status \(session.status.rawValue)",
+                code: (session.error as NSError?)?.code ?? 0
+            )
         }
         return insertTime
     }
@@ -2263,7 +2276,11 @@ public class ShotDetectorModule: Module {
         audioSession.exportAsynchronously { semA.signal() }
         semA.wait()
         guard audioSession.status == .completed else {
-            throw FastComposeError(stage: "music", message: audioSession.error?.localizedDescription ?? "audio mix failed")
+            throw FastComposeError(
+                stage: "music",
+                message: audioSession.error?.localizedDescription ?? "audio mix failed",
+                code: (audioSession.error as NSError?)?.code ?? 0
+            )
         }
 
         let muxComp = AVMutableComposition()
@@ -2292,7 +2309,11 @@ public class ShotDetectorModule: Module {
         muxSession.exportAsynchronously { semM.signal() }
         semM.wait()
         guard muxSession.status == .completed else {
-            throw FastComposeError(stage: "mux", message: muxSession.error?.localizedDescription ?? "mux failed")
+            throw FastComposeError(
+                stage: "mux",
+                message: muxSession.error?.localizedDescription ?? "mux failed",
+                code: (muxSession.error as NSError?)?.code ?? 0
+            )
         }
     }
 
@@ -2318,10 +2339,14 @@ public class ShotDetectorModule: Module {
         }
         defer { segmentURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
 
-        // Export segments concurrently, 3 at a time. The per-frame cost is
-        // the CoreAnimation overlay compositing; three sessions pipeline
-        // decode/composite/encode across cores.
-        let gate = DispatchSemaphore(value: 3)
+        // Export segments concurrently. Each session holds a full
+        // decode + CoreAnimation-composite + encode pipeline, so adapt the
+        // worker count to memory headroom (same policy as the JS trim pool):
+        // a jetsam kill here has NO fallback — the whole app dies.
+        let availableMB = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
+        let segmentConcurrency = availableMB > 1500 ? 3 : (availableMB > 700 ? 2 : 1)
+        print("[Clippar.Compose] FAST segment concurrency=\(segmentConcurrency) (availableMB=\(String(format: "%.0f", availableMB)))")
+        let gate = DispatchSemaphore(value: segmentConcurrency)
         let group = DispatchGroup()
         let stateQueue = DispatchQueue(label: "clippar.fastcompose.state")
         var firstError: Error? = nil
@@ -2427,8 +2452,26 @@ public class ShotDetectorModule: Module {
 
             // ---- FAST PATH ----
             // Segment-parallel export + passthrough concat (helpers above).
-            // Falls back to the legacy single-session export below on ANY
-            // error, so the fast path can never lose a reel.
+            // Falls back to the legacy single-session export below on most
+            // errors, so the fast path can never lose a reel. Exception:
+            // -11847 (export interrupted — app backgrounded) REJECTS instead,
+            // because the legacy path would just die the same death after
+            // another 8 minutes of doomed re-encoding.
+            //
+            // Same UIKit background-task protection as the legacy export so a
+            // brief app switch doesn't immediately kill the segment exports.
+            var fastBgTaskId: UIBackgroundTaskIdentifier = .invalid
+            DispatchQueue.main.sync {
+                fastBgTaskId = UIApplication.shared.beginBackgroundTask(withName: "ClipparReelComposeFast") {
+                    print("[Clippar.Compose] fast-path background task expiring — segment exports will fail with -11847")
+                }
+            }
+            let endFastBgTask = {
+                if fastBgTaskId != .invalid {
+                    DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(fastBgTaskId) }
+                    fastBgTaskId = .invalid
+                }
+            }
             do {
                 try self.composeReelFast(
                     clips: clips,
@@ -2437,8 +2480,18 @@ public class ShotDetectorModule: Module {
                     promise: promise,
                     startTime: startTime
                 )
+                endFastBgTask()
                 return
             } catch {
+                endFastBgTask()
+                if let fastErr = error as? FastComposeError, fastErr.code == -11847 {
+                    print("[Clippar.Compose] fast path interrupted (backgrounded) — rejecting, no legacy detour")
+                    promise.reject(Exception(
+                        name: "ERR_COMPOSE_INTERRUPTED",
+                        description: "Reel compose was interrupted (app backgrounded). Keep Clippar in the foreground and try again."
+                    ))
+                    return
+                }
                 print("[Clippar.Compose] fast path failed — falling back to legacy single-session export. error=\(error)")
             }
 

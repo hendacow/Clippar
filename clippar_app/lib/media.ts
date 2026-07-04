@@ -83,10 +83,18 @@ let clipsDirReady: Promise<string> | null = null;
 function ensureClipsDir(): Promise<string> {
   if (!clipsDirReady) {
     const dir = `${FileSystemLegacy!.documentDirectory}clips/`;
+    // intermediates:true is mkdir -p — succeeds when the dir already exists,
+    // so a rejection here is a REAL failure. Don't cache it (the memoization
+    // would otherwise turn one transient error into permanent copy failures);
+    // reset and rethrow so persistAsset's catch falls back to the source uri
+    // and the next call retries.
     clipsDirReady = FileSystemLegacy!
       .makeDirectoryAsync(dir, { intermediates: true })
-      .catch(() => {}) // already exists (or racing creator) — fine
-      .then(() => dir);
+      .then(() => dir)
+      .catch((err) => {
+        clipsDirReady = null;
+        throw err;
+      });
   }
   return clipsDirReady;
 }
