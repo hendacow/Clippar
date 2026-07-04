@@ -912,19 +912,19 @@ export function useEditorState(roundId: string | undefined) {
     };
 
     // ---- Parallel batch orchestration ----
-    // The shot-type classifier consumes recentByHole context, which is
-    // sequential WITHIN a hole — but holes are independent. So: one
-    // sequential chain per hole, several holes in flight at once. The native
-    // detectAndTrim dispatches onto a CONCURRENT DispatchQueue
-    // (userInitiated), so chains genuinely parallelize the pose/audio
-    // analysis + export work across cores instead of idling between clips.
-    const byHole = new Map<number, EditorClip[]>();
-    for (const c of untrimmedClips) {
-      const arr = byHole.get(c.holeNumber);
-      if (arr) arr.push(c);
-      else byHole.set(c.holeNumber, [c]);
-    }
-    const chainQueue = [...byHole.values()];
+    // Workers pull clips in STRICT round order (hole 1 finishes fully before
+    // hole 2 starts, etc.) so the earliest holes become watchable first —
+    // Henry's explicit preference over per-hole lanes, which completed the
+    // first shot of every hole before finishing any single hole.
+    //
+    // Tradeoff: the shot-type classifier's recentByHole context becomes
+    // BEST-EFFORT — same-hole clips running concurrently don't see each
+    // other, only siblings that already completed (processOneClip reads the
+    // map at start, appends on finish). It's a lean-heuristic for ambiguous
+    // clips, and ordered output is worth the softer context. The native
+    // detectAndTrim dispatches onto a CONCURRENT DispatchQueue, so workers
+    // genuinely parallelize pose/audio analysis + export across cores.
+    const clipQueue = [...untrimmedClips];
 
     // Adaptive concurrency: pose frames + AVAssetExportSession are memory-
     // heavy and iOS kills the app under pressure (hence all the [MEMORY]
@@ -934,20 +934,17 @@ export function useEditorState(roundId: string | undefined) {
       const mb = (await getMemoryStats()).availableMemoryMB;
       if (mb > 0) concurrency = mb > 1500 ? 3 : mb > 700 ? 2 : 1;
     } catch {}
-    concurrency = Math.max(1, Math.min(concurrency, chainQueue.length));
+    concurrency = Math.max(1, Math.min(concurrency, clipQueue.length));
     console.log(
-      `[useEditorState] trim batch: ${total} clips across ${chainQueue.length} holes, concurrency=${concurrency}`
+      `[useEditorState] trim batch: ${total} clips in round order, concurrency=${concurrency}`
     );
 
     const runWorker = async () => {
       for (;;) {
         if (trimCancelledRef.current) return;
-        const chain = chainQueue.shift();
-        if (!chain) return;
-        for (const clip of chain) {
-          if (trimCancelledRef.current) return;
-          await processOneClip(clip);
-        }
+        const clip = clipQueue.shift();
+        if (!clip) return;
+        await processOneClip(clip);
       }
     };
     await Promise.all(Array.from({ length: concurrency }, runWorker));
