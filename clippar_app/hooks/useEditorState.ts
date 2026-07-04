@@ -723,13 +723,14 @@ export function useEditorState(roundId: string | undefined) {
       }
     }
 
-    if (untrimmedClips.length === 0) return;
+    const total = untrimmedClips.length;
+    if (total === 0) return;
 
     // Log initial memory stats
     try {
       const initialStats = await getMemoryStats();
       console.log(
-        `[MEMORY] === START: ${untrimmedClips.length} clips to process ===\n` +
+        `[MEMORY] === START: ${total} clips to process ===\n` +
         `[MEMORY] Available: ${initialStats.availableMemoryMB}MB | Used: ${initialStats.usedMemoryMB}MB | Free disk: ${initialStats.freeDiskMB}MB | Caches: ${initialStats.cachesDirMB}MB`
       );
     } catch {}
@@ -738,8 +739,12 @@ export function useEditorState(roundId: string | undefined) {
     // gets inter-clip context (e.g. recent putts → lean the next ambiguous clip putt).
     const recentByHole = new Map<number, ShotTypeClassification[]>();
 
-    for (let clipIdx = 0; clipIdx < untrimmedClips.length; clipIdx++) {
-      const clip = untrimmedClips[clipIdx];
+    // Per-clip work, shared by the parallel hole-chains below. `clipIdx` is a
+    // start-order counter for log labels (chains interleave, so it no longer
+    // matches array position — each clip still gets a unique 1..N label).
+    let startedCount = 0;
+    const processOneClip = async (clip: EditorClip) => {
+      const clipIdx = startedCount++;
 
       // Check for cancellation before each clip
       if (trimCancelledRef.current) {
@@ -752,7 +757,7 @@ export function useEditorState(roundId: string | undefined) {
         try {
           const before = await getMemoryStats();
           console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} BEFORE: Available: ${before.availableMemoryMB}MB | Used: ${before.usedMemoryMB}MB | Free disk: ${before.freeDiskMB}MB`
+            `[MEMORY] Clip ${clipIdx + 1}/${total} BEFORE: Available: ${before.availableMemoryMB}MB | Used: ${before.usedMemoryMB}MB | Free disk: ${before.freeDiskMB}MB`
           );
           // CRASH WARNING: if available memory drops below 200MB
           if (before.availableMemoryMB > 0 && before.availableMemoryMB < 200) {
@@ -852,7 +857,7 @@ export function useEditorState(roundId: string | undefined) {
         try {
           const after = await getMemoryStats();
           console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} AFTER:  Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB` +
+            `[MEMORY] Clip ${clipIdx + 1}/${total} AFTER:  Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB` +
             ` | ${result.found ? 'TRIMMED' : 'no swing'} (hole ${clip.holeNumber}, shot ${clip.shotNumber})`
           );
         } catch {}
@@ -885,7 +890,7 @@ export function useEditorState(roundId: string | undefined) {
         try {
           const errStats = await getMemoryStats();
           console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${untrimmedClips.length} FAILED: Available: ${errStats.availableMemoryMB}MB | Used: ${errStats.usedMemoryMB}MB`
+            `[MEMORY] Clip ${clipIdx + 1}/${total} FAILED: Available: ${errStats.availableMemoryMB}MB | Used: ${errStats.usedMemoryMB}MB`
           );
         } catch {}
         // CRITICAL: mark the failed clip as processed so it doesn't block the
@@ -904,7 +909,48 @@ export function useEditorState(roundId: string | undefined) {
         }));
         // Continue with next clip — don't abort the whole batch
       }
+    };
+
+    // ---- Parallel batch orchestration ----
+    // The shot-type classifier consumes recentByHole context, which is
+    // sequential WITHIN a hole — but holes are independent. So: one
+    // sequential chain per hole, several holes in flight at once. The native
+    // detectAndTrim dispatches onto a CONCURRENT DispatchQueue
+    // (userInitiated), so chains genuinely parallelize the pose/audio
+    // analysis + export work across cores instead of idling between clips.
+    const byHole = new Map<number, EditorClip[]>();
+    for (const c of untrimmedClips) {
+      const arr = byHole.get(c.holeNumber);
+      if (arr) arr.push(c);
+      else byHole.set(c.holeNumber, [c]);
     }
+    const chainQueue = [...byHole.values()];
+
+    // Adaptive concurrency: pose frames + AVAssetExportSession are memory-
+    // heavy and iOS kills the app under pressure (hence all the [MEMORY]
+    // logging in this file). Scale workers to headroom; floor 1, cap 3.
+    let concurrency = 2;
+    try {
+      const mb = (await getMemoryStats()).availableMemoryMB;
+      if (mb > 0) concurrency = mb > 1500 ? 3 : mb > 700 ? 2 : 1;
+    } catch {}
+    concurrency = Math.max(1, Math.min(concurrency, chainQueue.length));
+    console.log(
+      `[useEditorState] trim batch: ${total} clips across ${chainQueue.length} holes, concurrency=${concurrency}`
+    );
+
+    const runWorker = async () => {
+      for (;;) {
+        if (trimCancelledRef.current) return;
+        const chain = chainQueue.shift();
+        if (!chain) return;
+        for (const clip of chain) {
+          if (trimCancelledRef.current) return;
+          await processOneClip(clip);
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: concurrency }, runWorker));
 
     console.log('[useEditorState] All untrimmed clips processed');
   }, [state.holes, getTrimSettings, resolveDetection, updateClipInState]);
