@@ -611,6 +611,7 @@ export default function ImportRoundScreen() {
       // Promise.all so the slowest clip (not the sum) sets the wall time.
       // Production Supabase RTT + iOS sandbox checks add ~600-800ms per clip
       // serially; in parallel a 12-clip import drops from ~10s to ~2-3s.
+      const persistT0 = Date.now();
       const clipTasks: Promise<void>[] = [];
       for (const hole of holes) {
         for (let shotIdx = 0; shotIdx < hole.clips.length; shotIdx++) {
@@ -630,12 +631,14 @@ export default function ImportRoundScreen() {
             // a stable path. We still fall back to `resolveAssetUri` if the
             // persist step fails.
             const filename = `imported_${roundId}_h${holeNumber}_s${shotNumber}_${Date.now()}.mp4`;
+            const tPersist = Date.now();
             let durableUri: string;
             try {
               durableUri = await persistAsset(clip.uri, filename);
             } catch {
               durableUri = await resolveAssetUri(clip.uri);
             }
+            const persistMs = Date.now() - tPersist;
 
             // Photos mirroring: clip.assetId is set iff the user picked the
             // video from Photos (so it's already there — free recovery hint).
@@ -655,6 +658,7 @@ export default function ImportRoundScreen() {
               }
             }
 
+            const tSave = Date.now();
             const clipId = await saveLocalClip({
               round_id: roundId,
               hole_number: holeNumber,
@@ -678,6 +682,9 @@ export default function ImportRoundScreen() {
               void setClipPhotosAssetId(clipId, photosAssetId);
             }
 
+            const saveMs = Date.now() - tSave;
+
+            const tShot = Date.now();
             try {
               await createShot({
                 round_id: roundId,
@@ -687,12 +694,18 @@ export default function ImportRoundScreen() {
                 clip_url: '',
               });
             } catch {}
+            console.log(
+              `[Import] h${holeNumber}s${shotNumber} persist=${persistMs}ms save=${saveMs}ms shot=${Date.now() - tShot}ms`
+            );
 
             setImportProgress((prev) => ({ ...prev, done: prev.done + 1 }));
           })());
         }
       }
       await Promise.all(clipTasks);
+      console.log(
+        `[Import] persisted+saved ${clipTasks.length} clips in ${Date.now() - persistT0}ms (move-not-copy)`
+      );
 
       // Save scores per hole — use scorecard scores for quick imports, clip count for manual
       const usesScorecard = importMode === 'quick';
