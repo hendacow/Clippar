@@ -526,6 +526,19 @@ export function useCamera({
     lastToggleTime.current = now;
 
     if (isRecordingRef.current) {
+      // Minimum-duration gate: no real golf clip is under ~2s (a swing with
+      // pre/post-roll is 4s+), but phantom volume events DO arrive ~1-1.5s
+      // after start (clicker bounce / iOS volume-ramp echo — seen in the
+      // field as "recording started then instantly stopped with an error").
+      // A stop that early also makes recordAsync reject with a generic
+      // "error occurred while recording" for the too-short file. Swallow it.
+      const elapsed = now - recordingStartTime.current;
+      if (elapsed < 2000) {
+        console.log(
+          `[useCamera] stop ignored — only ${elapsed}ms after start (phantom click guard)`
+        );
+        return;
+      }
       await stopRecording();
     } else {
       await startRecording();

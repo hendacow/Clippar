@@ -17,7 +17,7 @@
  */
 
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { Platform } from 'react-native';
+import { AppState, Platform } from 'react-native';
 import { useBLE } from '@/hooks/useBLE';
 
 // Try loading expo-key-event (requires dev build + config plugin)
@@ -284,6 +284,18 @@ export function useShutter(): ShutterState {
   const RESET_TOLERANCE = 0.02;
   const EXPECTED_RESET_WINDOW_MS = 600;
 
+  // Grace window: iOS emits a volume notification when the audio session
+  // (re)activates or the output route changes — e.g. the camera setting its
+  // record audio mode on mount, returning from background, AirPods connecting.
+  // Those report the session's CURRENT volume (any value ≠ 0.5), so the
+  // value-based reset suppression above can't catch them, and one was observed
+  // phantom-starting a recording ({volume: 0.25} with no press — 2026-07-03).
+  // No real user press can meaningfully happen in the first moments after
+  // mount/foreground, so drop volume events in that window (still re-centering
+  // the volume so the press pipeline stays armed).
+  const VOLUME_GRACE_MS = 1500;
+  const volumeGraceUntilRef = useRef(0);
+
   useEffect(() => {
     if (!volumeAvailable || !VolumeManager) {
       slog('volume manager unavailable — HUD will show, no volume capture');
@@ -313,9 +325,27 @@ export function useShutter(): ShutterState {
       } catch {}
     };
 
+    // Arm the mount grace window, and re-arm it whenever the app returns to
+    // the foreground (audio-session reactivation emits volume noise there too).
+    volumeGraceUntilRef.current = Date.now() + VOLUME_GRACE_MS;
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        volumeGraceUntilRef.current = Date.now() + VOLUME_GRACE_MS;
+      }
+    });
+
     const subscription = VolumeManager.addVolumeListener((event: { volume?: number }) => {
       const value = event?.volume ?? -1;
       const now = Date.now();
+
+      if (now < volumeGraceUntilRef.current) {
+        // Audio-session activation noise (mount/foreground) — not a press.
+        // Re-center so the pipeline is armed once the grace window ends.
+        slog('volume change SUPPRESSED (mount/foreground grace)', { volume: value });
+        resetVolumeSafely();
+        return;
+      }
+
       const expectedUntil = expectedResetUntilRef.current;
       const expecting = expectedUntil !== null && now <= expectedUntil;
       const matchesReset = Math.abs(value - RESET_TARGET) <= RESET_TOLERANCE;
@@ -353,6 +383,7 @@ export function useShutter(): ShutterState {
 
     return () => {
       subscription?.remove?.();
+      appStateSub?.remove?.();
       try { VolumeManager.showNativeVolumeUI({ enabled: true }); } catch {}
     };
   }, [emitPress]);
