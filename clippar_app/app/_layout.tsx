@@ -76,14 +76,19 @@ function RootLayout() {
     if (loading || !sales.loaded) return;
     const inAuthGroup = segments[0] === '(auth)';
     const inOnboardingGroup = segments[0] === '(onboarding)';
+    // The onboarding funnel hands off to /paywall BEFORE signup (StoreKit
+    // trials are Apple-ID scoped — no account needed). Don't bounce a
+    // signed-out user off it; the paywall itself routes forward to signup
+    // when opened from onboarding (?from=onboarding).
+    const onPaywall = segments[0] === 'paywall';
     // Dev builds only: (dev) harness screens (tracer-sim, detection-ab) are
     // reachable without sign-in so simulator automation can deep-link to them.
     const inDevGroup = __DEV__ && segments[0] === '(dev)';
     if (!user) {
       // Brand-new visitor (cold from the Instagram ad) → sell first.
-      if (!sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup) {
+      if (!sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup && !onPaywall) {
         router.replace('/(onboarding)');
-      } else if (sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup) {
+      } else if (sales.done && !inAuthGroup && !inOnboardingGroup && !inDevGroup && !onPaywall) {
         router.replace('/(auth)/login');
       }
     } else if (user && (inAuthGroup || inOnboardingGroup)) {
