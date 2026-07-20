@@ -7,7 +7,15 @@
  * memory not the stats, no fabricated social proof.
  */
 import { useEffect, useState } from 'react';
-import { View, Text, Pressable, Dimensions, StyleSheet } from 'react-native';
+import {
+  View,
+  Text,
+  Pressable,
+  Dimensions,
+  StyleSheet,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
 import * as Haptics from 'expo-haptics';
 import Animated, {
   useSharedValue,
@@ -243,6 +251,10 @@ export function CourseScreen({ answers, setAnswers, onNext, onSkip }: FlowScreen
     onNext();
   };
   return (
+    <KeyboardAvoidingView
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      style={{ flex: 1 }}
+    >
     <FlowScreen
       title="Where do you play most?"
       sub="Your course shows up on your reels' end-card."
@@ -267,6 +279,7 @@ export function CourseScreen({ answers, setAnswers, onNext, onSkip }: FlowScreen
         />
       </Rise>
     </FlowScreen>
+    </KeyboardAvoidingView>
   );
 }
 
@@ -346,6 +359,7 @@ export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
     return (
       <View style={styles.loaderWrap}>
         <Animated.View style={[ring, styles.loaderRing]} />
+        <H1 center>Building your Clippar…</H1>
         <View style={{ gap: 14, alignSelf: 'stretch', paddingHorizontal: 12 }}>
           {lines.map((l, i) => (
             <View key={i} style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
