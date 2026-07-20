@@ -36,6 +36,9 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Surface Claude's actual error output in CI logs — without this the
+          # action hides the SDK stream and failures are undiagnosable.
+          show_full_output: true
           # Security-focused prompt — narrower than general code review.
           # Claude has gh CLI access to post inline review comments.
           prompt: |
