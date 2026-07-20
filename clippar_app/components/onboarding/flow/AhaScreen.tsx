@@ -88,7 +88,16 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
 
       let videoUri: string | null = null;
       try {
-        const detection = await detectAndTrim(asset.uri, 3000, 2000, []);
+        // Insurance: a huge 4K clip (or a wedged native promise) must never
+        // strand the user on "Building your reel…" — after 30s we fall to the
+        // sample path, same as a detection failure.
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('aha-build-timeout')), 30_000)
+        );
+        const detection = await Promise.race([
+          detectAndTrim(asset.uri, 3000, 2000, []),
+          timeout,
+        ]);
         if (detection.found && detection.trimmedUri) {
           videoUri = detection.trimmedUri;
         } else if (isShotDetectorAvailable()) {

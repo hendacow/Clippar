@@ -35,7 +35,10 @@ const PRO_FEATURES = [
   'All detection & trim settings',
 ];
 
-const TRIAL_DAYS = 14;
+// Trial length comes from the STORE (ProOffering.trialDays, derived from the
+// package's free intro offer + user eligibility) — never hardcoded. Until the
+// 14-day Free Introductory Offer exists in App Store Connect, offerings carry
+// no trialDays and this paywall shows plain pricing with no trial claims.
 
 export default function PaywallScreen() {
   const insets = useSafeAreaInsets();
@@ -220,7 +223,7 @@ export default function PaywallScreen() {
                       >
                         {o.plan === 'annual' ? 'Annual' : o.plan === 'lifetime' ? 'Lifetime' : 'Monthly'}
                       </Text>
-                      {o.plan !== 'lifetime' ? (
+                      {o.trialDays ? (
                         <View
                           style={{
                             backgroundColor: `${theme.colors.primary}22`,
@@ -232,7 +235,7 @@ export default function PaywallScreen() {
                           <Text
                             style={{ color: theme.colors.primary, fontSize: 11, fontWeight: '800' }}
                           >
-                            {TRIAL_DAYS} days free
+                            {o.trialDays} days free
                           </Text>
                         </View>
                       ) : null}
@@ -254,9 +257,9 @@ export default function PaywallScreen() {
                       ) : null}
                     </View>
                     <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 2 }}>
-                      {o.plan === 'lifetime'
+                      {o.plan === 'lifetime' || !o.trialDays
                         ? `${o.priceLabel} ${o.periodLabel}`
-                        : `${TRIAL_DAYS} days free, then ${o.priceLabel} ${o.periodLabel}`}
+                        : `${o.trialDays} days free, then ${o.priceLabel} ${o.periodLabel}`}
                     </Text>
                   </View>
                   <View
@@ -286,7 +289,9 @@ export default function PaywallScreen() {
             busy
               ? 'One sec…'
               : selectedIsSubscription
-                ? `Start my ${TRIAL_DAYS} days free`
+                ? selectedOffering?.trialDays
+                  ? `Start my ${selectedOffering.trialDays} days free`
+                  : 'Subscribe'
                 : 'Continue'
           }
           onPress={handlePurchase}
@@ -307,7 +312,11 @@ export default function PaywallScreen() {
           >
             {selectedOffering.plan === 'lifetime'
               ? `One-time purchase of ${selectedOffering.priceLabel}. Payment is charged to your Apple ID at confirmation of purchase. No subscription, nothing renews.`
-              : `Free for ${TRIAL_DAYS} days, then ${selectedOffering.priceLabel} ${selectedOffering.periodLabel}. Payment is charged to your Apple ID at confirmation of purchase. The subscription automatically renews unless auto-renew is turned off at least 24 hours before the end of the current period. Manage or cancel anytime in your Apple Account Settings.`}
+              : `${
+                  selectedOffering.trialDays
+                    ? `Free for ${selectedOffering.trialDays} days, then ${selectedOffering.priceLabel} ${selectedOffering.periodLabel}.`
+                    : `${selectedOffering.priceLabel} ${selectedOffering.periodLabel}.`
+                } Payment is charged to your Apple ID at confirmation of purchase. The subscription automatically renews unless auto-renew is turned off at least 24 hours before the end of the current period. Manage or cancel anytime in your Apple Account Settings.`}
           </Text>
         ) : null}
 

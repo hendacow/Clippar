@@ -442,7 +442,9 @@ export function ProGateScreen({ ahaOutcome, onSeePro, onMaybeLater }: FlowScreen
       title={real ? 'You’ve made your first reel.' : 'Your first reel is one tap away.'}
       sub={
         real
-          ? 'Free Clippar keeps this one, with a small watermark. To keep making them — HD, no watermark, straight to your group — you’ll want Clippar Pro.'
+          ? // Honest claim only: the aha clip is NOT persisted into the library
+            // after signup (it lives in cache), so never promise "keeps this one".
+            'Free Clippar makes reels like this from your rounds, with a small watermark. To keep them coming — HD, no watermark, straight to your group — you’ll want Clippar Pro.'
           : 'Free Clippar makes it, with a small watermark. To keep making them — HD, no watermark, straight to your group — you’ll want Clippar Pro.'
       }
       center
