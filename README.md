@@ -202,3 +202,4 @@ When `save_annotated: true`, each input clip gets a full debug video showing exa
 - The pipeline falls back to OpenCV (no audio) if ffmpeg fails
 
 ---
+
