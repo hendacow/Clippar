@@ -40,6 +40,7 @@ import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
 import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from '@/lib/storage';
+import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset } from '@/lib/api';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
@@ -229,6 +230,21 @@ export default function RecordScreen() {
     setRecordingActive(isActive);
     return () => { setRecordingActive(false); };
   }, [isActive, setRecordingActive]);
+
+  // Onboarding personalization: prefill the course field with the home
+  // course from onboarding (visible "it used my answer" proof). Text-only —
+  // the user still picks from the dropdown to attach hole data, and any
+  // value they've already typed wins.
+  useEffect(() => {
+    getOnboardingProfile()
+      .then((p) => {
+        if (p.homeCourseName) {
+          setCourseName((cur) => (cur.trim() ? cur : p.homeCourseName!));
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Subscribe shutter press → 1/2/3-click action map.
   //

@@ -33,6 +33,7 @@ import {
   getProfile,
 } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
+import { getOnboardingProfile, shotEmptyStateLine } from '@/lib/onboardingProfile';
 import { ScoreCollection } from '@/components/library/ScoreCollection';
 import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
 import { StatsHero } from '@/components/stats/StatsHero';
@@ -243,6 +244,16 @@ function HomeSkeleton() {
 
 // ---- Empty state ----
 function EmptyState() {
+  // Onboarding personalization: echo the shot they said they'd hate to lose.
+  // Falls back to the stock copy when onboarding was skipped or pre-dates v2.
+  const [personalLine, setPersonalLine] = useState<string | null>(null);
+  useEffect(() => {
+    getOnboardingProfile()
+      .then((p) => {
+        if (p.memorableShot) setPersonalLine(shotEmptyStateLine[p.memorableShot]);
+      })
+      .catch(() => {});
+  }, []);
   return (
     <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 48, marginTop: 60 }}>
       <View
@@ -278,7 +289,7 @@ function EmptyState() {
           marginBottom: 28,
         }}
       >
-        Record your shots, let Clippar build the reel. Your highlights live right here.
+        {personalLine ?? 'Record your shots, let Clippar build the reel. Your highlights live right here.'}
       </Text>
       <Pressable
         onPress={() => {
