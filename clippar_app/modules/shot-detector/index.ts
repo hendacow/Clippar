@@ -251,6 +251,16 @@ try {
 }
 
 /**
+ * Whether the native shot-detector is present in this binary. Lets callers
+ * (e.g. the onboarding aha) pick a fallback path up-front instead of
+ * inferring absence from a `{ found: false }` result that could equally
+ * mean "detection genuinely found no swing".
+ */
+export function isShotDetectorAvailable(): boolean {
+  return nativeModule !== null;
+}
+
+/**
  * Subscribe to stitch/compose progress events from the native module.
  * Returns a subscription with a `remove()` method to unsubscribe.
  *
