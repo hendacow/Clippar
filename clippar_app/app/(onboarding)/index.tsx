@@ -1,11 +1,21 @@
 /**
- * Cold-start golfer sales funnel — host stepper.
- * HOOK → MICRO-COMMIT ×2 → VALUE ×3 → LOADER → PROOF → PAYWALL.
+ * 10-screen animated onboarding — host stepper (feat/onboarding-v2).
+ * HERO → PROBLEM → INTENT → SHOT → COURSE → HANDICAP → BUILD/REVEAL →
+ * CAMERA-ROLL AHA → REEL READY → PRO GATE → app/paywall (14-day trial).
  *
- * One screen mounted at a time (heavy video) with a cross-fade between steps.
- * Shown once to first-time unauthenticated visitors (gated in app/_layout via
- * lib/salesFlow). The funnel never holds an account — its exits route into the
- * existing signup/login, carrying the trial intent for the post-signup paywall.
+ * One screen mounted at a time (the aha holds video + audio) with a
+ * cross-fade between steps and an endowed progress bar (starts at 15%).
+ * Shown once to first-time unauthenticated visitors (gated in app/_layout
+ * via lib/salesFlow — that plumbing is unchanged, so deleting lib/salesFlow
+ * + this route group still disconnects the whole feature).
+ *
+ * Exits (no dead-ends, even with every skippable skipped and the picker
+ * cancelled):
+ *  - Hero "I already have an account" → login.
+ *  - Pro gate "See Pro" → /paywall?from=onboarding (the paywall routes to
+ *    signup on close/purchase when it came from here).
+ *  - Pro gate "Not now" → signup.
+ * All three mark the funnel done + persist answers first.
  */
 import { useCallback, useMemo, useRef, useState } from 'react';
 import { View } from 'react-native';
@@ -14,54 +24,61 @@ import { StatusBar } from 'expo-status-bar';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import {
-  HookIntro,
-  QHandicap,
-  QGoal,
-  ValueAutocut,
-  ValueTracer,
-  ValueShare,
-  BuildingLoader,
-  ProofWall,
-  PaywallPreview,
-  type ScreenProps,
-} from '@/components/onboarding/sales/Screens';
+  HeroScreen,
+  ProblemScreen,
+  IntentScreen,
+  ShotScreen,
+  CourseScreen,
+  HandicapScreen,
+  BuildRevealScreen,
+  ReelReadyScreen,
+  ProGateScreen,
+  type FlowScreenProps,
+  type FlowAnswers,
+  type AhaOutcome,
+} from '@/components/onboarding/flow/Screens';
+import { AhaScreen } from '@/components/onboarding/flow/AhaScreen';
+import { FlowProgressBar } from '@/components/onboarding/flow/FlowKit';
+import { PROGRESS_START } from '@/constants/onboardingV2';
+import { markSalesDone, setTrialIntent } from '@/lib/salesFlow';
 import {
-  markSalesDone,
-  saveSalesAnswers,
-  setTrialIntent,
-} from '@/lib/salesFlow';
-import type { HandicapBand, GolferGoal } from '@/constants/onboardingFlow';
+  saveOnboardingAnswers,
+  markOnboardingComplete,
+} from '@/lib/onboardingProfile';
 
 const STEPS = [
-  HookIntro,
-  QHandicap,
-  QGoal,
-  ValueAutocut,
-  ValueTracer,
-  ValueShare,
-  BuildingLoader,
-  ProofWall,
-  PaywallPreview,
+  HeroScreen, // 1 — hero reel
+  ProblemScreen, // 2 — the problem
+  IntentScreen, // 3 — intent
+  ShotScreen, // 4 — the shot you'd hate to forget
+  CourseScreen, // 5 — home course (skippable)
+  HandicapScreen, // 6 — handicap band (skippable)
+  BuildRevealScreen, // 7 — building → reveal
+  AhaScreen, // 8 — camera-roll reel aha
+  ReelReadyScreen, // 9 — your reel's ready
+  ProGateScreen, // 10 — paywall setup
 ] as const;
 
-export default function SalesFunnel() {
+export default function OnboardingFunnel() {
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState(0);
-  const [handicap, setHandicapState] = useState<HandicapBand | null>(null);
-  const [goal, setGoalState] = useState<GolferGoal | null>(null);
+  const [answers, setAnswersState] = useState<FlowAnswers>({
+    intent: null,
+    memorableShot: null,
+    homeCourseName: null,
+    handicap: null,
+    vibe: 'cinematic', // default choice architecture — Cinematic pre-selected
+  });
+  const [ahaOutcome, setAhaOutcome] = useState<AhaOutcome | null>(null);
 
-  const finishTo = useCallback(
-    async (dest: '/(auth)/signup' | '/(auth)/login', wantsTrial: boolean) => {
-      await saveSalesAnswers(handicap, goal);
-      await setTrialIntent(wantsTrial);
-      await markSalesDone();
-      router.replace(dest);
-    },
-    [handicap, goal]
-  );
+  // Persist incrementally so answers survive an app kill mid-funnel.
+  const setAnswers = useCallback((patch: Partial<FlowAnswers>) => {
+    setAnswersState((prev) => ({ ...prev, ...patch }));
+    saveOnboardingAnswers(patch).catch(() => {});
+  }, []);
 
-  // Throttle advances so a stray double-call (auto-advance + tap) can't skip
-  // a screen — observed handicap jumping straight past the goal question.
+  // Throttle advances so a stray double-call (auto-advance + tap) can't
+  // skip a screen — same field bug the v1 funnel hit.
   const lastAdvance = useRef(0);
   const advance = useCallback(() => {
     const now = Date.now();
@@ -69,44 +86,69 @@ export default function SalesFunnel() {
     lastAdvance.current = now;
     setStep((s) => Math.min(s + 1, STEPS.length - 1));
   }, []);
-  const onNext = advance;
-  const onSkip = advance;
 
-  const setHandicap = useCallback((h: HandicapBand) => setHandicapState(h), []);
-  const setGoal = useCallback((g: GolferGoal) => setGoalState(g), []);
-
-  // Primary = convert (carry trial intent → signup). Secondary depends on screen:
-  // Hook = "I have an account" → login; Paywall = "Maybe later" → signup, no trial.
-  const Current = STEPS[step];
-  const isPaywall = step === STEPS.length - 1;
-
-  const props: ScreenProps = useMemo(
-    () => ({
-      onNext,
-      onSkip,
-      onPrimary: () => finishTo('/(auth)/signup', true),
-      onSecondary: isPaywall
-        ? () => finishTo('/(auth)/signup', false)
-        : () => finishTo('/(auth)/login', false),
-      handicap,
-      goal,
-      setHandicap,
-      setGoal,
-    }),
-    [onNext, onSkip, finishTo, isPaywall, handicap, goal, setHandicap, setGoal]
+  const finish = useCallback(
+    async (wantsTrial: boolean) => {
+      await saveOnboardingAnswers(answers);
+      await markOnboardingComplete();
+      await setTrialIntent(wantsTrial);
+      await markSalesDone();
+    },
+    [answers]
   );
 
-  // Hook screen is full-bleed video (its own safe-area handling); others inset.
-  const padTop = step === 0 ? 0 : insets.top;
-  const padBottom = step === 0 ? 0 : insets.bottom;
+  const onLogin = useCallback(async () => {
+    await finish(false);
+    router.replace('/(auth)/login');
+  }, [finish]);
+
+  const onSeePro = useCallback(async () => {
+    await finish(true);
+    // The paywall handles its own exits when it came from onboarding
+    // (close / purchase / restore → signup) so the funnel never dead-ends.
+    router.replace({ pathname: '/paywall', params: { from: 'onboarding' } });
+  }, [finish]);
+
+  const onMaybeLater = useCallback(async () => {
+    await finish(false);
+    router.replace('/(auth)/signup');
+  }, [finish]);
+
+  const Current = STEPS[step];
+  const props: FlowScreenProps = useMemo(
+    () => ({
+      answers,
+      setAnswers,
+      onNext: advance,
+      onSkip: advance,
+      onLogin,
+      onSeePro,
+      onMaybeLater,
+      ahaOutcome,
+      setAhaOutcome,
+    }),
+    [answers, setAnswers, advance, onLogin, onSeePro, onMaybeLater, ahaOutcome]
+  );
+
+  // Endowed progress: never zero, completes at the pro gate.
+  const progress = PROGRESS_START + (1 - PROGRESS_START) * (step / (STEPS.length - 1));
 
   return (
     <View style={{ flex: 1, backgroundColor: '#0A0A0F' }}>
       <StatusBar style="light" />
+      <View
+        style={{
+          paddingTop: insets.top + 10,
+          paddingHorizontal: 24,
+          paddingBottom: 6,
+        }}
+      >
+        <FlowProgressBar progress={progress} />
+      </View>
       <Animated.View
         key={step}
         entering={FadeIn.duration(280)}
-        style={{ flex: 1, paddingTop: padTop, paddingBottom: padBottom }}
+        style={{ flex: 1, paddingBottom: insets.bottom }}
       >
         <Current {...props} />
       </Animated.View>

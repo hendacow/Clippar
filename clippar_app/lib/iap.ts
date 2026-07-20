@@ -34,6 +34,16 @@ export interface ProOffering {
   periodLabel: string;
   /** Savings hook for the annual card, e.g. "Save 38%". */
   badge?: string;
+  /**
+   * Length of the FREE introductory trial in days, present ONLY when the
+   * store reports a free intro offer on this package AND the user is not
+   * known-ineligible for it. The paywall must never claim a trial unless
+   * this is set — a hardcoded "N days free" against a package with no
+   * intro offer (or a lapsed subscriber) charges the user immediately,
+   * which is both an App Review 3.1.2 problem and real-money harm.
+   * Stub offerings never set it (placeholder prices ⇒ no trial claims).
+   */
+  trialDays?: number;
 }
 
 export interface IapProvider {
@@ -166,6 +176,58 @@ function packagePlan(pkg: RcPackage): ProPlan | null {
   return PLAN_BY_PACKAGE_TYPE[String(pkg.packageType)] ?? null;
 }
 
+/**
+ * Days of FREE trial the store reports on a package, or null when there is
+ * no intro offer / the intro offer is paid (pay-up-front / pay-as-you-go).
+ */
+function introTrialDays(pkg: RcPackage): number | null {
+  const intro = pkg.product.introPrice;
+  if (!intro || intro.price !== 0) return null;
+  const units = intro.periodNumberOfUnits * Math.max(1, intro.cycles);
+  switch (intro.periodUnit) {
+    case 'DAY':
+      return units;
+    case 'WEEK':
+      return units * 7;
+    case 'MONTH':
+      return units * 30;
+    case 'YEAR':
+      return units * 365;
+    default:
+      return null;
+  }
+}
+
+// react-native-purchases INTRO_ELIGIBILITY_STATUS values we must exclude.
+// 1 = INELIGIBLE (e.g. lapsed subscriber who already used the trial),
+// 3 = NO_INTRO_OFFER_EXISTS. 0 = UNKNOWN and 2 = ELIGIBLE both allow the
+// trial claim — StoreKit's own purchase sheet remains the source of truth
+// at confirmation time.
+const INTRO_STATUS_INELIGIBLE = 1;
+const INTRO_STATUS_NO_OFFER = 3;
+
+async function introEligibilityByProduct(
+  packages: RcPackage[]
+): Promise<Record<string, number | undefined>> {
+  const Purchases = getConfiguredPurchases();
+  if (!Purchases) return {};
+  try {
+    const checker = (Purchases as unknown as {
+      checkTrialOrIntroductoryPriceEligibility?: (
+        ids: string[]
+      ) => Promise<Record<string, { status: number }>>;
+    }).checkTrialOrIntroductoryPriceEligibility;
+    if (!checker) return {};
+    const result = await checker(packages.map((p) => p.product.identifier));
+    const out: Record<string, number | undefined> = {};
+    for (const [id, v] of Object.entries(result ?? {})) out[id] = v?.status;
+    return out;
+  } catch {
+    // Eligibility check is best-effort; introPrice presence still gates.
+    return {};
+  }
+}
+
 const RevenueCatProvider: IapProvider = {
   isAvailable() {
     return getConfiguredPurchases() !== null;
@@ -175,6 +237,7 @@ const RevenueCatProvider: IapProvider = {
     const packages = await getDefaultPackages();
     if (packages.length === 0) return StubProvider.getOfferings();
 
+    const eligibility = await introEligibilityByProduct(packages);
     const monthly = packages.find((p) => packagePlan(p) === 'monthly');
     const offerings: ProOffering[] = [];
     for (const pkg of packages) {
@@ -188,11 +251,20 @@ const RevenueCatProvider: IapProvider = {
         if (saving > 0) badge = `Save ${saving}%`;
       }
       if (plan === 'lifetime') badge = 'Forever';
+      const days = introTrialDays(pkg);
+      const status = eligibility[pkg.product.identifier];
+      const trialDays =
+        days != null &&
+        status !== INTRO_STATUS_INELIGIBLE &&
+        status !== INTRO_STATUS_NO_OFFER
+          ? days
+          : undefined;
       offerings.push({
         plan,
         priceLabel: pkg.product.priceString,
         periodLabel: PERIOD_LABEL[plan],
         badge,
+        trialDays,
       });
     }
     // Stable display order: monthly, annual, lifetime.
