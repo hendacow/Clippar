@@ -4,6 +4,7 @@ import { Music, Check, X } from 'lucide-react-native';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { theme } from '@/constants/theme';
 import { getMusicTracks } from '@/lib/api';
+import { MUSIC_LIBRARY } from '@/lib/musicLibrary';
 
 export interface MusicTrack {
   id: string;
@@ -14,33 +15,20 @@ export interface MusicTrack {
   preview_url: string | null;
 }
 
-/** Bundled royalty-free tracks that are always available (shipped with the app). */
-const BUNDLED_TRACKS: MusicTrack[] = [
-  {
-    id: 'chill_vibes',
-    title: 'Chill Vibes',
-    artist: 'Clippar',
-    duration_seconds: 30,
-    file_url: null, // resolved from app bundle at export time
-    preview_url: null,
-  },
-  {
-    id: 'victory_lap',
-    title: 'Victory Lap',
-    artist: 'Clippar',
-    duration_seconds: 30,
-    file_url: null, // resolved from app bundle at export time
-    preview_url: null,
-  },
-  {
-    id: 'focus_mode',
-    title: 'Focus Mode',
-    artist: 'Clippar',
-    duration_seconds: 30,
-    file_url: null, // resolved from app bundle at export time
-    preview_url: null,
-  },
-];
+/**
+ * Bundled royalty-free tracks that are always available (shipped with the
+ * app). Sourced from lib/musicLibrary.ts — the single source of truth —
+ * mapped into this picker's MusicTrack shape. Includes the legacy Clippar
+ * tracks so reels that already reference them keep resolving.
+ */
+const BUNDLED_TRACKS: MusicTrack[] = MUSIC_LIBRARY.map((t) => ({
+  id: t.id,
+  title: t.title,
+  artist: t.artist,
+  duration_seconds: t.durationSeconds,
+  file_url: null, // resolved from app bundle at export time
+  preview_url: null,
+}));
 
 interface MusicPickerProps {
   visible: boolean;
