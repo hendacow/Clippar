@@ -24,6 +24,8 @@
  */
 import { NativeModules, Platform } from 'react-native';
 import { config } from '@/constants/config';
+import { emitSubscriptionChanged } from '@/lib/subscriptionEvents';
+import { isDevVariant } from '@/lib/devPro';
 
 export type ProPlan = 'monthly' | 'annual' | 'lifetime';
 
@@ -91,7 +93,9 @@ const StubProvider: IapProvider = {
   },
   async purchase() {
     throw new Error(
-      'Purchases are not available in this build yet — Clippar Pro arrives with the App Store release.'
+      isDevVariant()
+        ? 'Purchases are not available in the dev build — no App Store products exist for com.clippar.app.dev. Use "Dev: unlock Pro" below to test Pro features.'
+        : 'Purchases are not available in this build yet — Clippar Pro arrives with the App Store release.'
     );
   },
   async restore() {
@@ -140,6 +144,16 @@ function getConfiguredPurchases() {
     try {
       Purchases.configure({ apiKey: config.subscription.revenueCatIosKey });
       configured = true;
+      // Entitlement push channel: RevenueCat fires this on purchase, restore,
+      // renewal, billing lapse and (on app foreground) refreshed customerInfo.
+      // Re-broadcast on our in-process bus so every mounted useSubscription()
+      // re-runs getProStatus() — this is how trial expiry / cancellation
+      // re-locks gated features on the next refresh instead of mid-session.
+      try {
+        Purchases.addCustomerInfoUpdateListener(() => emitSubscriptionChanged());
+      } catch {
+        // Listener wiring is best-effort; polling refreshes still cover us.
+      }
     } catch {
       // Belt-and-braces: any configure failure downgrades to the stub
       // rather than surfacing store errors into UI flows.
@@ -279,7 +293,16 @@ const RevenueCatProvider: IapProvider = {
 
     const packages = await getDefaultPackages();
     const pkg = packages.find((p) => packagePlan(p) === plan);
-    if (!pkg) throw new Error('That plan is not available right now. Please try again later.');
+    if (!pkg) {
+      // Dev builds ("Clippar Dev", com.clippar.app.dev) have no App Store
+      // products, so this path is EXPECTED there — point at the dev unlock
+      // instead of a dead-end store error.
+      throw new Error(
+        isDevVariant()
+          ? 'No store products exist for the dev build (com.clippar.app.dev), so purchases can\'t work here. Use "Dev: unlock Pro" below to test Pro features.'
+          : 'That plan is not available right now. Please try again later.'
+      );
+    }
 
     const mod = loadPurchases();
     try {
@@ -296,6 +319,14 @@ const RevenueCatProvider: IapProvider = {
         (err as { userCancelled?: boolean }).userCancelled
       ) {
         throw new Error('Purchase cancelled.');
+      }
+      if (isDevVariant()) {
+        // Any real store failure in the dev variant traces back to the same
+        // root cause: the dev bundle ID has no products/StoreKit config.
+        const detail = err instanceof Error && err.message ? ` (${err.message})` : '';
+        throw new Error(
+          `The store purchase failed in the dev build${detail}. Dev builds can't complete real purchases — use "Dev: unlock Pro" below to test Pro features.`
+        );
       }
       throw err;
     }

@@ -93,12 +93,12 @@ export async function processUploadQueue(): Promise<void> {
       // and skip the network entirely so free-tier users never hit
       // Supabase Storage.
       const { getCloudBackupEnabled } = await import('@/lib/storage');
-      const { checkSubscription } = await import('@/lib/subscription');
+      const { getProStatus } = await import('@/lib/subscription');
       const cloudBackupOn = await getCloudBackupEnabled();
       if (!cloudBackupOn) {
         return;
       }
-      const subscribed = await checkSubscription();
+      const subscribed = await getProStatus();
       if (!subscribed) {
         return;
       }
