@@ -5,6 +5,7 @@
  * screen code. Voice: confident and warm. No fabricated social proof —
  * no user counts, no ratings, no testimonials until real ones exist.
  */
+import { defaultTrackForVibe } from '@/lib/musicLibrary';
 import type {
   OnboardingIntent,
   MemorableShot,
@@ -38,10 +39,10 @@ export const handicapOptionsV2: { id: OnboardingHandicap; label: string }[] = [
 ];
 
 /**
- * Vibe cards for the camera-roll aha. Music maps onto the three bundled
- * tracks (assets/music): Chill → chill_vibes, Cinematic → focus_mode,
- * Hype → victory_lap. Cinematic is pre-selected (default choice
- * architecture) so the order puts it in the middle.
+ * Vibe cards for the camera-roll aha. Music comes from the curated,
+ * licensed library (lib/musicLibrary.ts — Pixabay, loudness-normalized);
+ * each vibe plays its default library track. Cinematic is pre-selected
+ * (default choice architecture) so the order puts it in the middle.
  */
 export const vibeOptions: {
   id: ReelVibe;
@@ -53,19 +54,19 @@ export const vibeOptions: {
     id: 'chill',
     label: 'Chill',
     tagline: 'Easy Sunday swing',
-    musicAsset: require('@/assets/music/chill_vibes.m4a'),
+    musicAsset: defaultTrackForVibe('chill').asset,
   },
   {
     id: 'cinematic',
     label: 'Cinematic',
     tagline: 'Telecast energy',
-    musicAsset: require('@/assets/music/focus_mode.m4a'),
+    musicAsset: defaultTrackForVibe('cinematic').asset,
   },
   {
     id: 'hype',
     label: 'Hype',
     tagline: 'Group-chat detonator',
-    musicAsset: require('@/assets/music/victory_lap.m4a'),
+    musicAsset: defaultTrackForVibe('hype').asset,
   },
 ];
 
