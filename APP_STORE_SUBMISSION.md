@@ -29,3 +29,13 @@ checked per Apple ID — lapsed subscribers who already used a trial correctly
 see plain pricing). Apple starts the trial at purchase confirmation, sends
 the pre-renewal notice, and takes the first charge on day 15 unless the user
 cancels — none of that is app logic.
+
+## OTA publish safety (dev-unlock foot-gun)
+
+`extra.variant` is evaluated when `eas update` runs, so publishing from a shell
+with `APP_VARIANT=development` set would push a dev-variant manifest to
+production — which used to risk exposing the dev paywall unlock. Two layers now
+prevent this: `isDevVariant()` also requires the native `.dev` bundle id
+(un-OTA-able), and the only sanctioned publish commands are
+`npm run ota:prod` (strips APP_VARIANT) and `npm run ota:dev`.
+**Never run raw `eas update` from a local shell.**

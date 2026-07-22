@@ -21,6 +21,7 @@
  * both the setter and the unsetter.
  */
 import Constants from 'expo-constants';
+import * as Application from 'expo-application';
 import { getSetting, setSetting } from '@/lib/storage';
 import { variantIsDev } from '@/lib/proStatusLogic';
 
@@ -31,9 +32,30 @@ export function currentVariant(): string | undefined {
   return Constants.expoConfig?.extra?.variant as string | undefined;
 }
 
-/** True only in the development variant (Clippar Dev). Fail-closed. */
+/**
+ * True only in the development variant (Clippar Dev). Fail-closed, and
+ * DOUBLE-gated against the OTA foot-gun:
+ *
+ * `extra.variant` is evaluated at PUBLISH time, so a local
+ * `APP_VARIANT=development eas update --branch production` would push a
+ * dev-variant manifest into every App Store install. The manifest check
+ * alone would then light up "Dev: unlock Pro" for real users. The native
+ * bundle identifier, however, is baked into the binary and can never be
+ * changed by an OTA update — so we additionally require it to be the
+ * `.dev` bundle (com.clippar.app.dev). A production binary that receives
+ * a dev-variant manifest still reads NOT dev.
+ *
+ * `Application.applicationId` is null only where the native module is
+ * absent (web / a stale dev client built before expo-application was a
+ * direct dep) — in that case we fall back to the manifest check alone,
+ * which is the pre-hardening behaviour and only reachable in non-store
+ * contexts.
+ */
 export function isDevVariant(): boolean {
-  return variantIsDev(currentVariant());
+  if (!variantIsDev(currentVariant())) return false;
+  const bundleId = Application.applicationId;
+  if (bundleId != null && !bundleId.endsWith('.dev')) return false;
+  return true;
 }
 
 /**

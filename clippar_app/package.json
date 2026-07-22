@@ -16,7 +16,9 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test tests/*.test.ts",
     "verify": "npm run typecheck && npm run test",
-    "done": "bash scripts/done.sh"
+    "done": "bash scripts/done.sh",
+    "ota:prod": "env -u APP_VARIANT eas update --branch production",
+    "ota:dev": "APP_VARIANT=development eas update --branch development"
   },
   "dependencies": {
     "@expo/ngrok": "^4.1.3",
@@ -31,6 +33,7 @@
     "base64-arraybuffer": "^1.0.2",
     "expo": "~54.0.33",
     "expo-apple-authentication": "~8.0.8",
+    "expo-application": "~7.0.8",
     "expo-auth-session": "~7.0.11",
     "expo-av": "~16.0.8",
     "expo-blur": "~15.0.8",
