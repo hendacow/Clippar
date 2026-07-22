@@ -11,7 +11,7 @@ import {
   Modal,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
-import { checkSubscription } from '@/lib/subscription';
+import { getProStatus } from '@/lib/subscription';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -893,7 +893,7 @@ export default function EditorScreen() {
     // Pro gate (config.subscription.enforceExportGate — OFF until StoreKit
     // IAP ships; flipping it without purchases would lock exports for all).
     if (config.subscription.enforceExportGate) {
-      const isPro = await checkSubscription().catch(() => false);
+      const isPro = await getProStatus().catch(() => false);
       if (!isPro) {
         setExportModalVisible(false);
         router.push('/paywall');

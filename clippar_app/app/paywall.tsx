@@ -8,6 +8,7 @@ import { theme } from '@/constants/theme';
 import { Button } from '@/components/ui/Button';
 import { iap, type ProOffering, type ProPlan } from '@/lib/iap';
 import { emitSubscriptionChanged } from '@/lib/subscriptionEvents';
+import { getDevProOverride, isDevVariant, toggleDevProOverride } from '@/lib/devPro';
 import { getOnboardingProfile, intentEcho } from '@/lib/onboardingProfile';
 
 /**
@@ -48,9 +49,17 @@ export default function PaywallScreen() {
   const [selected, setSelected] = useState<ProPlan>('annual');
   const [busy, setBusy] = useState(false);
   const [personalLine, setPersonalLine] = useState<string | null>(null);
+  // Dev-only paywall bypass state ("Clippar Dev" builds have no App Store
+  // products, so real purchases can never succeed there). isDevVariant() is
+  // fail-closed: outside the dev variant the action never renders and the
+  // persisted flag is never even read (lib/devPro.ts).
+  const [devUnlocked, setDevUnlocked] = useState(false);
 
   useEffect(() => {
     iap.getOfferings().then(setOfferings).catch(() => {});
+    if (isDevVariant()) {
+      getDevProOverride().then(setDevUnlocked).catch(() => {});
+    }
     // Echo the user's onboarding answers back (self-reference cue). Absent
     // answers → no line, nothing invented.
     getOnboardingProfile()
@@ -90,6 +99,22 @@ export default function PaywallScreen() {
       Alert.alert('Purchase not completed', err instanceof Error ? err.message : 'Please try again.');
     } finally {
       setBusy(false);
+    }
+  };
+
+  /** Dev builds only: toggle the persisted local Pro override (tap again to
+   *  relock). Production binaries never render the control and lib/devPro
+   *  no-ops there anyway — double fail-closed. */
+  const handleDevToggle = async () => {
+    if (busy || !isDevVariant()) return;
+    const next = await toggleDevProOverride();
+    setDevUnlocked(next);
+    emitSubscriptionChanged();
+    if (next) {
+      Alert.alert('Dev Pro unlocked', 'Pro features are unlocked on this device. Tap again to relock.');
+      exit();
+    } else {
+      Alert.alert('Dev Pro relocked', 'The local override is off — gating behaves like a free user again.');
     }
   };
 
@@ -339,6 +364,23 @@ export default function PaywallScreen() {
             <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>Privacy</Text>
           </Pressable>
         </View>
+
+        {/* Dev-only escape hatch: com.clippar.app.dev has no App Store
+            products, so a real purchase can never succeed in dev builds.
+            Never rendered outside the dev variant (fail-closed). */}
+        {isDevVariant() ? (
+          <Pressable onPress={handleDevToggle} hitSlop={8} style={{ alignSelf: 'center', marginTop: 14 }}>
+            <Text
+              style={{
+                color: theme.colors.textSecondary,
+                fontSize: 12,
+                textDecorationLine: 'underline',
+              }}
+            >
+              {devUnlocked ? 'Dev: Pro unlocked — tap to relock' : 'Dev: unlock Pro'}
+            </Text>
+          </Pressable>
+        ) : null}
       </ScrollView>
     </View>
   );

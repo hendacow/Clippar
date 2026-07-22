@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react';
-import { checkSubscription, SubscriptionStatus } from '@/lib/subscription';
+import { AppState } from 'react-native';
+import { getProStatus, SubscriptionStatus } from '@/lib/subscription';
 import { supabase } from '@/lib/supabase';
 import { onSubscriptionChanged } from '@/lib/subscriptionEvents';
 
@@ -11,7 +12,9 @@ export function useSubscription() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      const subscribed = await checkSubscription();
+      // Single source of truth (lib/subscription.getProStatus): RevenueCat
+      // entitlement / Supabase profile, offline cache, dev-only override.
+      const subscribed = await getProStatus();
       setIsSubscribed(subscribed);
 
       const { data: { user } } = await supabase.auth.getUser();
@@ -32,9 +35,20 @@ export function useSubscription() {
 
   useEffect(() => {
     refresh();
-    // Re-check immediately after a purchase/restore so the UI reflects the
-    // new entitlement without waiting for a remount or the webhook.
-    return onSubscriptionChanged(refresh);
+    // Re-check when the app returns to the foreground: this is the moment a
+    // lapsed trial / cancelled subscription re-locks features (RevenueCat
+    // refreshes customerInfo on activation, and getProStatus reads it live).
+    const appState = AppState.addEventListener('change', (state) => {
+      if (state === 'active') refresh();
+    });
+    // Re-check immediately after a purchase/restore (paywall emits) and on
+    // RevenueCat customerInfo pushes (lib/iap re-broadcasts its listener),
+    // so the UI reflects entitlement changes without waiting for a remount.
+    const unsubscribe = onSubscriptionChanged(refresh);
+    return () => {
+      appState.remove();
+      unsubscribe();
+    };
   }, [refresh]);
 
   return { isSubscribed, status, loading, refresh };
