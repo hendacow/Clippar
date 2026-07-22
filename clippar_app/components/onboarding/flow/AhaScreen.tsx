@@ -151,6 +151,13 @@ async function buildReelFromClips(
 export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowScreenProps) {
   const [phase, setPhase] = useState<Phase>({ name: 'choose' });
   const busyRef = useRef(false);
+  // The UNRACED build promise. When an overall timeout loses the race, the
+  // native Vision/trim/stitch work underneath keeps running — starting a
+  // SECOND build on top of it (user re-picks after the sample fallback) would
+  // run 2× pose estimation concurrently on hardware that was already slow
+  // enough to time out: a plausible jetsam. Serialize: a new pick waits for
+  // the previous build's native work to actually settle first.
+  const inFlightBuildRef = useRef<Promise<unknown> | null>(null);
 
   const pickClip = useCallback(async () => {
     if (busyRef.current) return;
@@ -186,6 +193,14 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
       });
       const startedAt = Date.now();
 
+      // Serialization latch: if a previous build's native work is still
+      // running (its race timed out but the work didn't), wait for it to
+      // settle before feeding the native module a new batch. The user is
+      // already looking at the "building" phase, so the wait is invisible.
+      if (inFlightBuildRef.current) {
+        await inFlightBuildRef.current.catch(() => {});
+      }
+
       let built: { uri: string; clipCount: number } | null = null;
       // Once the race settles (timeout OR completion), a still-running build
       // must never flip the screen back to "building" via a late progress
@@ -201,12 +216,19 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
             computeOverallBuildTimeoutMs(picked.length)
           )
         );
-        built = await Promise.race([
-          buildReelFromClips(picked, (progress) => {
-            if (buildActive) setPhase({ name: 'building', progress });
-          }),
-          timeout,
-        ]);
+        const buildPromise = buildReelFromClips(picked, (progress) => {
+          if (buildActive) setPhase({ name: 'building', progress });
+        });
+        // Track the UNRACED promise; clear only when the native work settles.
+        inFlightBuildRef.current = buildPromise;
+        buildPromise
+          .catch(() => {})
+          .then(() => {
+            if (inFlightBuildRef.current === buildPromise) {
+              inFlightBuildRef.current = null;
+            }
+          });
+        built = await Promise.race([buildPromise, timeout]);
       } catch (err) {
         console.warn('[onboarding-aha] reel build failed:', err);
         built = null;
