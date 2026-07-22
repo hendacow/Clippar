@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { supabase } from './supabase';
+import { BUNDLED_ASSET_MAP } from './musicLibrary';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -11,15 +12,9 @@ if (isNative) {
   } catch {}
 }
 
-/**
- * Bundled music track IDs and their corresponding asset require() calls.
- * These are royalty-free tracks shipped with the app binary.
- */
-const BUNDLED_ASSET_MAP: Record<string, number> = {
-  chill_vibes: require('@/assets/music/chill_vibes.m4a'),
-  victory_lap: require('@/assets/music/victory_lap.m4a'),
-  focus_mode: require('@/assets/music/focus_mode.m4a'),
-};
+// Bundled music track IDs → asset require() calls now live in the single
+// source of truth: lib/musicLibrary.ts (BUNDLED_ASSET_MAP covers both the
+// curated Pixabay library and the legacy Clippar tracks).
 
 /**
  * Check if a track ID refers to a bundled (on-device) music asset.
