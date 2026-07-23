@@ -657,6 +657,14 @@ export default function RecordScreen() {
 
   const handleRecordPress = () => {
     if (isNative) {
+      // The MP4 finalize window (5–10s after a stop) can't accept a new
+      // recordAsync — without this guard the button would silently drop the
+      // press and feel broken on fast re-records (short putts). Give the tap
+      // a warning haptic instead; the button also renders "Saving…" (below).
+      if (camera.isFinalizing) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        return;
+      }
       // force: the on-screen button is an unambiguous user intent — an
       // early (<2s) stop cancels the recording (discarding the too-short
       // clip) instead of being silently swallowed like phantom clicker
@@ -1409,8 +1417,15 @@ export default function RecordScreen() {
             <Text style={styles.actionButtonText}>Penalty</Text>
           </Pressable>
 
-          {/* Record button — large, centered */}
-          <Pressable onPress={handleRecordPress} style={styles.recordButtonContainer}>
+          {/* Record button — large, centered. Dims during the finalize
+              window so a dropped re-record press reads as "busy", not broken. */}
+          <Pressable
+            onPress={handleRecordPress}
+            style={[
+              styles.recordButtonContainer,
+              camera.isFinalizing && { opacity: 0.4 },
+            ]}
+          >
             <RecordingIndicator isRecording={camera.isRecording} />
           </Pressable>
 
