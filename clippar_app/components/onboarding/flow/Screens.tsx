@@ -61,7 +61,7 @@ export interface FlowAnswers {
   vibe: ReelVibe;
 }
 
-/** How screen 8 actually ended — drives honest copy on screens 9 & 10. */
+/** How screen 9 actually ended — drives honest copy on screens 10 & 11. */
 export type AhaOutcome = 'real' | 'sample';
 
 export interface FlowScreenProps {
@@ -71,9 +71,9 @@ export interface FlowScreenProps {
   onSkip: () => void;
   /** Hero secondary — existing users exit to login. */
   onLogin: () => void;
-  /** Screen 10 primary — hand off to the paywall. */
+  /** Screen 11 primary — hand off to the paywall. */
   onSeePro: () => void;
-  /** Screen 10 secondary — decline path (still forward: signup). */
+  /** Screen 11 secondary — decline path (still forward: signup). */
   onMaybeLater: () => void;
   ahaOutcome: AhaOutcome | null;
   setAhaOutcome: (o: AhaOutcome) => void;
