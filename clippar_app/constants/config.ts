@@ -54,15 +54,14 @@ export const config = {
     // Physical Clippar Mount kit (phone mount + Bluetooth clicker + portable
     // charger), sold on the website. Physical goods must NOT go through IAP
     // (App Review 3.1.3(e)) — every in-app surface links out to Safari.
-    // TODO(mount-page): clippargolf.com has no dedicated /mount page yet —
-    // point this at the real product page once it exists.
-    mountUrl: 'https://clippargolf.com',
+    mountUrl: 'https://clippargolf.com/mount',
     mountPriceLabel: '$99',
     // Master switch for the mount cross-sell surfaces (post-signup offer +
-    // record-tab card). OFF until a real product page exists at mountUrl —
-    // the offer is one-shot per user, so showing it while the link lands on
-    // a waitlist page would burn it on a dead end. Dev builds always show
-    // the surfaces (see mountCommerceEnabled in lib/mountOffer.ts).
+    // record-tab card). OFF until the page's Stripe Payment Link is LIVE
+    // (it currently carries a test-mode link — Stripe account activation
+    // pending). The offer is one-shot per user, so it must never point at
+    // a checkout that can't take money. Dev builds always show the
+    // surfaces (see mountCommerceEnabled in lib/mountOffer.ts).
     mountCommerceEnabled: false,
   },
   processing: {
