@@ -14,6 +14,7 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { SocialAuthButtons } from '@/components/auth/SocialAuthButtons';
 import { useAuth } from '@/hooks/useAuth';
+import { resolvePostAuthRoute } from '@/lib/mountOffer';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -32,7 +33,9 @@ export default function LoginScreen() {
     setError('');
     try {
       await signIn(email.trim(), password);
-      router.replace('/(tabs)');
+      // A brand-new account's FIRST login (post email-confirmation) shows
+      // the one-time mount offer; every other login goes straight home.
+      router.replace((await resolvePostAuthRoute()) as never);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Login failed';
       setError(message);
@@ -172,8 +175,15 @@ export default function LoginScreen() {
               </Text>
             </Pressable>
 
+            {/* Social auth can also CREATE an account (first "Continue with
+                Apple/Google" on this screen) — resolvePostAuthRoute sends
+                brand-new accounts to the one-time mount offer. */}
             <SocialAuthButtons
-              onAuthSuccess={() => router.replace('/(tabs)')}
+              onAuthSuccess={() => {
+                void resolvePostAuthRoute().then((route) =>
+                  router.replace(route as never)
+                );
+              }}
               onAuthError={setError}
             />
 

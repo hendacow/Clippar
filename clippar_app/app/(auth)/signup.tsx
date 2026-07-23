@@ -15,6 +15,7 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { SocialAuthButtons } from '@/components/auth/SocialAuthButtons';
 import { useAuth } from '@/hooks/useAuth';
+import { markMountOfferPending, resolvePostAuthRoute } from '@/lib/mountOffer';
 
 export default function SignUpScreen() {
   const [displayName, setDisplayName] = useState('');
@@ -39,6 +40,11 @@ export default function SignUpScreen() {
     setError('');
     try {
       await signUp(email.trim(), password, displayName.trim() || undefined);
+      // New account created (session arrives later, after email
+      // confirmation + first login) — flag it locally so that first login
+      // shows the one-time mount offer (lib/mountOffer). Scoped to this
+      // email so another account logging in next never inherits the offer.
+      void markMountOfferPending(email);
       setSuccess(true);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Sign up failed';
@@ -222,8 +228,16 @@ export default function SignUpScreen() {
               style={{ marginTop: 8 }}
             />
 
+            {/* Social auth creates the account + session in one step. Route
+                through resolvePostAuthRoute so a brand-new account sees the
+                one-time mount offer; an existing account signing in here
+                goes straight to the tabs. */}
             <SocialAuthButtons
-              onAuthSuccess={() => router.replace('/(tabs)')}
+              onAuthSuccess={() => {
+                void resolvePostAuthRoute().then((route) =>
+                  router.replace(route as never)
+                );
+              }}
               onAuthError={setError}
             />
 

@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { useSalesFlowDone } from '@/lib/salesFlow';
+import { resolvePostAuthRoute } from '@/lib/mountOffer';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
 import { OnboardingProvider } from '@/contexts/OnboardingContext';
@@ -92,7 +93,25 @@ function RootLayout() {
         router.replace('/(auth)/login');
       }
     } else if (user && (inAuthGroup || inOnboardingGroup)) {
-      router.replace('/(tabs)');
+      // The password-reset flow establishes a session mid-form (verifyOtp);
+      // navigating away here would unmount the form before the new password
+      // is saved. Let the screen finish and navigate itself.
+      if ((segments as string[])[1] === 'reset-password') return;
+      // New-account handoff (feat/mount-upsell): a freshly created account
+      // gets the one-time Clippar Mount offer before landing on the tabs;
+      // returning logins go straight home. Async because the seen/pending
+      // flags live in SQLite; fail-open to the tabs. The cancellation guard
+      // kills stale promises — auth emits several user-object identities in
+      // quick succession, and a stale resolve racing the screen-level
+      // navigation could otherwise yank the user off the just-mounted offer
+      // (which marks itself seen immediately, losing it forever).
+      let cancelled = false;
+      resolvePostAuthRoute(user).then((route) => {
+        if (!cancelled) router.replace(route as never);
+      });
+      return () => {
+        cancelled = true;
+      };
     }
   }, [user, loading, sales.loaded, sales.done, segments, router]);
 
@@ -181,6 +200,7 @@ function RootLayout() {
               name="paywall"
               options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
             />
+            <Stack.Screen name="mount-offer" options={{ animation: 'fade' }} />
           </Stack>
           <OnboardingHost />
         </BottomSheetModalProvider>
