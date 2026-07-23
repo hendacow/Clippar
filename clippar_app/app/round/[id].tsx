@@ -34,6 +34,8 @@ import { ShareSheet } from '@/components/shared/ShareSheet';
 import { ReelStage } from '@/components/shared/ReelStage';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
+import { deleteLocalRound } from '@/lib/storage';
+import { runDeleteRound } from '@/lib/roundDeleteLogic';
 import { computeRoundStatus, type RoundStatusResult } from '@/lib/roundStatus';
 import { formatRoundDate, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { subscribePipeline } from '@/lib/pipelineEvents';
@@ -223,6 +225,18 @@ export default function RoundViewer() {
     router.push(`/round/editor?roundId=${id}`);
   }, [id]);
 
+  // Safe back: `router.back()` is a silent no-op when the nav stack is empty
+  // (the redesigned Home can reach this screen via a path with no history —
+  // deep link / fresh nav), leaving the header arrow dead and stranding the
+  // post-delete screen. Fall back to the library tab in that case.
+  const safeBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  }, []);
+
   // ---- Fetch + canonical status ----
   const roundRef = useRef<any>(null);
   const computeStatus = useCallback(
@@ -313,16 +327,28 @@ export default function RoundViewer() {
     confirmDeleteRound(async () => {
       if (!id) return;
       setDeleting(true);
-      try {
-        await deleteRound(id);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        router.back();
-      } catch {
-        Alert.alert('Error', 'Failed to delete round. Please try again.');
-        setDeleting(false);
-      }
+      // Remote-first: the round appears on Home iff its remote `rounds` row
+      // exists, so success is gated on the remote delete. Only once the remote
+      // row is gone do we wipe the local copy (rows + clip files) — deleting
+      // local while the remote survived would strand the media and resurface a
+      // broken empty shell on Home. The Supabase call is bounded so a hanging
+      // storage list can't wedge the overlay; on failure/timeout we keep the
+      // media, alert, and stay on-screen to retry. `finalize` ALWAYS clears
+      // `deleting` so the overlay can never wedge.
+      await runDeleteRound({
+        deleteRemote: () => deleteRound(id),
+        deleteLocal: () => deleteLocalRound(id),
+        onSuccess: () => {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          safeBack();
+        },
+        onFailure: () => {
+          Alert.alert('Error', "Couldn't delete the round — please try again.");
+        },
+        finalize: () => setDeleting(false),
+      });
     });
-  }, [id]);
+  }, [id, safeBack]);
 
   const handleDownloadReel = useCallback(async () => {
     if (!reelSourceUri || !id) return;
@@ -415,7 +441,7 @@ export default function RoundViewer() {
         {/* Header: back · course + date · overflow. ONE share affordance
             per screen — the sticky CTA owns sharing. */}
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} hitSlop={12} accessibilityLabel="Back">
+          <Pressable onPress={safeBack} hitSlop={12} accessibilityLabel="Back">
             <ArrowLeft size={24} color={theme.colors.textPrimary} />
           </Pressable>
           <View style={{ flex: 1, alignItems: 'center', marginHorizontal: 12 }}>

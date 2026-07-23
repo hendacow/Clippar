@@ -821,10 +821,58 @@ export async function getClipsForMultipleRounds(roundIds: string[]) {
 
 export async function deleteLocalRound(roundId: string) {
   const database = await getDatabase();
+
+  // Collect every on-disk clip file for this round BEFORE dropping the rows.
+  // Each clip can carry up to four file:// URIs (raw / trimmed / original /
+  // tracer). Without this, deleting an 18-hole round leaks tens–hundreds of
+  // MB permanently. Best-effort: a missing column or file must never throw.
+  let fileUris: string[] = [];
+  try {
+    const rows = await database.getAllAsync<{
+      file_uri: string | null;
+      trimmed_file_uri: string | null;
+      original_file_uri: string | null;
+      tracer_file_uri: string | null;
+    }>(
+      'SELECT file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips WHERE round_id = ?',
+      roundId
+    );
+    fileUris = [
+      ...new Set(
+        rows
+          .flatMap((r) => [
+            r.file_uri,
+            r.trimmed_file_uri,
+            r.original_file_uri,
+            r.tracer_file_uri,
+          ])
+          .filter((u): u is string => !!u && u.startsWith('file://'))
+      ),
+    ];
+  } catch {
+    // Older schemas may lack the editor columns — non-fatal, rows still drop.
+  }
+
   await database.runAsync('DELETE FROM local_scores WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_clips WHERE round_id = ?', roundId);
   await database.runAsync('DELETE FROM local_rounds WHERE id = ?', roundId);
   await database.runAsync('DELETE FROM local_upload_queue WHERE round_id = ?', roundId);
+
+  // Unlink the underlying video files now their rows are gone. Lazy require
+  // keeps this module free of the shot-detector native dependency at load time
+  // (same import-cycle concern as deleteLocalClip / staleClipTracer). Each
+  // delete is fire-and-forget so a missing file can't wedge or throw.
+  if (fileUris.length > 0) {
+    try {
+      const shotDetector =
+        require('../modules/shot-detector') as typeof import('../modules/shot-detector');
+      for (const uri of fileUris) {
+        shotDetector.deleteFile(uri).catch(() => {});
+      }
+    } catch {
+      // shot-detector unavailable (e.g. web build) — rows are already gone.
+    }
+  }
 }
 
 /**
