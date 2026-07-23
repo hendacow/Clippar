@@ -1,5 +1,5 @@
 /**
- * Screen 8 — the REAL aha: pick up to 5 swings from the camera roll and
+ * Screen 9 — the REAL aha: pick up to 5 swings from the camera roll and
  * watch them become ONE reel (trimmed clips stitched together + vibe music
  * + overlay chrome). This is the compliant 3.1.2(c) value demonstration
  * that makes the paywall honest.

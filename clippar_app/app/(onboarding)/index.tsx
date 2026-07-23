@@ -1,6 +1,6 @@
 /**
- * 10-screen animated onboarding — host stepper (feat/onboarding-v2).
- * HERO → PROBLEM → INTENT → SHOT → COURSE → HANDICAP → BUILD/REVEAL →
+ * 11-screen animated onboarding — host stepper (feat/onboarding-v2).
+ * HERO → PROBLEM → INTENT → SHOT → COURSE → HANDICAP → AGE → BUILD/REVEAL →
  * CAMERA-ROLL AHA → REEL READY → PRO GATE → app/paywall (14-day trial).
  *
  * One screen mounted at a time (the aha holds video + audio) with a
@@ -30,6 +30,7 @@ import {
   ShotScreen,
   CourseScreen,
   HandicapScreen,
+  AgeScreen,
   BuildRevealScreen,
   ReelReadyScreen,
   ProGateScreen,
@@ -53,10 +54,11 @@ const STEPS = [
   ShotScreen, // 4 — the shot you'd hate to forget
   CourseScreen, // 5 — home course (skippable)
   HandicapScreen, // 6 — handicap band (skippable)
-  BuildRevealScreen, // 7 — building → reveal
-  AhaScreen, // 8 — camera-roll reel aha
-  ReelReadyScreen, // 9 — your reel's ready
-  ProGateScreen, // 10 — paywall setup
+  AgeScreen, // 7 — age range (skippable)
+  BuildRevealScreen, // 8 — building → reveal
+  AhaScreen, // 9 — camera-roll reel aha
+  ReelReadyScreen, // 10 — your reel's ready
+  ProGateScreen, // 11 — paywall setup
 ] as const;
 
 export default function OnboardingFunnel() {
@@ -67,6 +69,7 @@ export default function OnboardingFunnel() {
     memorableShot: null,
     homeCourseName: null,
     handicap: null,
+    ageRange: null,
     vibe: 'cinematic', // default choice architecture — Cinematic pre-selected
   });
   const [ahaOutcome, setAhaOutcome] = useState<AhaOutcome | null>(null);
