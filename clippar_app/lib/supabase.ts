@@ -32,32 +32,47 @@ const storageAdapter = Platform.OS === 'web'
   : (() => {
       // Dynamic import to avoid loading SecureStore on web
       const SecureStore = require('expo-secure-store');
-      const AsyncStorage = require('@react-native-async-storage/async-storage').default;
+
+      // In-memory mirror of the latest value written this process. It exists
+      // ONLY to answer a transient SecureStore *read* failure (the Keychain
+      // "User interaction is not allowed" window we used to fall back to disk
+      // for) without ever persisting the Supabase session — which contains the
+      // long-lived refresh token — to unencrypted on-disk AsyncStorage. The
+      // cache lives for the process lifetime and is cleared on removeItem, so
+      // no cleartext secret survives on disk or across launches. SecureStore
+      // (Keychain) remains the sole at-rest store.
+      const memoryCache = new Map<string, string>();
 
       return {
         getItem: async (key: string): Promise<string | null> => {
           try {
-            return await SecureStore.getItemAsync(key);
-          } catch (err) {
-            // Keychain unavailable — fall back to AsyncStorage so auth
-            // session read doesn't throw out of the whole call stack.
-            try { return await AsyncStorage.getItem(key); } catch { return null; }
+            const value = await SecureStore.getItemAsync(key);
+            if (value !== null) {
+              memoryCache.set(key, value);
+              return value;
+            }
+            // SecureStore succeeded but has no value: return the in-memory
+            // copy if we hold one (covers a racey read during this session),
+            // else a genuine "no session".
+            return memoryCache.has(key) ? memoryCache.get(key)! : null;
+          } catch {
+            // Keychain unavailable (e.g. interaction-not-allowed) — serve the
+            // in-memory copy instead of throwing out of the whole call stack.
+            return memoryCache.has(key) ? memoryCache.get(key)! : null;
           }
         },
         setItem: async (key: string, value: string): Promise<void> => {
+          memoryCache.set(key, value);
           try {
             await SecureStore.setItemAsync(key, value);
-            // Mirror into AsyncStorage so a later SecureStore failure can still
-            // read a fresh token. This costs one extra write per auth update
-            // (infrequent) and protects against keychain outages mid-session.
-            try { await AsyncStorage.setItem(key, value); } catch {}
           } catch {
-            try { await AsyncStorage.setItem(key, value); } catch {}
+            // Keychain write failed; the in-memory copy above still lets reads
+            // succeed this session without writing plaintext to disk.
           }
         },
         removeItem: async (key: string): Promise<void> => {
+          memoryCache.delete(key);
           try { await SecureStore.deleteItemAsync(key); } catch {}
-          try { await AsyncStorage.removeItem(key); } catch {}
         },
       };
     })();
