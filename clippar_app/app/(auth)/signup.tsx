@@ -3,6 +3,7 @@ import {
   View,
   Text,
   TextInput,
+  Image,
   KeyboardAvoidingView,
   Platform,
   ScrollView,
@@ -99,21 +100,19 @@ export default function SignUpScreen() {
           keyboardShouldPersistTaps="handled"
         >
           <View style={{ alignItems: 'center', marginBottom: 48 }}>
-            <Text
-              style={{
-                ...theme.typography.h1,
-                color: theme.colors.primary,
-                fontSize: 40,
-                letterSpacing: -1,
-              }}
-            >
-              Clippar
-            </Text>
+            <Image
+              source={require('@/assets/images/clippar-logo-stacked.png')}
+              style={{ width: 215, height: 140 }}
+              resizeMode="contain"
+              accessible
+              accessibilityRole="image"
+              accessibilityLabel="Clippar Golf"
+            />
             <Text
               style={{
                 ...theme.typography.bodySmall,
                 color: theme.colors.textSecondary,
-                marginTop: 8,
+                marginTop: 12,
               }}
             >
               Create your account

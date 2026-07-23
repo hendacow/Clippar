@@ -188,7 +188,9 @@
     position: relative;
     z-index: 1;
   }
-  .logo { font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em; color: var(--green); }
+  .logo { display: flex; align-items: center; }
+  .logo img { height: 26px; width: auto; display: block; }
+  footer .logo img { height: 60px; }
   .logo-sub {
     display: none;
   }
@@ -770,7 +772,6 @@
     border-top: 1px solid var(--border); padding: 36px 48px;
     display: flex; align-items: center; justify-content: space-between;
   }
-  footer .logo { font-size: 22px; }
   footer p { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
   footer .footer-links { display: flex; gap: 22px; }
   footer .footer-links a {
@@ -909,8 +910,8 @@
 <body>
 
 <nav>
-  <div style="display:flex;align-items:baseline;">
-    <div class="logo">CLIPPAR</div>
+  <div style="display:flex;align-items:center;">
+    <div class="logo"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></div>
   </div>
   <a class="nav-mount-link" href="/mount">Mount Kit &rarr;</a>
 </nav>
@@ -1268,7 +1269,7 @@
 </section>
 
 <footer>
-  <div class="logo">CLIPPAR</div>
+  <div class="logo"><img src="/landing_assets/clippar-stacked-white.png" alt="Clippar Golf" width="360" height="234"></div>
   <nav class="footer-links">
     <a href="/privacy">Privacy Policy</a>
     <a href="/terms">Terms of Service</a>

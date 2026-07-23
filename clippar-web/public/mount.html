@@ -108,10 +108,9 @@
     background: var(--bg);
     z-index: -1;
   }
-  .logo {
-    font-family: var(--font-display); font-size: 28px; letter-spacing: 0.08em;
-    color: var(--green); text-decoration: none;
-  }
+  .logo { display: flex; align-items: center; text-decoration: none; }
+  .logo img { height: 26px; width: auto; display: block; }
+  footer .logo img { height: 60px; }
   .nav-buy {
     font-family: var(--font-display); font-size: 17px; letter-spacing: 0.08em;
     color: #07100a; background: var(--green); text-decoration: none;
@@ -531,7 +530,6 @@
     border-top: 1px solid var(--border); padding: 36px 48px;
     display: flex; align-items: center; justify-content: space-between;
   }
-  footer .logo { font-size: 22px; }
   footer p { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
   footer .footer-links { display: flex; gap: 22px; }
   footer .footer-links a {
@@ -594,7 +592,7 @@
 <body>
 
 <nav>
-  <a class="logo" href="/">CLIPPAR</a>
+  <a class="logo" href="/"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
   <a class="nav-buy js-buy" href="#pricing">GET THE KIT — A$99</a>
 </nav>
 
@@ -936,7 +934,7 @@
 </section>
 
 <footer>
-  <a class="logo" href="/">CLIPPAR</a>
+  <a class="logo" href="/"><img src="/landing_assets/clippar-stacked-white.png" alt="Clippar Golf" width="360" height="234"></a>
   <nav class="footer-links">
     <a href="/privacy">Privacy Policy</a>
     <a href="/terms">Terms of Service</a>

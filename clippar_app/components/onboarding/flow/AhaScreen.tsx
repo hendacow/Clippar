@@ -27,7 +27,7 @@
  * prompt on iOS — zero OS prompts during onboarding.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Text, Pressable, Dimensions, StyleSheet } from 'react-native';
+import { View, Text, Image, Pressable, Dimensions, StyleSheet } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
 import { useVideoPlayer, VideoView } from 'expo-video';
@@ -527,7 +527,14 @@ function ClipCard({
         </View>
       </View>
       <View style={styles.clipChromeBottom}>
-        <Text style={styles.clipWordmark}>CLIPPAR</Text>
+        <Image
+          source={require('@/assets/images/clippar-logo-wordmark.png')}
+          style={styles.clipWordmark}
+          resizeMode="contain"
+          accessible
+          accessibilityRole="image"
+          accessibilityLabel="Clippar"
+        />
         <Text style={styles.clipCourse} numberOfLines={1}>
           {courseName ? `${courseName} · YOUR REEL` : 'YOUR REEL'}
         </Text>
@@ -676,10 +683,8 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   clipWordmark: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '900',
-    letterSpacing: 2,
+    width: 44,
+    height: 13,
   },
   clipCourse: {
     color: theme.colors.textSecondary,

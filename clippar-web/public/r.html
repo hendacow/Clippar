@@ -72,7 +72,8 @@
   .wrap { position: relative; z-index: 1; width: 100%; max-width: 440px; display: flex; flex-direction: column; align-items: center; }
 
   .brandbar { width: 100%; display: flex; justify-content: center; margin-bottom: 18px; }
-  .brandbar .logo { font-family: var(--font-display); font-size: 30px; letter-spacing: 0.06em; color: var(--white); }
+  .brandbar .logo { display: flex; align-items: center; }
+  .brandbar .logo img { height: 28px; width: auto; display: block; }
 
   /* Phone frame */
   .phone {
@@ -140,7 +141,7 @@
 </head>
 <body>
   <div class="wrap">
-    <div class="brandbar"><a class="logo" href="https://clippargolf.com/">CLIPPAR</a></div>
+    <div class="brandbar"><a class="logo" href="https://clippargolf.com/"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a></div>
 
     <!-- Phone frame: holds loading → video OR error -->
     <div class="phone" id="phone">
