@@ -34,6 +34,8 @@ import { ShareSheet } from '@/components/shared/ShareSheet';
 import { ReelStage } from '@/components/shared/ReelStage';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
+import { deleteLocalRound } from '@/lib/storage';
+import { runDeleteRound } from '@/lib/roundDeleteLogic';
 import { computeRoundStatus, type RoundStatusResult } from '@/lib/roundStatus';
 import { formatRoundDate, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { subscribePipeline } from '@/lib/pipelineEvents';
@@ -223,6 +225,18 @@ export default function RoundViewer() {
     router.push(`/round/editor?roundId=${id}`);
   }, [id]);
 
+  // Safe back: `router.back()` is a silent no-op when the nav stack is empty
+  // (the redesigned Home can reach this screen via a path with no history —
+  // deep link / fresh nav), leaving the header arrow dead and stranding the
+  // post-delete screen. Fall back to the library tab in that case.
+  const safeBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)');
+    }
+  }, []);
+
   // ---- Fetch + canonical status ----
   const roundRef = useRef<any>(null);
   const computeStatus = useCallback(
@@ -313,16 +327,23 @@ export default function RoundViewer() {
     confirmDeleteRound(async () => {
       if (!id) return;
       setDeleting(true);
-      try {
-        await deleteRound(id);
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        router.back();
-      } catch {
-        Alert.alert('Error', 'Failed to delete round. Please try again.');
-        setDeleting(false);
-      }
+      // Delete BOTH copies of the round. `runDeleteRound` removes the local
+      // SQLite round + clips FIRST (instant, offline-safe) so the round leaves
+      // the library even with no network, then bounds the Supabase delete so a
+      // hanging storage call can't wedge the overlay, and ALWAYS runs finalize
+      // — so `setDeleting(false)` + navigation happen no matter what.
+      await runDeleteRound({
+        deleteLocal: () => deleteLocalRound(id),
+        deleteRemote: () => deleteRound(id),
+        onSuccess: () =>
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
+        finalize: () => {
+          setDeleting(false);
+          safeBack();
+        },
+      });
     });
-  }, [id]);
+  }, [id, safeBack]);
 
   const handleDownloadReel = useCallback(async () => {
     if (!reelSourceUri || !id) return;
@@ -415,7 +436,7 @@ export default function RoundViewer() {
         {/* Header: back · course + date · overflow. ONE share affordance
             per screen — the sticky CTA owns sharing. */}
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} hitSlop={12} accessibilityLabel="Back">
+          <Pressable onPress={safeBack} hitSlop={12} accessibilityLabel="Back">
             <ArrowLeft size={24} color={theme.colors.textPrimary} />
           </Pressable>
           <View style={{ flex: 1, alignItems: 'center', marginHorizontal: 12 }}>
