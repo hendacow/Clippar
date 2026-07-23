@@ -1,5 +1,5 @@
 /**
- * Screens 1-8, 10 and 11 of the animated onboarding (screen 9 — the
+ * Screens 1-9, 11 and 12 of the animated onboarding (screen 10 — the
  * camera-roll aha — lives in AhaScreen.tsx). Pure presentational components
  * driven by the host stepper in app/(onboarding)/index.tsx.
  *
@@ -26,7 +26,7 @@ import Animated, {
   FadeIn,
   useReducedMotion,
 } from 'react-native-reanimated';
-import { Check, Sparkles } from 'lucide-react-native';
+import { Bluetooth, Check, Share2, Smartphone, Sparkles } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { FlowButton, TapChip } from '../sales/primitives';
 import { FlowScreen, Rise, H1, Sub, SkipLink } from './FlowKit';
@@ -39,6 +39,7 @@ import {
   ageRangeOptions,
   ageScreenCopy,
   problemCopy,
+  howItWorksCopy,
 } from '@/constants/onboardingV2';
 import {
   intentEcho,
@@ -61,7 +62,7 @@ export interface FlowAnswers {
   vibe: ReelVibe;
 }
 
-/** How screen 9 actually ended — drives honest copy on screens 10 & 11. */
+/** How screen 10 actually ended — drives honest copy on screens 11 & 12. */
 export type AhaOutcome = 'real' | 'sample';
 
 export interface FlowScreenProps {
@@ -71,9 +72,9 @@ export interface FlowScreenProps {
   onSkip: () => void;
   /** Hero secondary — existing users exit to login. */
   onLogin: () => void;
-  /** Screen 11 primary — hand off to the paywall. */
+  /** Screen 12 primary — hand off to the paywall. */
   onSeePro: () => void;
-  /** Screen 11 secondary — decline path (still forward: signup). */
+  /** Screen 12 secondary — decline path (still forward: signup). */
   onMaybeLater: () => void;
   ahaOutcome: AhaOutcome | null;
   setAhaOutcome: (o: AhaOutcome) => void;
@@ -154,7 +155,97 @@ function FadingShotRow({ label, detail, delay }: { label: string; detail: string
   );
 }
 
-/* ════════════════════ 3. INTENT ════════════════════ */
+/* ════════════════════ 3. HOW CLIPPAR WORKS ════════════════════ */
+
+/**
+ * Education only — no price, no link, no purchase CTA. Plants the mental
+ * model that the mount + clicker is the full Clippar experience while the
+ * note keeps the no-hardware path (film by hand / a mate films) first-class.
+ */
+export function HowItWorksScreen({ onNext }: FlowScreenProps) {
+  return (
+    <FlowScreen
+      title={howItWorksCopy.title}
+      sub={howItWorksCopy.sub}
+      footer={<FlowButton label={howItWorksCopy.cta} onPress={onNext} />}
+    >
+      <View style={{ marginTop: 28 }}>
+        {howItWorksCopy.steps.map((s, i) => (
+          <HowStep
+            key={s.title}
+            index={i}
+            title={s.title}
+            detail={s.detail}
+            last={i === howItWorksCopy.steps.length - 1}
+          />
+        ))}
+      </View>
+      <Rise delay={820}>
+        <Text style={styles.howNote}>{howItWorksCopy.note}</Text>
+      </Rise>
+    </FlowScreen>
+  );
+}
+
+// TODO(hardware-photo): swap the icon tiles for a real product render of the
+// phone mount on the bag + the Bluetooth clicker once photography exists.
+const HOW_STEP_ICONS = [Smartphone, Sparkles, Share2] as const;
+
+function HowStep({
+  index,
+  title,
+  detail,
+  last,
+}: {
+  index: number;
+  title: string;
+  detail: string;
+  last: boolean;
+}) {
+  const Icon = HOW_STEP_ICONS[index] ?? Sparkles;
+  return (
+    <Rise delay={280 + index * 170}>
+      <View style={styles.howRow}>
+        <View style={styles.howRail}>
+          <View style={styles.howTile}>
+            <Icon size={22} color={theme.colors.primaryLight} />
+            {index === 0 ? <ClickerBadge /> : null}
+          </View>
+          {!last ? <View style={styles.howConnector} /> : null}
+        </View>
+        <View style={[styles.howBody, !last && { paddingBottom: 22 }]}>
+          <Text style={styles.howKicker}>{`STEP ${index + 1}`}</Text>
+          <Text style={styles.howTitle}>{title}</Text>
+          <Text style={styles.howDetail}>{detail}</Text>
+        </View>
+      </View>
+    </Rise>
+  );
+}
+
+/** The clicker, pairing away in the corner of the mount tile. */
+function ClickerBadge() {
+  const reduceMotion = useReducedMotion();
+  const pulse = useSharedValue(0);
+  useEffect(() => {
+    if (reduceMotion) return;
+    pulse.value = withRepeat(
+      withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.quad) }),
+      -1,
+      true
+    );
+  }, [pulse, reduceMotion]);
+  const a = useAnimatedStyle(() => ({
+    transform: [{ scale: 1 + pulse.value * 0.15 }],
+  }));
+  return (
+    <Animated.View style={[styles.howClickerBadge, a]}>
+      <Bluetooth size={10} color={theme.colors.primaryLight} />
+    </Animated.View>
+  );
+}
+
+/* ════════════════════ 4. INTENT ════════════════════ */
 
 export function IntentScreen({ answers, setAnswers, onNext }: FlowScreenProps) {
   return (
@@ -178,7 +269,7 @@ export function IntentScreen({ answers, setAnswers, onNext }: FlowScreenProps) {
   );
 }
 
-/* ════════════════════ 4. THE SHOT YOU'D HATE TO FORGET ════════════════════ */
+/* ════════════════════ 5. THE SHOT YOU'D HATE TO FORGET ════════════════════ */
 
 export function ShotScreen({ answers, setAnswers, onNext }: FlowScreenProps) {
   return (
@@ -246,7 +337,7 @@ function BallDropBackdrop() {
   );
 }
 
-/* ════════════════════ 5. HOME COURSE (skippable) ════════════════════ */
+/* ════════════════════ 6. HOME COURSE (skippable) ════════════════════ */
 
 export function CourseScreen({ answers, setAnswers, onNext, onSkip }: FlowScreenProps) {
   const [text, setText] = useState(answers.homeCourseName ?? '');
@@ -288,7 +379,7 @@ export function CourseScreen({ answers, setAnswers, onNext, onSkip }: FlowScreen
   );
 }
 
-/* ════════════════════ 6. HANDICAP BAND (skippable) ════════════════════ */
+/* ════════════════════ 7. HANDICAP BAND (skippable) ════════════════════ */
 
 export function HandicapScreen({ answers, setAnswers, onNext, onSkip }: FlowScreenProps) {
   return (
@@ -320,7 +411,7 @@ export function HandicapScreen({ answers, setAnswers, onNext, onSkip }: FlowScre
   );
 }
 
-/* ════════════════════ 7. AGE RANGE (skippable) ════════════════════ */
+/* ════════════════════ 8. AGE RANGE (skippable) ════════════════════ */
 
 export function AgeScreen({ answers, setAnswers, onNext, onSkip }: FlowScreenProps) {
   return (
@@ -352,7 +443,7 @@ export function AgeScreen({ answers, setAnswers, onNext, onSkip }: FlowScreenPro
   );
 }
 
-/* ════════════════════ 8. BUILDING → REVEAL (one beat) ════════════════════ */
+/* ════════════════════ 9. BUILDING → REVEAL (one beat) ════════════════════ */
 
 export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
   const [phase, setPhase] = useState<'loading' | 'reveal'>('loading');
@@ -445,7 +536,7 @@ export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
   );
 }
 
-/* ════════════════════ 10. YOUR REEL'S READY ════════════════════ */
+/* ════════════════════ 11. YOUR REEL'S READY ════════════════════ */
 
 export function ReelReadyScreen({ ahaOutcome, onNext }: FlowScreenProps) {
   const real = ahaOutcome !== 'sample';
@@ -470,7 +561,7 @@ export function ReelReadyScreen({ ahaOutcome, onNext }: FlowScreenProps) {
   );
 }
 
-/* ════════════════════ 11. PAYWALL SETUP ════════════════════ */
+/* ════════════════════ 12. PAYWALL SETUP ════════════════════ */
 
 export function ProGateScreen({ ahaOutcome, onSeePro, onMaybeLater }: FlowScreenProps) {
   const real = ahaOutcome !== 'sample';
@@ -530,6 +621,72 @@ const styles = StyleSheet.create({
     color: theme.colors.textTertiary,
     fontSize: 12,
     marginTop: 2,
+  },
+  howRow: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  howRail: {
+    alignItems: 'center',
+    width: 48,
+  },
+  howTile: {
+    width: 48,
+    height: 48,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  howClickerBadge: {
+    position: 'absolute',
+    right: -6,
+    bottom: -6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.primaryDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  howConnector: {
+    width: 2,
+    flex: 1,
+    minHeight: 14,
+    marginVertical: 8,
+    borderRadius: 1,
+    backgroundColor: theme.colors.surfaceBorder,
+  },
+  howBody: {
+    flex: 1,
+  },
+  howKicker: {
+    color: theme.colors.primary,
+    fontSize: 11,
+    fontWeight: '800',
+    letterSpacing: 1.2,
+  },
+  howTitle: {
+    color: theme.colors.textPrimary,
+    fontSize: 17,
+    fontWeight: '800',
+    marginTop: 3,
+  },
+  howDetail: {
+    color: theme.colors.textSecondary,
+    fontSize: 14,
+    lineHeight: 20,
+    marginTop: 4,
+  },
+  howNote: {
+    color: theme.colors.textTertiary,
+    fontSize: 13,
+    lineHeight: 18,
+    marginTop: 22,
   },
   loaderWrap: {
     flex: 1,

@@ -1,7 +1,7 @@
 /**
  * Onboarding v2 answer store (feat/onboarding-v2).
  *
- * Persists the questionnaire answers from the 11-screen animated onboarding
+ * Persists the questionnaire answers from the 12-screen animated onboarding
  * (intent, memorable shot, home course, handicap band, age range, reel vibe)
  * locally via
  * lib/storage settings, and exposes typed getters so downstream surfaces —
