@@ -1,323 +1,118 @@
-import { useState, useEffect, useCallback } from 'react';
-import {
-  View,
-  Text,
-  SectionList,
-  Pressable,
-  Alert,
-  RefreshControl,
-} from 'react-native';
-import { router, Stack } from 'expo-router';
-import {
-  Film,
-  Clock,
-  CheckCircle,
-  AlertCircle,
-  Trash2,
-  ChevronRight,
-  Disc,
-} from 'lucide-react-native';
+/**
+ * Backup & status — the ops view (Drafts / Backing up / Backup failed /
+ * All synced), while Home is the content view. Rows reuse RoundListCard
+ * + the canonical status chips; backup state is carried separately and
+ * is never presented as a reel problem.
+ *
+ * The failed-backup retry re-drains the GATED queue
+ * (processUploadQueue) — there is no per-round upload call anywhere.
+ */
+import { useState, useCallback } from 'react';
+import { View, Text, SectionList, Pressable, RefreshControl, Platform } from 'react-native';
+import { router, Stack, useFocusEffect } from 'expo-router';
+import { Film, Clock, CheckCircle, AlertCircle, Disc, RefreshCw } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
-import { getRounds, deleteRound, getProcessingJob } from '@/lib/api';
-import { ProgressBar } from '@/components/ui/ProgressBar';
+import { getRounds, deleteRound } from '@/lib/api';
+import { computeRoundStatuses, type RoundStatusResult } from '@/lib/roundStatus';
+import { subscribePipeline } from '@/lib/pipelineEvents';
+import { processUploadQueue } from '@/lib/uploadQueue';
+import { useUploadContext } from '@/contexts/UploadContext';
+import { RoundListCard, type RoundListItem } from '@/components/library/RoundListCard';
 import { Skeleton } from '@/components/ui/Skeleton';
-import type { Round } from '@/types/round';
 
-type RoundStatus = 'recording' | 'uploading' | 'processing' | 'ready' | 'failed';
+const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
-interface RoundWithProgress extends Round {
-  progressPercent?: number;
+type BackupBucket = 'drafts' | 'backing-up' | 'backup-failed' | 'synced';
+
+interface OpsRound extends RoundListItem {
+  status?: string | null;
+  reel_url?: string | null;
+  updated_at?: string | null;
 }
 
 interface Section {
+  key: BackupBucket;
   title: string;
   icon: React.ReactNode;
   statusColor: string;
-  data: RoundWithProgress[];
+  data: OpsRound[];
 }
 
-const STATUS_CONFIG: Record<RoundStatus, { label: string; color: string }> = {
-  recording: { label: 'Drafts', color: theme.colors.textSecondary },
-  uploading: { label: 'Uploading', color: theme.colors.accentBlue },
-  processing: { label: 'Processing', color: theme.colors.processing },
-  ready: { label: 'Completed', color: theme.colors.primary },
-  failed: { label: 'Failed', color: theme.colors.accentRed },
+const BUCKET_CONFIG: Record<BackupBucket, { title: string; color: string }> = {
+  drafts: { title: 'Drafts', color: theme.colors.textSecondary },
+  'backing-up': { title: 'Backing up', color: theme.colors.accentBlue },
+  'backup-failed': { title: 'Backup failed', color: theme.colors.processing },
+  synced: { title: 'All synced', color: theme.colors.primary },
 };
 
-function getStatusIcon(status: RoundStatus, size: number = 18) {
-  switch (status) {
-    case 'recording':
-      return <Disc size={size} color={STATUS_CONFIG.recording.color} />;
-    case 'uploading':
-      return <Clock size={size} color={STATUS_CONFIG.uploading.color} />;
-    case 'processing':
-      return <Film size={size} color={STATUS_CONFIG.processing.color} />;
-    case 'ready':
-      return <CheckCircle size={size} color={STATUS_CONFIG.ready.color} />;
-    case 'failed':
-      return <AlertCircle size={size} color={STATUS_CONFIG.failed.color} />;
+function bucketIcon(bucket: BackupBucket, size = 16) {
+  const color = BUCKET_CONFIG[bucket].color;
+  switch (bucket) {
+    case 'drafts':
+      return <Disc size={size} color={color} />;
+    case 'backing-up':
+      return <Clock size={size} color={color} />;
+    case 'backup-failed':
+      return <AlertCircle size={size} color={color} />;
+    case 'synced':
+      return <CheckCircle size={size} color={color} />;
   }
 }
 
-function StatusBadge({ status }: { status: RoundStatus }) {
-  const config = STATUS_CONFIG[status];
-  return (
-    <View
-      style={{
-        flexDirection: 'row',
-        alignItems: 'center',
-        gap: 4,
-        backgroundColor: `${config.color}15`,
-        paddingHorizontal: 8,
-        paddingVertical: 3,
-        borderRadius: theme.radius.full,
-      }}
-    >
-      {getStatusIcon(status, 12)}
-      <Text style={{ color: config.color, fontSize: 11, fontWeight: '600' }}>
-        {config.label}
-      </Text>
-    </View>
-  );
-}
-
-function RoundRow({
-  round,
-  onPress,
-  onDelete,
-}: {
-  round: RoundWithProgress;
-  onPress: () => void;
-  onDelete: () => void;
-}) {
-  const dateStr = new Date(round.date).toLocaleDateString('en-AU', {
-    day: 'numeric',
-    month: 'short',
-    year: 'numeric',
-  });
-
-  const handleLongPress = () => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    Alert.alert(
-      'Delete Round',
-      `Delete "${round.course_name}"? This will permanently remove the round, all clips, and any highlight reel.`,
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: onDelete },
-      ]
-    );
-  };
-
-  return (
-    <Pressable
-      onPress={() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onPress();
-      }}
-      onLongPress={handleLongPress}
-      style={({ pressed }) => ({
-        backgroundColor: pressed ? theme.colors.surface : theme.colors.surfaceElevated,
-        marginHorizontal: 16,
-        marginBottom: 8,
-        borderRadius: theme.radius.lg,
-        borderWidth: 1,
-        borderColor: theme.colors.surfaceBorder,
-        padding: 14,
-      })}
-    >
-      <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-        {/* Score circle or status icon */}
-        <View
-          style={{
-            width: 48,
-            height: 48,
-            borderRadius: 24,
-            backgroundColor: theme.colors.surface,
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginRight: 12,
-          }}
-        >
-          {round.status === 'ready' && round.total_score != null ? (
-            <Text style={{ fontSize: 18, fontWeight: '900', color: theme.colors.textPrimary }}>
-              {round.total_score}
-            </Text>
-          ) : (
-            getStatusIcon(round.status, 22)
-          )}
-        </View>
-
-        {/* Course details */}
-        <View style={{ flex: 1 }}>
-          <Text
-            style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}
-            numberOfLines={1}
-          >
-            {round.course_name}
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 3 }}>
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>{dateStr}</Text>
-            <View
-              style={{
-                width: 3,
-                height: 3,
-                borderRadius: 1.5,
-                backgroundColor: theme.colors.textTertiary,
-              }}
-            />
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
-              {round.holes_played} holes
-            </Text>
-          </View>
-        </View>
-
-        {/* Status badge + arrow */}
-        <View style={{ alignItems: 'flex-end', gap: 4 }}>
-          <StatusBadge status={round.status} />
-          <ChevronRight size={16} color={theme.colors.textTertiary} />
-        </View>
-      </View>
-
-      {/* Processing progress bar */}
-      {(round.status === 'processing' || round.status === 'uploading') &&
-        round.progressPercent != null && (
-          <View style={{ marginTop: 10 }}>
-            <ProgressBar
-              progress={round.progressPercent}
-              label={
-                round.status === 'uploading'
-                  ? `Uploading... ${round.progressPercent}%`
-                  : `Processing... ${round.progressPercent}%`
-              }
-              color={
-                round.status === 'uploading'
-                  ? theme.colors.accentBlue
-                  : theme.colors.processing
-              }
-            />
-          </View>
-        )}
-    </Pressable>
-  );
-}
-
-function EmptyState() {
-  return (
-    <View style={{ alignItems: 'center', paddingVertical: 64, paddingHorizontal: 32 }}>
-      <View
-        style={{
-          width: 80,
-          height: 80,
-          borderRadius: 40,
-          backgroundColor: theme.colors.primaryMuted,
-          justifyContent: 'center',
-          alignItems: 'center',
-          marginBottom: 20,
-        }}
-      >
-        <Film size={34} color={theme.colors.primary} />
-      </View>
-      <Text
-        style={{
-          color: theme.colors.textPrimary,
-          fontSize: 20,
-          fontWeight: '800',
-          textAlign: 'center',
-          marginBottom: 8,
-          letterSpacing: -0.3,
-        }}
-      >
-        No Rounds Yet
-      </Text>
-      <Text
-        style={{
-          color: theme.colors.textSecondary,
-          fontSize: 14,
-          textAlign: 'center',
-          maxWidth: 260,
-          marginBottom: 24,
-          lineHeight: 20,
-        }}
-      >
-        Your drafts, processing rounds, and completed reels will all appear here.
-      </Text>
-      <Pressable
-        onPress={() => {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          router.push('/(tabs)/record');
-        }}
-        style={({ pressed }) => ({
-          paddingHorizontal: 24,
-          paddingVertical: 12,
-          borderRadius: theme.radius.full,
-          backgroundColor: theme.colors.primary,
-          opacity: pressed ? 0.85 : 1,
-        })}
-        accessibilityLabel="Record your first round"
-        accessibilityRole="button"
-      >
-        <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 15 }}>
-          Record Your First Round
-        </Text>
-      </Pressable>
-    </View>
-  );
-}
-
-export default function MyRoundsScreen() {
-  const [rounds, setRounds] = useState<RoundWithProgress[]>([]);
+export default function BackupStatusScreen() {
+  const { backup } = useUploadContext();
+  const [rounds, setRounds] = useState<OpsRound[]>([]);
+  const [statuses, setStatuses] = useState<Map<string, RoundStatusResult>>(new Map());
+  const [queueByRound, setQueueByRound] = useState<Map<string, string>>(new Map());
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [retryingBackup, setRetryingBackup] = useState(false);
 
-  const fetchRounds = useCallback(async () => {
+  const fetchData = useCallback(async () => {
     try {
       const data = await getRounds();
-      if (!data) {
-        setRounds([]);
-        return;
+      const mapped: OpsRound[] = (data ?? []).map((r: any) => ({
+        ...r,
+        clips_count: r.clips_count ?? 0,
+      }));
+      setRounds(mapped);
+
+      const statusMap = await computeRoundStatuses(mapped);
+      setStatuses(statusMap);
+
+      // Backup queue state (SQLite) — pending/error rows.
+      if (isNative) {
+        try {
+          const storage = require('@/lib/storage') as typeof import('@/lib/storage');
+          const queued = await storage.getQueuedRoundUploads();
+          setQueueByRound(new Map(queued.map((q) => [q.round_id, q.status])));
+        } catch {
+          setQueueByRound(new Map());
+        }
       }
-
-      // Fetch processing progress for rounds in progress
-      const enriched: RoundWithProgress[] = await Promise.all(
-        data.map(async (r: any) => {
-          if (r.status === 'processing' || r.status === 'uploading') {
-            try {
-              const job = await getProcessingJob(r.id);
-              return { ...r, progressPercent: job?.progress_percent ?? 0 };
-            } catch {
-              return r;
-            }
-          }
-          return r;
-        })
-      );
-
-      setRounds(enriched);
-    } catch (err) {
-      console.log('[MyRounds] fetch error:', err);
+    } catch {
+      // Offline — keep what we had
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
   }, []);
 
-  useEffect(() => {
-    fetchRounds();
-  }, [fetchRounds]);
-
-  // Refresh processing rounds periodically.  We derive the boolean flag
-  // explicitly so the interval is only torn down / recreated when the
-  // presence of active jobs flips, not every time rounds re-fetches (which
-  // would cause leaked back-to-back intervals on each poll tick).
-  const hasActiveJobs = rounds.some(
-    (r) => r.status === 'processing' || r.status === 'uploading'
+  useFocusEffect(
+    useCallback(() => {
+      fetchData();
+      return subscribePipeline((event) => {
+        if (
+          event.type === 'backup:complete' ||
+          event.type === 'backup:idle' ||
+          event.type === 'compose:complete'
+        ) {
+          fetchData();
+        }
+      });
+    }, [fetchData]),
   );
-  useEffect(() => {
-    if (!hasActiveJobs) return;
-    const interval = setInterval(fetchRounds, 10000);
-    return () => clearInterval(interval);
-  }, [hasActiveJobs, fetchRounds]);
 
   const handleDelete = useCallback(
     async (roundId: string) => {
@@ -325,88 +120,101 @@ export default function MyRoundsScreen() {
         await deleteRound(roundId);
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         setRounds((prev) => prev.filter((r) => r.id !== roundId));
-      } catch (err) {
-        console.log('[MyRounds] delete error:', err);
-        Alert.alert('Error', 'Failed to delete round. Please try again.');
-      }
+      } catch {}
     },
-    []
+    [],
   );
 
-  const handleRoundPress = useCallback((round: RoundWithProgress) => {
-    // Navigate to round detail regardless of status
-    router.push(`/round/${round.id}`);
-  }, []);
+  const handleRetryBackup = useCallback(async () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setRetryingBackup(true);
+    try {
+      // The ONLY backup path: re-drain the gated queue. It exits
+      // immediately for free-tier / backup-off users.
+      await processUploadQueue();
+      await fetchData();
+    } finally {
+      setRetryingBackup(false);
+    }
+  }, [fetchData]);
 
-  // Group rounds by status into sections
+  // Bucket assignment
+  const bucketOf = (r: OpsRound): BackupBucket => {
+    const queueStatus = queueByRound.get(r.id);
+    if (queueStatus === 'error') return 'backup-failed';
+    if (
+      queueStatus === 'pending' ||
+      queueStatus === 'in_progress' ||
+      (backup.status === 'uploading' && backup.roundId === r.id)
+    ) {
+      return 'backing-up';
+    }
+    if (r.status === 'recording') return 'drafts';
+    return 'synced';
+  };
+
   const sections: Section[] = [];
-
-  const drafts = rounds.filter((r) => r.status === 'recording');
-  const uploading = rounds.filter((r) => r.status === 'uploading');
-  const processing = rounds.filter((r) => r.status === 'processing');
-  const failed = rounds.filter((r) => r.status === 'failed');
-  const ready = rounds.filter((r) => r.status === 'ready');
-
-  if (drafts.length > 0) {
-    sections.push({
-      title: 'Drafts',
-      icon: <Disc size={16} color={STATUS_CONFIG.recording.color} />,
-      statusColor: STATUS_CONFIG.recording.color,
-      data: drafts,
-    });
-  }
-
-  if (uploading.length > 0) {
-    sections.push({
-      title: 'Uploading',
-      icon: <Clock size={16} color={STATUS_CONFIG.uploading.color} />,
-      statusColor: STATUS_CONFIG.uploading.color,
-      data: uploading,
-    });
-  }
-
-  if (processing.length > 0) {
-    sections.push({
-      title: 'Processing',
-      icon: <Film size={16} color={STATUS_CONFIG.processing.color} />,
-      statusColor: STATUS_CONFIG.processing.color,
-      data: processing,
-    });
-  }
-
-  if (failed.length > 0) {
-    sections.push({
-      title: 'Failed',
-      icon: <AlertCircle size={16} color={STATUS_CONFIG.failed.color} />,
-      statusColor: STATUS_CONFIG.failed.color,
-      data: failed,
-    });
-  }
-
-  if (ready.length > 0) {
-    sections.push({
-      title: 'Completed',
-      icon: <CheckCircle size={16} color={STATUS_CONFIG.ready.color} />,
-      statusColor: STATUS_CONFIG.ready.color,
-      data: ready,
-    });
+  for (const key of ['drafts', 'backing-up', 'backup-failed', 'synced'] as BackupBucket[]) {
+    const bucketRounds = rounds.filter((r) => bucketOf(r) === key);
+    if (bucketRounds.length > 0) {
+      sections.push({
+        key,
+        title: BUCKET_CONFIG[key].title,
+        icon: bucketIcon(key),
+        statusColor: BUCKET_CONFIG[key].color,
+        data: bucketRounds,
+      });
+    }
   }
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.background }}>
-      <Stack.Screen options={{ title: 'My Rounds' }} />
+      <Stack.Screen options={{ title: 'Backup & status' }} />
 
       {loading ? (
         <View style={{ padding: 16, gap: 10 }}>
           <Skeleton width="40%" height={18} style={{ marginBottom: 8 }} />
-          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
-          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
+          <Skeleton width="100%" height={88} borderRadius={theme.radius.lg} />
+          <Skeleton width="100%" height={88} borderRadius={theme.radius.lg} />
           <Skeleton width="40%" height={18} style={{ marginTop: 16, marginBottom: 8 }} />
-          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
-          <Skeleton width="100%" height={80} borderRadius={theme.radius.lg} />
+          <Skeleton width="100%" height={88} borderRadius={theme.radius.lg} />
         </View>
       ) : rounds.length === 0 ? (
-        <EmptyState />
+        <View style={{ alignItems: 'center', paddingVertical: 64, paddingHorizontal: 32 }}>
+          <View
+            style={{
+              width: 80,
+              height: 80,
+              borderRadius: 40,
+              backgroundColor: theme.colors.primaryMuted,
+              justifyContent: 'center',
+              alignItems: 'center',
+              marginBottom: 20,
+            }}
+          >
+            <Film size={34} color={theme.colors.primary} />
+          </View>
+          <Text
+            style={{
+              ...theme.typography.h3,
+              color: theme.colors.textPrimary,
+              textAlign: 'center',
+              marginBottom: 8,
+            }}
+          >
+            Nothing here yet
+          </Text>
+          <Text
+            style={{
+              ...theme.typography.bodySmall,
+              color: theme.colors.textSecondary,
+              textAlign: 'center',
+              maxWidth: 260,
+            }}
+          >
+            Your drafts, backup progress, and synced rounds will all appear here.
+          </Text>
+        </View>
       ) : (
         <SectionList
           sections={sections}
@@ -424,13 +232,7 @@ export default function MyRoundsScreen() {
               }}
             >
               {section.icon}
-              <Text
-                style={{
-                  color: theme.colors.textPrimary,
-                  fontSize: 16,
-                  fontWeight: '700',
-                }}
-              >
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700' }}>
                 {section.title}
               </Text>
               <View
@@ -441,25 +243,54 @@ export default function MyRoundsScreen() {
                   borderRadius: theme.radius.full,
                 }}
               >
-                <Text
-                  style={{
-                    color: section.statusColor,
-                    fontSize: 12,
-                    fontWeight: '600',
-                  }}
-                >
+                <Text style={{ color: section.statusColor, fontSize: 12, fontWeight: '600' }}>
                   {section.data.length}
                 </Text>
               </View>
+              {section.key === 'backup-failed' && (
+                <Pressable
+                  onPress={handleRetryBackup}
+                  disabled={retryingBackup}
+                  style={{
+                    marginLeft: 'auto',
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    gap: 6,
+                    paddingHorizontal: 12,
+                    paddingVertical: 6,
+                    borderRadius: theme.radius.full,
+                    backgroundColor: theme.colors.surfaceElevated,
+                    borderWidth: 1,
+                    borderColor: theme.colors.surfaceBorder,
+                    opacity: retryingBackup ? 0.5 : 1,
+                  }}
+                  accessibilityLabel="Retry backup"
+                  accessibilityRole="button"
+                >
+                  <RefreshCw size={12} color={theme.colors.textPrimary} />
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '600' }}>
+                    Retry backup
+                  </Text>
+                </Pressable>
+              )}
             </View>
           )}
-          renderItem={({ item }) => (
-            <RoundRow
-              round={item}
-              onPress={() => handleRoundPress(item)}
-              onDelete={() => handleDelete(item.id)}
-            />
-          )}
+          renderItem={({ item }) => {
+            const status = statuses.get(item.id)?.status ?? 'NO_CONTENT';
+            return (
+              <RoundListCard
+                round={item}
+                status={status}
+                onPress={() => router.push(`/round/${item.id}`)}
+                onDelete={() => handleDelete(item.id)}
+                onRetry={
+                  status === 'FAILED'
+                    ? () => router.push(`/round/editor?roundId=${item.id}&recompose=1`)
+                    : undefined
+                }
+              />
+            );
+          }}
           contentContainerStyle={{ paddingBottom: 40 }}
           stickySectionHeadersEnabled={false}
           refreshControl={
@@ -467,7 +298,7 @@ export default function MyRoundsScreen() {
               refreshing={refreshing}
               onRefresh={() => {
                 setRefreshing(true);
-                fetchRounds();
+                fetchData();
               }}
               tintColor={theme.colors.primary}
             />
