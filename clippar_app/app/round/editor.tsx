@@ -1221,11 +1221,9 @@ export default function EditorScreen() {
             setComposing(false);
             setExportProgress(null);
             setExportModalVisible(false);
-            Alert.alert(
-              'Reel Created!',
-              `Your ${result.clipCount}-clip highlight reel (${Math.round(result.durationMs / 1000)}s) has been saved.`,
-              [{ text: 'OK', onPress: () => router.replace('/(tabs)') }]
-            );
+            // Land straight on the reel with the one-tap Save & Share CTA
+            // instead of an alert that dumps the user back on Home.
+            router.replace(`/round/${state.roundId}?exported=1`);
           }, 800);
         } else {
           throw new Error('No reel URI returned');

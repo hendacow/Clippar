@@ -264,7 +264,8 @@ function ClipThumb({
 }
 
 export default function RoundViewer() {
-  const { id } = useLocalSearchParams<{ id: string }>();
+  const { id, exported } = useLocalSearchParams<{ id: string; exported?: string }>();
+  const justExported = exported === '1';
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const { upload, startUpload } = useUploadContext();
@@ -338,6 +339,15 @@ export default function RoundViewer() {
     if (!id) return;
     isReelStale(id).then(setReelStale).catch(() => {});
   }, [id, editor.state.holes]);
+
+  // Celebrate a freshly-exported reel once it's actually on screen.
+  const celebratedRef = useRef(false);
+  useEffect(() => {
+    if (justExported && reelSignedUrl && !celebratedRef.current) {
+      celebratedRef.current = true;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    }
+  }, [justExported, reelSignedUrl]);
 
   const hasActiveUpload = upload.roundId === id &&
     ['preparing', 'uploading', 'submitting', 'processing'].includes(upload.stage);
@@ -559,6 +569,17 @@ export default function RoundViewer() {
                   Edit
                 </Text>
               </Pressable>
+            )}
+
+            {/* ===== Fresh-export banner — the reel was auto-saved to the
+                 camera roll during compose, so this confirms both. ===== */}
+            {justExported && reelSignedUrl && !reelStale && (
+              <View style={styles.readyBanner}>
+                <Check size={18} color={theme.colors.primary} />
+                <Text style={styles.readyBannerText}>
+                  Reel ready — saved to your Camera Roll
+                </Text>
+              </View>
             )}
 
             {/* ===== VIDEO PLAYER (near fullscreen) ===== */}
@@ -800,11 +821,37 @@ export default function RoundViewer() {
               </View>
             )}
 
-            {/* Bottom padding */}
-            <View style={{ height: insets.bottom + 24 }} />
+            {/* Bottom padding — extra room so the sticky Save & Share CTA
+                never covers the last content row. */}
+            <View style={{ height: insets.bottom + (reelSignedUrl ? 96 : 24) }} />
           </ScrollView>
         )}
       </View>
+
+      {/* ===== Sticky one-tap Save & Share CTA — opens the share sheet
+           (save, share to friends, Instagram Stories, copy link). ===== */}
+      {!loading && !deleting && round && reelSignedUrl && (
+        <View
+          pointerEvents="box-none"
+          style={{
+            position: 'absolute',
+            left: 16,
+            right: 16,
+            bottom: insets.bottom + 16,
+          }}
+        >
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              setShowShare(true);
+            }}
+            style={({ pressed }) => [styles.shareCta, pressed && { opacity: 0.85 }]}
+          >
+            <Share2 size={20} color="#fff" />
+            <Text style={styles.shareCtaText}>Save & Share</Text>
+          </Pressable>
+        </View>
+      )}
 
       {/* Deleting overlay */}
       {deleting && (
@@ -946,6 +993,46 @@ const styles = StyleSheet.create({
     paddingVertical: 14,
     borderRadius: theme.radius.md,
     backgroundColor: theme.colors.primary,
+  },
+  readyBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: theme.radius.lg,
+    borderWidth: 1,
+    borderColor: theme.colors.primary + '60',
+    backgroundColor: theme.colors.primary + '15',
+  },
+  readyBannerText: {
+    flex: 1,
+    color: theme.colors.textPrimary,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  shareCta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 10,
+    paddingVertical: 16,
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.primary,
+    shadowColor: '#000',
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    shadowOffset: { width: 0, height: 6 },
+    elevation: 8,
+  },
+  shareCtaText: {
+    color: '#fff',
+    fontWeight: '800',
+    fontSize: 16,
+    letterSpacing: 0.2,
   },
   reRenderText: {
     color: '#fff',
