@@ -1,8 +1,9 @@
 /**
  * Onboarding v2 answer store (feat/onboarding-v2).
  *
- * Persists the questionnaire answers from the 10-screen animated onboarding
- * (intent, memorable shot, home course, handicap band, reel vibe) locally via
+ * Persists the questionnaire answers from the 11-screen animated onboarding
+ * (intent, memorable shot, home course, handicap band, age range, reel vibe)
+ * locally via
  * lib/storage settings, and exposes typed getters so downstream surfaces —
  * the paywall personalization line, the round-setup course prefill and the
  * home empty-state — can read them without touching the funnel.
@@ -14,7 +15,14 @@ import { getSetting, setSetting } from '@/lib/storage';
 
 export type OnboardingIntent = 'relive' | 'share' | 'improve' | 'all';
 export type MemorableShot = 'ace' | 'careerRound' | 'perfectDrive' | 'everyGoodOne';
-export type OnboardingHandicap = 'scratch' | 'tidy' | 'gettingThere' | 'learning' | 'noIdea';
+export type OnboardingHandicap =
+  | 'plus'
+  | 'scratch'
+  | 'tidy'
+  | 'gettingThere'
+  | 'learning'
+  | 'noIdea';
+export type OnboardingAgeRange = 'under18' | '18to29' | '30to44' | '45to59' | '60plus';
 export type ReelVibe = 'chill' | 'hype' | 'cinematic';
 
 export interface OnboardingProfile {
@@ -22,6 +30,7 @@ export interface OnboardingProfile {
   memorableShot: MemorableShot | null;
   homeCourseName: string | null;
   handicap: OnboardingHandicap | null;
+  ageRange: OnboardingAgeRange | null;
   vibe: ReelVibe | null;
   /** ISO timestamp when the funnel finished (either exit). */
   completedAt: string | null;
@@ -32,13 +41,22 @@ const KEYS = {
   memorableShot: 'onboarding.v2.memorable_shot',
   homeCourseName: 'onboarding.v2.home_course',
   handicap: 'onboarding.v2.handicap',
+  ageRange: 'onboarding.v2.age_range',
   vibe: 'onboarding.v2.vibe',
   completedAt: 'onboarding.v2.completed_at',
 } as const;
 
 const INTENTS: OnboardingIntent[] = ['relive', 'share', 'improve', 'all'];
 const SHOTS: MemorableShot[] = ['ace', 'careerRound', 'perfectDrive', 'everyGoodOne'];
-const HANDICAPS: OnboardingHandicap[] = ['scratch', 'tidy', 'gettingThere', 'learning', 'noIdea'];
+const HANDICAPS: OnboardingHandicap[] = [
+  'plus',
+  'scratch',
+  'tidy',
+  'gettingThere',
+  'learning',
+  'noIdea',
+];
+const AGE_RANGES: OnboardingAgeRange[] = ['under18', '18to29', '30to44', '45to59', '60plus'];
 const VIBES: ReelVibe[] = ['chill', 'hype', 'cinematic'];
 
 function pick<T extends string>(raw: string | null, allowed: T[]): T | null {
@@ -57,6 +75,8 @@ export async function saveOnboardingAnswers(
       await setSetting(KEYS.homeCourseName, answers.homeCourseName);
     if (answers.handicap !== undefined && answers.handicap !== null)
       await setSetting(KEYS.handicap, answers.handicap);
+    if (answers.ageRange !== undefined && answers.ageRange !== null)
+      await setSetting(KEYS.ageRange, answers.ageRange);
     if (answers.vibe !== undefined && answers.vibe !== null)
       await setSetting(KEYS.vibe, answers.vibe);
   } catch {
@@ -72,11 +92,12 @@ export async function markOnboardingComplete(): Promise<void> {
 
 export async function getOnboardingProfile(): Promise<OnboardingProfile> {
   try {
-    const [intent, shot, course, handicap, vibe, completedAt] = await Promise.all([
+    const [intent, shot, course, handicap, ageRange, vibe, completedAt] = await Promise.all([
       getSetting(KEYS.intent),
       getSetting(KEYS.memorableShot),
       getSetting(KEYS.homeCourseName),
       getSetting(KEYS.handicap),
+      getSetting(KEYS.ageRange),
       getSetting(KEYS.vibe),
       getSetting(KEYS.completedAt),
     ]);
@@ -85,6 +106,7 @@ export async function getOnboardingProfile(): Promise<OnboardingProfile> {
       memorableShot: pick(shot, SHOTS),
       homeCourseName: course && course.trim() ? course.trim() : null,
       handicap: pick(handicap, HANDICAPS),
+      ageRange: pick(ageRange, AGE_RANGES),
       vibe: pick(vibe, VIBES),
       completedAt: completedAt ?? null,
     };
@@ -94,6 +116,7 @@ export async function getOnboardingProfile(): Promise<OnboardingProfile> {
       memorableShot: null,
       homeCourseName: null,
       handicap: null,
+      ageRange: null,
       vibe: null,
       completedAt: null,
     };

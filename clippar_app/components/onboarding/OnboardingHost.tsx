@@ -14,7 +14,7 @@ import { SpotlightTour } from './SpotlightTour';
  *
  * NOTE: the legacy first-run INTRO MODAL (OnboardingIntro, "Welcome to
  * Clippar", 4 slides) is RETIRED. Its welcome-pitch job belongs to the
- * 10-screen /(onboarding) sales funnel now — and because this host renders
+ * 11-screen /(onboarding) sales funnel now — and because this host renders
  * ABOVE the router, the modal was covering that funnel on every fresh
  * install (found on the first cold-start simulator run). We auto-complete
  * the intro flag so the tour chain below keeps working unchanged.

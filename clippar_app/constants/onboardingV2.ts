@@ -1,5 +1,5 @@
 /**
- * Content for the 10-screen animated onboarding (feat/onboarding-v2).
+ * Content for the 11-screen animated onboarding (feat/onboarding-v2).
  *
  * Everything copy-ish lives here so wording can be tuned without touching
  * screen code. Voice: confident and warm. No fabricated social proof —
@@ -10,6 +10,7 @@ import type {
   OnboardingIntent,
   MemorableShot,
   OnboardingHandicap,
+  OnboardingAgeRange,
   ReelVibe,
 } from '@/lib/onboardingProfile';
 
@@ -31,12 +32,44 @@ export const shotOptions: { id: MemorableShot; label: string }[] = [
 ];
 
 export const handicapOptionsV2: { id: OnboardingHandicap; label: string }[] = [
+  { id: 'plus', label: 'Plus (take a bow)' },
   { id: 'scratch', label: 'Scratch-ish (0–5)' },
   { id: 'tidy', label: 'Pretty tidy (6–12)' },
   { id: 'gettingThere', label: 'Getting there (13–20)' },
   { id: 'learning', label: 'Still learning (21+)' },
   { id: 'noIdea', label: "No idea / don't keep one" },
 ];
+
+export const ageRangeOptions: { id: OnboardingAgeRange; label: string }[] = [
+  { id: 'under18', label: 'Under 18' },
+  { id: '18to29', label: '18–29' },
+  { id: '30to44', label: '30–44' },
+  { id: '45to59', label: '45–59' },
+  { id: '60plus', label: '60+' },
+];
+
+/** Screen 7 — age range (skippable). The sub carries the joke. */
+export const ageScreenCopy = {
+  title: 'Roughly how old are you?',
+  sub: 'So we know if your reel wants bass drops or the Sunday-telecast piano.',
+  skip: "Skip — age is a mindset",
+};
+
+/**
+ * Screen 2 — the problem. Lands the real pains: shots never filmed, footage
+ * buried in the camera roll, nobody edits after a round, nothing makes the
+ * group chat.
+ */
+export const problemCopy = {
+  title: 'Your best shots are disappearing.',
+  sub: 'The ones that got filmed are buried in your camera roll — because nobody edits golf footage after a round.',
+  rows: [
+    { label: 'The chip-in at the 9th', detail: '3 summers ago · never filmed' },
+    { label: 'That drive that split the fairway', detail: 'buried deep in the camera roll' },
+    { label: 'The putt for the career round', detail: 'never made it to the group chat' },
+  ],
+  cta: "Let's fix that",
+};
 
 /**
  * Vibe cards for the camera-roll aha. Music comes from the curated,

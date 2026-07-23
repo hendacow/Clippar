@@ -1,5 +1,5 @@
 /**
- * Screens 1-7, 9 and 10 of the animated onboarding (screen 8 — the
+ * Screens 1-8, 10 and 11 of the animated onboarding (screen 9 — the
  * camera-roll aha — lives in AhaScreen.tsx). Pure presentational components
  * driven by the host stepper in app/(onboarding)/index.tsx.
  *
@@ -36,6 +36,9 @@ import {
   intentOptions,
   shotOptions,
   handicapOptionsV2,
+  ageRangeOptions,
+  ageScreenCopy,
+  problemCopy,
 } from '@/constants/onboardingV2';
 import {
   intentEcho,
@@ -43,6 +46,7 @@ import {
   type OnboardingIntent,
   type MemorableShot,
   type OnboardingHandicap,
+  type OnboardingAgeRange,
   type ReelVibe,
 } from '@/lib/onboardingProfile';
 
@@ -53,6 +57,7 @@ export interface FlowAnswers {
   memorableShot: MemorableShot | null;
   homeCourseName: string | null;
   handicap: OnboardingHandicap | null;
+  ageRange: OnboardingAgeRange | null;
   vibe: ReelVibe;
 }
 
@@ -107,21 +112,21 @@ export function HeroScreen({ onNext, onLogin }: FlowScreenProps) {
 export function ProblemScreen({ onNext }: FlowScreenProps) {
   return (
     <FlowScreen
-      title="Your best shots are disappearing."
-      sub="You've hit shots you still talk about. Do you have a single one of them on film?"
+      title={problemCopy.title}
+      sub={problemCopy.sub}
       center
-      footer={<FlowButton label="Let's fix that" onPress={onNext} />}
+      footer={<FlowButton label={problemCopy.cta} onPress={onNext} />}
     >
       <Rise delay={300} style={{ marginTop: 32, gap: 14 }}>
-        <FadingShotRow label="The chip-in at the 9th" age="3 summers ago" delay={0} />
-        <FadingShotRow label="That drive that split the fairway" age="last month" delay={180} />
-        <FadingShotRow label="The putt for the career round" age="you had to be there" delay={360} />
+        {problemCopy.rows.map((row, i) => (
+          <FadingShotRow key={row.label} label={row.label} detail={row.detail} delay={i * 180} />
+        ))}
       </Rise>
     </FlowScreen>
   );
 }
 
-function FadingShotRow({ label, age, delay }: { label: string; age: string; delay: number }) {
+function FadingShotRow({ label, detail, delay }: { label: string; detail: string; delay: number }) {
   const reduceMotion = useReducedMotion();
   const fade = useSharedValue(1);
   useEffect(() => {
@@ -142,7 +147,7 @@ function FadingShotRow({ label, age, delay }: { label: string; age: string; dela
         <View style={styles.memoryDot} />
         <View style={{ flex: 1 }}>
           <Text style={styles.memoryLabel}>{label}</Text>
-          <Text style={styles.memoryAge}>{age} · no footage</Text>
+          <Text style={styles.memoryAge}>{detail}</Text>
         </View>
       </Animated.View>
     </Rise>
@@ -315,7 +320,39 @@ export function HandicapScreen({ answers, setAnswers, onNext, onSkip }: FlowScre
   );
 }
 
-/* ════════════════════ 7. BUILDING → REVEAL (one beat) ════════════════════ */
+/* ════════════════════ 7. AGE RANGE (skippable) ════════════════════ */
+
+export function AgeScreen({ answers, setAnswers, onNext, onSkip }: FlowScreenProps) {
+  return (
+    <FlowScreen
+      title={ageScreenCopy.title}
+      sub={ageScreenCopy.sub}
+      footer={
+        <View style={{ alignItems: 'center' }}>
+          <SkipLink label={ageScreenCopy.skip} onPress={onSkip} />
+        </View>
+      }
+    >
+      <View style={{ gap: 10, marginTop: 24 }}>
+        {ageRangeOptions.map((o, i) => (
+          <TapChip
+            key={o.id}
+            label={o.label}
+            selected={answers.ageRange === o.id}
+            dimmed={answers.ageRange !== null && answers.ageRange !== o.id}
+            delay={i * 60}
+            onPress={() => {
+              setAnswers({ ageRange: o.id });
+              setTimeout(onNext, 280);
+            }}
+          />
+        ))}
+      </View>
+    </FlowScreen>
+  );
+}
+
+/* ════════════════════ 8. BUILDING → REVEAL (one beat) ════════════════════ */
 
 export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
   const [phase, setPhase] = useState<'loading' | 'reveal'>('loading');
@@ -408,7 +445,7 @@ export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
   );
 }
 
-/* ════════════════════ 9. YOUR REEL'S READY ════════════════════ */
+/* ════════════════════ 10. YOUR REEL'S READY ════════════════════ */
 
 export function ReelReadyScreen({ ahaOutcome, onNext }: FlowScreenProps) {
   const real = ahaOutcome !== 'sample';
@@ -433,7 +470,7 @@ export function ReelReadyScreen({ ahaOutcome, onNext }: FlowScreenProps) {
   );
 }
 
-/* ════════════════════ 10. PAYWALL SETUP ════════════════════ */
+/* ════════════════════ 11. PAYWALL SETUP ════════════════════ */
 
 export function ProGateScreen({ ahaOutcome, onSeePro, onMaybeLater }: FlowScreenProps) {
   const real = ahaOutcome !== 'sample';
