@@ -87,3 +87,79 @@ DROP POLICY IF EXISTS "Shared rounds are publicly viewable" ON public.rounds;
 -- ----------------------------------------------------------------------------
 DROP POLICY IF EXISTS "Authenticated users can update courses" ON public.courses;
 DROP POLICY IF EXISTS "Authenticated users can update holes" ON public.holes;
+
+
+-- ----------------------------------------------------------------------------
+-- FINDING (medium): process-round compute-bill DoS via a client-forgeable
+-- claim guard.
+--
+-- process-round dispatches a ~14-min Modal GPU job. Its original guard claimed
+-- the round by transitioning `status` (recording/uploading/failed → processing)
+-- and rejecting when zero rows matched. But `status` is client-writable — the
+-- "Users can manage own rounds" FOR ALL policy plus the table-wide UPDATE grant
+-- let any owner rewrite it, and the app legitimately does (hooks/useRound.ts,
+-- app/round/import.tsx, app/round/editor.tsx). An attacker could therefore
+-- reset `status` back to a claimable value and loop the endpoint, launching a
+-- fresh GPU job every time.
+--
+-- We cannot simply strip `status` from the client grant — the app depends on
+-- writing it. Instead we add a dedicated service-role-only claim stamp,
+-- `dispatch_claimed_at`, that the client cannot write. process-round claims a
+-- round with an atomic `UPDATE ... WHERE dispatch_claimed_at IS NULL` and
+-- rejects (409) when no row returns; because the column is excluded from the
+-- client UPDATE grant, a user cannot reset it to re-arm the claim.
+--
+-- Postgres has no "grant every column except one", so we mirror the profiles
+-- fix: revoke the blanket UPDATE grant and re-grant UPDATE on every existing
+-- rounds column EXCEPT `dispatch_claimed_at`. `status` stays in the list, so
+-- all legitimate client status writes keep working unchanged.
+-- ----------------------------------------------------------------------------
+ALTER TABLE public.rounds
+  ADD COLUMN IF NOT EXISTS dispatch_claimed_at TIMESTAMPTZ;
+
+REVOKE UPDATE ON public.rounds FROM anon, authenticated;
+
+GRANT UPDATE (
+  id,
+  user_id,
+  course_id,
+  course_name,
+  date,
+  total_score,
+  total_par,
+  score_to_par,
+  total_putts,
+  holes_played,
+  status,
+  reel_url,
+  reel_duration_seconds,
+  music_track_id,
+  thumbnail_url,
+  is_published,
+  share_token,
+  notes,
+  created_at,
+  updated_at
+) ON public.rounds TO authenticated;
+
+
+-- ----------------------------------------------------------------------------
+-- FINDING (medium): sync-courses `sync_single` lets any signed-in user drive
+-- unbounded service-role writes to the shared catalog.
+--
+-- Even with the INSERT-only + escaped-ILIKE hardening in the function, a user
+-- can still call `sync_single` (and admins `sync_region`) in a loop to create
+-- many junk courses / burn the external API quota. Add a tiny per-user, per-day
+-- counter the function checks and increments. No RLS policies are defined, so
+-- only the service role (which bypasses RLS) can read or write it — clients
+-- cannot see or reset their own counter.
+-- ----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS public.sync_course_usage (
+  user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  usage_date DATE NOT NULL DEFAULT (now() AT TIME ZONE 'utc')::date,
+  count INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (user_id, usage_date)
+);
+
+ALTER TABLE public.sync_course_usage ENABLE ROW LEVEL SECURITY;
+-- Intentionally no policies: service-role only.
