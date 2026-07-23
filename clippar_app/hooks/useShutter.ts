@@ -19,6 +19,7 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 import { useBLE } from '@/hooks/useBLE';
+import { classifyVolumeEvent } from '@/lib/liveRecordingLogic';
 
 // Try loading expo-key-event (requires dev build + config plugin)
 let realUseKeyEvent: any = null;
@@ -84,6 +85,18 @@ export interface ShutterState {
    * resolve into "start recording again".
    */
   clearPendingClicks: () => void;
+  /**
+   * Re-arm the volume grace window (VOLUME_GRACE_MS). The window is armed
+   * automatically at mount and on app foreground, but iOS ALSO emits
+   * phantom volume notifications when the audio session (re)activates
+   * mid-app — most importantly when the CameraView mounts at round start
+   * (the patched expo-camera asserts .playAndRecord + setActive there) and
+   * when returning from the editor (PreviewPlayer flips the session to
+   * .playback and back). Callers should arm this at those moments so the
+   * activation noise can't be counted as a press and phantom-start a
+   * recording.
+   */
+  armVolumeGrace: () => void;
   simulatePress: () => void;
   ble: ReturnType<typeof useBLE>;
 }
@@ -338,42 +351,44 @@ export function useShutter(): ShutterState {
       const value = event?.volume ?? -1;
       const now = Date.now();
 
-      if (now < volumeGraceUntilRef.current) {
-        // Audio-session activation noise (mount/foreground) — not a press.
+      // Classification is pure (lib/liveRecordingLogic) so the node test
+      // runner can lock it down. Two suppression layers:
+      //  - grace: audio-session activation noise (mount / foreground /
+      //    camera start) reporting the session's current volume;
+      //  - reset value: real presses report 0.55/0.65/0.7, never exactly
+      //    the 0.5 we pin the volume to — so ANY ≈0.5 event is either our
+      //    own re-center landing or a session/route-change notification.
+      //    Suppressing on value alone (no longer requiring a pending reset
+      //    expectation) stops route changes and accessory reconnects from
+      //    registering as phantom presses that stop a mid-swing clip.
+      const action = classifyVolumeEvent({
+        value,
+        nowMs: now,
+        graceUntilMs: volumeGraceUntilRef.current,
+        resetTarget: RESET_TARGET,
+        resetTolerance: RESET_TOLERANCE,
+      });
+
+      if (action === 'suppress-grace') {
         // Re-center so the pipeline is armed once the grace window ends.
         slog('volume change SUPPRESSED (mount/foreground grace)', { volume: value });
         resetVolumeSafely();
         return;
       }
 
-      const expectedUntil = expectedResetUntilRef.current;
-      const expecting = expectedUntil !== null && now <= expectedUntil;
-      const matchesReset = Math.abs(value - RESET_TARGET) <= RESET_TOLERANCE;
-
-      if (expecting && matchesReset) {
-        // This event is our own reset landing. Suppress and clear the
-        // expectation so the next reset cycle starts clean.
-        slog('volume change SUPPRESSED (matches expected reset)', {
+      if (action === 'suppress-reset') {
+        const expectedUntil = expectedResetUntilRef.current;
+        slog('volume change SUPPRESSED (matches reset target)', {
           volume: value,
           target: RESET_TARGET,
+          expecting: expectedUntil !== null && now <= expectedUntil,
         });
+        // Clear a pending expectation so the next reset cycle starts clean.
         expectedResetUntilRef.current = null;
         return;
       }
 
-      // Either we weren't expecting a reset, or the value doesn't look
-      // like one. Treat as a real press. (If we were expecting a reset
-      // that never came, the next setVolume call will overwrite the
-      // expectation so no leak.)
-      if (expecting) {
-        slog('source[volume] change (real, despite pending reset)', {
-          volume: value,
-          target: RESET_TARGET,
-          delta: Math.abs(value - RESET_TARGET).toFixed(3),
-        });
-      } else {
-        slog('source[volume] change', { volume: value });
-      }
+      slog('source[volume] change', { volume: value });
       emitPress('volume');
       resetVolumeSafely();
     });
@@ -444,6 +459,16 @@ export function useShutter(): ShutterState {
     clickCountRef.current = 0;
   }, []);
 
+  // Re-arm the volume grace window on demand. The record screen calls this
+  // when the CameraView mounts at round start (the native .playAndRecord
+  // assertion emits an activation volume notification there — observed
+  // phantom-starting a recording) and when regaining focus from the editor
+  // (PreviewPlayer's session flip emits the same class of noise).
+  const armVolumeGrace = useCallback(() => {
+    volumeGraceUntilRef.current = Date.now() + VOLUME_GRACE_MS;
+    slog('volume grace re-armed', { untilMs: VOLUME_GRACE_MS });
+  }, []);
+
   const simulatePress = useCallback(() => {
     slog('source[simulated] press');
     emitPress('simulated');
@@ -464,6 +489,7 @@ export function useShutter(): ShutterState {
     onPress,
     onClick,
     clearPendingClicks,
+    armVolumeGrace,
     simulatePress,
     ble,
   };
