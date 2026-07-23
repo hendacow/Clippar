@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView, Linking } from 'react-native';
 import { router } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import { useRecordingContext } from '@/contexts/RecordingContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
@@ -161,6 +162,13 @@ export default function RecordScreen() {
   const { setRecordingActive } = useRecordingContext();
   const roundState = round.state;
   const isActive = roundState?.status === 'in_progress';
+  // Screen focus. "Review round so far" router.pushes the editor on TOP of
+  // this screen (deliberately, so the in-memory round survives), which means
+  // isActive alone stays true while the user is in the editor — the shutter
+  // subscriptions below must ALSO be focus-gated or volume presses in the
+  // editor (adjusting preview playback volume) start recordings / advance
+  // holes behind the user's back.
+  const isFocused = useIsFocused();
 
   // Camera hook — only active when round is in progress
   const camera = useCamera({
@@ -194,6 +202,14 @@ export default function RecordScreen() {
       [round.onShotClassified]
     ),
   });
+
+  // Recording OR finalizing (the 5-10s MP4 write + save after a stop).
+  // Round-mutating actions (End Round / Next Hole / pickup / delete last
+  // shot / review) must wait for both: acting mid-recording unmounts the
+  // CameraView under an active recordAsync (killing the clip with the
+  // generic recording error), and acting mid-finalize scores or deletes
+  // around a clip that hasn't landed in round state yet.
+  const recordingBusy = camera.isRecording || camera.isFinalizing;
 
   // Camera framing handlers — defined after `camera` so they can read
   // isRecording. Both are inert mid-clip so the AVCaptureSession is never
@@ -279,7 +295,7 @@ export default function RecordScreen() {
   // below, and use clearPendingClicks() to prevent the same press from
   // re-triggering a "toggle" 1s later through this onClick path.
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive || !isFocused) return;
 
     const unsubscribe = shutter.onClick(({ count }) => {
       console.log(`[record] onClick count=${count} isRecording=${camera.isRecording} ts=${Date.now() % 100000}`);
@@ -294,6 +310,13 @@ export default function RecordScreen() {
       // catch regressions, then bail — onPress already toggled.
       if (camera.isRecording) {
         console.log('[record] onClick fired while recording — IGNORED (onPress should have handled)');
+        return;
+      }
+      // While the previous clip finalizes (5-10s MP4 write + save), a start
+      // would be silently dropped by useCamera and an end-hole would score
+      // the in-flight clip into the wrong hole — swallow the gesture.
+      if (camera.isFinalizing) {
+        console.log('[record] onClick fired while finalizing — IGNORED');
         return;
       }
       if (count === 1) {
@@ -321,12 +344,31 @@ export default function RecordScreen() {
   }, [
     shutter.onClick,
     isActive,
+    isFocused,
     camera.toggleRecording,
     camera.simulateRecording,
     camera.isRecording,
+    camera.isFinalizing,
     round.endHole,
     round.addPenalty,
   ]);
+
+  // Arm the shutter pipeline for THIS screen when it becomes both active
+  // and focused:
+  //  - clearPendingClicks: a press buffered on the setup screen (e.g. the
+  //    user test-clicking their clicker) must not flush into the freshly
+  //    subscribed onClick handler and phantom-start a recording on entry;
+  //  - armVolumeGrace: the CameraView mounting at round start natively
+  //    asserts .playAndRecord + setActive, and iOS emits a volume
+  //    notification on that activation. The mount-time grace window has
+  //    long expired by then (round setup takes >1.5s), so re-arm it here.
+  //    Same on refocus from the editor, whose PreviewPlayer flips the
+  //    shared audio session and emits the same class of noise.
+  useEffect(() => {
+    if (!isActive || !isFocused) return;
+    shutter.clearPendingClicks();
+    shutter.armVolumeGrace();
+  }, [isActive, isFocused, shutter.clearPendingClicks, shutter.armVolumeGrace]);
 
   // Immediate-press handler. Two jobs:
   //   1. ALWAYS: light haptic so the user feels the press registered, even
@@ -337,12 +379,16 @@ export default function RecordScreen() {
   //      doesn't trigger an onClick 1s later that would start a NEW
   //      recording.
   useEffect(() => {
-    if (!isActive) return;
+    if (!isActive || !isFocused) return;
     return shutter.onPress(() => {
       if (camera.isRecording) {
         console.log('[record] onPress: instant stop (was recording)');
         shutter.clearPendingClicks();
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        // No stop-confirm haptic here: toggleRecording swallows stops that
+        // arrive <2s after start (phantom clicker-bounce guard), and firing
+        // Medium before knowing would tell the user "stopped" while the
+        // camera keeps recording to the 120s cap. stopRecording fires the
+        // Medium impact itself when a stop actually happens.
         if (isNative) {
           camera.toggleRecording();
         } else {
@@ -356,6 +402,7 @@ export default function RecordScreen() {
     shutter.onPress,
     shutter.clearPendingClicks,
     isActive,
+    isFocused,
     camera.isRecording,
     camera.toggleRecording,
     camera.simulateRecording,
@@ -458,16 +505,27 @@ export default function RecordScreen() {
   // underneath (router.push), so the in-memory round survives the trip.
   const handleReviewRound = useCallback(() => {
     if (!roundState) return;
-    if (camera.isRecording) {
-      Alert.alert('Stop recording first', 'Stop the current clip before reviewing your round.');
+    if (recordingBusy) {
+      Alert.alert('Stop recording first', 'Stop the current clip and let it finish saving before reviewing your round.');
       return;
     }
     setShowRecordingSettings(false);
     router.push(`/round/editor?roundId=${roundState.roundId}&review=1`);
-  }, [roundState, camera.isRecording]);
+  }, [roundState, recordingBusy]);
 
-  // Delete the most recent clip on the current hole.
+  // Delete the most recent clip on the current hole. Blocked while a clip
+  // is recording or still saving: the just-stopped clip only enters round
+  // state when its save pipeline completes (5-10s), so an immediate delete
+  // would target the PREVIOUS clip on the hole — permanently destroying a
+  // good shot while keeping the one the user meant to remove.
   const handleDeleteLastShot = useCallback(() => {
+    if (recordingBusy) {
+      Alert.alert(
+        'Clip still saving',
+        'Wait a few seconds for the last clip to finish saving, then delete it.'
+      );
+      return;
+    }
     Alert.alert(
       'Delete last shot',
       'Remove the most recent clip on this hole? This cannot be undone.',
@@ -486,7 +544,7 @@ export default function RecordScreen() {
         },
       ]
     );
-  }, [round.deleteLastClip]);
+  }, [round.deleteLastClip, recordingBusy]);
 
   // Whether the current hole has any clips to delete.
   const canDeleteLastShot = !!roundState?.clips.some(
@@ -573,18 +631,37 @@ export default function RecordScreen() {
   }, [mode]);
 
   const handleEndHole = () => {
+    // Mid-recording (or mid-finalize) the in-flight clip hasn't landed in
+    // round state: ending the hole now would score it one stroke short and
+    // spill the clip's shot counter into the next hole.
+    if (recordingBusy) {
+      Alert.alert('Stop recording first', 'Stop the current clip before moving to the next hole.');
+      return;
+    }
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     round.endHole();
   };
 
   const handlePenaltySelect = (type: PenaltyType) => {
     setShowPenalty(false);
+    // Pickup finalizes the hole (and on the last hole, the round) — doing
+    // that mid-recording unmounts the CameraView under an active
+    // recordAsync and kills the clip. Other penalty types only bump the
+    // shot counter and are safe.
+    if (type === 'pickup' && recordingBusy) {
+      Alert.alert('Stop recording first', 'Stop the current clip before picking up.');
+      return;
+    }
     round.addPenalty(type);
   };
 
   const handleRecordPress = () => {
     if (isNative) {
-      camera.toggleRecording();
+      // force: the on-screen button is an unambiguous user intent — an
+      // early (<2s) stop cancels the recording (discarding the too-short
+      // clip) instead of being silently swallowed like phantom clicker
+      // events are.
+      camera.toggleRecording({ force: true });
     } else {
       camera.simulateRecording();
     }
@@ -1127,6 +1204,13 @@ export default function RecordScreen() {
           // is ready, so 1× engages even if the change event doesn't fire on
           // first mount (otherwise it'd sit on the 0.5× virtual-device default).
           onCameraReady={async () => {
+            // Camera-ready marks the end of an audio-session / capture-
+            // session (re)start — the exact moments iOS emits phantom
+            // volume notifications (mount, unlock after a between-shots
+            // pocket, mediaServicesWereReset). Re-arm the grace window from
+            // HERE so it covers the notification even when session restart
+            // takes longer than the fixed foreground grace (older devices).
+            shutter.armVolumeGrace();
             try {
               const lenses = await camera.cameraRef.current?.getAvailableLensesAsync();
               if (Array.isArray(lenses) && lenses.length) setAvailableLenses(lenses);
@@ -1224,6 +1308,14 @@ export default function RecordScreen() {
       {!tutorialActive && (
         <Pressable
           onPress={() => {
+            // Ending the round flips to the FINISHED screen and unmounts
+            // the CameraView — mid-recording (or mid-finalize) that aborts
+            // the in-flight recordAsync and loses the final clip of the
+            // round. Mirror handleReviewRound's guard.
+            if (recordingBusy) {
+              Alert.alert('Stop recording first', 'Stop the current clip and let it finish saving before ending the round.');
+              return;
+            }
             if (isNative) {
               Alert.alert(
                 'End Round',
