@@ -18,7 +18,8 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
-import { type UploadMode } from '@/contexts/UploadContext';
+import { emitPipelineEvent, subscribePipeline } from '@/lib/pipelineEvents';
+import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
@@ -31,6 +32,33 @@ import { saveClipToPhotos, saveHoleToPhotos, shareHole, stitchHoleClips, shareCl
 import { resolveTrackToLocalUri } from '@/lib/music';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+// ---------------------------------------------------------------------------
+// Concurrent-compose guard (F2c).
+//
+// A native composeReel is expensive and must never run twice at once for the
+// same round. The classic trigger: the stall watchdog surfaces FAILED, the
+// user taps Retry (which deep-links back here with ?recompose=1), and a second
+// compose launches while the first is still running. This lock is module-scoped
+// so it holds across editor remounts / separate navigations, not just within
+// one component instance.
+//
+// It is RELEASED reactively from the pipeline bus on the job's terminal event
+// (compose:complete or compose:error, including a watchdog-fired error) so it
+// can never strand across a real failure — no matter which code path or which
+// editor instance ended the job.
+const inFlightComposeRoundIds = new Set<string>();
+let composeLockReleaserInstalled = false;
+function installComposeLockReleaser() {
+  if (composeLockReleaserInstalled) return;
+  composeLockReleaserInstalled = true;
+  subscribePipeline((event) => {
+    if (event.type === 'compose:complete' || event.type === 'compose:error') {
+      inFlightComposeRoundIds.delete(event.roundId);
+    }
+  });
+}
+installComposeLockReleaser();
 
 // Conditionally import thumbnail generator
 const VideoThumbnails = isNative
@@ -619,7 +647,9 @@ export default function EditorScreen() {
   const [exportModalVisible, setExportModalVisible] = useState(false);
   // Export resolution/frame-rate UI was removed — clips render at their
   // captured quality. See the export-settings JSX comment below.
-  const exportMode: UploadMode = 'highlight-reel';
+  // Vocabulary law: "reel"/"build"/"stitch" = on-device compose, never a
+  // cloud upload. This export flow composes locally, full stop.
+  const exportMode = 'local-compose' as const;
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState('');
   const [exportProgress, setExportProgress] = useState<StitchProgressEvent | null>(null);
@@ -901,7 +931,17 @@ export default function EditorScreen() {
       }
     }
 
-    if (exportMode === 'highlight-reel') {
+    if (exportMode === 'local-compose') {
+      // F2c: never launch a second native compose for a round that is already
+      // composing (e.g. a stale watchdog FAILED + a Retry tap). Focus the
+      // existing progress instead of starting a concurrent job.
+      if (state.roundId && inFlightComposeRoundIds.has(state.roundId)) {
+        console.log(
+          `[Editor] compose already in-flight for round ${state.roundId} — ignoring duplicate export`,
+        );
+        setExportModalVisible(false);
+        return;
+      }
       // On-device reel composition
       const allClips = editor.getAllClipsInOrder();
       const clipUris = allClips
@@ -935,8 +975,28 @@ export default function EditorScreen() {
         `(${excludedCount} excluded, ${allClipsRaw.length - clipUris.length - excludedCount} missing sourceUri)`,
       );
 
+      // F2c: claim the concurrent-compose lock BEFORE any async work so a
+      // rapid second tap can't slip past the guard above. Released reactively
+      // on the job's terminal compose:complete / compose:error event.
+      inFlightComposeRoundIds.add(state.roundId);
+
       setComposing(true);
       setComposeProgress('Checking clip files...');
+      // Broadcast to the pipeline bus so Home / round detail can render live
+      // compose state. This is the "preparing" phase (clip recovery + music
+      // resolution) — it emits liveness but does NOT arm the 30s watchdog; the
+      // watchdog only supervises the native stage below (F2a).
+      emitPipelineEvent({
+        type: 'compose:start',
+        roundId: state.roundId,
+        courseName: state.courseName ?? null,
+      });
+      emitPipelineEvent({
+        type: 'compose:stage',
+        roundId: state.roundId,
+        stage: 'preparing',
+        stageLabel: 'Getting your clips…',
+      });
 
       // Verify clip files exist on disk; for any that are missing, try to
       // recover by downloading from Supabase Storage. iOS routinely evicts
@@ -984,12 +1044,26 @@ export default function EditorScreen() {
           console.warn(
             `[Editor] ${missingRecoverable.length} clip(s) missing locally — re-downloading from Supabase`
           );
-          setComposeProgress(
-            `Recovering ${missingRecoverable.length} missing clip${missingRecoverable.length > 1 ? 's' : ''}...`
-          );
+          const recoverLabel =
+            `Recovering ${missingRecoverable.length} missing clip${missingRecoverable.length > 1 ? 's' : ''}...`;
+          setComposeProgress(recoverLabel);
+          // Liveness during recovery (still the "preparing" phase — watchdog
+          // stays disarmed while clips download over slow LTE).
+          emitPipelineEvent({
+            type: 'compose:stage',
+            roundId: state.roundId,
+            stage: 'preparing',
+            stageLabel: recoverLabel,
+          });
 
           const paths = missingRecoverable.map(({ clip }) => clip.storagePath!);
-          const signed = await getSignedClipUrls(paths);
+          // Never let a signing failure throw out of the compose flow — that
+          // would leak the concurrent-compose lock. On failure, treat those
+          // clips as unrecoverable (they fall through to the no-URL branch).
+          const signed = await getSignedClipUrls(paths).catch((err) => {
+            console.warn('[Editor] getSignedClipUrls failed during recovery:', err);
+            return {} as Record<string, string>;
+          });
 
           const cacheDir = `${FileSystem.cacheDirectory}recovered-clips/`;
           try {
@@ -1050,6 +1124,11 @@ export default function EditorScreen() {
             'All clips are missing from this device and could not be recovered. Try re-importing or re-recording the round.'
           );
           setComposing(false);
+          emitPipelineEvent({
+            type: 'compose:error',
+            roundId: state.roundId,
+            cause: FAILURE_CAUSE.missingClips,
+          });
           return;
         }
 
@@ -1102,6 +1181,14 @@ export default function EditorScreen() {
         let musicFileUri: string | null = null;
         if (selectedMusic) {
           setComposeProgress('Preparing music track...');
+          // Still the "preparing" phase — resolving a remote track can be slow
+          // on LTE, but it isn't the native render, so keep the watchdog off.
+          emitPipelineEvent({
+            type: 'compose:stage',
+            roundId: state.roundId,
+            stage: 'preparing',
+            stageLabel: 'Preparing music track…',
+          });
           musicFileUri = await resolveTrackToLocalUri(
             selectedMusic.id,
             selectedMusic.file_url,
@@ -1122,6 +1209,19 @@ export default function EditorScreen() {
           } else {
             setComposeProgress(`Exporting: ${Math.round(event.percent)}%...`);
           }
+          // Broadcast real native progress only — never a fake percent.
+          const percent =
+            typeof event.percent === 'number' && event.percent > 0
+              ? Math.min(event.percent, 100)
+              : event.phase === 'composing' && event.total > 0
+                ? (event.current / event.total) * 100
+                : null;
+          emitPipelineEvent({
+            type: 'compose:progress',
+            roundId: state.roundId,
+            stageLabel: 'Stitching your reel…',
+            percent,
+          });
         });
 
         // Build per-clip compose inputs that carry trim metadata into the
@@ -1172,6 +1272,17 @@ export default function EditorScreen() {
           composeClips.map((c, i) => `[${i}] ${c.trimStartMs}..${c.trimEndMs}`).join(', '),
         );
 
+        // The native render is about to begin — this is the ONLY signal that
+        // arms the 30s stall watchdog (F2a). Everything above (clip recovery,
+        // music resolution) ran without a watchdog so a slow LTE prep phase
+        // can't be misread as a stalled render.
+        emitPipelineEvent({
+          type: 'compose:stage',
+          roundId: state.roundId,
+          stage: 'composing',
+          stageLabel: 'Stitching your reel…',
+        });
+
         let result;
         try {
           result = await composeReel(composeClips, scorecardData, musicFileUri);
@@ -1217,6 +1328,10 @@ export default function EditorScreen() {
           // "Re-compose reel" button.
           markReelFresh(state.roundId).catch(() => {});
 
+          // Notify subscribers (Home + round detail refetch on this) so
+          // the new reel shows without a manual refresh.
+          emitPipelineEvent({ type: 'compose:complete', roundId: state.roundId });
+
           setTimeout(() => {
             setComposing(false);
             setExportProgress(null);
@@ -1233,6 +1348,11 @@ export default function EditorScreen() {
         setExportProgress(null);
         const msg = err instanceof Error ? err.message : 'Unknown error';
         console.error('[Editor] Compose failed:', err);
+        emitPipelineEvent({
+          type: 'compose:error',
+          roundId: state.roundId,
+          cause: composeFailureCause(msg),
+        });
         if (msg.includes('native rebuild') || msg.includes('not available')) {
           Alert.alert(
             'Native Build Required',

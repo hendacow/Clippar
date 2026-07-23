@@ -125,7 +125,7 @@ function FloatingTabBar({ state, descriptors, navigation }: any) {
             <View ref={roundsRef} onLayout={roundsOnLayout}>
               <Home size={22} color={tintColor('index')} />
             </View>
-            <Text style={[styles.tabLabel, { color: tintColor('index') }]}>Rounds</Text>
+            <Text style={[styles.tabLabel, { color: tintColor('index') }]}>Home</Text>
           </Pressable>
           {SHOP_ENABLED && (
             <Pressable style={styles.tabItem} onPress={() => handlePress('shop')}>
@@ -238,7 +238,7 @@ export default function TabLayout() {
           tabBarStyle: { position: 'absolute' },
         }}
       >
-        <Tabs.Screen name="index" options={{ title: 'Rounds' }} />
+        <Tabs.Screen name="index" options={{ title: 'Home' }} />
         <Tabs.Screen name="record" options={{ title: 'Record' }} />
         {/* href: null removes Shop from the navigator when disabled, so it's
             not reachable via deep link either (belt-and-braces for v1). */}

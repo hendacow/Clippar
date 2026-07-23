@@ -497,8 +497,8 @@ export default function ProfileScreen() {
           <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
             <SettingsRow
               icon={<Film size={18} color={theme.colors.primary} />}
-              title="My Rounds"
-              subtitle="Drafts, processing & completed reels"
+              title="Backup & status"
+              subtitle="Drafts, backup progress & synced rounds"
               onPress={() => router.push('/profile/rounds')}
               trailing={
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
