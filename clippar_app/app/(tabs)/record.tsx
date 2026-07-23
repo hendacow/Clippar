@@ -47,8 +47,8 @@ import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from
 import { getMountCardDismissed, dismissMountCard } from '@/lib/mountOffer';
 import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
-import { listCoursePresets, touchCoursePreset, createCoursePreset } from '@/lib/api';
-import { buildHoleDataFromPars, presetHasScorecard } from '@/lib/scorecardLogic';
+import { listCoursePresets, touchCoursePreset, upsertCoursePreset } from '@/lib/api';
+import { buildHoleDataFromPars, presetHasScorecard, findPresetToUpdate } from '@/lib/scorecardLogic';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 import type { CoursePreset } from '@/types/preset';
@@ -633,7 +633,10 @@ export default function RecordScreen() {
   const handleSaveScorecard = useCallback(async (holePars: number[]) => {
     setSavingScorecard(true);
     try {
-      const created = await createCoursePreset({
+      // Upsert by (user, name): re-saving a course you've already bookmarked
+      // overwrites that scorecard in place instead of erroring on the
+      // duplicate name, so correcting a wrong par just works.
+      const saved = await upsertCoursePreset({
         course_id: selectedCourseId ?? null,
         course_name: courseName.trim(),
         holes_played: holesPlayed,
@@ -642,18 +645,17 @@ export default function RecordScreen() {
         hole_pars: holePars,
       });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      // Surface the new bookmark immediately (most-recent-first, matching
-      // the server's last_used_at ordering).
-      setPresets((prev) => [created, ...prev]);
+      // Reflect the save immediately: drop any prior row for this preset and
+      // put the freshly-saved one on top (most-recent-first, matching the
+      // server's last_used_at ordering) so the corrected scorecard is what the
+      // picker shows — and loads — next time.
+      setPresets((prev) => [saved, ...prev.filter((p) => p.id !== saved.id)]);
       setLivePhase('preset-picker');
     } catch (err: any) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      const isDuplicate = /unique|duplicate/i.test(err?.message ?? '');
       Alert.alert(
         'Could not save scorecard',
-        isDuplicate
-          ? `You already have a saved scorecard named "${courseName.trim()}". Rename or delete the old one first.`
-          : 'Something went wrong saving your scorecard. Please try again.',
+        'Something went wrong saving your scorecard. Please try again.',
       );
     } finally {
       setSavingScorecard(false);
@@ -1004,6 +1006,9 @@ export default function RecordScreen() {
           holesPlayed={holesPlayed}
           startHole={startHole}
           saving={savingScorecard}
+          // Re-saving a course you've already bookmarked overwrites it, so
+          // label the CTA "Update…" instead of "Save…" in that case.
+          isUpdate={!!findPresetToUpdate(presets, courseName.trim())}
           onBack={() => {
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             setLivePhase('setup');

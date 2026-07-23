@@ -239,24 +239,18 @@ export default function ImportRoundScreen() {
     }
   };
 
-  // Get ordered hole numbers based on starting nine and hole count
+  // The real hole numbers this round plays, in play order, starting from the
+  // chosen nine. A round plays `holesCount` consecutive holes from the start
+  // hole (1 for the front nine, 10 for the back), wrapping 18→1 so a full 18
+  // teed off the back reads 10..18 then 1..9. Count-correct for every option
+  // the setup offers (3/6/9/12/15/18) — a partial round no longer silently
+  // expands to 18 holes, and a back-nine round yields 10..18 not 1..9.
   const getOrderedHoleNumbers = useCallback((): number[] => {
-    if (holesCount <= 9) {
-      if (startingNine === 'front') {
-        return Array.from({ length: holesCount }, (_, i) => i + 1);
-      } else {
-        return Array.from({ length: holesCount }, (_, i) => i + 10);
-      }
-    }
-    // 18 holes
-    if (startingNine === 'front') {
-      return Array.from({ length: 18 }, (_, i) => i + 1);
-    }
-    // Started on back nine: 10-18, then 1-9
-    return [
-      ...Array.from({ length: 9 }, (_, i) => i + 10),
-      ...Array.from({ length: 9 }, (_, i) => i + 1),
-    ];
+    const startHole = startingNine === 'back' ? 10 : 1;
+    return Array.from(
+      { length: holesCount },
+      (_, i) => ((startHole - 1 + i) % 18) + 1,
+    );
   }, [holesCount, startingNine]);
 
   const initHoles = useCallback(() => {
@@ -265,19 +259,24 @@ export default function ImportRoundScreen() {
       return;
     }
 
-    const holeList: HoleImport[] = [];
-    for (let i = 1; i <= holesCount; i++) {
-      const courseHole = courseHoles.find((h) => h.holeNumber === i);
-      holeList.push({
-        holeNumber: i,
+    // Number the holes from the actual played hole numbers (start-hole aware),
+    // NOT a flat 1..holesCount. A back-nine scorecard preset seeds courseHoles
+    // at holes 10..18; keying off getOrderedHoleNumbers() lets courseHoles.find
+    // match those, so the user's saved per-hole pars survive to submit (manual
+    // mode reads hole.par directly) instead of falling back to par 4. Mirrors
+    // the numbering initScorecard already uses.
+    const holeList: HoleImport[] = getOrderedHoleNumbers().map((holeNum) => {
+      const courseHole = courseHoles.find((h) => h.holeNumber === holeNum);
+      return {
+        holeNumber: holeNum,
         par: courseHole?.par ?? 4,
         clips: [],
         expanded: true,
-      });
-    }
+      };
+    });
     setHoles(holeList);
     setStep('mode');
-  }, [courseName, holesCount, courseHoles]);
+  }, [courseName, courseHoles, getOrderedHoleNumbers]);
 
   const initScorecard = useCallback(() => {
     const ordered = getOrderedHoleNumbers();
@@ -529,7 +528,10 @@ export default function ImportRoundScreen() {
   };
 
   const promptMoveClip = (sourceHole: number, clipIndex: number) => {
-    const targets = Array.from({ length: holesCount }, (_, i) => i + 1);
+    // Real played hole numbers (start-hole aware) so moving a clip on a
+    // back-nine round targets holes 10..18, matching the holes state — not a
+    // phantom 1..9 that would drop the clip into a non-existent hole.
+    const targets = getOrderedHoleNumbers();
     const labels = targets.map((n) =>
       n === sourceHole ? `Hole ${n} (current)` : `Hole ${n}`,
     );

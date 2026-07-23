@@ -44,6 +44,12 @@ export interface ScorecardSetupScreenProps {
   startHole: 1 | 10;
   /** Disables the CTA + shows a spinner while the preset is being saved. */
   saving?: boolean;
+  /**
+   * True when the user already has a saved scorecard for this course name, so
+   * saving OVERWRITES it (upsert by name) rather than creating a new one. Only
+   * changes the CTA copy — the save itself is the same call either way.
+   */
+  isUpdate?: boolean;
   onBack: () => void;
   /** Positional par array, length = holesPlayed, element i = i-th hole played. */
   onSave: (holePars: number[]) => void;
@@ -54,6 +60,7 @@ export function ScorecardSetupScreen({
   holesPlayed,
   startHole,
   saving = false,
+  isUpdate = false,
   onBack,
   onSave,
 }: ScorecardSetupScreenProps) {
@@ -319,7 +326,13 @@ export function ScorecardSetupScreen({
           }}
         >
           <Button
-            title={complete ? 'Save course scorecard' : `Set all ${holesPlayed} holes`}
+            title={
+              complete
+                ? isUpdate
+                  ? 'Update saved scorecard'
+                  : 'Save course scorecard'
+                : `Set all ${holesPlayed} holes`
+            }
             onPress={handleSave}
             loading={saving}
             disabled={!complete}

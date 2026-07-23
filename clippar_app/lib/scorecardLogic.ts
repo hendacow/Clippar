@@ -115,3 +115,22 @@ export function sanitizeHolePars(
 export function totalParOf(holePars: readonly number[]): number {
   return holePars.reduce((sum, p) => sum + p, 0);
 }
+
+/**
+ * Decide whether saving a scorecard under `name` should UPDATE an existing
+ * preset or INSERT a new one. Returns the user's preset that a save would
+ * collide with on the DB's UNIQUE(user_id, name) key — so the caller can
+ * overwrite it in place (letting the user iterate on a saved scorecard, e.g.
+ * fix a wrong par) instead of hitting the duplicate-name error — or null when
+ * the name is new. Matches the stored name exactly after trimming both sides,
+ * mirroring the case-sensitive DB constraint (a differently-cased name is a
+ * distinct preset, not a collision). Blank names never match.
+ */
+export function findPresetToUpdate<T extends { name: string }>(
+  presets: readonly T[],
+  name: string,
+): T | null {
+  const target = name.trim();
+  if (!target) return null;
+  return presets.find((p) => p.name.trim() === target) ?? null;
+}

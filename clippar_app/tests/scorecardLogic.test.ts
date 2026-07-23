@@ -11,6 +11,7 @@ import {
   isScorecardComplete,
   sanitizeHolePars,
   totalParOf,
+  findPresetToUpdate,
 } from '../lib/scorecardLogic';
 
 // ── constants ──────────────────────────────────────────────
@@ -152,4 +153,36 @@ test('sanitizeHolePars: rejects non-integers', () => {
 
 test('totalParOf: sums the array', () => {
   assert.equal(totalParOf([3, 4, 5, 4]), 16);
+});
+
+// ── findPresetToUpdate (upsert-by-name decision) ───────────
+
+const presetsFixture = [
+  { id: 'a', name: 'Riversdale GC' },
+  { id: 'b', name: 'Pebble Beach' },
+];
+
+test('findPresetToUpdate: exact name match → update that preset (its id)', () => {
+  assert.equal(findPresetToUpdate(presetsFixture, 'Pebble Beach')?.id, 'b');
+});
+
+test('findPresetToUpdate: unknown name → null (insert a new preset)', () => {
+  assert.equal(findPresetToUpdate(presetsFixture, 'Augusta National'), null);
+});
+
+test('findPresetToUpdate: trims the query name before matching', () => {
+  assert.equal(findPresetToUpdate(presetsFixture, '  Riversdale GC  ')?.id, 'a');
+});
+
+test('findPresetToUpdate: match is case-sensitive (mirrors the DB unique key)', () => {
+  // A differently-cased name is a distinct preset, not a collision → insert.
+  assert.equal(findPresetToUpdate(presetsFixture, 'pebble beach'), null);
+});
+
+test('findPresetToUpdate: blank name never matches', () => {
+  assert.equal(findPresetToUpdate(presetsFixture, '   '), null);
+});
+
+test('findPresetToUpdate: empty preset list → null', () => {
+  assert.equal(findPresetToUpdate([], 'Riversdale GC'), null);
 });
