@@ -108,8 +108,9 @@
     background: var(--bg);
     z-index: -1;
   }
-  .logo { display: flex; align-items: center; text-decoration: none; }
-  .logo img { height: 26px; width: auto; display: block; }
+  .logo { display: flex; align-items: center; text-decoration: none; gap: 10px; }
+  .logo img { height: 26px; width: auto; display: block; flex-shrink: 0; }
+  .logo .logo-mark { height: 34px; width: 34px; }
   footer .logo img { height: 60px; }
   .nav-buy {
     font-family: var(--font-display); font-size: 17px; letter-spacing: 0.08em;
@@ -592,7 +593,7 @@
 <body>
 
 <nav>
-  <a class="logo" href="/"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
+  <a class="logo" href="/"><img class="logo-mark" src="/landing_assets/clippar-icon-white.png" alt="" width="272" height="272"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
   <a class="nav-buy js-buy" href="#pricing">GET THE KIT — A$99</a>
 </nav>
 
