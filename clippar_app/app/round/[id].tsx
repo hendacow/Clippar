@@ -268,7 +268,7 @@ export default function RoundViewer() {
   const justExported = exported === '1';
   const insets = useSafeAreaInsets();
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { upload, startUpload } = useUploadContext();
+  const { upload } = useUploadContext();
   const editor = useEditorState(id);
 
   const [round, setRound] = useState<any>(null);
@@ -439,12 +439,15 @@ export default function RoundViewer() {
     }
   }, [reelSignedUrl, id]);
 
+  // Rebuilding a reel is ALWAYS an on-device compose via the editor's
+  // export flow (?recompose=1 auto-opens the export modal, with built-in
+  // missing-clip re-download recovery). It must never trigger a cloud
+  // upload — zero network I/O on tap.
   const handleReRender = useCallback(() => {
-    if (!id || !round) return;
+    if (!id) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    startUpload(id, round.course_name ?? '');
-    setReelSignedUrl(null);
-  }, [id, round, startUpload]);
+    router.push(`/round/editor?roundId=${id}&recompose=1`);
+  }, [id]);
 
   // Poll for processing completion
   useEffect(() => {
@@ -618,8 +621,8 @@ export default function RoundViewer() {
                       Processing Failed
                     </Text>
                     <Button
-                      title="Retry"
-                      onPress={() => router.push(`/round/upload?roundId=${round.id}`)}
+                      title="Try again"
+                      onPress={() => router.push(`/round/editor?roundId=${round.id}&recompose=1`)}
                       variant="secondary"
                     />
                   </>
