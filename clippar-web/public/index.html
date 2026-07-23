@@ -968,6 +968,11 @@
       <p>Get founding member pricing and be first to know when we launch.</p>
       <div class="form-error" id="form-error"></div>
       <form id="waitlist-form">
+        <!-- Honeypot: hidden from real users, catches naive bots. Kept out of
+             the tab order and hidden from assistive tech. If filled, the API
+             silently drops the submission. -->
+        <input type="text" id="f-website" name="website" tabindex="-1" autocomplete="off"
+               aria-hidden="true" style="position:absolute;left:-9999px;width:1px;height:1px;opacity:0;">
         <div class="form-group">
           <label>Your name</label>
           <input type="text" id="f-name" placeholder="Tiger" required autocomplete="name">
@@ -1380,6 +1385,7 @@
     const name = document.getElementById('f-name').value.trim();
     const email = document.getElementById('f-email').value.trim();
     const frequency = document.getElementById('f-frequency').value;
+    const website = document.getElementById('f-website').value;
 
     if (!name || !email) {
       errorDiv.textContent = 'Name and email are required.';
@@ -1394,7 +1400,7 @@
       const res = await fetch('/api/submit', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name, email, frequency})
+        body: JSON.stringify({name, email, frequency, website})
       });
       const result = await res.json();
 
