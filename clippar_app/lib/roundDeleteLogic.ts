@@ -6,21 +6,26 @@
  * (tests/roundDelete.test.ts). The SQLite / Supabase / expo-router glue lives
  * in app/round/[id].tsx.
  *
- * A round recorded on the free tier lives in TWO places: the local SQLite
- * `local_rounds` row (+ clip files) and the remote Supabase `rounds` row.
- * Deleting only the remote row (the old behaviour) orphaned the local copy,
- * and the remote storage `.list()` call could hang on a flaky/absent network
- * — wedging the "Deleting round..." overlay forever. This orchestrator fixes
- * both, with three guarantees, in order:
+ * A round shows on Home iff its REMOTE Supabase `rounds` row exists — Home's
+ * `fetchRounds` lists rounds from `getRounds()` (remote) and local SQLite only
+ * enriches clip counts/thumbnails of already-remote rounds. Round metadata
+ * syncs to remote at round start; on the free tier the clips just stay local.
  *
- *  1. The LOCAL delete runs FIRST — the round leaves the on-device library
- *     instantly, even fully offline. A local failure is swallowed
- *     (best-effort) and never blocks the rest.
- *  2. The REMOTE delete runs next but is BOUNDED by `timeoutMs` — a Supabase
- *     storage list/remove that hangs can never wedge the UI. A slow, failing
- *     or timed-out cloud call is swallowed; the round is already gone locally.
- *  3. `finalize` ALWAYS runs exactly once (in a `finally`), so the deleting
- *     overlay is torn down and navigation happens no matter what.
+ * So success MUST be gated on the REMOTE delete. If we deleted local first and
+ * the remote call failed/timed out, we'd wipe the on-device media while the
+ * remote row survived — the round would reappear on Home as a broken empty
+ * shell, with the user wrongly told it worked. The contract, in order:
+ *
+ *  1. Delete REMOTE first, BOUNDED by `timeoutMs` — a Supabase storage
+ *     list/remove that hangs on a flaky/absent network can never wedge the UI.
+ *  2. If the remote delete SUCCEEDS: delete local (best-effort cleanup of the
+ *     SQLite rows + clip files), then `onSuccess` (success haptic + navigate).
+ *     The round is gone from remote, so it can't reappear on Home.
+ *  3. If the remote delete FAILS or TIMES OUT: leave local intact, call
+ *     `onFailure` (alert), and do NOT navigate — the user stays on-screen and
+ *     can retry. This preserves the media for the retry.
+ *  4. `finalize` ALWAYS runs exactly once (in a `finally`), so the deleting
+ *     overlay is torn down no matter what — it can never wedge.
  */
 
 /** How long the cloud delete may run before we stop waiting on it. */
@@ -37,14 +42,16 @@ const defaultTimers: TimerApi = {
 };
 
 export interface RunDeleteRoundDeps {
-  /** Remove the round from local SQLite (rows + clip metadata). */
-  deleteLocal: () => Promise<void>;
   /** Remove the round from Supabase (storage buckets + DB rows). */
   deleteRemote: () => Promise<void>;
-  /** Tear down the overlay + navigate away. MUST always be safe to call. */
+  /** Remove the round from local SQLite (rows + clip files). */
+  deleteLocal: () => Promise<void>;
+  /** Remote succeeded: success side-effect (haptic) + navigate away. */
+  onSuccess: () => void;
+  /** Remote failed/timed out: alert the user; they stay on-screen to retry. */
+  onFailure: () => void;
+  /** Tear down the overlay (setDeleting(false)). MUST always be safe to call. */
   finalize: () => void;
-  /** Optional success side-effect (e.g. success haptic). */
-  onSuccess?: () => void;
   /** Upper bound on the cloud call. Defaults to DELETE_ROUND_CLOUD_TIMEOUT_MS. */
   timeoutMs?: number;
   /** Injectable timer (tests). Defaults to real setTimeout/clearTimeout. */
@@ -52,19 +59,21 @@ export interface RunDeleteRoundDeps {
 }
 
 export interface RunDeleteRoundResult {
-  /** Local delete resolved without throwing. */
-  localOk: boolean;
   /** Remote delete resolved (within the timeout) without throwing. */
   remoteOk: boolean;
   /** Remote delete did not settle before `timeoutMs` elapsed. */
   remoteTimedOut: boolean;
+  /** Local cleanup ran and resolved (only attempted when `remoteOk`). */
+  localOk: boolean;
 }
 
 /**
  * Run the remote delete but never wait longer than `timeoutMs`. Resolves with
  * 'ok' when it succeeds, 'error' when it throws, or 'timeout' when the bound
- * elapses first. A hanging remote promise is simply abandoned (left pending);
- * the timer is cleared on the fast path so nothing leaks when it wins.
+ * elapses first. A `settled` guard means a remote promise that resolves LATE
+ * (after the timeout already won) can't double-resolve or flip the outcome; a
+ * hanging remote promise is simply abandoned. The timer is cleared on the fast
+ * path so nothing leaks when the remote wins.
  */
 function boundedRemote(
   deleteRemote: () => Promise<void>,
@@ -100,40 +109,45 @@ export async function runDeleteRound(
   deps: RunDeleteRoundDeps,
 ): Promise<RunDeleteRoundResult> {
   const {
-    deleteLocal,
     deleteRemote,
-    finalize,
+    deleteLocal,
     onSuccess,
+    onFailure,
+    finalize,
     timeoutMs = DELETE_ROUND_CLOUD_TIMEOUT_MS,
     timers = defaultTimers,
   } = deps;
 
   const result: RunDeleteRoundResult = {
-    localOk: false,
     remoteOk: false,
     remoteTimedOut: false,
+    localOk: false,
   };
 
   try {
-    // 1. Local first — instant, offline-safe. Best-effort.
-    try {
-      await deleteLocal();
-      result.localOk = true;
-    } catch {
-      // Swallow: a local failure must not block the remote delete or finalize.
-    }
-
-    // 2. Remote, bounded so a hanging cloud call can't wedge the overlay.
+    // 1. REMOTE first, bounded so a hanging cloud call can't wedge the overlay.
     const outcome = await boundedRemote(deleteRemote, timeoutMs, timers);
-    result.remoteOk = outcome === 'ok';
-    result.remoteTimedOut = outcome === 'timeout';
 
-    // Celebrate only if at least one side actually removed something.
-    if (result.localOk || result.remoteOk) {
-      onSuccess?.();
+    if (outcome === 'ok') {
+      result.remoteOk = true;
+      // 2. Remote row is gone → best-effort local cleanup (rows + clip files).
+      //    A local failure here is cosmetic — the round is already off Home.
+      try {
+        await deleteLocal();
+        result.localOk = true;
+      } catch {
+        // Swallow: never block success on local orphan cleanup.
+      }
+      onSuccess();
+    } else {
+      // 3. Remote FAILED or TIMED OUT → keep local media intact, tell the
+      //    user, and stay on-screen so they can retry. Never wipe local while
+      //    the remote row may still exist (would resurface a broken shell).
+      result.remoteTimedOut = outcome === 'timeout';
+      onFailure();
     }
   } finally {
-    // 3. Always tear down the overlay + navigate — the overlay can't wedge.
+    // 4. Overlay can never wedge — always tear it down.
     finalize();
   }
 

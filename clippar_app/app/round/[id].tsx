@@ -327,20 +327,25 @@ export default function RoundViewer() {
     confirmDeleteRound(async () => {
       if (!id) return;
       setDeleting(true);
-      // Delete BOTH copies of the round. `runDeleteRound` removes the local
-      // SQLite round + clips FIRST (instant, offline-safe) so the round leaves
-      // the library even with no network, then bounds the Supabase delete so a
-      // hanging storage call can't wedge the overlay, and ALWAYS runs finalize
-      // — so `setDeleting(false)` + navigation happen no matter what.
+      // Remote-first: the round appears on Home iff its remote `rounds` row
+      // exists, so success is gated on the remote delete. Only once the remote
+      // row is gone do we wipe the local copy (rows + clip files) — deleting
+      // local while the remote survived would strand the media and resurface a
+      // broken empty shell on Home. The Supabase call is bounded so a hanging
+      // storage list can't wedge the overlay; on failure/timeout we keep the
+      // media, alert, and stay on-screen to retry. `finalize` ALWAYS clears
+      // `deleting` so the overlay can never wedge.
       await runDeleteRound({
-        deleteLocal: () => deleteLocalRound(id),
         deleteRemote: () => deleteRound(id),
-        onSuccess: () =>
-          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success),
-        finalize: () => {
-          setDeleting(false);
+        deleteLocal: () => deleteLocalRound(id),
+        onSuccess: () => {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
           safeBack();
         },
+        onFailure: () => {
+          Alert.alert('Error', "Couldn't delete the round — please try again.");
+        },
+        finalize: () => setDeleting(false),
       });
     });
   }, [id, safeBack]);
