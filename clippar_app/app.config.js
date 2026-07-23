@@ -187,15 +187,18 @@ module.exports = () => ({
           // url defaults to https://sentry.io for SaaS; no need to set.
         },
       ],
-      // Stripe — adds the Apple Pay in-app-payments entitlement for this
-      // merchant ID. The ID must also exist in the Apple Developer portal
-      // (Certificates → Identifiers → Merchant IDs); EAS then attaches the
-      // Apple Pay capability to the provisioning profile automatically.
-      // Physical-goods checkout only — Clippar Pro stays on StoreKit IAP.
+      // Stripe SDK — no `merchantIdentifier` on purpose. Declaring it adds the
+      // Apple Pay in-app-payments entitlement, which requires the Merchant ID
+      // to exist in the Apple Developer portal and the Apple Pay capability on
+      // the provisioning profile — neither of which is set up, so it fails the
+      // build. v1 doesn't use in-app Apple Pay: Clippar Pro is StoreKit IAP,
+      // and the physical mount kit checks out via the web Stripe payment link
+      // (clippargolf.com/mount), not in-app. Re-add `merchantIdentifier` here
+      // AND register the Merchant ID + Apple Pay capability in the portal if
+      // in-app Apple Pay is ever added.
       [
         '@stripe/stripe-react-native',
         {
-          merchantIdentifier: 'merchant.com.clippar.app',
           enableGooglePay: false,
         },
       ],
