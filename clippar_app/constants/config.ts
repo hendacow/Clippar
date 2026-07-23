@@ -58,6 +58,12 @@ export const config = {
     // point this at the real product page once it exists.
     mountUrl: 'https://clippargolf.com',
     mountPriceLabel: '$99',
+    // Master switch for the mount cross-sell surfaces (post-signup offer +
+    // record-tab card). OFF until a real product page exists at mountUrl —
+    // the offer is one-shot per user, so showing it while the link lands on
+    // a waitlist page would burn it on a dead end. Dev builds always show
+    // the surfaces (see mountCommerceEnabled in lib/mountOffer.ts).
+    mountCommerceEnabled: false,
   },
   processing: {
     maxJobsPerDay: 2,

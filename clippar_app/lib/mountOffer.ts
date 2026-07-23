@@ -22,16 +22,32 @@
 import { getSetting, setSetting } from '@/lib/storage';
 import { supabase } from '@/lib/supabase';
 import { shouldShowMountOffer } from '@/lib/mountOfferLogic';
+import { config } from '@/constants/config';
+import { isDevVariant } from '@/lib/devPro';
 
 const SEEN_KEY = 'shop.mount_offer_seen';
 const PENDING_KEY = 'shop.mount_offer_pending';
 const CARD_DISMISSED_KEY = 'shop.mount_card_dismissed';
 
+/**
+ * Master gate for both cross-sell surfaces. Prod stays dark until a real
+ * product page exists at config.shop.mountUrl (the one-shot offer must not
+ * link to the waitlist landing page); dev builds always show the surfaces
+ * so they can be exercised before the flag flips.
+ */
+export function mountCommerceEnabled(): boolean {
+  return config.shop.mountCommerceEnabled || isDevVariant();
+}
+
 /** Call when an EMAIL signup succeeds (account exists but the session only
- *  arrives after email confirmation + first login). */
-export async function markMountOfferPending(): Promise<void> {
+ *  arrives after email confirmation + first login). The pending marker is
+ *  scoped to the signup email so it can never leak the offer to a DIFFERENT
+ *  account that logs in next on this device (shared device, or Supabase's
+ *  obfuscated "success" for an already-registered email). */
+export async function markMountOfferPending(email: string): Promise<void> {
   try {
-    await setSetting(PENDING_KEY, '1');
+    const normalized = email.trim().toLowerCase();
+    if (normalized) await setSetting(PENDING_KEY, normalized);
   } catch {}
 }
 
@@ -52,21 +68,28 @@ export async function markMountOfferSeen(): Promise<void> {
  * session hiccup must never block getting into the app.
  */
 export async function resolvePostAuthRoute(
-  user?: { created_at?: string } | null
+  user?: { created_at?: string; email?: string } | null
 ): Promise<'/mount-offer' | '/(tabs)'> {
   try {
+    if (!mountCommerceEnabled()) return '/(tabs)';
     let u = user;
     if (!u) {
       const { data } = await supabase.auth.getSession();
       u = data.session?.user ?? null;
     }
-    const [seen, pending] = await Promise.all([
+    const [seen, pendingValue] = await Promise.all([
       getSetting(SEEN_KEY),
       getSetting(PENDING_KEY),
     ]);
+    // The pending marker stores the signup email — it only counts for the
+    // account that actually signed up on this device.
+    const pending =
+      !!pendingValue &&
+      pendingValue !== '0' &&
+      pendingValue === (u?.email ?? '').trim().toLowerCase();
     const show = shouldShowMountOffer({
       seen: seen === '1',
-      pending: pending === '1',
+      pending,
       createdAt: u?.created_at ?? null,
       nowMs: Date.now(),
     });
@@ -80,6 +103,8 @@ export async function resolvePostAuthRoute(
 
 export async function getMountCardDismissed(): Promise<boolean> {
   try {
+    // Commerce dark in prod → the card behaves as permanently dismissed.
+    if (!mountCommerceEnabled()) return true;
     return (await getSetting(CARD_DISMISSED_KEY)) === '1';
   } catch {
     // On a storage hiccup, hide the card — never risk it nagging forever.

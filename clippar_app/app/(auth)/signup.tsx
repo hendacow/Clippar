@@ -42,8 +42,9 @@ export default function SignUpScreen() {
       await signUp(email.trim(), password, displayName.trim() || undefined);
       // New account created (session arrives later, after email
       // confirmation + first login) — flag it locally so that first login
-      // shows the one-time mount offer (lib/mountOffer). Fire-and-forget.
-      void markMountOfferPending();
+      // shows the one-time mount offer (lib/mountOffer). Scoped to this
+      // email so another account logging in next never inherits the offer.
+      void markMountOfferPending(email);
       setSuccess(true);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Sign up failed';

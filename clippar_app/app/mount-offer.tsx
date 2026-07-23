@@ -30,7 +30,7 @@ import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
-import { markMountOfferSeen } from '@/lib/mountOffer';
+import { markMountOfferSeen, mountCommerceEnabled } from '@/lib/mountOffer';
 
 const BENEFITS = [
   'Record every shot without touching your phone',
@@ -49,7 +49,13 @@ export default function MountOfferScreen() {
 
   // Mark seen the moment the screen appears — the offer is strictly
   // once-ever, even if the app is killed before the user picks an option.
+  // If commerce is dark (deep link while the flag is off), bounce without
+  // burning the one-shot.
   useEffect(() => {
+    if (!mountCommerceEnabled()) {
+      router.replace('/(tabs)');
+      return;
+    }
     void markMountOfferSeen();
   }, []);
 
