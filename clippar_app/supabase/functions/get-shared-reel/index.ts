@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 
 /**
  * get-shared-reel — PUBLIC signer for the shared-reel viewer at

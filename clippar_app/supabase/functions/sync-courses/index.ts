@@ -16,12 +16,40 @@
  *   GOLF_API_IO_KEY       - from golfapi.io (optional, paid)
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 );
+
+/**
+ * Is this user an admin? Checks the `admin_users` table by id or email using
+ * the service-role client (RLS-bypassing). Admin-only actions
+ * (approve_suggestion, sync_region) gate on this; the everyday search-fallback
+ * action (sync_single) only requires a valid signed-in user.
+ */
+async function isAdminUser(
+  userId: string,
+  email: string | null | undefined,
+): Promise<boolean> {
+  const { data: byId } = await supabase
+    .from('admin_users')
+    .select('id')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (byId) return true;
+
+  if (email) {
+    const { data: byEmail } = await supabase
+      .from('admin_users')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+    if (byEmail) return true;
+  }
+  return false;
+}
 
 // ────────────────────────────────────────────────────────────
 // Shared types
@@ -334,8 +362,43 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // ── Authenticate the caller ─────────────────────────────
+    // The platform default (verify_jwt=true) only proves the request carries a
+    // valid signed JWT — the public anon key satisfies that. Resolve an actual
+    // end user here and reject anonymous/anon-key calls outright.
+    const token = req.headers.get('Authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: corsHeaders }
+      );
+    }
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser(token);
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
     const body = await req.json().catch(() => ({}));
     const action = body.action || 'sync_region';
+
+    // Privileged actions promote community data into the live catalog
+    // (approve_suggestion) or fan out bulk paid-API syncs (sync_region), and
+    // must be admin-only. sync_single is the everyday course-search fallback
+    // and stays available to any signed-in user.
+    if (action === 'approve_suggestion' || action === 'sync_region') {
+      if (!(await isAdminUser(user.id, user.email))) {
+        return new Response(
+          JSON.stringify({ error: 'Forbidden' }),
+          { status: 403, headers: corsHeaders }
+        );
+      }
+    }
 
     // ── Action: sync_region ─────────────────────────────────
     // Syncs courses for a region (default: QLD, AU)

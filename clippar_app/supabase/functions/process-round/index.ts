@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 
 const MODAL_PIPELINE_URL =
   'https://hendacow--clippar-shot-detector-run-full-pipeline.modal.run';
@@ -53,11 +53,24 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Update round status
-    await supabase
+    // Atomically claim the round before dispatching. The UPDATE only matches
+    // rounds NOT already in-flight or finished ('processing'/'ready'), so
+    // concurrent/duplicate invocations for the same round update zero rows and
+    // are rejected here — without this guard each call fired a fresh ~14-min
+    // Modal GPU job, enabling a compute-bill DoS by looping the endpoint.
+    const { data: claimed } = await supabase
       .from('rounds')
       .update({ status: 'processing' })
-      .eq('id', round_id);
+      .eq('id', round_id)
+      .in('status', ['recording', 'uploading', 'failed'])
+      .select('id');
+
+    if (!claimed || claimed.length === 0) {
+      return new Response(
+        JSON.stringify({ error: 'Round is already processing or completed' }),
+        { status: 409, headers: { 'Content-Type': 'application/json' } }
+      );
+    }
 
     // Dispatch to Modal GPU pipeline (fire and forget with timeout)
     const controller = new AbortController();
