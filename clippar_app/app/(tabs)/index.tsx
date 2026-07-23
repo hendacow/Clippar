@@ -1,42 +1,52 @@
-import { useState, useCallback, useMemo, useEffect } from 'react';
+/**
+ * Home — content view of the user's rounds.
+ *
+ * Top → bottom: header (compact Clippar logo mark + greeting) ·
+ * latest-reel hero (always above the
+ * fold, H1) · pipeline card (one, max — severity FAILED > PROCESSING >
+ * backup) · stats strip (4 tiles whose counts share the list filter's
+ * predicate) · "Your rounds" vertical list, newest first.
+ *
+ * Removed by design (see redesign spec): bell icon, the green text
+ * wordmark line (a compact logo mark is kept in the header), the
+ * three horizontal shelves with no-op "See All"s, the mock-data feed,
+ * ScoreCollection (an editing surface — lives on round detail), and
+ * StatsFilterBar below 11 rounds.
+ *
+ * The Record tab button is the app's single dominant CTA — Home has no
+ * "Start Round" button outside the first-run empty state.
+ */
+import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   ScrollView,
-  FlatList,
   Pressable,
   RefreshControl,
   Dimensions,
   Alert,
   Platform,
   Image,
+  StyleSheet,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Bell, TrendingDown, Trophy, Flame, CircleDot, ArrowRight } from 'lucide-react-native';
+import { Play, X } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
-import { MOCK_ROUNDS, MOCK_STATS } from '@/constants/mockData';
-import type { MockRound } from '@/constants/mockData';
 import { HeroReel } from '@/components/library/HeroReel';
-import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
-import { SectionHeader } from '@/components/library/SectionHeader';
+import { RoundListCard } from '@/components/library/RoundListCard';
+import { RoundStatusCard } from '@/components/shared/RoundStatusCard';
+import { ShareSheet } from '@/components/shared/ShareSheet';
 import { Skeleton } from '@/components/ui/Skeleton';
-import {
-  getRounds,
-  getUserStats,
-  deleteRound,
-  getSignedReelUrl,
-  getFirstClipSignedUrl,
-  repairScoresParData,
-  getProfile,
-} from '@/lib/api';
+import { getRounds, deleteRound, getFirstClipSignedUrl, getProfile } from '@/lib/api';
 import { supabase } from '@/lib/supabase';
-import { getOnboardingProfile, shotEmptyStateLine } from '@/lib/onboardingProfile';
-import { ScoreCollection } from '@/components/library/ScoreCollection';
+import { computeRoundStatuses, type RoundStatusResult } from '@/lib/roundStatus';
+import { formatScoreToPar, type RoundStatus } from '@/lib/roundStatusLogic';
+import { subscribePipeline } from '@/lib/pipelineEvents';
+import { useUploadContext } from '@/contexts/UploadContext';
 import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
-import { StatsHero } from '@/components/stats/StatsHero';
 import { CompilationPlayer } from '@/components/stats/CompilationPlayer';
 import { useStatsFilter, type StatCategoryKey } from '@/hooks/useStatsFilter';
 import { processUploadQueue } from '@/lib/uploadQueue';
@@ -49,289 +59,107 @@ if (isNative) {
   storage = require('@/lib/storage') as typeof import('@/lib/storage');
 }
 
-function getGreeting(): string {
-  const hour = new Date().getHours();
-  if (hour < 12) return 'Good morning';
-  if (hour < 18) return 'Good afternoon';
-  return 'Good evening';
-}
+const VideoThumbnails = isNative
+  ? (require('expo-video-thumbnails') as typeof import('expo-video-thumbnails'))
+  : null;
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-// ---- Full-width list card for "All Rounds" section ----
-function RoundListCard({ round, onPress, onDelete }: { round: MockRound; onPress: () => void; onDelete?: () => void }) {
-  const scoreColor = getScoreColor(round.score_to_par);
-
-  const handleLongPress = () => {
-    if (!onDelete) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-    Alert.alert(
-      'Delete this round?',
-      'This will permanently delete the round, all clips, and the highlight reel. This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        { text: 'Delete', style: 'destructive', onPress: onDelete },
-      ]
-    );
-  };
-
-  return (
-    <Pressable
-      onPress={() => {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-        onPress();
-      }}
-      onLongPress={handleLongPress}
-    >
-      <View
-        style={{
-          marginHorizontal: 16,
-          marginBottom: 10,
-          backgroundColor: theme.colors.surfaceElevated,
-          borderRadius: theme.radius.lg,
-          borderWidth: 1,
-          borderColor: theme.colors.surfaceBorder,
-          padding: 14,
-          flexDirection: 'row',
-          alignItems: 'center',
-        }}
-      >
-        {/* Score circle */}
-        <View
-          style={{
-            width: 52,
-            height: 52,
-            borderRadius: 26,
-            backgroundColor: `${scoreColor}15`,
-            borderWidth: 2,
-            borderColor: `${scoreColor}40`,
-            justifyContent: 'center',
-            alignItems: 'center',
-            marginRight: 14,
-          }}
-        >
-          <Text style={{ fontSize: 20, fontWeight: '900', color: scoreColor }}>
-            {round.total_score ?? '—'}
-          </Text>
-        </View>
-
-        {/* Course + meta */}
-        <View style={{ flex: 1 }}>
-          <Text
-            style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}
-            numberOfLines={1}
-          >
-            {round.course_name}
-          </Text>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 3 }}>
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
-              {new Date(round.date).toLocaleDateString('en-AU', {
-                day: 'numeric',
-                month: 'short',
-              })}
-            </Text>
-            <View
-              style={{
-                width: 3,
-                height: 3,
-                borderRadius: 1.5,
-                backgroundColor: theme.colors.textTertiary,
-              }}
-            />
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
-              {round.holes_played} holes
-            </Text>
-            <View
-              style={{
-                width: 3,
-                height: 3,
-                borderRadius: 1.5,
-                backgroundColor: theme.colors.textTertiary,
-              }}
-            />
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>
-              {round.clips_count} clips
-            </Text>
-          </View>
-        </View>
-
-        {/* Score to par */}
-        <View style={{ alignItems: 'flex-end' }}>
-          {round.score_to_par != null && (
-            <Text style={{ fontSize: 15, fontWeight: '700', color: scoreColor }}>
-              {formatScoreToPar(round.score_to_par)}
-            </Text>
-          )}
-          {round.best_hole && round.best_hole.label !== 'Par' && (
-            <Text
-              style={{
-                fontSize: 10,
-                fontWeight: '600',
-                color:
-                  round.best_hole.label === 'Eagle'
-                    ? theme.colors.accentGold
-                    : theme.colors.primary,
-                marginTop: 2,
-              }}
-            >
-              {round.best_hole.label} #{round.best_hole.hole}
-            </Text>
-          )}
-        </View>
-      </View>
-    </Pressable>
-  );
+interface HomeRound {
+  id: string;
+  course_name: string;
+  course_id?: string | null;
+  date: string;
+  holes_played?: number | null;
+  clips_count: number;
+  total_score?: number | null;
+  score_to_par?: number | null;
+  reel_url?: string | null;
+  status?: string | null;
+  updated_at?: string | null;
+  best_hole: { hole: number; par: number; score: number; label: string } | null;
+  [key: string]: any;
 }
 
-// ---- Horizontal scrollable round section ----
-function HorizontalRoundSection({
-  rounds,
-  size = 'default',
-  onDeleteRound,
-  reelSignedUrls,
-  onOpenRound,
-}: {
-  rounds: MockRound[];
-  size?: 'default' | 'large';
-  onDeleteRound?: (id: string) => void;
-  reelSignedUrls?: Record<string, string>;
-  /** Overrides the default round navigation (sample data shows a CTA). */
-  onOpenRound?: (id: string) => void;
-}) {
-  return (
-    <FlatList
-      horizontal
-      showsHorizontalScrollIndicator={false}
-      data={rounds}
-      keyExtractor={(item) => item.id}
-      contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}
-      style={{ marginBottom: 28 }}
-      renderItem={({ item, index }) => (
-        <RoundCardHorizontal
-          round={item}
-          index={index}
-          size={size}
-          onPress={() =>
-            onOpenRound ? onOpenRound(item.id) : router.push(`/round/${item.id}`)
-          }
-          onDelete={onDeleteRound ? () => onDeleteRound(item.id) : undefined}
-          reelSignedUrl={reelSignedUrls?.[item.id]}
-        />
-      )}
-    />
-  );
+// ---- Session-level thumbnail cache (rows never do per-render I/O) ----
+const thumbCache = new Map<string, string>();
+async function getVideoThumb(uri: string): Promise<string | null> {
+  if (!isNative || !VideoThumbnails) return null;
+  const cached = thumbCache.get(uri);
+  if (cached) return cached;
+  try {
+    const r = await VideoThumbnails.getThumbnailAsync(uri, { time: 500 });
+    thumbCache.set(uri, r.uri);
+    return r.uri;
+  } catch {
+    return null;
+  }
 }
 
-// ---- Loading skeleton ----
+// ---- Loading skeleton — layout-matching, fixed heights (H13) ----
 function HomeSkeleton() {
   return (
-    <View style={{ padding: 16, gap: 16 }}>
-      <Skeleton width={SCREEN_WIDTH - 32} height={220} borderRadius={theme.radius.lg} />
+    <View style={{ paddingHorizontal: theme.spacing.md, gap: theme.spacing.md }}>
+      <Skeleton width={SCREEN_WIDTH - 32} height={300} borderRadius={theme.radius.lg} />
       <View style={{ flexDirection: 'row', gap: 8 }}>
-        <Skeleton width={80} height={60} borderRadius={theme.radius.md} />
-        <Skeleton width={80} height={60} borderRadius={theme.radius.md} />
-        <Skeleton width={80} height={60} borderRadius={theme.radius.md} />
-        <Skeleton width={80} height={60} borderRadius={theme.radius.md} />
+        <Skeleton width={(SCREEN_WIDTH - 56) / 4} height={72} borderRadius={theme.radius.md} />
+        <Skeleton width={(SCREEN_WIDTH - 56) / 4} height={72} borderRadius={theme.radius.md} />
+        <Skeleton width={(SCREEN_WIDTH - 56) / 4} height={72} borderRadius={theme.radius.md} />
+        <Skeleton width={(SCREEN_WIDTH - 56) / 4} height={72} borderRadius={theme.radius.md} />
       </View>
-      <Skeleton width="50%" height={20} />
-      <View style={{ flexDirection: 'row', gap: 10 }}>
-        <Skeleton width={170} height={180} borderRadius={theme.radius.lg} />
-        <Skeleton width={170} height={180} borderRadius={theme.radius.lg} />
-      </View>
+      <Skeleton width="40%" height={20} />
+      <Skeleton width={SCREEN_WIDTH - 32} height={88} borderRadius={theme.radius.lg} />
+      <Skeleton width={SCREEN_WIDTH - 32} height={88} borderRadius={theme.radius.lg} />
+      <Skeleton width={SCREEN_WIDTH - 32} height={88} borderRadius={theme.radius.lg} />
     </View>
   );
 }
 
-// ---- Empty state ----
-function EmptyState() {
-  // Onboarding personalization: echo the shot they said they'd hate to lose.
-  // Falls back to the stock copy when onboarding was skipped or pre-dates v2.
-  const [personalLine, setPersonalLine] = useState<string | null>(null);
-  useEffect(() => {
-    getOnboardingProfile()
-      .then((p) => {
-        if (p.memorableShot) setPersonalLine(shotEmptyStateLine[p.memorableShot]);
-      })
-      .catch(() => {});
-  }, []);
+// ---- First-run empty state (H10): one headline, one sentence, one CTA ----
+function FirstRunEmptyState() {
   return (
-    <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', padding: 48, marginTop: 60 }}>
-      <View
-        style={{
-          width: 96,
-          height: 96,
-          borderRadius: 48,
-          backgroundColor: theme.colors.primaryMuted,
-          justifyContent: 'center',
-          alignItems: 'center',
-          marginBottom: 24,
-          ...theme.shadows.glow,
-        }}
-      >
-        <Trophy size={44} color={theme.colors.primary} />
+    <View style={styles.emptyRoot}>
+      <View style={styles.emptyVisual}>
+        <Play size={44} color={theme.colors.primary} fill={theme.colors.primary} />
       </View>
-      <Text
-        style={{
-          ...theme.typography.h1,
-          color: theme.colors.textPrimary,
-          textAlign: 'center',
-          marginBottom: 10,
-        }}
-      >
-        Ready for your first round?
-      </Text>
-      <Text
-        style={{
-          ...theme.typography.body,
-          color: theme.colors.textSecondary,
-          textAlign: 'center',
-          maxWidth: 300,
-          marginBottom: 28,
-        }}
-      >
-        {personalLine ?? 'Record your shots, let Clippar build the reel. Your highlights live right here.'}
+      <Text style={styles.emptyHeadline}>Play golf. Get the highlights.</Text>
+      <Text style={styles.emptyBody}>
+        Record or import your shots and Clippar cuts them into a shareable reel.
       </Text>
       <Pressable
         onPress={() => {
           Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
           router.push('/(tabs)/record');
         }}
-        style={({ pressed }) => ({
-          flexDirection: 'row',
-          alignItems: 'center',
-          gap: 10,
-          paddingHorizontal: 24,
-          paddingVertical: 14,
-          borderRadius: theme.radius.full,
-          backgroundColor: theme.colors.primary,
-          opacity: pressed ? 0.85 : 1,
-          ...theme.shadows.glow,
-        })}
-        accessibilityLabel="Start your first round"
+        style={styles.emptyCta}
+        accessibilityLabel="Record your first round"
         accessibilityRole="button"
       >
-        <CircleDot size={20} color="#FFFFFF" strokeWidth={2.5} />
-        <Text style={{ color: '#FFFFFF', fontWeight: '700', fontSize: 16 }}>
-          Start a Round
-        </Text>
-        <ArrowRight size={18} color="#FFFFFF" />
+        <Text style={styles.emptyCtaText}>Record your first round</Text>
+      </Pressable>
+      <Pressable
+        onPress={() => router.push('/round/import')}
+        hitSlop={8}
+        accessibilityRole="button"
+      >
+        <Text style={styles.emptyImportLink}>Already have clips? Import from Photos</Text>
       </Pressable>
     </View>
   );
 }
 
-// ---- Helpers ----
-function getScoreColor(scoreToPar: number | null): string {
-  if (scoreToPar === null) return theme.colors.textSecondary;
-  if (scoreToPar < 0) return theme.colors.birdie;
-  if (scoreToPar === 0) return theme.colors.par;
-  if (scoreToPar <= 4) return theme.colors.bogey;
-  return theme.colors.doubleBogey;
-}
+// ---- Stats strip tiles ----
+type TileKey = 'rounds' | 'best' | 'birdies' | 'clips';
 
-function formatScoreToPar(scoreToPar: number): string {
-  if (scoreToPar === 0) return 'E';
-  return scoreToPar > 0 ? `+${scoreToPar}` : `${scoreToPar}`;
+const TILE_LABELS: Record<TileKey, string> = {
+  rounds: 'Rounds',
+  best: 'Best round',
+  birdies: 'Birdies+',
+  clips: 'Clips',
+};
+
+function isBirdieRound(r: HomeRound): boolean {
+  return r.best_hole?.label === 'Birdie' || r.best_hole?.label === 'Eagle';
 }
 
 // ============================================================
@@ -339,158 +167,144 @@ function formatScoreToPar(scoreToPar: number): string {
 // ============================================================
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
+  const { compose } = useUploadContext();
   const [refreshing, setRefreshing] = useState(false);
-  const [liveRounds, setLiveRounds] = useState<MockRound[]>([]);
+  const [rounds, setRounds] = useState<HomeRound[]>([]);
+  const [statuses, setStatuses] = useState<Map<string, RoundStatusResult>>(new Map());
+  const [thumbs, setThumbs] = useState<Record<string, string>>({});
   const [loaded, setLoaded] = useState(false);
-  const [stats, setStats] = useState(MOCK_STATS);
-  const [reelSignedUrls, setReelSignedUrls] = useState<Record<string, string>>({});
   const [displayName, setDisplayName] = useState<string | null>(null);
-  const [activeStatCategory, setActiveStatCategory] = useState<StatCategoryKey | null>(null);
+  const [activeTile, setActiveTile] = useState<TileKey | null>(null);
   const [compilingCategory, setCompilingCategory] = useState<StatCategoryKey | null>(null);
+  const [showHeroShare, setShowHeroShare] = useState(false);
 
-  // Always try real data first; only show mock if user has zero rounds
+  const roundsRef = useRef<HomeRound[]>([]);
+
+  const composeFlags = useMemo(
+    () => ({
+      activeComposeRoundId: compose.active ? compose.roundId : null,
+      failedComposeRoundId: compose.failed ? compose.failedRoundId : null,
+    }),
+    [compose.active, compose.roundId, compose.failed, compose.failedRoundId],
+  );
+
   const fetchRounds = useCallback(async () => {
     try {
       const data = await getRounds();
       if (data) {
-        let mapped = data.map((r: any) => ({
+        let mapped: HomeRound[] = data.map((r: any) => ({
           ...r,
+          course_name: r.course_name ?? '',
           clips_count: r.clips_count ?? 0,
-          best_hole: null as { hole: number; par: number; score: number; label: string } | null,
+          best_hole: null,
         }));
 
-        // Compute best_hole for each round from scores
+        // Compute best_hole for each round from scores (feeds the Birdies+
+        // tile predicate — the SAME predicate filters the list, so counts
+        // and results match by construction).
         const roundIds = data.map((r: any) => r.id);
-        const { data: scores } = await supabase
-          .from('scores')
-          .select('round_id, hole_number, strokes, par, score_to_par')
-          .in('round_id', roundIds);
+        if (roundIds.length > 0) {
+          const { data: scores } = await supabase
+            .from('scores')
+            .select('round_id, hole_number, strokes, par, score_to_par')
+            .in('round_id', roundIds);
 
-        if (scores) {
-          const bestHoleMap = new Map<string, { hole: number; par: number; score: number; label: string }>();
-          for (const s of scores) {
-            if (s.score_to_par == null) continue;
-            const existing = bestHoleMap.get(s.round_id);
-            if (!existing || s.score_to_par < (existing.score - existing.par)) {
-              let label = 'Par';
-              if (s.score_to_par <= -2) label = 'Eagle';
-              else if (s.score_to_par === -1) label = 'Birdie';
-              else if (s.score_to_par === 1) label = 'Bogey';
-              else if (s.score_to_par >= 2) label = 'Double Bogey';
-              bestHoleMap.set(s.round_id, { hole: s.hole_number, par: s.par, score: s.strokes, label });
-            }
-          }
-          mapped = mapped.map((r) => ({
-            ...r,
-            best_hole: bestHoleMap.get(r.id) ?? null,
-          }));
-        }
-
-        // Set rounds immediately so the screen isn't blank while we sign URLs
-        setLiveRounds(mapped);
-
-        // Sign reel URLs for rounds that have a reel
-        const reelRounds = data.filter((r: any) => r.reel_url);
-        const noReelRounds = data.filter((r: any) => !r.reel_url && (r.clips_count ?? 0) > 0);
-        const signedMap: Record<string, string> = {};
-
-        await Promise.all([
-          // Sign reel URLs
-          ...reelRounds.map(async (r: any) => {
-            const signed = await getSignedReelUrl(r.reel_url);
-            if (signed) signedMap[r.id] = signed;
-          }),
-          // For rounds without a reel but with clips, use the first clip as preview
-          ...noReelRounds.slice(0, 5).map(async (r: any) => {
-            const signed = await getFirstClipSignedUrl(r.id);
-            if (signed) signedMap[r.id] = signed;
-          }),
-        ]);
-
-        // Fallback: check local SQLite for rounds that still have no preview URL
-        // Note: clips_count may be 0 for rounds where clips were only saved locally,
-        // so we check ALL rounds without a preview URL, not just those with clips_count > 0
-        if (isNative && storage) {
-          const roundsWithoutPreview = data.filter(
-            (r: any) => !signedMap[r.id]
-          );
-          await Promise.all(
-            roundsWithoutPreview.slice(0, 10).map(async (r: any) => {
-              try {
-                const localClips = await storage!.getClipsForRound(r.id);
-                if (localClips && localClips.length > 0) {
-                  // Only use a local URI as preview if it's actually playable —
-                  // `ph://`/`assets-library://` choke expo-video and produce the
-                  // broken-play-icon watermark. Prefer normalized file:// paths.
-                  const first = localClips[0];
-                  const rawUri = first.file_uri ?? '';
-                  const normalizedUri = rawUri.startsWith('file://') || rawUri.startsWith('/')
-                    ? rawUri
-                    : null;
-                  if (normalizedUri) {
-                    signedMap[r.id] = normalizedUri;
-                  }
-                  // Also update clips_count if the round shows 0
-                  if ((r.clips_count ?? 0) === 0) {
-                    const idx = mapped.findIndex((m: any) => m.id === r.id);
-                    if (idx !== -1) {
-                      mapped[idx] = { ...mapped[idx], clips_count: localClips.length };
-                    }
-                  }
-                }
-              } catch {
-                // Local DB lookup failed — skip
+          if (scores) {
+            const bestHoleMap = new Map<string, HomeRound['best_hole']>();
+            for (const s of scores) {
+              if (s.score_to_par == null) continue;
+              const existing = bestHoleMap.get(s.round_id);
+              if (!existing || s.score_to_par < existing.score - existing.par) {
+                let label = 'Par';
+                if (s.score_to_par <= -2) label = 'Eagle';
+                else if (s.score_to_par === -1) label = 'Birdie';
+                else if (s.score_to_par === 1) label = 'Bogey';
+                else if (s.score_to_par >= 2) label = 'Double Bogey';
+                bestHoleMap.set(s.round_id, { hole: s.hole_number, par: s.par, score: s.strokes, label });
               }
-            })
+            }
+            mapped = mapped.map((r) => ({ ...r, best_hole: bestHoleMap.get(r.id) ?? null }));
+          }
+        }
+
+        // Local SQLite fallback for clips_count (clips saved locally only).
+        if (isNative && storage) {
+          await Promise.all(
+            mapped
+              .filter((r) => r.clips_count === 0)
+              .slice(0, 10)
+              .map(async (r) => {
+                try {
+                  const localClips = await storage!.getClipsForRound(r.id);
+                  if (localClips && localClips.length > 0) {
+                    r.clips_count = localClips.length;
+                  }
+                } catch {}
+              }),
           );
         }
 
-        if (Object.keys(signedMap).length > 0) {
-          setReelSignedUrls(signedMap);
-        }
+        roundsRef.current = mapped;
+        // Rounds render immediately; statuses/thumbnails hydrate after.
+        setRounds(mapped);
 
-        // Re-set rounds if local clips_count was updated
-        setLiveRounds([...mapped]);
+        // Canonical statuses — all I/O (file checks, signing, stale flags)
+        // happens here, once per fetch.
+        const statusMap = await computeRoundStatuses(mapped, composeFlags);
+        setStatuses(statusMap);
+
+        // Poster/thumbnail hydration for the hero + first rows.
+        const thumbEntries: Record<string, string> = {};
+        await Promise.all(
+          mapped.slice(0, 8).map(async (r, idx) => {
+            const source = statusMap.get(r.id)?.source;
+            let previewUri = source?.uri ?? null;
+            if (!previewUri) {
+              // No reel — fall back to the first clip (cloud, then local).
+              if (idx < 5) {
+                previewUri = await getFirstClipSignedUrl(r.id).catch(() => null);
+              }
+              if (!previewUri && isNative && storage) {
+                try {
+                  const localClips = await storage.getClipsForRound(r.id);
+                  const raw = localClips?.[0]?.file_uri ?? '';
+                  if (raw.startsWith('file://') || raw.startsWith('/')) previewUri = raw;
+                } catch {}
+              }
+            }
+            if (previewUri) {
+              const thumb = await getVideoThumb(previewUri);
+              if (thumb) thumbEntries[r.id] = thumb;
+            }
+          }),
+        );
+        if (Object.keys(thumbEntries).length > 0) {
+          setThumbs((prev) => ({ ...prev, ...thumbEntries }));
+        }
       }
     } catch {
-      // Network error — keep whatever we had
+      // Network error — keep whatever we had (offline: cached rounds render)
     } finally {
       setLoaded(true);
       setRefreshing(false);
     }
-  }, []);
-
-  const fetchStats = useCallback(async () => {
-    try {
-      const data = await getUserStats();
-      if (data && data.roundsPlayed > 0) {
-        setStats(data);
-      }
-    } catch {
-      // Keep MOCK_STATS as fallback
-    }
-  }, []);
+  }, [composeFlags]);
 
   const fetchName = useCallback(async () => {
     try {
       const p: any = await getProfile();
       const name = (p?.display_name ?? '').toString().trim();
-      if (name) {
-        // Just first name for the greeting
-        setDisplayName(name.split(' ')[0]);
-      }
-    } catch {
-      // Silently ignore — greeting will fall back to generic
-    }
+      if (name) setDisplayName(name.split(' ')[0]);
+    } catch {}
   }, []);
 
   const handleDeleteRound = useCallback(async (roundId: string) => {
     try {
       await deleteRound(roundId);
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setLiveRounds((prev) => prev.filter((r) => r.id !== roundId));
-    } catch (err) {
-      console.log('[HomeScreen] delete failed:', err);
+      setRounds((prev) => prev.filter((r) => r.id !== roundId));
+      roundsRef.current = roundsRef.current.filter((r) => r.id !== roundId);
+    } catch {
       Alert.alert('Error', 'Failed to delete round. Please try again.');
     }
   }, []);
@@ -498,50 +312,38 @@ export default function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       fetchRounds();
-      fetchStats();
-    }, [fetchRounds, fetchStats])
+    }, [fetchRounds]),
   );
 
-  // Initial data fetch on mount (par/score_to_par repair is already called
-  // once at app startup in app/_layout.tsx). Also kick the upload queue so
-  // any clips still sitting locally get pushed to Supabase — this is what
-  // produces the signed URLs the preview cards need.
+  // Initial fetch + drain the GATED backup queue (free tier / backup-off
+  // users exit immediately inside processUploadQueue).
   useEffect(() => {
     fetchRounds();
-    fetchStats();
     fetchName();
     processUploadQueue()
-      // Re-fetch rounds after queue drain so any newly-signed URLs show up
       .then(() => fetchRounds())
       .catch(() => {});
-  }, [fetchRounds, fetchStats, fetchName]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  // Show real rounds if we have them, otherwise show mock as placeholder
-  const useMock = loaded && liveRounds.length === 0;
-  const rounds = useMock ? MOCK_ROUNDS : liveRounds;
-
-  // Sample rounds have no backing data — navigating opened a dead "Round not
-  // found" screen (every first-session tap dead-ended there). Show a CTA
-  // toward recording instead.
-  const openRound = useCallback(
-    (id: string) => {
-      if (useMock) {
-        Alert.alert(
-          'Sample round',
-          'This is example data so there is nothing to open yet. Record or import your first round and it will show up here.',
-          [
-            { text: 'Not now', style: 'cancel' },
-            { text: 'Start a round', onPress: () => router.push('/(tabs)/record') },
-          ]
-        );
-        return;
+  // Broadcaster: refetch when a compose/backup completes anywhere.
+  useEffect(() => {
+    return subscribePipeline((event) => {
+      if (event.type === 'compose:complete' || event.type === 'backup:complete') {
+        fetchRounds();
       }
-      router.push(`/round/${id}`);
-    },
-    [useMock]
-  );
+    });
+  }, [fetchRounds]);
 
-  // ---- Shared stats filter (course / hole / timeframe / clips-only) ----
+  // Live status recompute when compose state flips (start/finish/fail).
+  useEffect(() => {
+    if (roundsRef.current.length === 0) return;
+    computeRoundStatuses(roundsRef.current, composeFlags)
+      .then(setStatuses)
+      .catch(() => {});
+  }, [composeFlags]);
+
+  // ---- Course/timeframe filter bar (only rendered above 10 rounds, H14) ----
   const {
     filters,
     setTimeframe,
@@ -549,81 +351,116 @@ export default function HomeScreen() {
     setHole,
     setClipsOnly,
     filteredRounds: statsFilteredRounds,
-    breakdown,
-    trend,
     availableCourses,
-  } = useStatsFilter(rounds);
+  } = useStatsFilter<HomeRound>(rounds);
 
-  const avgScoreToPar = useMemo(() => {
-    const vals = statsFilteredRounds
+  const showFilterBar = rounds.length > 10;
+  const baseRounds = showFilterBar ? statsFilteredRounds : rounds;
+
+  // ---- Stats tiles: counts and list share ONE predicate ----
+  const minScore = useMemo(() => {
+    const vals = baseRounds
       .map((r) => r.score_to_par)
       .filter((v): v is number => typeof v === 'number');
-    if (vals.length === 0) return null;
-    return vals.reduce((a, b) => a + b, 0) / vals.length;
-  }, [statsFilteredRounds]);
+    return vals.length > 0 ? Math.min(...vals) : null;
+  }, [baseRounds]);
 
-  // Derived data for sections (use filtered list so the whole screen obeys the filter bar)
-  const latestRound = statsFilteredRounds[0] ?? rounds[0];
-  const recentRounds = statsFilteredRounds.slice(0, 5);
-  const bestRounds = useMemo(
-    () =>
-      [...statsFilteredRounds]
-        .sort((a, b) => (a.score_to_par ?? 99) - (b.score_to_par ?? 99))
-        .slice(0, 5),
-    [statsFilteredRounds],
-  );
-  const birdieRounds = useMemo(
-    () =>
-      statsFilteredRounds.filter(
-        (r) =>
-          r.best_hole &&
-          (r.best_hole.label === 'Birdie' || r.best_hole.label === 'Eagle'),
-      ),
-    [statsFilteredRounds],
+  const tilePredicates = useMemo<Record<TileKey, (r: HomeRound) => boolean>>(
+    () => ({
+      rounds: () => true,
+      best: (r) => minScore != null && r.score_to_par === minScore,
+      birdies: isBirdieRound,
+      clips: (r) => (r.clips_count ?? 0) > 0,
+    }),
+    [minScore],
   );
 
-  // Rounds list filtered further by the selected stat category tile (if any).
-  const filteredRounds = useMemo(() => {
-    if (!activeStatCategory) return statsFilteredRounds;
-    // A round qualifies if any of its holes sits in the selected category.
-    // Cheap heuristic from round-level data: for eagles/birdies we expose via
-    // best_hole when available. Otherwise fall back to score_to_par ranges.
-    return statsFilteredRounds.filter((r) => {
-      const bhLabel = r.best_hole?.label;
-      if (activeStatCategory === 'eagle') return bhLabel === 'Eagle';
-      if (activeStatCategory === 'birdie')
-        return bhLabel === 'Birdie' || bhLabel === 'Eagle';
-      if (activeStatCategory === 'par')
-        return r.score_to_par != null && r.score_to_par <= 2;
-      if (activeStatCategory === 'bogey')
-        return r.score_to_par != null && r.score_to_par >= 1;
-      if (activeStatCategory === 'double')
-        return r.score_to_par != null && r.score_to_par >= 5;
-      if (activeStatCategory === 'triple')
-        return r.score_to_par != null && r.score_to_par >= 10;
-      return true;
-    });
-  }, [statsFilteredRounds, activeStatCategory]);
+  const tileValues = useMemo<Record<TileKey, string>>(() => {
+    const clipRounds = baseRounds.filter(tilePredicates.clips);
+    return {
+      rounds: String(baseRounds.length),
+      best: minScore != null ? formatScoreToPar(minScore) : '—',
+      birdies: String(baseRounds.filter(tilePredicates.birdies).length),
+      clips: String(clipRounds.reduce((s, r) => s + (r.clips_count ?? 0), 0)),
+    };
+  }, [baseRounds, tilePredicates, minScore]);
 
+  const listRounds = useMemo(
+    () => (activeTile ? baseRounds.filter(tilePredicates[activeTile]) : baseRounds),
+    [baseRounds, activeTile, tilePredicates],
+  );
+
+  // ---- Hero + pipeline card precedence ----
+  // A round's state appears in exactly ONE place: hero if it's the latest
+  // round, else the pipeline card; row chips are always-on and don't count.
+  const heroRound = rounds[0] ?? null;
+  const heroStatus: RoundStatus = heroRound
+    ? (statuses.get(heroRound.id)?.status ?? 'NO_CONTENT')
+    : 'NO_CONTENT';
+  const heroSource = heroRound ? statuses.get(heroRound.id)?.source : undefined;
+
+  const failedRound = useMemo(() => {
+    const r = rounds.find(
+      (x) => x.id !== heroRound?.id && statuses.get(x.id)?.status === 'FAILED',
+    );
+    return r ? { id: r.id, courseName: r.course_name || 'Unknown course' } : null;
+  }, [rounds, statuses, heroRound?.id]);
+
+  const processingRound = useMemo(() => {
+    const r = rounds.find(
+      (x) => x.id !== heroRound?.id && statuses.get(x.id)?.status === 'PROCESSING',
+    );
+    return r ? { id: r.id, courseName: r.course_name || 'Unknown course' } : null;
+  }, [rounds, statuses, heroRound?.id]);
+
+  const goEditorRecompose = useCallback((id: string) => {
+    router.push(`/round/editor?roundId=${id}&recompose=1`);
+  }, []);
+
+  // ---- Render ----
   if (!loaded) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.background, paddingTop: insets.top + 16 }}>
+        <View style={styles.header}>
+          <Image
+            source={require('@/assets/images/clippar-logo-mark.png')}
+            style={styles.headerLogo}
+            resizeMode="contain"
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel="Clippar Golf"
+          />
+          <Text style={styles.greeting} numberOfLines={1}>G'day{displayName ? `, ${displayName}` : ''}</Text>
+        </View>
         <HomeSkeleton />
       </View>
     );
   }
 
-  if (!latestRound) {
+  if (rounds.length === 0) {
     return (
       <View style={{ flex: 1, backgroundColor: theme.colors.background, paddingTop: insets.top }}>
-        <EmptyState />
+        <View style={styles.header}>
+          <Image
+            source={require('@/assets/images/clippar-logo-mark.png')}
+            style={styles.headerLogo}
+            resizeMode="contain"
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel="Clippar Golf"
+          />
+          <Text style={styles.greeting} numberOfLines={1}>G'day{displayName ? `, ${displayName}` : ''}</Text>
+        </View>
+        <FirstRunEmptyState />
       </View>
     );
   }
 
+  const activeFilterLabel =
+    activeTile && activeTile !== 'rounds' ? TILE_LABELS[activeTile] : null;
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.colors.background }}>
-      {/* Top fade gradient */}
       <LinearGradient
         colors={['rgba(76, 175, 80, 0.06)', 'transparent']}
         style={{ position: 'absolute', top: 0, left: 0, right: 0, height: 300 }}
@@ -637,257 +474,178 @@ export default function HomeScreen() {
             onRefresh={() => {
               setRefreshing(true);
               fetchRounds();
-              fetchStats();
             }}
             tintColor={theme.colors.primary}
           />
         }
-        contentContainerStyle={{ paddingBottom: 120 }}
+        contentContainerStyle={{ paddingTop: insets.top, paddingBottom: 120 }}
       >
-        {/* ---- HEADER ---- */}
-        <View
-          style={{
-            flexDirection: 'row',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            paddingHorizontal: 16,
-            paddingTop: insets.top + 12,
-            paddingBottom: 16,
-          }}
-        >
-          <View style={{ flex: 1 }}>
-            <Text
-              style={{
-                fontSize: 12,
-                fontWeight: '600',
-                color: theme.colors.textTertiary,
-                letterSpacing: 0.5,
-                textTransform: 'uppercase',
-              }}
-            >
-              {getGreeting()}{displayName ? `, ${displayName}` : ''}
-            </Text>
-            <View
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 8,
-                marginTop: 4,
-              }}
-              accessible
-              accessibilityRole="image"
-              accessibilityLabel="Clippar Golf"
-            >
-              <Image
-                source={require('@/assets/images/clippar-logo-mark.png')}
-                style={{ width: 44, height: 34 }}
-                resizeMode="contain"
-              />
-              <Image
-                source={require('@/assets/images/clippar-logo-wordmark.png')}
-                style={{ width: 68, height: 20 }}
-                resizeMode="contain"
-              />
-            </View>
-          </View>
-          <Pressable
-            onPress={() => {
-              Haptics.selectionAsync();
-              router.push('/profile/notifications');
-            }}
-            hitSlop={10}
-            accessibilityLabel="Notifications"
-            accessibilityRole="button"
-            style={{
-              width: 44,
-              height: 44,
-              borderRadius: 22,
-              backgroundColor: theme.colors.surfaceElevated,
-              borderWidth: 1,
-              borderColor: theme.colors.surfaceBorder,
-              justifyContent: 'center',
-              alignItems: 'center',
-            }}
-          >
-            <Bell size={20} color={theme.colors.textSecondary} />
-          </Pressable>
+        {/* ---- HEADER (56pt): compact logo mark + greeting ---- */}
+        <View style={styles.header}>
+          <Image
+            source={require('@/assets/images/clippar-logo-mark.png')}
+            style={styles.headerLogo}
+            resizeMode="contain"
+            accessible
+            accessibilityRole="image"
+            accessibilityLabel="Clippar Golf"
+          />
+          <Text style={styles.greeting} numberOfLines={1}>
+            G'day{displayName ? `, ${displayName}` : ''}
+          </Text>
         </View>
 
-        {/* ---- SAMPLE DATA BANNER ---- */}
-        {useMock && (
-          <View
-            style={{
-              marginHorizontal: 16,
-              marginBottom: 12,
-              paddingVertical: 10,
-              paddingHorizontal: 14,
-              backgroundColor: 'rgba(168, 230, 61, 0.08)',
-              borderRadius: theme.radius.md,
-              borderWidth: 1,
-              borderColor: 'rgba(168, 230, 61, 0.15)',
-            }}
-          >
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, textAlign: 'center' }}>
-              Sample data shown below — upload your first round to see your stats
-            </Text>
+        {/* ---- LATEST-REEL HERO ---- */}
+        {heroRound && (
+          <HeroReel
+            round={heroRound}
+            status={heroStatus}
+            sourceUri={heroSource?.uri ?? null}
+            posterUri={thumbs[heroRound.id] ?? null}
+            offline={heroSource?.offline}
+            failedCause={
+              compose.failed && compose.failedRoundId === heroRound.id
+                ? compose.failedCause
+                : null
+            }
+            onOpen={() => router.push(`/round/${heroRound.id}`)}
+            onShare={() => setShowHeroShare(true)}
+            onRebuild={() => goEditorRecompose(heroRound.id)}
+            onMakeReel={() => router.push(`/round/editor?roundId=${heroRound.id}`)}
+            onRetry={() => goEditorRecompose(heroRound.id)}
+          />
+        )}
+
+        {/* ---- PIPELINE CARD (one max; hero state never duplicated) ---- */}
+        <RoundStatusCard
+          excludeRoundId={heroRound?.id}
+          failedRound={failedRound}
+          processingRound={processingRound}
+        />
+
+        {/* ---- STATS STRIP (hidden under 2 rounds, H12 ≤90pt) ---- */}
+        {rounds.length >= 2 && (
+          <View style={styles.tileRow}>
+            {(Object.keys(TILE_LABELS) as TileKey[]).map((key) => {
+              const active = activeTile === key;
+              return (
+                <Pressable
+                  key={key}
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    setActiveTile(active ? null : key);
+                  }}
+                  onLongPress={
+                    key === 'birdies' ? () => setCompilingCategory('birdie') : undefined
+                  }
+                  style={[styles.tile, active && styles.tileActive]}
+                  accessibilityRole="button"
+                  accessibilityState={{ selected: active }}
+                >
+                  <Text style={styles.tileLabel}>{TILE_LABELS[key]}</Text>
+                  <Text style={styles.tileValue}>{tileValues[key]}</Text>
+                  {active && key === 'birdies' && (
+                    <Pressable
+                      onPress={() => {
+                        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                        setCompilingCategory('birdie');
+                      }}
+                      style={styles.playAllChip}
+                      accessibilityLabel="Play all birdie highlights"
+                      accessibilityRole="button"
+                    >
+                      <Play size={9} color="#FFFFFF" fill="#FFFFFF" />
+                      <Text style={styles.playAllText}>Play all</Text>
+                    </Pressable>
+                  )}
+                </Pressable>
+              );
+            })}
           </View>
         )}
 
-        {/* ---- HERO REEL (latest highlight — top of page) ---- */}
-        <HeroReel
-          round={latestRound}
-          onPress={() => openRound(latestRound.id)}
-          reelSignedUrl={reelSignedUrls[latestRound.id]}
-        />
+        {/* ---- COURSE/TIMEFRAME FILTERS (rounds > 10 only, H14) ---- */}
+        {showFilterBar && (
+          <StatsFilterBar
+            filters={filters}
+            courses={availableCourses}
+            onTimeframe={setTimeframe}
+            onCourse={setCourseId}
+            onHole={setHole}
+            onClipsOnly={setClipsOnly}
+          />
+        )}
 
-        {/* ---- STATS FILTER BAR (hero filters, after HeroReel per spec) ---- */}
-        <StatsFilterBar
-          filters={filters}
-          courses={availableCourses}
-          onTimeframe={setTimeframe}
-          onCourse={setCourseId}
-          onHole={setHole}
-          onClipsOnly={setClipsOnly}
-        />
-
-        {/* ---- STATS HERO (chart above tiles per spec) ---- */}
-        <StatsHero
-          breakdown={breakdown}
-          trend={trend}
-          activeCategory={activeStatCategory}
-          onSelectCategory={setActiveStatCategory}
-          totalRounds={statsFilteredRounds.length}
-          avgScoreToPar={avgScoreToPar}
-          onCompileCategory={setCompilingCategory}
-        />
-
-        {activeStatCategory == null ? (
-          <>
-            {/* ---- RECENT ROUNDS (horizontal scroll) ---- */}
-            {recentRounds.length > 0 && (
-              <>
-                <SectionHeader title="Recent Rounds" onSeeAll={() => { /* filters already applied */ }} />
-                <HorizontalRoundSection
-                  rounds={recentRounds}
-                  size="large"
-                  onDeleteRound={useMock ? undefined : handleDeleteRound}
-                  reelSignedUrls={reelSignedUrls}
-                  onOpenRound={openRound}
-                />
-              </>
-            )}
-
-            {/* ---- BEST ROUNDS (horizontal scroll) ---- */}
-            {bestRounds.length > 0 && (
-              <>
-                <SectionHeader title="Best Rounds" onSeeAll={() => { /* filters already applied */ }} />
-                <HorizontalRoundSection
-                  rounds={bestRounds}
-                  onDeleteRound={useMock ? undefined : handleDeleteRound}
-                  reelSignedUrls={reelSignedUrls}
-                  onOpenRound={openRound}
-                />
-              </>
-            )}
-
-            {/* ---- BIRDIES & EAGLES ---- */}
-            {birdieRounds.length > 0 && (
-              <>
-                <SectionHeader title="Birdies & Eagles" onSeeAll={() => setActiveStatCategory('birdie')} />
-                <HorizontalRoundSection
-                  rounds={birdieRounds}
-                  onDeleteRound={useMock ? undefined : handleDeleteRound}
-                  reelSignedUrls={reelSignedUrls}
-                  onOpenRound={openRound}
-                />
-              </>
-            )}
-          </>
-        ) : null}
-
-        {/* ---- SCORE HIGHLIGHTS (Birdies, Eagles, Bogeys) — moved above All Rounds ---- */}
-        {!useMock && <ScoreCollection />}
-
-        {/* ---- FILTERED / ALL ROUNDS (vertical list) ---- */}
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, marginTop: 8, marginBottom: 14 }}>
-          <Text
-            style={{
-              color: theme.colors.textPrimary,
-              fontSize: 18,
-              fontWeight: '700',
-              letterSpacing: -0.2,
-            }}
-          >
-            {activeStatCategory == null
-              ? 'All Rounds'
-              : activeStatCategory === 'eagle'
-                ? 'Eagles'
-                : activeStatCategory === 'birdie'
-                  ? 'Birdies'
-                  : activeStatCategory === 'par'
-                    ? 'Pars'
-                    : activeStatCategory === 'bogey'
-                      ? 'Bogeys'
-                      : activeStatCategory === 'double'
-                        ? 'Doubles'
-                        : 'Triples+'}
-          </Text>
-          <View
-            style={{
-              backgroundColor: theme.colors.surfaceBorder,
-              paddingHorizontal: 8,
-              paddingVertical: 2,
-              borderRadius: theme.radius.full,
-            }}
-          >
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' }}>
-              {filteredRounds.length}
-            </Text>
+        {/* ---- YOUR ROUNDS ---- */}
+        <View style={styles.listHeader}>
+          <Text style={styles.listTitle}>Your rounds</Text>
+          <View style={styles.countPill}>
+            <Text style={styles.countPillText}>{listRounds.length}</Text>
           </View>
-          {activeStatCategory != null && (
+          {activeFilterLabel && (
             <Pressable
               onPress={() => {
                 Haptics.selectionAsync();
-                setActiveStatCategory(null);
+                setActiveTile(null);
               }}
-              style={{
-                marginLeft: 'auto',
-                paddingHorizontal: 10,
-                paddingVertical: 4,
-                borderRadius: theme.radius.full,
-                backgroundColor: theme.colors.surface,
-                borderWidth: 1,
-                borderColor: theme.colors.surfaceBorder,
-              }}
+              style={styles.filterChip}
+              accessibilityLabel={`Clear ${activeFilterLabel} filter`}
+              accessibilityRole="button"
             >
-              <Text style={{ color: theme.colors.textSecondary, fontSize: 12, fontWeight: '600' }}>
-                Clear
-              </Text>
+              <Text style={styles.filterChipText}>{activeFilterLabel}</Text>
+              <X size={12} color={theme.colors.textSecondary} />
             </Pressable>
           )}
         </View>
 
-        {filteredRounds.length === 0 ? (
-          <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+        {listRounds.length === 0 ? (
+          <View style={{ alignItems: 'center', paddingVertical: 32, gap: 12 }}>
             <Text style={{ color: theme.colors.textTertiary, fontSize: 14 }}>
-              No rounds match this filter
+              No rounds match
             </Text>
+            <Pressable
+              onPress={() => setActiveTile(null)}
+              style={styles.clearFiltersButton}
+              accessibilityRole="button"
+            >
+              <Text style={styles.clearFiltersText}>Clear filters</Text>
+            </Pressable>
           </View>
         ) : (
-          filteredRounds.map((round) => (
-            <RoundListCard
-              key={round.id}
-              round={round}
-              onPress={() => openRound(round.id)}
-              onDelete={useMock ? undefined : () => handleDeleteRound(round.id)}
-            />
-          ))
+          listRounds.map((round) => {
+            const result = statuses.get(round.id);
+            const status = result?.status ?? 'NO_CONTENT';
+            return (
+              <RoundListCard
+                key={round.id}
+                round={round}
+                status={status}
+                composePercent={
+                  compose.active && compose.roundId === round.id ? compose.percent : null
+                }
+                thumbUri={thumbs[round.id]}
+                onPress={() => router.push(`/round/${round.id}`)}
+                onDelete={() => handleDeleteRound(round.id)}
+                onRetry={status === 'FAILED' ? () => goEditorRecompose(round.id) : undefined}
+              />
+            );
+          })
         )}
-
-        {/* (Score Highlights moved above All Rounds — see top of ScrollView) */}
       </ScrollView>
 
-      {/* ---- STITCHED COMPILATION (long-press on a stat tile) ---- */}
+      {/* ---- Hero share sheet (cold open → Share → native sheet: 2 taps) ---- */}
+      {heroRound && (
+        <ShareSheet
+          visible={showHeroShare}
+          roundId={heroRound.id}
+          reelUrl={heroSource?.uri ?? null}
+          courseName={heroRound.course_name ?? ''}
+          score={heroRound.total_score ?? undefined}
+          onDismiss={() => setShowHeroShare(false)}
+        />
+      )}
+
+      {/* ---- Stitched compilation ("Play all" on the Birdies+ tile) ---- */}
       <CompilationPlayer
         visible={compilingCategory != null}
         category={compilingCategory}
@@ -904,3 +662,174 @@ export default function HomeScreen() {
     </View>
   );
 }
+
+const styles = StyleSheet.create({
+  header: {
+    height: 56,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    paddingHorizontal: theme.spacing.md,
+  },
+  headerLogo: {
+    width: 40,
+    height: 30,
+  },
+  greeting: {
+    ...theme.typography.h2,
+    color: theme.colors.textPrimary,
+  },
+
+  // Stats tiles
+  tileRow: {
+    flexDirection: 'row',
+    gap: 8,
+    paddingHorizontal: theme.spacing.md,
+    marginBottom: theme.spacing.md,
+    maxHeight: 90,
+  },
+  tile: {
+    flex: 1,
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    alignItems: 'center',
+  },
+  tileActive: {
+    borderColor: theme.colors.primary,
+    backgroundColor: theme.colors.primaryMuted,
+  },
+  tileLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textTertiary,
+  },
+  tileValue: {
+    ...theme.typography.h3,
+    color: theme.colors.textPrimary,
+    marginTop: 2,
+  },
+  playAllChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.primary,
+  },
+  playAllText: {
+    color: '#FFFFFF',
+    fontSize: 10,
+    fontWeight: '700',
+  },
+
+  // List header
+  listHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: theme.spacing.md,
+    marginTop: theme.spacing.sm,
+    marginBottom: 14,
+  },
+  listTitle: {
+    ...theme.typography.h3,
+    color: theme.colors.textPrimary,
+  },
+  countPill: {
+    backgroundColor: theme.colors.surfaceBorder,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: theme.radius.full,
+  },
+  countPillText: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  filterChip: {
+    marginLeft: 'auto',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surface,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+  },
+  filterChipText: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  clearFiltersButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+  },
+  clearFiltersText: {
+    color: theme.colors.textPrimary,
+    fontSize: 13,
+    fontWeight: '600',
+  },
+
+  // First-run empty state
+  emptyRoot: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: theme.spacing.xl,
+    paddingBottom: 80,
+  },
+  emptyVisual: {
+    width: 240,
+    height: 160,
+    borderRadius: theme.radius.lg,
+    backgroundColor: theme.colors.primaryMuted,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: theme.spacing.lg,
+  },
+  emptyHeadline: {
+    ...theme.typography.h1,
+    color: theme.colors.textPrimary,
+    textAlign: 'center',
+    marginBottom: theme.spacing.sm,
+  },
+  emptyBody: {
+    ...theme.typography.body,
+    color: theme.colors.textSecondary,
+    textAlign: 'center',
+    maxWidth: 300,
+    marginBottom: theme.spacing.lg,
+  },
+  emptyCta: {
+    alignSelf: 'stretch',
+    height: 52,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    ...theme.shadows.glow,
+  },
+  emptyCtaText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 16,
+  },
+  emptyImportLink: {
+    ...theme.typography.bodySmall,
+    color: theme.colors.textSecondary,
+    textDecorationLine: 'underline',
+    marginTop: theme.spacing.md,
+  },
+});
