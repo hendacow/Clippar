@@ -188,8 +188,9 @@
     position: relative;
     z-index: 1;
   }
-  .logo { display: flex; align-items: center; }
-  .logo img { height: 26px; width: auto; display: block; }
+  .logo { display: flex; align-items: center; gap: 10px; }
+  .logo img { height: 26px; width: auto; display: block; flex-shrink: 0; }
+  .logo .logo-mark { height: 34px; width: 34px; }
   footer .logo img { height: 60px; }
   .logo-sub {
     display: none;
@@ -911,7 +912,7 @@
 
 <nav>
   <div style="display:flex;align-items:center;">
-    <div class="logo"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></div>
+    <div class="logo"><img class="logo-mark" src="/landing_assets/clippar-icon-white.png" alt="" width="272" height="272"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></div>
   </div>
   <a class="nav-mount-link" href="/mount">Mount Kit &rarr;</a>
 </nav>

@@ -48,8 +48,9 @@
     padding: 24px 48px;
     display: flex; align-items: center; justify-content: space-between;
   }
-  header .logo { display: flex; align-items: center; }
-  header .logo img { height: 24px; width: auto; display: block; }
+  header .logo { display: flex; align-items: center; gap: 10px; }
+  header .logo img { height: 24px; width: auto; display: block; flex-shrink: 0; }
+  header .logo .logo-mark { height: 30px; width: 30px; }
   header nav a { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
 
   main { max-width: 760px; margin: 0 auto; padding: 56px 28px 96px; }
@@ -100,7 +101,7 @@
     flex-wrap: wrap; gap: 12px;
   }
   footer .logo { display: flex; align-items: center; }
-  footer .logo img { height: 20px; width: auto; display: block; }
+  footer .logo img { height: 60px; width: auto; display: block; }
   footer p { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; }
   footer nav a { font-family: var(--font-mono); font-size: 11px; color: var(--muted); letter-spacing: 0.08em; margin-left: 18px; }
 
@@ -113,7 +114,7 @@
 </head>
 <body>
 <header>
-  <a class="logo" href="/"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
+  <a class="logo" href="/"><img class="logo-mark" src="/landing_assets/clippar-icon-white.png" alt="" width="272" height="272"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
   <nav><a href="/terms">Terms of Service</a></nav>
 </header>
 
@@ -266,7 +267,7 @@
 </main>
 
 <footer>
-  <div class="logo"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></div>
+  <div class="logo"><img src="/landing_assets/clippar-stacked-white.png" alt="Clippar Golf" width="360" height="234"></div>
   <p>&copy; 2026 Clippar &middot; clippargolf@gmail.com</p>
   <nav><a href="/">Home</a><a href="/terms">Terms</a></nav>
 </footer>

@@ -9,6 +9,7 @@ import {
   Dimensions,
   Alert,
   Platform,
+  Image,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -667,17 +668,28 @@ export default function HomeScreen() {
             >
               {getGreeting()}{displayName ? `, ${displayName}` : ''}
             </Text>
-            <Text
+            <View
               style={{
-                fontSize: 26,
-                fontWeight: '900',
-                color: theme.colors.primary,
-                letterSpacing: -0.8,
-                marginTop: 2,
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: 8,
+                marginTop: 4,
               }}
+              accessible
+              accessibilityRole="image"
+              accessibilityLabel="Clippar Golf"
             >
-              Clippar
-            </Text>
+              <Image
+                source={require('@/assets/images/clippar-logo-mark.png')}
+                style={{ width: 44, height: 34 }}
+                resizeMode="contain"
+              />
+              <Image
+                source={require('@/assets/images/clippar-logo-wordmark.png')}
+                style={{ width: 68, height: 20 }}
+                resizeMode="contain"
+              />
+            </View>
           </View>
           <Pressable
             onPress={() => {
