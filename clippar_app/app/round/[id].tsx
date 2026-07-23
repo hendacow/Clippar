@@ -12,34 +12,32 @@ import {
   Image,
   useWindowDimensions,
 } from 'react-native';
-import { useLocalSearchParams, router } from 'expo-router';
+import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
   ArrowLeft,
   Share2,
-  Trash2,
   Play,
-  Loader,
-  Upload,
   Film,
-  ChevronDown,
-  ChevronUp,
-  XCircle,
   RefreshCw,
   Download,
+  MoreVertical,
+  Eye,
+  EyeOff,
   Check,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { SkeletonCard } from '@/components/ui/Skeleton';
-import { Button } from '@/components/ui/Button';
-import { PreviewPlayer } from '@/components/editor/PreviewPlayer';
 import { ShareSheet } from '@/components/shared/ShareSheet';
+import { ReelStage } from '@/components/shared/ReelStage';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
-import { supabase } from '@/lib/supabase';
-import { isReelStale } from '@/lib/storage';
+import { computeRoundStatus, type RoundStatusResult } from '@/lib/roundStatus';
+import { formatRoundDate, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
+import { subscribePipeline } from '@/lib/pipelineEvents';
+import { confirmDeleteRound } from '@/lib/confirmDeleteRound';
 import { saveClipToPhotos, saveHoleToPhotos, shareHole } from '@/lib/clipShare';
 import { saveToGallery } from '@/lib/sharing';
 import { useUploadContext } from '@/contexts/UploadContext';
@@ -52,108 +50,16 @@ const VideoThumbnails = isNative
   ? (require('expo-video-thumbnails') as typeof import('expo-video-thumbnails'))
   : null;
 
-// ---- Animated progress bar for processing ----
-function ProcessingProgress({ upload }: { upload: { stage: string; currentClip: number; totalClips: number; progress: number; stageLabel: string } }) {
-  const progressAnim = useRef(new Animated.Value(0)).current;
-  const pulseAnim = useRef(new Animated.Value(0.6)).current;
-
-  useEffect(() => {
-    Animated.timing(progressAnim, {
-      toValue: upload.progress / 100,
-      duration: 300,
-      useNativeDriver: false,
-    }).start();
-  }, [upload.progress]);
-
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1, duration: 800, useNativeDriver: false }),
-        Animated.timing(pulseAnim, { toValue: 0.6, duration: 800, useNativeDriver: false }),
-      ])
-    );
-    loop.start();
-    return () => loop.stop();
-  }, []);
-
-  const isUploading = upload.stage === 'uploading';
-  const isProcessing = upload.stage === 'processing';
-  const isSubmitting = upload.stage === 'submitting';
-
-  let eta = '';
-  if (isUploading && upload.totalClips > 0 && upload.currentClip > 0) {
-    const remaining = upload.totalClips - upload.currentClip;
-    const secs = remaining * 8;
-    eta = secs < 60 ? `~${secs}s left` : `~${Math.ceil(secs / 60)} min left`;
-  } else if (isProcessing) {
-    if (upload.progress < 50) eta = 'Usually 2-4 minutes';
-    else if (upload.progress < 70) eta = 'About 1-2 minutes left';
-    else if (upload.progress < 90) eta = 'Less than a minute';
-    else eta = 'Almost done...';
-  }
-
-  return (
-    <View style={{ alignItems: 'center', width: '100%', paddingHorizontal: 24 }}>
-      <Animated.View style={{ opacity: pulseAnim }}>
-        {isUploading ? (
-          <Upload size={32} color={theme.colors.primary} />
-        ) : (
-          <Loader size={32} color={theme.colors.primary} />
-        )}
-      </Animated.View>
-
-      <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700', marginTop: 14 }}>
-        {upload.stageLabel || 'Processing...'}
-      </Text>
-
-      {isUploading && upload.totalClips > 0 && (
-        <Text style={{ color: theme.colors.textSecondary, fontSize: 14, marginTop: 4 }}>
-          Clip {upload.currentClip} of {upload.totalClips}
-        </Text>
-      )}
-
-      {isProcessing && (
-        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
-          Your highlight reel is being created
-        </Text>
-      )}
-
-      {isSubmitting && (
-        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
-          Sending clips for processing...
-        </Text>
-      )}
-
-      <View style={{ width: '100%', marginTop: 16 }}>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 }}>
-          <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>{eta}</Text>
-          <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>{upload.progress}%</Text>
-        </View>
-        <View style={{ height: 6, borderRadius: 3, backgroundColor: theme.colors.surface, overflow: 'hidden' }}>
-          <Animated.View
-            style={{
-              height: '100%',
-              borderRadius: 3,
-              backgroundColor: theme.colors.primary,
-              width: progressAnim.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }),
-            }}
-          />
-        </View>
-      </View>
-    </View>
-  );
-}
-
-// ---- Clip thumbnail card for the editor section ----
+// ---- Clip thumbnail card with a visible hide/show (eye) toggle ----
 function ClipThumb({
   clip,
   onPress,
-  onLongPress,
+  onToggleExclude,
   onDownload,
 }: {
   clip: EditorClip;
   onPress: () => void;
-  onLongPress: () => void;
+  onToggleExclude: () => void;
   onDownload: () => void;
 }) {
   const [thumb, setThumb] = useState<string | null>(clip.thumbnailUri ?? null);
@@ -177,8 +83,9 @@ function ClipThumb({
         onPress();
       }}
       onLongPress={() => {
+        // Long-press retained as a shortcut for the eye toggle.
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-        onLongPress();
+        onToggleExclude();
       }}
       delayLongPress={500}
     >
@@ -190,7 +97,7 @@ function ClipThumb({
           backgroundColor: theme.colors.surface,
           overflow: 'hidden',
           marginRight: 8,
-          opacity: clip.isExcluded ? 0.35 : 1,
+          opacity: clip.isExcluded ? 0.4 : 1,
         }}
       >
         {thumb ? (
@@ -216,8 +123,7 @@ function ClipThumb({
             <Text style={{ color: '#fff', fontSize: 10, fontWeight: '700' }}>{durationLabel}</Text>
           </View>
         ) : null}
-        {/* Download button (top-right) — saves this clip's trim file
-            to the Photos library. Hidden if the clip isn't playable. */}
+        {/* Download button (top-right) — hidden if the clip isn't playable. */}
         {clip.sourceUri && !clip.needsTrim && !clip.isExcluded && (
           <Pressable
             onPress={(e) => {
@@ -241,23 +147,44 @@ function ClipThumb({
             <Download size={11} color="rgba(255,255,255,0.95)" />
           </Pressable>
         )}
+      </View>
 
-        {/* Shot label */}
-        <View
-          style={{
-            position: 'absolute',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            paddingVertical: 4,
-            backgroundColor: clip.isExcluded ? 'rgba(180,0,0,0.7)' : 'rgba(0,0,0,0.55)',
-            alignItems: 'center',
+      {/* Label + visible eye toggle */}
+      <View
+        style={{
+          position: 'absolute',
+          bottom: 0,
+          left: 0,
+          right: 8,
+          paddingVertical: 4,
+          paddingHorizontal: 6,
+          backgroundColor: 'rgba(0,0,0,0.55)',
+          borderBottomLeftRadius: theme.radius.md,
+          borderBottomRightRadius: theme.radius.md,
+          flexDirection: 'row',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}
+      >
+        <Text style={{ color: '#fff', fontSize: 10, fontWeight: '600' }}>
+          {clip.isExcluded ? 'Hidden' : `Shot ${clip.shotNumber}`}
+        </Text>
+        <Pressable
+          onPress={(e) => {
+            e.stopPropagation?.();
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            onToggleExclude();
           }}
+          hitSlop={12}
+          accessibilityLabel={clip.isExcluded ? 'Include this clip' : 'Hide this clip'}
+          accessibilityRole="button"
         >
-          <Text style={{ color: '#fff', fontSize: 10, fontWeight: '600' }}>
-            {clip.isExcluded ? 'Excluded' : `Shot ${clip.shotNumber}`}
-          </Text>
-        </View>
+          {clip.isExcluded ? (
+            <EyeOff size={13} color="rgba(255,255,255,0.9)" />
+          ) : (
+            <Eye size={13} color="rgba(255,255,255,0.9)" />
+          )}
+        </Pressable>
       </View>
     </Pressable>
   );
@@ -267,22 +194,159 @@ export default function RoundViewer() {
   const { id, exported } = useLocalSearchParams<{ id: string; exported?: string }>();
   const justExported = exported === '1';
   const insets = useSafeAreaInsets();
-  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
-  const { upload } = useUploadContext();
+  const { height: screenHeight } = useWindowDimensions();
+  const { compose } = useUploadContext();
   const editor = useEditorState(id);
 
   const [round, setRound] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [statusResult, setStatusResult] = useState<RoundStatusResult | null>(null);
   const [showShare, setShowShare] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [reelSignedUrl, setReelSignedUrl] = useState<string | null>(null);
-  const [clipsExpanded, setClipsExpanded] = useState(false);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
-  const [saveState, setSaveState] = useState<'idle' | 'saving' | 'done'>('idle');
-  const [reelStale, setReelStale] = useState<boolean>(false);
   const [busyHoleNumber, setBusyHoleNumber] = useState<number | null>(null);
+  const [showToast, setShowToast] = useState(false);
 
-  // Per-clip download — saves the trimmed file directly to Photos.
+  const status = statusResult?.status ?? null;
+  const reelSourceUri = statusResult?.source.uri ?? null;
+  const isReady = status === 'READY';
+
+  const goEditorRecompose = useCallback(() => {
+    if (!id) return;
+    // The ONLY rebuild path: on-device compose via the editor's export
+    // flow. Zero network I/O on tap.
+    router.push(`/round/editor?roundId=${id}&recompose=1`);
+  }, [id]);
+
+  const goEditor = useCallback(() => {
+    if (!id) return;
+    router.push(`/round/editor?roundId=${id}`);
+  }, [id]);
+
+  // ---- Fetch + canonical status ----
+  const roundRef = useRef<any>(null);
+  const computeStatus = useCallback(
+    async (r: any) => {
+      if (!r) return;
+      try {
+        const result = await computeRoundStatus(
+          {
+            id: r.id,
+            reel_url: r.reel_url,
+            status: r.status,
+            updated_at: r.updated_at,
+            clips_count: r.clips_count ?? r.shots?.length ?? 0,
+          },
+          {
+            activeComposeRoundId: compose.active ? compose.roundId : null,
+            failedComposeRoundId: compose.failed ? compose.failedRoundId : null,
+          },
+        );
+        setStatusResult(result);
+      } catch {}
+    },
+    [compose.active, compose.roundId, compose.failed, compose.failedRoundId],
+  );
+
+  const fetchRound = useCallback(() => {
+    if (!id) return;
+    getRound(id)
+      .then((data) => {
+        roundRef.current = data;
+        setRound(data);
+        return computeStatus(data);
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, [id, computeStatus]);
+
+  // Always refetch on focus — returning from the editor (?exported=1 or
+  // otherwise) must never strand this screen on stale state.
+  useFocusEffect(
+    useCallback(() => {
+      fetchRound();
+    }, [fetchRound]),
+  );
+
+  // Broadcaster subscription: refetch when a compose/backup for THIS round
+  // completes, and recompute on compose errors.
+  useEffect(() => {
+    return subscribePipeline((event) => {
+      if (
+        (event.type === 'compose:complete' ||
+          event.type === 'backup:complete' ||
+          event.type === 'compose:error') &&
+        event.roundId === id
+      ) {
+        fetchRound();
+      }
+    });
+  }, [id, fetchRound]);
+
+  // Recompute status live when compose state flips or clips are edited
+  // (edits set the stale flag → stage flips to NEEDS_REBUILD immediately).
+  useEffect(() => {
+    if (roundRef.current) computeStatus(roundRef.current);
+  }, [computeStatus, editor.state.holes]);
+
+  // Celebrate a freshly-exported reel + show the save toast once.
+  const celebratedRef = useRef(false);
+  useEffect(() => {
+    if (justExported && !celebratedRef.current) {
+      celebratedRef.current = true;
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      setShowToast(true);
+      const t = setTimeout(() => setShowToast(false), 2000);
+      return () => clearTimeout(t);
+    }
+  }, [justExported]);
+
+  // Poll while a server-side processing row is live (legacy path).
+  useEffect(() => {
+    if (!round || round.status !== 'processing') return;
+    const interval = setInterval(fetchRound, 10_000);
+    return () => clearInterval(interval);
+  }, [round?.status, fetchRound]);
+
+  // ---- Actions ----
+  const handleDelete = useCallback(() => {
+    confirmDeleteRound(async () => {
+      if (!id) return;
+      setDeleting(true);
+      try {
+        await deleteRound(id);
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        router.back();
+      } catch {
+        Alert.alert('Error', 'Failed to delete round. Please try again.');
+        setDeleting(false);
+      }
+    });
+  }, [id]);
+
+  const handleDownloadReel = useCallback(async () => {
+    if (!reelSourceUri || !id) return;
+    try {
+      const saved = await saveToGallery(reelSourceUri, id);
+      if (!saved) {
+        Alert.alert('Permission Required', 'Allow Clippar to save videos in Settings.');
+      }
+    } catch {
+      Alert.alert('Error', 'Failed to save video.');
+    }
+  }, [reelSourceUri, id]);
+
+  const handleOverflowMenu = useCallback(() => {
+    Haptics.selectionAsync();
+    const buttons: any[] = [];
+    if (isReady && reelSourceUri) {
+      buttons.push({ text: 'Download reel', onPress: handleDownloadReel });
+    }
+    buttons.push({ text: 'Delete round', style: 'destructive', onPress: handleDelete });
+    buttons.push({ text: 'Cancel', style: 'cancel' });
+    Alert.alert(round?.course_name ?? 'Round', undefined, buttons);
+  }, [isReady, reelSourceUri, handleDownloadReel, handleDelete, round?.course_name]);
+
   const handleClipDownload = useCallback(async (clip: EditorClip) => {
     if (!clip.sourceUri) {
       Alert.alert('Not Ready', 'This clip is still processing. Try again in a moment.');
@@ -294,7 +358,7 @@ export default function RoundViewer() {
     } else {
       Alert.alert(
         'Save Failed',
-        'Could not save to Photos. The trim file may have been evicted from cache — re-render the reel to regenerate it.',
+        'Could not save to Photos. The trim file may have been evicted from cache — rebuild the reel to regenerate it.',
       );
     }
   }, []);
@@ -333,180 +397,43 @@ export default function RoundViewer() {
     }
   }, [editor.state.holes, round?.course_name]);
 
-  // Refresh stale flag whenever the round id changes or the editor state
-  // loads — the user may have trimmed clips since the last visit.
-  useEffect(() => {
-    if (!id) return;
-    isReelStale(id).then(setReelStale).catch(() => {});
-  }, [id, editor.state.holes]);
-
-  // Celebrate a freshly-exported reel once it's actually on screen.
-  const celebratedRef = useRef(false);
-  useEffect(() => {
-    if (justExported && reelSignedUrl && !celebratedRef.current) {
-      celebratedRef.current = true;
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    }
-  }, [justExported, reelSignedUrl]);
-
-  const hasActiveUpload = upload.roundId === id &&
-    ['preparing', 'uploading', 'submitting', 'processing'].includes(upload.stage);
-
-  // Video player height: ~55% of screen minus safe areas
+  // Video stage height: ~55% of screen minus safe areas
   const videoHeight = Math.round((screenHeight - insets.top - insets.bottom) * 0.55);
-
-  const fetchRound = useCallback(() => {
-    if (!id) return;
-    getRound(id)
-      .then((data) => {
-        setRound(data);
-        if (data?.reel_url) {
-          const reelUrl = data.reel_url;
-
-          if (reelUrl.startsWith('file://') || reelUrl.startsWith('/')) {
-            // Legacy: local file URI from on-device composition.  This only
-            // works while the app has the original install — wiped on rebuild.
-            setReelSignedUrl(reelUrl);
-          } else if (reelUrl.startsWith('http')) {
-            // Full URL — re-sign the underlying storage path so it doesn't expire.
-            const match = reelUrl.match(/\/object\/(?:public\/)?clips\/(.+?)(?:\?|$)/);
-            if (match) {
-              supabase.storage.from('clips').createSignedUrl(match[1], 86400)
-                .then(({ data: signed }) => {
-                  if (signed?.signedUrl) setReelSignedUrl(signed.signedUrl);
-                });
-            } else {
-              setReelSignedUrl(reelUrl);
-            }
-          } else {
-            // Bare storage path within the `clips` bucket (e.g. "reels/xxx.mp4").
-            // Strip any redundant "clips/" prefix for forward compatibility.
-            const path = reelUrl.startsWith('clips/') ? reelUrl.slice(6) : reelUrl;
-            supabase.storage.from('clips').createSignedUrl(path, 86400)
-              .then(({ data: signed }) => {
-                if (signed?.signedUrl) setReelSignedUrl(signed.signedUrl);
-              });
-          }
-        }
-      })
-      .catch(() => {})
-      .finally(() => setLoading(false));
-  }, [id]);
-
-  useEffect(() => { fetchRound(); }, [fetchRound]);
-
-  const handleDelete = useCallback(() => {
-    Alert.alert(
-      'Delete this round?',
-      'This will permanently delete the round, all clips, and the highlight reel. This cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Delete',
-          style: 'destructive',
-          onPress: async () => {
-            if (!id) return;
-            setDeleting(true);
-            try {
-              await deleteRound(id);
-              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-              router.back();
-            } catch (err) {
-              Alert.alert('Error', 'Failed to delete round. Please try again.');
-              setDeleting(false);
-            }
-          },
-        },
-      ]
-    );
-  }, [id]);
-
-  const handleSave = useCallback(async () => {
-    if (!reelSignedUrl || !id) return;
-    setSaveState('saving');
-    try {
-      const saved = await saveToGallery(reelSignedUrl, id);
-      if (saved) {
-        setSaveState('done');
-        setTimeout(() => setSaveState('idle'), 2500);
-      } else {
-        Alert.alert('Permission Required', 'Allow Clippar to save videos in Settings.');
-        setSaveState('idle');
-      }
-    } catch {
-      Alert.alert('Error', 'Failed to save video.');
-      setSaveState('idle');
-    }
-  }, [reelSignedUrl, id]);
-
-  // Rebuilding a reel is ALWAYS an on-device compose via the editor's
-  // export flow (?recompose=1 auto-opens the export modal, with built-in
-  // missing-clip re-download recovery). It must never trigger a cloud
-  // upload — zero network I/O on tap.
-  const handleReRender = useCallback(() => {
-    if (!id) return;
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    router.push(`/round/editor?roundId=${id}&recompose=1`);
-  }, [id]);
-
-  // Poll for processing completion
-  useEffect(() => {
-    if (!round || round.status !== 'processing') return;
-    const interval = setInterval(fetchRound, 10_000);
-    return () => clearInterval(interval);
-  }, [round?.status, fetchRound]);
-
   const totalEditorClips = editor.state.holes.reduce((s, h) => s + h.clips.length, 0);
+  const clipsCount = round?.clips_count ?? totalEditorClips;
+
+  const failedCause =
+    compose.failed && compose.failedRoundId === id
+      ? compose.failedCause
+      : status === 'FAILED'
+        ? FAILURE_CAUSE.didNotFinish
+        : null;
 
   return (
     <GradientBackground>
       <View style={{ flex: 1, paddingTop: insets.top }}>
-        {/* Header */}
+        {/* Header: back · course + date · overflow. ONE share affordance
+            per screen — the sticky CTA owns sharing. */}
         <View style={styles.header}>
-          <Pressable onPress={() => router.back()} hitSlop={12}>
+          <Pressable onPress={() => router.back()} hitSlop={12} accessibilityLabel="Back">
             <ArrowLeft size={24} color={theme.colors.textPrimary} />
           </Pressable>
-          <Text style={styles.headerTitle} numberOfLines={1}>
-            {round?.course_name ?? ''}
-          </Text>
-          <View style={{ flexDirection: 'row', gap: 16, alignItems: 'center' }}>
-            {reelSignedUrl && (
-              <Pressable
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  handleSave();
-                }}
-                hitSlop={12}
-                disabled={saveState === 'saving'}
-              >
-                {saveState === 'saving' ? (
-                  <ActivityIndicator size="small" color={theme.colors.primary} />
-                ) : saveState === 'done' ? (
-                  <Check size={22} color={theme.colors.primary} />
-                ) : (
-                  <Download size={22} color={theme.colors.textPrimary} />
-                )}
-              </Pressable>
-            )}
-            <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                setShowShare(true);
-              }}
-              hitSlop={12}
-            >
-              <Share2 size={22} color={theme.colors.textPrimary} />
-            </Pressable>
-            <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-                handleDelete();
-              }}
-              hitSlop={12}
-            >
-              <Trash2 size={22} color={theme.colors.accentRed} />
-            </Pressable>
+          <View style={{ flex: 1, alignItems: 'center', marginHorizontal: 12 }}>
+            <Text style={styles.headerTitle} numberOfLines={1}>
+              {round?.course_name ?? ''}
+            </Text>
+            {round?.date ? (
+              <Text style={styles.headerDate}>{formatRoundDate(round.date)}</Text>
+            ) : null}
           </View>
+          <Pressable
+            onPress={handleOverflowMenu}
+            hitSlop={12}
+            accessibilityLabel="More options"
+            accessibilityRole="button"
+          >
+            <MoreVertical size={22} color={theme.colors.textPrimary} />
+          </Pressable>
         </View>
 
         {loading ? (
@@ -520,136 +447,64 @@ export default function RoundViewer() {
           </View>
         ) : (
           <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
-            {/* ===== Stale-reel banner — shown when clips were edited
-                 after the last compose. Tapping navigates to the editor
-                 where the user can re-export. ===== */}
-            {reelStale && reelSignedUrl && (
-              <Pressable
-                onPress={() => {
-                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                  // ?recompose=1 tells the editor to auto-open the export
-                  // modal, so the user lands on the compose flow without
-                  // an extra tap.
-                  router.push(`/round/editor?roundId=${id}&recompose=1`);
-                }}
-                style={{
-                  marginHorizontal: 16,
-                  marginTop: 12,
-                  marginBottom: 4,
-                  paddingHorizontal: 14,
-                  paddingVertical: 12,
-                  borderRadius: theme.radius.lg,
-                  borderWidth: 1,
-                  borderColor: theme.colors.primary + '60',
-                  backgroundColor: theme.colors.primary + '15',
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 12,
-                }}
-              >
-                <RefreshCw size={18} color={theme.colors.primary} />
+            {/* ===== Status banner — one slot, one banner ===== */}
+            {status === 'NEEDS_REBUILD' && (
+              <View style={[styles.statusBanner, { borderLeftColor: theme.colors.accentGold }]}>
                 <View style={{ flex: 1 }}>
-                  <Text
-                    style={{
-                      color: theme.colors.textPrimary,
-                      fontWeight: '700',
-                      fontSize: 14,
-                    }}
-                  >
-                    Reel out of date
-                  </Text>
-                  <Text
-                    style={{
-                      color: theme.colors.textSecondary,
-                      fontSize: 12,
-                      marginTop: 2,
-                    }}
-                  >
-                    Trims have been changed. Tap to open the editor and re-compose.
+                  <Text style={styles.bannerTitle}>This reel needs a rebuild</Text>
+                  <Text style={styles.bannerSub}>
+                    Your clips changed since it was made — takes about a minute, right on your
+                    phone.
                   </Text>
                 </View>
-                <Text style={{ color: theme.colors.primary, fontWeight: '700', fontSize: 13 }}>
-                  Edit
-                </Text>
-              </Pressable>
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    goEditorRecompose();
+                  }}
+                  style={styles.bannerButton}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.bannerButtonText}>Rebuild reel</Text>
+                </Pressable>
+              </View>
             )}
-
-            {/* ===== Fresh-export banner — the reel was auto-saved to the
-                 camera roll during compose, so this confirms both. ===== */}
-            {justExported && reelSignedUrl && !reelStale && (
-              <View style={styles.readyBanner}>
-                <Check size={18} color={theme.colors.primary} />
-                <Text style={styles.readyBannerText}>
-                  Reel ready — saved to your Camera Roll
-                </Text>
+            {status === 'FAILED' && (
+              <View style={[styles.statusBanner, { borderLeftColor: theme.colors.accentRed }]}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.bannerTitle}>
+                    {failedCause ?? FAILURE_CAUSE.didNotFinish}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => {
+                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                    goEditorRecompose();
+                  }}
+                  style={styles.bannerButton}
+                  accessibilityRole="button"
+                >
+                  <Text style={styles.bannerButtonText}>Try again</Text>
+                </Pressable>
               </View>
             )}
 
-            {/* ===== VIDEO PLAYER (near fullscreen) ===== */}
-            {reelSignedUrl ? (
-              <View style={{ height: videoHeight, backgroundColor: '#000' }}>
-                <PreviewPlayer
-                  clips={[{ uri: reelSignedUrl, holeNumber: -1, shotNumber: -1 }]}
-                  style={{ flex: 1 }}
-                  hideOverlay
-                />
-              </View>
-            ) : (
-              <View
-                style={{
-                  height: videoHeight,
-                  backgroundColor: theme.colors.surface,
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                {hasActiveUpload ? (
-                  <ProcessingProgress upload={upload} />
-                ) : round.status === 'processing' ? (
-                  <ProcessingProgress
-                    upload={{
-                      stage: 'processing',
-                      currentClip: 0,
-                      totalClips: round.clips_count ?? 0,
-                      progress: 50,
-                      stageLabel: 'Processing your highlight reel...',
-                    }}
-                  />
-                ) : round.status === 'failed' ? (
-                  <>
-                    <Text style={{ color: theme.colors.accentRed, fontWeight: '600', marginBottom: 8 }}>
-                      Processing Failed
-                    </Text>
-                    <Button
-                      title="Try again"
-                      onPress={() => router.push(`/round/editor?roundId=${round.id}&recompose=1`)}
-                      variant="secondary"
-                    />
-                  </>
-                ) : (
-                  <>
-                    <Play size={40} color={theme.colors.textTertiary} />
-                    <Text style={{ color: theme.colors.textSecondary, fontSize: 15, fontWeight: '600', marginTop: 12 }}>
-                      No highlight reel yet
-                    </Text>
-                    <Pressable
-                      onPress={() => { if (id) router.push(`/round/editor?roundId=${id}`); }}
-                      style={{
-                        marginTop: 14,
-                        paddingHorizontal: 24,
-                        paddingVertical: 10,
-                        backgroundColor: theme.colors.primary,
-                        borderRadius: theme.radius.md,
-                      }}
-                    >
-                      <Text style={{ color: '#fff', fontWeight: '700', fontSize: 14 }}>Edit Reel</Text>
-                    </Pressable>
-                  </>
-                )}
-              </View>
+            {/* ===== REEL STAGE ===== */}
+            {status && (
+              <ReelStage
+                status={status}
+                sourceUri={reelSourceUri}
+                offline={statusResult?.source.offline}
+                clipsCount={clipsCount}
+                height={videoHeight}
+                failedCause={failedCause}
+                onRebuild={goEditorRecompose}
+                onMakeReel={goEditor}
+                onRetry={goEditorRecompose}
+              />
             )}
 
-            {/* ===== SCORE STRIP ===== */}
+            {/* ===== SCORE STRIP (unchanged) ===== */}
             {typeof round.total_score === 'number' && (
               <View style={styles.scoreStrip}>
                 <View style={styles.scoreStat}>
@@ -698,142 +553,115 @@ export default function RoundViewer() {
               </View>
             )}
 
-            {/* ===== EDIT CLIPS SECTION ===== */}
+            {/* ===== CLIPS (expanded by default) ===== */}
             {totalEditorClips > 0 && (
               <View style={{ marginTop: 8 }}>
-                {/* Section header — tap to expand */}
-                <Pressable
-                  onPress={() => {
-                    Haptics.selectionAsync();
-                    setClipsExpanded((v) => !v);
-                  }}
-                  style={styles.clipsSectionHeader}
-                >
+                <View style={styles.clipsSectionHeader}>
                   <View style={{ flex: 1 }}>
-                    <Text style={styles.clipsSectionTitle}>Edit Clips</Text>
+                    <Text style={styles.clipsSectionTitle}>Clips</Text>
                     <Text style={styles.clipsSectionSub}>
                       {totalEditorClips} clips across {editor.state.holes.length} holes
                     </Text>
                   </View>
-                  {clipsExpanded ? (
-                    <ChevronUp size={20} color={theme.colors.textTertiary} />
-                  ) : (
-                    <ChevronDown size={20} color={theme.colors.textTertiary} />
-                  )}
-                </Pressable>
+                </View>
 
-                {clipsExpanded && (
-                  <View style={{ paddingBottom: 16 }}>
-                    {editor.state.holes.map((hole) => {
-                      const usableClips = hole.clips.filter(
-                        (c) => !c.isExcluded && c.sourceUri && !c.needsTrim,
-                      );
-                      const canStitchHole = usableClips.length > 0;
-                      const isBusy = busyHoleNumber === hole.holeNumber;
-                      return (
-                        <View key={hole.holeNumber} style={{ marginBottom: 16 }}>
-                          {/* Hole label + per-hole download/share */}
-                          <View style={styles.holeHeader}>
-                            <Text style={styles.holeLabel}>Hole {hole.holeNumber}</Text>
-                            <Text style={styles.holeInfo}>Par {hole.par}</Text>
-                            {hole.strokes > 0 && (
-                              <Text style={styles.holeInfo}>Score {hole.strokes}</Text>
-                            )}
-                            {canStitchHole && (
-                              <View style={{ flexDirection: 'row', gap: 6, marginLeft: 'auto' }}>
-                                <Pressable
-                                  onPress={() => handleHoleSave(hole)}
-                                  disabled={isBusy}
-                                  hitSlop={8}
-                                  style={{
-                                    width: 26,
-                                    height: 26,
-                                    borderRadius: 8,
-                                    borderWidth: 1,
-                                    borderColor: theme.colors.surfaceBorder,
-                                    backgroundColor: theme.colors.surfaceElevated,
-                                    justifyContent: 'center',
-                                    alignItems: 'center',
-                                    opacity: isBusy ? 0.5 : 1,
-                                  }}
-                                >
-                                  {isBusy ? (
-                                    <ActivityIndicator size="small" color={theme.colors.textPrimary} />
-                                  ) : (
-                                    <Download size={12} color={theme.colors.textPrimary} />
-                                  )}
-                                </Pressable>
-                                <Pressable
-                                  onPress={() => handleHoleShare(hole)}
-                                  disabled={isBusy}
-                                  hitSlop={8}
-                                  style={{
-                                    width: 26,
-                                    height: 26,
-                                    borderRadius: 8,
-                                    borderWidth: 1,
-                                    borderColor: theme.colors.surfaceBorder,
-                                    backgroundColor: theme.colors.surfaceElevated,
-                                    justifyContent: 'center',
-                                    alignItems: 'center',
-                                    opacity: isBusy ? 0.5 : 1,
-                                  }}
-                                >
-                                  <Share2 size={12} color={theme.colors.textPrimary} />
-                                </Pressable>
-                              </View>
-                            )}
-                          </View>
-                          {/* Clips row */}
-                          <ScrollView
-                            horizontal
-                            showsHorizontalScrollIndicator={false}
-                            contentContainerStyle={{ paddingHorizontal: 16 }}
-                          >
-                            {hole.clips.map((clip) => (
-                              <ClipThumb
-                                key={clip.id}
-                                clip={clip}
-                                onPress={() => setTrimClip(clip)}
-                                onLongPress={() => editor.toggleExclude(clip.id)}
-                                onDownload={() => handleClipDownload(clip)}
-                              />
-                            ))}
-                            {hole.clips.length === 0 && (
-                              <View style={styles.emptyClipSlot}>
-                                <Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>No clips</Text>
-                              </View>
-                            )}
-                          </ScrollView>
+                <View style={{ paddingBottom: 16 }}>
+                  {editor.state.holes.map((hole) => {
+                    const usableClips = hole.clips.filter(
+                      (c) => !c.isExcluded && c.sourceUri && !c.needsTrim,
+                    );
+                    const canStitchHole = usableClips.length > 0;
+                    const isBusy = busyHoleNumber === hole.holeNumber;
+                    return (
+                      <View key={hole.holeNumber} style={{ marginBottom: 16 }}>
+                        {/* Hole label + per-hole share/download (≥44pt) */}
+                        <View style={styles.holeHeader}>
+                          <Text style={styles.holeLabel}>Hole {hole.holeNumber}</Text>
+                          <Text style={styles.holeInfo}>Par {hole.par}</Text>
+                          {hole.strokes > 0 && (
+                            <Text style={styles.holeInfo}>Score {hole.strokes}</Text>
+                          )}
+                          {canStitchHole && (
+                            <View
+                              style={{
+                                flexDirection: 'row',
+                                alignItems: 'center',
+                                gap: 8,
+                                marginLeft: 'auto',
+                              }}
+                            >
+                              <Text style={styles.shareHoleLabel}>Share this hole</Text>
+                              <Pressable
+                                onPress={() => handleHoleSave(hole)}
+                                disabled={isBusy}
+                                style={[styles.holeActionButton, isBusy && { opacity: 0.5 }]}
+                                accessibilityLabel={`Download hole ${hole.holeNumber} highlight`}
+                                accessibilityRole="button"
+                              >
+                                {isBusy ? (
+                                  <ActivityIndicator size="small" color={theme.colors.textPrimary} />
+                                ) : (
+                                  <Download size={16} color={theme.colors.textPrimary} />
+                                )}
+                              </Pressable>
+                              <Pressable
+                                onPress={() => handleHoleShare(hole)}
+                                disabled={isBusy}
+                                style={[styles.holeActionButton, isBusy && { opacity: 0.5 }]}
+                                accessibilityLabel={`Share hole ${hole.holeNumber} highlight`}
+                                accessibilityRole="button"
+                              >
+                                <Share2 size={16} color={theme.colors.textPrimary} />
+                              </Pressable>
+                            </View>
+                          )}
                         </View>
-                      );
-                    })}
+                        {/* Clips row */}
+                        <ScrollView
+                          horizontal
+                          showsHorizontalScrollIndicator={false}
+                          contentContainerStyle={{ paddingHorizontal: 16 }}
+                        >
+                          {hole.clips.map((clip) => (
+                            <ClipThumb
+                              key={clip.id}
+                              clip={clip}
+                              onPress={() => setTrimClip(clip)}
+                              onToggleExclude={() => editor.toggleExclude(clip.id)}
+                              onDownload={() => handleClipDownload(clip)}
+                            />
+                          ))}
+                          {hole.clips.length === 0 && (
+                            <View style={styles.emptyClipSlot}>
+                              <Text style={{ color: theme.colors.textTertiary, fontSize: 10 }}>No clips</Text>
+                            </View>
+                          )}
+                        </ScrollView>
+                      </View>
+                    );
+                  })}
 
-                    {/* Re-render button */}
-                    <View style={{ paddingHorizontal: 16, marginTop: 8 }}>
-                      <Pressable
-                        onPress={handleReRender}
-                        style={styles.reRenderBtn}
-                      >
-                        <RefreshCw size={16} color="#fff" />
-                        <Text style={styles.reRenderText}>Re-render Highlight Reel</Text>
-                      </Pressable>
-                    </View>
-                  </View>
-                )}
+                  {/* Footer: full editor entry point */}
+                  <Pressable
+                    onPress={goEditor}
+                    style={{ alignSelf: 'center', paddingVertical: 10, paddingHorizontal: 16 }}
+                    hitSlop={8}
+                    accessibilityRole="button"
+                  >
+                    <Text style={styles.openEditorLink}>Open full editor</Text>
+                  </Pressable>
+                </View>
               </View>
             )}
 
-            {/* Bottom padding — extra room so the sticky Save & Share CTA
-                never covers the last content row. */}
-            <View style={{ height: insets.bottom + (reelSignedUrl ? 96 : 24) }} />
+            {/* Bottom padding — room for the sticky CTA. */}
+            <View style={{ height: insets.bottom + 110 }} />
           </ScrollView>
         )}
       </View>
 
-      {/* ===== Sticky one-tap Save & Share CTA — opens the share sheet
-           (save, share to friends, Instagram Stories, copy link). ===== */}
-      {!loading && !deleting && round && reelSignedUrl && (
+      {/* ===== Sticky bottom CTA ===== */}
+      {!loading && !deleting && round && (
         <View
           pointerEvents="box-none"
           style={{
@@ -843,16 +671,36 @@ export default function RoundViewer() {
             bottom: insets.bottom + 16,
           }}
         >
+          {!isReady && (
+            <Text style={styles.ctaHelper}>Rebuild your reel to share it</Text>
+          )}
           <Pressable
+            disabled={!isReady}
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
               setShowShare(true);
             }}
-            style={({ pressed }) => [styles.shareCta, pressed && { opacity: 0.85 }]}
+            style={({ pressed }) => [
+              styles.shareCta,
+              !isReady && styles.shareCtaDisabled,
+              pressed && isReady && { opacity: 0.85 },
+            ]}
+            accessibilityRole="button"
+            accessibilityState={{ disabled: !isReady }}
           >
-            <Share2 size={20} color="#fff" />
-            <Text style={styles.shareCtaText}>Save & Share</Text>
+            <Share2 size={20} color={isReady ? '#fff' : theme.colors.textTertiary} />
+            <Text style={[styles.shareCtaText, !isReady && { color: theme.colors.textTertiary }]}>
+              Save & Share
+            </Text>
           </Pressable>
+        </View>
+      )}
+
+      {/* Export toast — replaces the old dismissable banner chrome */}
+      {showToast && (
+        <View style={[styles.toast, { top: insets.top + 60 }]}>
+          <Check size={16} color={theme.colors.primary} />
+          <Text style={styles.toastText}>Saved to your Camera Roll</Text>
         </View>
       )}
 
@@ -870,7 +718,7 @@ export default function RoundViewer() {
       <ShareSheet
         visible={showShare}
         roundId={id ?? ''}
-        reelUrl={reelSignedUrl ?? null}
+        reelUrl={reelSourceUri}
         courseName={round?.course_name ?? ''}
         score={round?.total_score}
         onDismiss={() => setShowShare(false)}
@@ -899,12 +747,51 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
   },
   headerTitle: {
-    flex: 1,
     color: theme.colors.textPrimary,
     fontWeight: '700',
     fontSize: 16,
     textAlign: 'center',
-    marginHorizontal: 12,
+  },
+  headerDate: {
+    ...theme.typography.caption,
+    color: theme.colors.textTertiary,
+    marginTop: 1,
+  },
+
+  // Status banner (one slot)
+  statusBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginHorizontal: 16,
+    marginTop: 12,
+    marginBottom: 4,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: theme.radius.md,
+    borderLeftWidth: 3,
+    backgroundColor: theme.colors.surfaceElevated,
+  },
+  bannerTitle: {
+    color: theme.colors.textPrimary,
+    fontWeight: '700',
+    fontSize: 14,
+  },
+  bannerSub: {
+    color: theme.colors.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  bannerButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: theme.radius.md,
+    backgroundColor: theme.colors.primary,
+  },
+  bannerButtonText: {
+    color: '#fff',
+    fontWeight: '700',
+    fontSize: 13,
   },
 
   // Score strip
@@ -961,10 +848,11 @@ const styles = StyleSheet.create({
   // Hole rows
   holeHeader: {
     flexDirection: 'row',
-    alignItems: 'baseline',
+    alignItems: 'center',
     paddingHorizontal: 16,
     marginBottom: 8,
     gap: 10,
+    minHeight: 44,
   },
   holeLabel: {
     color: theme.colors.primary,
@@ -976,6 +864,20 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
+  shareHoleLabel: {
+    ...theme.typography.caption,
+    color: theme.colors.textTertiary,
+  },
+  holeActionButton: {
+    width: 44,
+    height: 44,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+    backgroundColor: theme.colors.surfaceElevated,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   emptyClipSlot: {
     width: 80,
     height: 110,
@@ -986,43 +888,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  openEditorLink: {
+    ...theme.typography.bodySmall,
+    color: theme.colors.textSecondary,
+    textDecorationLine: 'underline',
+  },
 
-  // Re-render button
-  reRenderBtn: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 14,
-    borderRadius: theme.radius.md,
-    backgroundColor: theme.colors.primary,
-  },
-  readyBanner: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 4,
-    paddingHorizontal: 14,
-    paddingVertical: 12,
-    borderRadius: theme.radius.lg,
-    borderWidth: 1,
-    borderColor: theme.colors.primary + '60',
-    backgroundColor: theme.colors.primary + '15',
-  },
-  readyBannerText: {
-    flex: 1,
-    color: theme.colors.textPrimary,
-    fontWeight: '700',
-    fontSize: 14,
-  },
+  // Sticky CTA
   shareCta: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 10,
-    paddingVertical: 16,
+    height: 52,
     borderRadius: theme.radius.lg,
     backgroundColor: theme.colors.primary,
     shadowColor: '#000',
@@ -1031,16 +909,42 @@ const styles = StyleSheet.create({
     shadowOffset: { width: 0, height: 6 },
     elevation: 8,
   },
+  shareCtaDisabled: {
+    backgroundColor: theme.colors.surfaceElevated,
+    shadowOpacity: 0,
+    elevation: 0,
+  },
   shareCtaText: {
     color: '#fff',
     fontWeight: '800',
     fontSize: 16,
     letterSpacing: 0.2,
   },
-  reRenderText: {
-    color: '#fff',
-    fontWeight: '700',
-    fontSize: 15,
+  ctaHelper: {
+    ...theme.typography.caption,
+    color: theme.colors.textTertiary,
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+
+  // Toast
+  toast: {
+    position: 'absolute',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: theme.radius.full,
+    backgroundColor: theme.colors.surfaceElevated,
+    borderWidth: 1,
+    borderColor: theme.colors.surfaceBorder,
+  },
+  toastText: {
+    color: theme.colors.textPrimary,
+    fontWeight: '600',
+    fontSize: 13,
   },
 
   // Deleting overlay

@@ -20,7 +20,6 @@ import { theme } from '@/constants/theme';
 import { MOCK_ROUNDS, MOCK_STATS } from '@/constants/mockData';
 import type { MockRound } from '@/constants/mockData';
 import { HeroReel } from '@/components/library/HeroReel';
-import { UploadProgressCard } from '@/components/library/UploadProgressCard';
 import { RoundCardHorizontal } from '@/components/library/RoundCardHorizontal';
 import { SectionHeader } from '@/components/library/SectionHeader';
 import { Skeleton } from '@/components/ui/Skeleton';
@@ -740,9 +739,6 @@ export default function HomeScreen() {
           onPress={() => openRound(latestRound.id)}
           reelSignedUrl={reelSignedUrls[latestRound.id]}
         />
-
-        {/* ---- UPLOAD PROGRESS (shown when active) ---- */}
-        <UploadProgressCard />
 
         {/* ---- STATS FILTER BAR (hero filters, after HeroReel per spec) ---- */}
         <StatsFilterBar

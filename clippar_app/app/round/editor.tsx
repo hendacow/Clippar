@@ -18,7 +18,8 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
-import { type UploadMode } from '@/contexts/UploadContext';
+import { emitPipelineEvent } from '@/lib/pipelineEvents';
+import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
@@ -619,7 +620,9 @@ export default function EditorScreen() {
   const [exportModalVisible, setExportModalVisible] = useState(false);
   // Export resolution/frame-rate UI was removed — clips render at their
   // captured quality. See the export-settings JSX comment below.
-  const exportMode: UploadMode = 'highlight-reel';
+  // Vocabulary law: "reel"/"build"/"stitch" = on-device compose, never a
+  // cloud upload. This export flow composes locally, full stop.
+  const exportMode = 'local-compose' as const;
   const [composing, setComposing] = useState(false);
   const [composeProgress, setComposeProgress] = useState('');
   const [exportProgress, setExportProgress] = useState<StitchProgressEvent | null>(null);
@@ -901,7 +904,7 @@ export default function EditorScreen() {
       }
     }
 
-    if (exportMode === 'highlight-reel') {
+    if (exportMode === 'local-compose') {
       // On-device reel composition
       const allClips = editor.getAllClipsInOrder();
       const clipUris = allClips
@@ -937,6 +940,13 @@ export default function EditorScreen() {
 
       setComposing(true);
       setComposeProgress('Checking clip files...');
+      // Broadcast to the pipeline bus so Home / round detail can render
+      // live compose state (and the 30s watchdog can supervise it).
+      emitPipelineEvent({
+        type: 'compose:start',
+        roundId: state.roundId,
+        courseName: state.courseName ?? null,
+      });
 
       // Verify clip files exist on disk; for any that are missing, try to
       // recover by downloading from Supabase Storage. iOS routinely evicts
@@ -1050,6 +1060,11 @@ export default function EditorScreen() {
             'All clips are missing from this device and could not be recovered. Try re-importing or re-recording the round.'
           );
           setComposing(false);
+          emitPipelineEvent({
+            type: 'compose:error',
+            roundId: state.roundId,
+            cause: FAILURE_CAUSE.missingClips,
+          });
           return;
         }
 
@@ -1122,6 +1137,19 @@ export default function EditorScreen() {
           } else {
             setComposeProgress(`Exporting: ${Math.round(event.percent)}%...`);
           }
+          // Broadcast real native progress only — never a fake percent.
+          const percent =
+            typeof event.percent === 'number' && event.percent > 0
+              ? Math.min(event.percent, 100)
+              : event.phase === 'composing' && event.total > 0
+                ? (event.current / event.total) * 100
+                : null;
+          emitPipelineEvent({
+            type: 'compose:progress',
+            roundId: state.roundId,
+            stageLabel: 'Stitching your reel…',
+            percent,
+          });
         });
 
         // Build per-clip compose inputs that carry trim metadata into the
@@ -1217,6 +1245,10 @@ export default function EditorScreen() {
           // "Re-compose reel" button.
           markReelFresh(state.roundId).catch(() => {});
 
+          // Notify subscribers (Home + round detail refetch on this) so
+          // the new reel shows without a manual refresh.
+          emitPipelineEvent({ type: 'compose:complete', roundId: state.roundId });
+
           setTimeout(() => {
             setComposing(false);
             setExportProgress(null);
@@ -1233,6 +1265,11 @@ export default function EditorScreen() {
         setExportProgress(null);
         const msg = err instanceof Error ? err.message : 'Unknown error';
         console.error('[Editor] Compose failed:', err);
+        emitPipelineEvent({
+          type: 'compose:error',
+          roundId: state.roundId,
+          cause: composeFailureCause(msg),
+        });
         if (msg.includes('native rebuild') || msg.includes('not available')) {
           Alert.alert(
             'Native Build Required',

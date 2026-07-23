@@ -16,6 +16,7 @@
  *     and wires the NetInfo listener.
  */
 import { Platform } from 'react-native';
+import { emitPipelineEvent } from '@/lib/pipelineEvents';
 import { supabase } from '@/lib/supabase';
 import { uploadClipToStorage } from '@/lib/r2';
 import { createShot } from '@/lib/api';
@@ -107,6 +108,10 @@ export async function processUploadQueue(): Promise<void> {
       const online = await isConnected();
       if (!online) {
         console.log('[uploadQueue] offline, deferring queue processing');
+        // Surface as "Backup paused — no connection" (never a failure/red
+        // state); the NetInfo listener re-drains automatically.
+        const pending = await getQueuedRoundUploads().catch(() => []);
+        if (pending.length > 0) emitPipelineEvent({ type: 'backup:paused' });
         return;
       }
 
@@ -124,18 +129,21 @@ export async function processUploadQueue(): Promise<void> {
           await markQueuedRoundStatus(item.round_id, 'in_progress');
           await uploadRoundClips(item.round_id, user.id);
           await markQueuedRoundStatus(item.round_id, 'done');
+          emitPipelineEvent({ type: 'backup:complete', roundId: item.round_id });
           // Keep the row briefly so /verifyRoundReachable can see the state;
           // a future startup will clear 'done' rows.
           await removeQueuedRoundUpload(item.round_id);
         } catch (err) {
           const msg = toErrorMessage(err);
           console.warn(`[uploadQueue] round ${item.round_id} failed:`, msg);
+          emitPipelineEvent({ type: 'backup:error', roundId: item.round_id, message: msg });
           try {
             await markQueuedRoundStatus(item.round_id, 'error', msg);
           } catch {}
           // Don't abort other queued rounds — move on.
         }
       }
+      emitPipelineEvent({ type: 'backup:idle' });
     } finally {
       inFlight = null;
     }
@@ -180,7 +188,14 @@ async function uploadRoundClips(roundId: string, userId: string): Promise<void> 
     );
   }
 
-  for (const clip of clips) {
+  for (let i = 0; i < clips.length; i++) {
+    const clip = clips[i];
+    emitPipelineEvent({
+      type: 'backup:progress',
+      roundId,
+      currentClip: i + 1,
+      totalClips: clips.length,
+    });
     // Basic per-clip retry throttle — cap attempts so a single bad file
     // doesn't spin forever.
     if ((clip as any).upload_retry_count >= 6) {
