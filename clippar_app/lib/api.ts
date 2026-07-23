@@ -1315,8 +1315,69 @@ export async function createCoursePreset(
       holes_played: input.holes_played,
       start_hole: input.start_hole,
       trim_duration_ms: input.trim_duration_ms ?? null,
+      hole_pars: input.hole_pars ?? null,
       name,
     })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return data as CoursePreset;
+}
+
+/**
+ * Save a preset, UPDATING in place when the user already has one with the
+ * same name (the UNIQUE(user_id, name) key) instead of throwing on the
+ * duplicate. This lets the user iterate on a saved scorecard — re-saving a
+ * corrected par for the same course overwrites the old row (updated_at is
+ * bumped by the 009 trigger; we also bump last_used_at so the fixed
+ * scorecard sorts to the top and is what loads next time). Falls back to a
+ * plain insert when no same-named preset exists.
+ *
+ * DB-authoritative: the existing row is looked up by (user_id, name) rather
+ * than trusting an in-memory list, so a preset saved on another device is
+ * still updated (not duplicated / rejected). RLS's owner UPDATE policy plus
+ * the explicit user_id filter scope both the lookup and the write to the
+ * caller's own rows.
+ */
+export async function upsertCoursePreset(
+  input: CoursePresetInput
+): Promise<CoursePreset> {
+  const user = await requireUser();
+
+  const name = input.name?.trim() || defaultPresetName({
+    course_name: input.course_name,
+    holes_played: input.holes_played,
+  });
+
+  const { data: existing, error: findError } = await supabase
+    .from('course_presets')
+    .select('id')
+    .eq('user_id', user.id)
+    .eq('name', name)
+    .maybeSingle();
+
+  if (findError) throw findError;
+
+  // No same-named preset yet → this is a fresh save.
+  if (!existing) {
+    return createCoursePreset({ ...input, name });
+  }
+
+  // Same-named preset exists → overwrite its scorecard + setup fields.
+  const { data, error } = await supabase
+    .from('course_presets')
+    .update({
+      course_id: input.course_id,
+      course_name: input.course_name,
+      holes_played: input.holes_played,
+      start_hole: input.start_hole,
+      trim_duration_ms: input.trim_duration_ms ?? null,
+      hole_pars: input.hole_pars ?? null,
+      last_used_at: new Date().toISOString(),
+    })
+    .eq('id', existing.id)
+    .eq('user_id', user.id)
     .select()
     .single();
 

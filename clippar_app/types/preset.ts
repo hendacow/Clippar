@@ -10,6 +10,12 @@ export type CoursePreset = {
   start_hole: 1 | 10;
   // ms of clip duration. null = inherit the app/user default.
   trim_duration_ms: number | null;
+  // Optional user-chosen per-hole par (custom scorecard bookmark). Positional:
+  // element i is the par of the i-th hole played, length = holes_played. When
+  // present it OVERRIDES the golf-course API par for rounds started from this
+  // preset. null = no custom scorecard (fall back to API / seeded par). See
+  // migration 014_course_preset_hole_pars.sql.
+  hole_pars: number[] | null;
   name: string;
   last_used_at: string; // ISO timestamp
   created_at: string;
@@ -25,6 +31,9 @@ export type CoursePresetInput = {
   holes_played: 9 | 18;
   start_hole: 1 | 10;
   trim_duration_ms?: number | null;
+  // Optional custom scorecard (positional per-hole par, length = holes_played).
+  // Omit or null to save a preset with no par override.
+  hole_pars?: number[] | null;
   // If omitted, the API helper derives a sensible default like
   // 'Riversdale GC — 18 holes'.
   name?: string;
