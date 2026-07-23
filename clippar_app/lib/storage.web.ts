@@ -69,6 +69,10 @@ export async function getLocalScores(_roundId: string) {
 
 export async function incrementClipRetryCount(_clipId: number) {}
 
+export async function clipExists(_clipId: number): Promise<boolean> {
+  return false;
+}
+
 export async function deleteLocalRound(_roundId: string) {}
 
 // Generic key/value settings — backed by localStorage on web

@@ -648,6 +648,22 @@ export async function getClipsForRound(roundId: string) {
   );
 }
 
+/**
+ * Whether a clip row still exists. Used by the live-record detection
+ * continuation: "Delete last shot" can remove a clip while its deferred
+ * detectAndTrim is still running, and the classification must not be
+ * applied (or fed to the putt→swing hole-advance detector) for a clip the
+ * user already deleted.
+ */
+export async function clipExists(clipId: number): Promise<boolean> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ id: number }>(
+    'SELECT id FROM local_clips WHERE id = ?',
+    clipId
+  );
+  return !!row;
+}
+
 export async function saveLocalRound(round: {
   id: string;
   course_name: string;

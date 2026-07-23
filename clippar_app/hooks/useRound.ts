@@ -6,6 +6,7 @@ import { PENALTY_STROKES } from '@/types/round';
 import type { ShotTypeClassification } from 'shot-detector';
 import { createRound, updateRound, upsertScore } from '@/lib/api';
 import { deleteFile } from 'shot-detector';
+import { lastHoleOf, findLastClipIndexOnHole } from '@/lib/liveRecordingLogic';
 import {
   saveLocalRound,
   updateLocalRound,
@@ -46,13 +47,10 @@ function createInitialState(
   };
 }
 
-// Where the round naturally ends. e.g. 18 holes starting at 1 → finish
-// after hole 18; 9 holes starting at 10 → finish after hole 18; 9 holes
-// starting at 1 → finish after hole 9. Used by endHole and addPenalty
-// pickup branches to decide when to mark the round 'finished'.
-function lastHoleOf(holesPlayed: 9 | 18, startHole: 1 | 10): number {
-  return startHole + holesPlayed - 1;
-}
+// lastHoleOf (where the round naturally ends) moved to
+// lib/liveRecordingLogic so the node test runner can exercise it. Used by
+// endHole and addPenalty pickup branches to decide when to mark the round
+// 'finished'.
 
 function getParForHole(courseHoles: HoleData[] | undefined, holeNumber: number): number {
   if (!courseHoles) return DEFAULT_PAR;
@@ -64,6 +62,10 @@ export function useRound() {
   const [state, setState] = useState<RoundState | null>(null);
   // Track the last classified shot type for auto hole detection
   const lastShotTypeRef = useRef<ShotTypeClassification | null>(null);
+  // Debounce for endHole — a physical double-tap on Next Hole (common on a
+  // sunlit touchscreen with a glove) would otherwise run the updater twice,
+  // scoring a phantom 1-stroke hole and skipping a real one.
+  const lastEndHoleAtRef = useRef(0);
 
   const startRound = useCallback(async (
     courseName: string,
@@ -270,15 +272,18 @@ export function useRound() {
           par,
         }).catch(() => {});
 
-        updateLocalRound(prev.roundId, {
-          current_hole: nextHole,
-          current_shot: 1,
-        });
-
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
 
         const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
         if (nextHole > lastHole) {
+          // Round complete — persist 'finished' NOW, not just in memory.
+          // Previously only the hole pointer was written (hole 19), so an
+          // app kill on the Round Complete screen resurrected the round as
+          // an orphan on a hole past the end of the course.
+          updateLocalRound(prev.roundId, {
+            status: 'finished',
+            finished_at: new Date().toISOString(),
+          });
           return {
             ...prev,
             scores: newScores,
@@ -289,6 +294,11 @@ export function useRound() {
             status: 'finished' as const,
           };
         }
+
+        updateLocalRound(prev.roundId, {
+          current_hole: nextHole,
+          current_shot: 1,
+        });
 
         return {
           ...prev,
@@ -311,6 +321,14 @@ export function useRound() {
   }, []);
 
   const endHole = useCallback(async () => {
+    // Double-tap guard: two endHole calls within the window are one gesture.
+    const now = Date.now();
+    if (now - lastEndHoleAtRef.current < 1500) {
+      console.log('[useRound] endHole ignored — double-tap guard');
+      return;
+    }
+    lastEndHoleAtRef.current = now;
+
     // Reset shot type tracking when manually advancing hole
     lastShotTypeRef.current = null;
     setState((prev) => {
@@ -358,15 +376,18 @@ export function useRound() {
         par,
       }).catch(() => {});
 
-      updateLocalRound(prev.roundId, {
-        current_hole: nextHole,
-        current_shot: 1,
-      });
-
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
       const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
       if (nextHole > lastHole) {
+        // Round complete — persist 'finished' NOW, not just in memory.
+        // Previously only the hole pointer was written (hole 19), so an
+        // app kill on the Round Complete screen resurrected the round as
+        // an orphan on a hole past the end of the course.
+        updateLocalRound(prev.roundId, {
+          status: 'finished',
+          finished_at: new Date().toISOString(),
+        });
         return {
           ...prev,
           scores: newScores,
@@ -377,6 +398,11 @@ export function useRound() {
           status: 'finished' as const,
         };
       }
+
+      updateLocalRound(prev.roundId, {
+        current_hole: nextHole,
+        current_shot: 1,
+      });
 
       return {
         ...prev,
@@ -614,11 +640,16 @@ export function useRound() {
     if (!current) return false;
 
     // Find the last clip on the current hole (clips are appended in order).
-    const holeClips = current.clips.filter(
-      (c) => c.holeNumber === current.currentHole
-    );
-    const lastClip = holeClips[holeClips.length - 1];
-    if (!lastClip) return false;
+    const lastIdx = findLastClipIndexOnHole(current.clips, current.currentHole);
+    if (lastIdx < 0) return false;
+    const lastClip = current.clips[lastIdx];
+
+    // The deleted shot's classification must not seed the putt→swing
+    // hole-advance detector: a deleted putt followed by a recorded chip
+    // ('swing') would otherwise auto-advance the hole and commit a phantom
+    // score. The clip's own pending detection continuation is skipped via
+    // the clipExists guard in useCamera once the row is gone.
+    lastShotTypeRef.current = null;
 
     // Optimistically update state: drop the last current-hole clip and
     // step the shot counter back one (never below 1).

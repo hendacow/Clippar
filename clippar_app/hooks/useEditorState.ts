@@ -5,6 +5,7 @@ import { getClipUrl } from '@/lib/r2';
 import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
+import { isTrimInFlight } from '@/lib/trimInFlight';
 import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
@@ -713,11 +714,22 @@ export function useEditorState(roundId: string | undefined) {
     // resolveDetection).
     const { strategy, optionsJson } = resolveDetection();
 
-    // Collect all clips that need trimming across all holes
+    // Collect all clips that need trimming across all holes. Skip clips
+    // whose LIVE-record detectAndTrim pass is still in flight (mid-round
+    // "Review round so far" keeps the record screen mounted underneath):
+    // running a second detect+trim on the same source file concurrently
+    // orphans one trimmed output and doubles native video load. The live
+    // pass marks the row trimmed itself; if it fails, the row keeps
+    // needs_trim=1 and the next editor visit retries it.
     const untrimmedClips: EditorClip[] = [];
     for (const hole of state.holes) {
       for (const clip of hole.clips) {
         if (clip.needsTrim && clip.sourceUri) {
+          const numId = parseInt(clip.id, 10);
+          if (!Number.isNaN(numId) && isTrimInFlight(numId)) {
+            console.log(`[useEditorState] clip ${clip.id} trim already in flight (live record) — skipping`);
+            continue;
+          }
           untrimmedClips.push(clip);
         }
       }
