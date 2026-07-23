@@ -27,6 +27,7 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { CoursePreset } from '@/types/preset';
+import { presetHasScorecard } from '@/lib/scorecardLogic';
 
 export interface PresetPickerScreenProps {
   presets: CoursePreset[];
@@ -130,15 +131,43 @@ export function PresetPickerScreen({
                     >
                       <Bookmark size={18} color={theme.colors.accent} />
                       <View style={{ flex: 1 }}>
-                        <Text
-                          style={{
-                            color: theme.colors.textPrimary,
-                            fontWeight: '600',
-                            fontSize: 15,
-                          }}
-                        >
-                          {preset.name}
-                        </Text>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                          <Text
+                            style={{
+                              color: theme.colors.textPrimary,
+                              fontWeight: '600',
+                              fontSize: 15,
+                              flexShrink: 1,
+                            }}
+                            numberOfLines={1}
+                          >
+                            {preset.name}
+                          </Text>
+                          {/* Badge presets that carry a saved custom scorecard
+                              so the user can tell which bookmarks override the
+                              (untrusted) API par. */}
+                          {presetHasScorecard(preset) && (
+                            <View
+                              style={{
+                                paddingHorizontal: 6,
+                                paddingVertical: 2,
+                                borderRadius: theme.radius.sm,
+                                backgroundColor: theme.colors.primaryMuted,
+                              }}
+                            >
+                              <Text
+                                style={{
+                                  color: theme.colors.primaryLight,
+                                  fontSize: 10,
+                                  fontWeight: '700',
+                                  letterSpacing: 0.3,
+                                }}
+                              >
+                                SCORECARD
+                              </Text>
+                            </View>
+                          )}
+                        </View>
                         <Text
                           style={{
                             color: theme.colors.textSecondary,

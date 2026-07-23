@@ -35,6 +35,7 @@ import { CameraPermissionScreen } from '@/components/record/CameraPermissionScre
 import { CourseSearch } from '@/components/record/CourseSearch';
 import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
 import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
+import { ScorecardSetupScreen } from '@/components/record/ScorecardSetupScreen';
 import { ClickerTutorial } from '@/components/record/ClickerTutorial';
 import { RecordingSettingsSheet } from '@/components/record/RecordingSettingsSheet';
 import { useBLE } from '@/hooks/useBLE';
@@ -46,7 +47,8 @@ import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from
 import { getMountCardDismissed, dismissMountCard } from '@/lib/mountOffer';
 import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
-import { listCoursePresets, touchCoursePreset } from '@/lib/api';
+import { listCoursePresets, touchCoursePreset, createCoursePreset } from '@/lib/api';
+import { buildHoleDataFromPars, presetHasScorecard } from '@/lib/scorecardLogic';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 import type { CoursePreset } from '@/types/preset';
@@ -91,9 +93,14 @@ export default function RecordScreen() {
   //   - 'preset-picker' = list of saved rounds + "Set up new" CTA
   //   - 'setup'         = the existing course-search / holes / start-hole
   //                       manual setup screen
+  //   - 'scorecard'     = the per-hole par entry screen ("Set the
+  //                       scorecard"), reached from 'setup'. Saving there
+  //                       creates a bookmark preset carrying hole_pars.
   // Users without presets jump straight to 'setup' since there's nothing
   // to pick from.
-  const [livePhase, setLivePhase] = useState<'preset-picker' | 'setup'>('setup');
+  const [livePhase, setLivePhase] = useState<'preset-picker' | 'setup' | 'scorecard'>('setup');
+  // True while a "Save course scorecard" write is in flight (disables the CTA).
+  const [savingScorecard, setSavingScorecard] = useState(false);
 
   // Wave 3 Phase D-redo: when a preset is tapped on the picker we open
   // a bottom-sheet confirmation that lets the user override the start
@@ -587,18 +594,27 @@ export default function RecordScreen() {
   ) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     const effectiveStartHole = overrides?.startHole ?? preset.start_hole;
+    // Custom-scorecard presets carry a per-hole par override. Build the
+    // authoritative HoleData[] from it so getParForHole / the persisted
+    // scores.par / the overlay all use the user's pars instead of the API's.
+    // Legacy presets (no hole_pars) keep the old behaviour: undefined →
+    // DEFAULT_PAR fallback. buildHoleDataFromPars honours the (possibly
+    // overridden) start hole so a back-nine preset maps to holes 10..18.
+    const presetHoles = presetHasScorecard(preset)
+      ? buildHoleDataFromPars(preset.hole_pars as number[], effectiveStartHole)
+      : undefined;
     // Mirror state into the form fields so a back-out keeps the values
     // visible in case the round fails to start.
     setCourseName(preset.course_name);
     setSelectedCourseId(preset.course_id ?? undefined);
-    setCourseHoles(undefined); // preset doesn't carry the per-hole par data
+    setCourseHoles(presetHoles);
     setHolesPlayed(preset.holes_played);
     setStartHole(effectiveStartHole);
 
     const ok = await round.startRound(
       preset.course_name,
       preset.course_id ?? undefined,
-      undefined,
+      presetHoles,
       preset.holes_played,
       effectiveStartHole,
     );
@@ -607,6 +623,42 @@ export default function RecordScreen() {
       void touchCoursePreset(preset.id);
     }
   }, [round.startRound]);
+
+  // Save the per-hole pars the user entered on the "Set the scorecard"
+  // screen as a bookmark preset. On success we add the new preset to the
+  // list and drop the user back on the picker so they see (and can one-tap
+  // start) their new saved scorecard. `holePars` is positional, length =
+  // holesPlayed. Errors are surfaced but non-destructive — the entered pars
+  // stay on screen so the user can retry (e.g. after renaming a duplicate).
+  const handleSaveScorecard = useCallback(async (holePars: number[]) => {
+    setSavingScorecard(true);
+    try {
+      const created = await createCoursePreset({
+        course_id: selectedCourseId ?? null,
+        course_name: courseName.trim(),
+        holes_played: holesPlayed,
+        start_hole: startHole,
+        name: courseName.trim(),
+        hole_pars: holePars,
+      });
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      // Surface the new bookmark immediately (most-recent-first, matching
+      // the server's last_used_at ordering).
+      setPresets((prev) => [created, ...prev]);
+      setLivePhase('preset-picker');
+    } catch (err: any) {
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      const isDuplicate = /unique|duplicate/i.test(err?.message ?? '');
+      Alert.alert(
+        'Could not save scorecard',
+        isDuplicate
+          ? `You already have a saved scorecard named "${courseName.trim()}". Rename or delete the old one first.`
+          : 'Something went wrong saving your scorecard. Please try again.',
+      );
+    } finally {
+      setSavingScorecard(false);
+    }
+  }, [selectedCourseId, courseName, holesPlayed, startHole]);
 
   // Load the user's presets when they enter the Live setup screen. We
   // load lazily (not on tab mount) so we don't hammer the network for
@@ -941,6 +993,26 @@ export default function RecordScreen() {
       );
     }
 
+    // ---- IDLE STATE: Live recording — "Set the scorecard" par entry ----
+    // Reached from the setup screen once a course + holes are chosen. Lets
+    // the user pick each hole's par and save it as a bookmark preset whose
+    // hole_pars override the API par on future rounds.
+    if (livePhase === 'scorecard') {
+      return (
+        <ScorecardSetupScreen
+          courseName={courseName.trim()}
+          holesPlayed={holesPlayed}
+          startHole={startHole}
+          saving={savingScorecard}
+          onBack={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            setLivePhase('setup');
+          }}
+          onSave={handleSaveScorecard}
+        />
+      );
+    }
+
     // ---- IDLE STATE: Live recording — manual setup screen ----
     // Reached when the user picked 'Live' AND either has no presets OR
     // tapped "Set up new round" on the picker. Course search + 9/18 +
@@ -1071,6 +1143,22 @@ export default function RecordScreen() {
               ...(courseName.trim() ? theme.shadows.glow : {}),
             }}
           />
+
+          {/* Save the course's scorecard as a bookmark. The golf-course API's
+              par data isn't trustworthy, so this lets the user set each hole's
+              par once and reuse it (the saved pars override the API on future
+              rounds). Only offered once a course is in the field. */}
+          {courseName.trim().length > 0 && (
+            <Button
+              title="Set the scorecard"
+              variant="secondary"
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setLivePhase('scorecard');
+              }}
+              style={{ marginTop: 12 }}
+            />
+          )}
 
           {/* Dev: Simulate BLE press */}
           {__DEV__ && (

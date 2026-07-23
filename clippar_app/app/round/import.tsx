@@ -40,6 +40,7 @@ import {
   touchCoursePreset,
 } from '@/lib/api';
 import type { CoursePreset } from '@/types/preset';
+import { buildHoleDataFromPars, presetHasScorecard } from '@/lib/scorecardLogic';
 import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
 import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
 import {
@@ -215,6 +216,16 @@ export default function ImportRoundScreen() {
     setSelectedCourseId(preset.course_id ?? undefined);
     setHolesCount(preset.holes_played);
     setStartingNine(effectiveStartHole === 10 ? 'back' : 'front');
+    // Custom-scorecard presets carry a per-hole par override. Seed courseHoles
+    // from it so initScorecard / initHoles pick up the user's pars (which then
+    // flow into the persisted scores.par and total_par) instead of the API's.
+    // Legacy presets (no hole_pars) leave courseHoles untouched → API/seeded
+    // par as before.
+    if (presetHasScorecard(preset)) {
+      setCourseHoles(
+        buildHoleDataFromPars(preset.hole_pars as number[], effectiveStartHole),
+      );
+    }
     // Bump last_used_at so this preset sorts to the top next time.
     // Best-effort — failure shouldn't tank the import.
     void touchCoursePreset(preset.id);

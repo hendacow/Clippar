@@ -1315,6 +1315,7 @@ export async function createCoursePreset(
       holes_played: input.holes_played,
       start_hole: input.start_hole,
       trim_duration_ms: input.trim_duration_ms ?? null,
+      hole_pars: input.hole_pars ?? null,
       name,
     })
     .select()
