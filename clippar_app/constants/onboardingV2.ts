@@ -1,5 +1,5 @@
 /**
- * Content for the 11-screen animated onboarding (feat/onboarding-v2).
+ * Content for the 12-screen animated onboarding (feat/onboarding-v2).
  *
  * Everything copy-ish lives here so wording can be tuned without touching
  * screen code. Voice: confident and warm. No fabricated social proof —
@@ -48,7 +48,7 @@ export const ageRangeOptions: { id: OnboardingAgeRange; label: string }[] = [
   { id: '60plus', label: '60+' },
 ];
 
-/** Screen 7 — age range (skippable). The sub carries the joke. */
+/** Screen 8 — age range (skippable). The sub carries the joke. */
 export const ageScreenCopy = {
   title: 'Roughly how old are you?',
   sub: 'So we know if your reel wants bass drops or the Sunday-telecast piano.',
@@ -69,6 +69,34 @@ export const problemCopy = {
     { label: 'The putt for the career round', detail: 'never made it to the group chat' },
   ],
   cta: "Let's fix that",
+};
+
+/**
+ * Screen 3 — how Clippar works. Education only: plants the mental model of
+ * the full setup (phone mount on the bag/buggy + Bluetooth clicker) without
+ * any price, link or purchase CTA — and without ever implying the hardware
+ * is required. The note keeps the hand-held / mate-films path first-class.
+ */
+export const howItWorksCopy = {
+  title: "Here's how Clippar works.",
+  sub: 'Set up once at the first tee — walk off the 18th with the reel already cut.',
+  steps: [
+    {
+      title: 'Mount & play',
+      detail:
+        'Clip your phone to your bag or buggy, then tap the clicker before and after each shot.',
+    },
+    {
+      title: 'AI does the editing',
+      detail: 'Every swing found and trimmed in seconds — no scrubbing through footage.',
+    },
+    {
+      title: 'Share the reel',
+      detail: 'One tap to the group chat or your socials.',
+    },
+  ],
+  note: 'No mount or clicker handy? Film by hand or get a mate on camera — Clippar edits it all the same.',
+  cta: 'Too easy',
 };
 
 /**

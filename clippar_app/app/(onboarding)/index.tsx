@@ -1,7 +1,8 @@
 /**
- * 11-screen animated onboarding — host stepper (feat/onboarding-v2).
- * HERO → PROBLEM → INTENT → SHOT → COURSE → HANDICAP → AGE → BUILD/REVEAL →
- * CAMERA-ROLL AHA → REEL READY → PRO GATE → app/paywall (14-day trial).
+ * 12-screen animated onboarding — host stepper (feat/onboarding-v2).
+ * HERO → PROBLEM → HOW-IT-WORKS → INTENT → SHOT → COURSE → HANDICAP → AGE →
+ * BUILD/REVEAL → CAMERA-ROLL AHA → REEL READY → PRO GATE → app/paywall
+ * (14-day trial).
  *
  * One screen mounted at a time (the aha holds video + audio) with a
  * cross-fade between steps and an endowed progress bar (starts at 15%).
@@ -26,6 +27,7 @@ import Animated, { FadeIn } from 'react-native-reanimated';
 import {
   HeroScreen,
   ProblemScreen,
+  HowItWorksScreen,
   IntentScreen,
   ShotScreen,
   CourseScreen,
@@ -50,15 +52,16 @@ import {
 const STEPS = [
   HeroScreen, // 1 — hero reel
   ProblemScreen, // 2 — the problem
-  IntentScreen, // 3 — intent
-  ShotScreen, // 4 — the shot you'd hate to forget
-  CourseScreen, // 5 — home course (skippable)
-  HandicapScreen, // 6 — handicap band (skippable)
-  AgeScreen, // 7 — age range (skippable)
-  BuildRevealScreen, // 8 — building → reveal
-  AhaScreen, // 9 — camera-roll reel aha
-  ReelReadyScreen, // 10 — your reel's ready
-  ProGateScreen, // 11 — paywall setup
+  HowItWorksScreen, // 3 — how Clippar works (mount + clicker education)
+  IntentScreen, // 4 — intent
+  ShotScreen, // 5 — the shot you'd hate to forget
+  CourseScreen, // 6 — home course (skippable)
+  HandicapScreen, // 7 — handicap band (skippable)
+  AgeScreen, // 8 — age range (skippable)
+  BuildRevealScreen, // 9 — building → reveal
+  AhaScreen, // 10 — camera-roll reel aha
+  ReelReadyScreen, // 11 — your reel's ready
+  ProGateScreen, // 12 — paywall setup
 ] as const;
 
 export default function OnboardingFunnel() {

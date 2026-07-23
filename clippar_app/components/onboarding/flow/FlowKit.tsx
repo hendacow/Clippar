@@ -1,5 +1,5 @@
 /**
- * Framework primitives for the 11-screen animated onboarding.
+ * Framework primitives for the 12-screen animated onboarding.
  *
  * - FlowProgressBar: endowed-progress bar (starts at 15%, animates per step).
  * - Rise: staggered fade+slide entrance that collapses to a plain fade-in
