@@ -2,23 +2,37 @@ import { useEffect, useRef } from 'react';
 import { router } from 'expo-router';
 import { useOnboarding } from '@/contexts/OnboardingContext';
 import { useAuth } from '@/hooks/useAuth';
-import { OnboardingIntro } from './OnboardingIntro';
 import { SpotlightTour } from './SpotlightTour';
 
 /**
  * OnboardingHost
  * --------------
- * Mounts the intro modal + spotlight tour. Reads flags from OnboardingContext
- * and drives transitions between them (intro -> tour).
+ * Mounts the signed-in Home spotlight tour. Reads flags from
+ * OnboardingContext and starts the tour once the intro flag settles.
  *
  * Intentionally lives above the app's Stack so overlays render over any screen.
+ *
+ * NOTE: the legacy first-run INTRO MODAL (OnboardingIntro, "Welcome to
+ * Clippar", 4 slides) is RETIRED. Its welcome-pitch job belongs to the
+ * 10-screen /(onboarding) sales funnel now — and because this host renders
+ * ABOVE the router, the modal was covering that funnel on every fresh
+ * install (found on the first cold-start simulator run). We auto-complete
+ * the intro flag so the tour chain below keeps working unchanged.
  */
 export function OnboardingHost() {
-  const { flags, completeIntro, skipIntro, startTour } = useOnboarding();
+  const { flags, completeIntro, startTour } = useOnboarding();
   const { user } = useAuth();
 
-  const introVisible = flags.loaded && !flags.introDone;
   const queuedTourStart = useRef(false);
+
+  // Retire the legacy intro: mark it done as soon as flags load so it can
+  // never gate (or cover) anything again. Existing users who already
+  // completed it are unaffected; new users get the funnel instead.
+  useEffect(() => {
+    if (flags.loaded && !flags.introDone) {
+      completeIntro().catch(() => {});
+    }
+  }, [flags.loaded, flags.introDone, completeIntro]);
 
   // Watch for intro finishing and tour not being done — drive the handoff
   // here instead of a flaky 300ms setTimeout chained off the intro's onComplete.
@@ -47,19 +61,5 @@ export function OnboardingHost() {
     });
   }, [flags.loaded, flags.introDone, flags.tourDone, startTour]);
 
-  return (
-    <>
-      <OnboardingIntro
-        visible={introVisible}
-        onComplete={async () => {
-          await completeIntro();
-          // Tour auto-start is driven by the useEffect above.
-        }}
-        onSkip={async () => {
-          await skipIntro();
-        }}
-      />
-      <SpotlightTour />
-    </>
-  );
+  return <SpotlightTour />;
 }
