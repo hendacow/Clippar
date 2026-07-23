@@ -1,5 +1,5 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
-import { Platform, InteractionManager } from 'react-native';
+import { Alert, AppState, Platform, InteractionManager } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
@@ -9,11 +9,14 @@ import {
   updateClipEditorState,
   markClipTrimmed,
   getSetting,
+  clipExists,
 } from '@/lib/storage';
-import { detectAndTrim, deleteFile, getDevicePitchDeg } from 'shot-detector';
+import { detectAndTrim, deleteFile, getDevicePitchDeg, getMemoryStats } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { logDetection } from '@/lib/detectionLog';
+import { canStartRecording, resolveStopRequest } from '@/lib/liveRecordingLogic';
+import { markTrimInFlight, clearTrimInFlight } from '@/lib/trimInFlight';
 
 // Resolve the active trim window (pre/post roll). Mirrors
 // useEditorState.getTrimSettings so live record uses the same numbers as import.
@@ -61,6 +64,18 @@ function resolveDetection(
 }
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+// Refuse to start a recording with less free disk than this. Untrimmed 1080p
+// clips run up to 120s (~150MB) and the pipeline keeps original + trimmed
+// (+ tracer) files per shot — on a nearly-full phone every finalize fails
+// with the generic "error occurred while recording" and the user silently
+// loses the rest of the round. Better to say so up front.
+const MIN_FREE_DISK_MB = 500;
+
+// Safety valve for the finalizing gate: if the recordAsync pipeline somehow
+// never settles (native finalize normally takes 5-10s), unblock the record
+// button rather than leaving it bricked for the rest of the round.
+const FINALIZE_SAFETY_MS = 30_000;
 
 // Dynamically import native-only modules
 const KeepAwake = isNative
@@ -122,6 +137,25 @@ export function useCamera({
   const isRecordingRef = useRef(false);
   const recordingStartTime = useRef<number>(0);
   const lastToggleTime = useRef<number>(0);
+  // True from the stop press until the recordAsync save pipeline settles
+  // (the native MP4 finalize takes 5-10s). While set, new starts are
+  // blocked: calling recordAsync against a still-finalizing movie output
+  // makes the native side silently no-op (promise never settles — REC shows
+  // while nothing records) or reject with the generic recording error.
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const isFinalizingRef = useRef(false);
+  // Monotonic recording generation. The shared `finally` of an OLD
+  // startRecording invocation must never clobber the state of a NEWER
+  // recording (UI flipping to idle / KeepAwake dropping while the camera is
+  // genuinely recording), so state resets are gated on the generation still
+  // being current.
+  const recordingGenRef = useRef(0);
+  // Generation whose clip should be DISCARDED on resolve: set when a <2s
+  // stop is forced (on-screen button / tutorial end) — the too-short file
+  // can't contain a shot and often fails finalize, so we swallow both the
+  // file and the expected error instead of surfacing S2.
+  const cancelledGenRef = useRef(0);
+  const finalizeTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // Keep refs in sync with params (they change each shot)
   const paramsRef = useRef({ roundId, holeNumber, shotNumber });
@@ -191,18 +225,46 @@ export function useCamera({
   }, []);
 
   const startRecording = useCallback(async () => {
-    if (!isNative || !cameraRef.current || isRecordingRef.current) return;
+    if (!isNative || !cameraRef.current) return;
+    if (
+      !canStartRecording({
+        isRecording: isRecordingRef.current,
+        isFinalizing: isFinalizingRef.current,
+      })
+    ) {
+      // A press during the previous clip's 5-10s finalize window used to
+      // reach recordAsync on a busy movie output — native record() no-ops
+      // without settling the promise, so REC showed while nothing recorded.
+      console.log('[useCamera] start ignored — previous clip still finalizing');
+      return;
+    }
 
     // Capture practice mode AT START. If the tutorial started this clip, we
     // discard it on stop regardless of whether practice mode is still on by
     // the time recordAsync resolves.
     const isPractice = practiceRef.current;
+    const gen = ++recordingGenRef.current;
 
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       isRecordingRef.current = true;
       setIsRecording(true);
       recordingStartTime.current = Date.now();
+
+      // Disk-space preflight: on a nearly-full phone every finalize fails
+      // with the generic recording error and the shot silently vanishes.
+      // getMemoryStats returns -1s when the native module is unavailable —
+      // skip the check rather than false-positive.
+      try {
+        const stats = await getMemoryStats();
+        if (stats.freeDiskMB >= 0 && stats.freeDiskMB < MIN_FREE_DISK_MB) {
+          Alert.alert(
+            'Storage almost full',
+            `Only ${Math.round(stats.freeDiskMB)}MB free. Free up space to keep recording shots — clips need room for the original and trimmed files.`
+          );
+          return; // finally resets the eager state flip above
+        }
+      } catch {}
 
       // Keep screen awake
       KeepAwake?.activateKeepAwakeAsync('recording');
@@ -281,6 +343,17 @@ export function useCamera({
       const video = await cameraRef.current.recordAsync({
         maxDuration: 120,
       });
+
+      // Force-stopped under the 2s minimum (on-screen button / tutorial
+      // end): the recording genuinely ended, but a <2s file can't contain a
+      // shot — discard it rather than saving a junk clip.
+      if (cancelledGenRef.current === gen) {
+        if (video?.uri) {
+          deleteFile(video.uri).catch(() => {});
+        }
+        console.log('[useCamera] cancelled clip discarded (<2s forced stop)');
+        return;
+      }
 
       // Practice / tutorial clip — discard it. The user saw the recording
       // happen (REC indicator, torch) but we don't persist anything.
@@ -370,6 +443,11 @@ export function useCamera({
         // can finish updating React state (isRecording=false, button resets)
         // before we kick off heavy detection + file I/O. Without this the stop
         // tap can visibly "lag" by a second or more on lower-end devices.
+        // Register the clip as trim-in-flight so the mid-round editor's
+        // processAllUntrimmed batch can't start a SECOND detect+trim on the
+        // same source file concurrently (the record screen stays mounted
+        // under the editor during "Review round so far").
+        if (clipId) markTrimInFlight(clipId);
         InteractionManager.runAfterInteractions(() => {
           loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
           try {
@@ -387,6 +465,19 @@ export function useCamera({
             // A/B harness (additive, non-fatal): record a structured row.
             void logDetection(clipId, result).catch(() => {});
             if (!clipId) return;
+
+            // "Delete last shot" may have removed this clip while detection
+            // ran. Applying the result would leak a trimmed file for a row
+            // that no longer exists, and firing onShotClassified would feed
+            // the putt→swing hole-advance detector a shot the user deleted.
+            const stillExists = await clipExists(clipId).catch(() => true);
+            if (!stillExists) {
+              if (result.trimmedUri && result.trimmedUri !== finalUri) {
+                deleteFile(result.trimmedUri).catch(() => {});
+              }
+              console.log('[ShotDetector] clip deleted during detection — skipping classification');
+              return;
+            }
 
             if (result.found && result.trimmedUri) {
               // Swing detected + trimmed file produced
@@ -436,11 +527,18 @@ export function useCamera({
             }
           } catch (err) {
             console.log('[ShotDetector] Detection error (non-fatal):', err);
+          } finally {
+            if (clipId) clearTrimInFlight(clipId);
           }
           });
         });
 
         const clip: ClipMetadata = {
+          // Carry the SQLite rowid so "Delete last shot" can actually delete
+          // the row + files for clips recorded THIS session (previously only
+          // recovered rounds had ids, so fresh-session undos were memory-only
+          // and the clip reappeared in the editor).
+          id: clipId,
           roundId: rid,
           holeNumber: hole,
           shotNumber: shot,
@@ -463,11 +561,39 @@ export function useCamera({
         });
       }
     } catch (error) {
-      console.error('[useCamera] Recording error:', error);
+      if (cancelledGenRef.current === gen) {
+        // Expected: a <2s forced stop often fails MP4 finalize. The clip
+        // was deliberately discarded — don't surface the scary generic
+        // error for it.
+        console.log('[useCamera] cancelled recording finalize error (expected):', error);
+      } else {
+        console.error('[useCamera] Recording error:', error);
+        // Surface the failure — previously every recordAsync rejection
+        // (backgrounding, phone call, disk full, session teardown) was
+        // console-only and the user discovered missing shots in the editor.
+        if (!isPractice) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+          Alert.alert(
+            'Recording failed',
+            'This shot was not saved. If this keeps happening, check your free storage and avoid locking or leaving the app while recording.'
+          );
+        }
+      }
     } finally {
-      isRecordingRef.current = false;
-      setIsRecording(false);
-      KeepAwake?.deactivateKeepAwake('recording');
+      // Generation guard: never let a stale invocation's finally clobber a
+      // newer recording's state (UI would show idle + KeepAwake would drop
+      // while the camera is still recording).
+      if (recordingGenRef.current === gen) {
+        isRecordingRef.current = false;
+        setIsRecording(false);
+        isFinalizingRef.current = false;
+        setIsFinalizing(false);
+        if (finalizeTimeoutRef.current) {
+          clearTimeout(finalizeTimeoutRef.current);
+          finalizeTimeoutRef.current = undefined;
+        }
+        KeepAwake?.deactivateKeepAwake('recording');
+      }
       // INTENTIONALLY do NOT restore the shared session to .ambient here.
       //
       // The mic AVCaptureDeviceInput stays attached to the AVCaptureSession
@@ -491,6 +617,17 @@ export function useCamera({
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
 
+    // A stop under the 2s minimum only reaches here when it was FORCED
+    // (on-screen record button, tutorial end) — the clicker path swallows
+    // early stops in toggleRecording. The recording must genuinely end (the
+    // user unambiguously asked), but the too-short file can't contain a
+    // shot and often fails MP4 finalize, so mark the generation cancelled:
+    // the pipeline discards the file and swallows the expected error.
+    const elapsed = Date.now() - recordingStartTime.current;
+    if (elapsed < 2000) {
+      cancelledGenRef.current = recordingGenRef.current;
+    }
+
     // Eagerly flip the recording state BEFORE telling iOS to finalize the
     // clip. The `recordAsync` promise in startRecording can take 5–10s to
     // resolve on iOS (it has to finalize the MP4 container), and the
@@ -508,6 +645,21 @@ export function useCamera({
     isRecordingRef.current = false;
     setIsRecording(false);
 
+    // Enter the finalizing window: block new starts until the recordAsync
+    // pipeline settles (its finally clears this). A safety timeout unblocks
+    // the button if the promise somehow never settles.
+    isFinalizingRef.current = true;
+    setIsFinalizing(true);
+    const gen = recordingGenRef.current;
+    if (finalizeTimeoutRef.current) clearTimeout(finalizeTimeoutRef.current);
+    finalizeTimeoutRef.current = setTimeout(() => {
+      if (recordingGenRef.current === gen && isFinalizingRef.current) {
+        console.log('[useCamera] finalize safety timeout — unblocking record');
+        isFinalizingRef.current = false;
+        setIsFinalizing(false);
+      }
+    }, FINALIZE_SAFETY_MS);
+
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
       cameraRef.current.stopRecording();
@@ -517,7 +669,7 @@ export function useCamera({
     }
   }, []);
 
-  const toggleRecording = useCallback(async () => {
+  const toggleRecording = useCallback(async (opts?: { force?: boolean }) => {
     // Debounce — ignore rapid double-fires from shutter (volume + key event).
     // 200ms is enough to swallow the doubled event without making a genuine
     // "start, wait ~300ms, try stop" interaction feel unresponsive.
@@ -526,24 +678,47 @@ export function useCamera({
     lastToggleTime.current = now;
 
     if (isRecordingRef.current) {
-      // Minimum-duration gate: no real golf clip is under ~2s (a swing with
-      // pre/post-roll is 4s+), but phantom volume events DO arrive ~1-1.5s
-      // after start (clicker bounce / iOS volume-ramp echo — seen in the
-      // field as "recording started then instantly stopped with an error").
-      // A stop that early also makes recordAsync reject with a generic
-      // "error occurred while recording" for the too-short file. Swallow it.
-      const elapsed = now - recordingStartTime.current;
-      if (elapsed < 2000) {
+      // Minimum-duration gate (pure logic in lib/liveRecordingLogic): no
+      // real golf clip is under ~2s, but phantom volume events DO arrive
+      // ~1-1.5s after start (clicker bounce / iOS volume-ramp echo), so an
+      // un-forced early stop is swallowed. A FORCED early stop (on-screen
+      // record button — an unambiguous user intent) cancels instead: the
+      // recording ends and the too-short clip is discarded, rather than
+      // silently running on to the 120s cap after a confirming haptic.
+      const action = resolveStopRequest({
+        elapsedMs: now - recordingStartTime.current,
+        forced: opts?.force ?? false,
+      });
+      if (action === 'ignore') {
         console.log(
-          `[useCamera] stop ignored — only ${elapsed}ms after start (phantom click guard)`
+          `[useCamera] stop ignored — only ${now - recordingStartTime.current}ms after start (phantom click guard)`
         );
         return;
       }
+      // 'cancel' semantics are applied inside stopRecording (it marks the
+      // generation cancelled so the pipeline discards the clip).
       await stopRecording();
     } else {
       await startRecording();
     }
   }, [startRecording, stopRecording]);
+
+  // Stop gracefully BEFORE iOS tears down the capture session on
+  // background/lock/phone-call. expo-camera stops the whole session when the
+  // app backgrounds, which aborts the in-flight recordAsync with the generic
+  // recording error and loses the footage entirely; stopping on the
+  // 'inactive' transition instead lets the MP4 finalize and the clip save
+  // through the normal pipeline.
+  useEffect(() => {
+    if (!isNative) return;
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state !== 'active' && isRecordingRef.current) {
+        console.log('[useCamera] app leaving foreground mid-recording — stopping to salvage clip');
+        stopRecording();
+      }
+    });
+    return () => sub.remove();
+  }, [stopRecording]);
 
   // Web stubs for development
   const simulateRecording = useCallback(async () => {
@@ -588,6 +763,7 @@ export function useCamera({
   return {
     cameraRef,
     isRecording,
+    isFinalizing,
     hasPermission,
     requestPermission,
     startRecording,
