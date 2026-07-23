@@ -163,7 +163,7 @@
   /* ── Nav ── */
   nav {
     position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-    display: flex; align-items: center; justify-content: center;
+    display: flex; align-items: center; justify-content: space-between;
     padding: 14px 48px;
     padding-top: calc(14px + env(safe-area-inset-top, 0px));
     background: var(--bg);
@@ -195,6 +195,13 @@
   .nav-tag {
     display: none;
   }
+  .nav-mount-link {
+    font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.15em;
+    text-transform: uppercase; color: var(--green); text-decoration: none;
+    border: 1px solid var(--border); border-radius: 20px; padding: 7px 16px;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .nav-mount-link:hover { background: rgba(168,230,61,0.08); border-color: var(--green); }
 
   /* ── Hero ── */
   .hero {
@@ -905,7 +912,7 @@
   <div style="display:flex;align-items:baseline;">
     <div class="logo">CLIPPAR</div>
   </div>
-  <div></div>
+  <a class="nav-mount-link" href="/mount">Mount Kit &rarr;</a>
 </nav>
 
 <main>
