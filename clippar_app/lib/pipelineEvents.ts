@@ -17,6 +17,22 @@
 export type PipelineEvent =
   | { type: 'compose:start'; roundId: string; courseName: string | null }
   | {
+      /**
+       * Phase transition inside a compose job.
+       *
+       *   - `preparing`  — pre-native work (clip recovery / music resolution).
+       *     On slow LTE this can run for a while; it emits liveness labels but
+       *     must NOT arm the 30s stall watchdog (there is no native progress to
+       *     measure yet).
+       *   - `composing`  — the native composeReel stage has truly begun. This is
+       *     the ONLY signal that arms the watchdog.
+       */
+      type: 'compose:stage';
+      roundId: string;
+      stage: 'preparing' | 'composing';
+      stageLabel: string;
+    }
+  | {
       type: 'compose:progress';
       roundId: string;
       stageLabel: string;

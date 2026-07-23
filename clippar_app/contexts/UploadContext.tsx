@@ -13,9 +13,11 @@
  * What remains here is a read-only broadcaster: it subscribes to
  * lib/pipelineEvents.ts (fed by the editor's composeReel flow and the
  * backup queue) and folds the events into ComposeState/BackupState for
- * the UI. It also runs the 30s compose watchdog — any active compose with
- * no progress signal for 30s flips to FAILED ("Rendering didn't finish"),
- * so there is never an eternal spinner.
+ * the UI. It also runs the 30s compose watchdog — but only AFTER the native
+ * composeReel stage has begun (compose:stage → 'composing'). A stalled native
+ * render with no progress for 30s flips to FAILED ("Rendering didn't finish"),
+ * so there is never an eternal spinner; the pre-native clip-recovery/music
+ * phase (which can legitimately exceed 30s on slow LTE) does NOT arm it.
  */
 import { createContext, useContext, useState, useCallback, useRef, useEffect } from 'react';
 import type { ReactNode } from 'react';
@@ -27,8 +29,15 @@ import {
 import { COMPOSE_WATCHDOG_MS, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 
 export interface ComposeState {
-  /** A local compose job is running right now. */
+  /** A local compose job is running right now (any phase). */
   active: boolean;
+  /**
+   * The native composeReel stage has actually begun (i.e. the pre-native
+   * clip-recovery / music-resolution work is done). ONLY once this is true
+   * does the 30s stall watchdog arm — a slow-LTE recovery phase must never
+   * be mistaken for a stalled render.
+   */
+  nativeStarted: boolean;
   roundId: string | null;
   courseName: string | null;
   /** Stage label per the copy sheet (e.g. "Stitching your reel…"). */
@@ -60,6 +69,7 @@ interface UploadContextType {
 
 const INITIAL_COMPOSE: ComposeState = {
   active: false,
+  nativeStarted: false,
   roundId: null,
   courseName: null,
   stageLabel: '',
@@ -104,16 +114,37 @@ export function UploadProvider({ children }: { children: ReactNode }) {
           setCompose({
             ...INITIAL_COMPOSE,
             active: true,
+            // Native compose has NOT started yet — clip recovery/music
+            // resolution run first. Watchdog stays disarmed until the
+            // `composing` stage arrives.
+            nativeStarted: false,
             roundId: event.roundId,
             courseName: event.courseName,
-            stageLabel: 'Building reel…',
+            stageLabel: 'Getting your clips…',
           });
           break;
+        case 'compose:stage':
+          // Refresh the stall reference on every phase transition so the
+          // watchdog (once armed) always measures from the true native start.
+          lastComposeSignalRef.current = Date.now();
+          activeComposeRoundRef.current = event.roundId;
+          setCompose((prev) => ({
+            ...prev,
+            active: true,
+            roundId: event.roundId,
+            stageLabel: event.stageLabel,
+            // Only the `composing` stage arms the watchdog.
+            nativeStarted: event.stage === 'composing' ? true : prev.nativeStarted,
+          }));
+          break;
         case 'compose:progress':
+          // Any real native progress resets the stall timer (F2b).
           lastComposeSignalRef.current = Date.now();
           setCompose((prev) => ({
             ...prev,
             active: true,
+            // Native progress implies the native stage is running.
+            nativeStarted: true,
             roundId: event.roundId,
             stageLabel: event.stageLabel,
             percent: event.percent,
@@ -124,6 +155,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
           setCompose((prev) => ({
             ...prev,
             active: false,
+            nativeStarted: false,
             roundId: null,
             stageLabel: '',
             percent: null,
@@ -138,6 +170,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
           setCompose((prev) => ({
             ...prev,
             active: false,
+            nativeStarted: false,
             roundId: null,
             stageLabel: '',
             percent: null,
@@ -173,10 +206,15 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     return unsubscribe;
   }, []);
 
-  // 30s compose watchdog — no progress signal flips the job to FAILED so
-  // the UI can never strand on an eternal spinner.
+  // 30s compose watchdog — a genuine-stall backstop, armed ONLY once the
+  // native composeReel stage has begun (compose.nativeStarted). Arming it at
+  // compose:start would misfire during a slow-LTE clip-recovery/music phase
+  // that legitimately exceeds 30s, flip the job to FAILED while it is still
+  // running, and let a Retry launch a second concurrent compose. It resets on
+  // every compose:progress (lastComposeSignalRef), so it only fires after a
+  // real, running native stage produces no progress for 30s.
   useEffect(() => {
-    if (!compose.active) return;
+    if (!compose.nativeStarted) return;
     const interval = setInterval(() => {
       const roundId = activeComposeRoundRef.current;
       if (!roundId) return;
@@ -189,7 +227,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
       }
     }, 5_000);
     return () => clearInterval(interval);
-  }, [compose.active]);
+  }, [compose.nativeStarted]);
 
   const dismissComposeError = useCallback(() => {
     setCompose((prev) => ({
