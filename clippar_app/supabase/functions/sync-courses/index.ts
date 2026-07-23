@@ -16,12 +16,86 @@
  *   GOLF_API_IO_KEY       - from golfapi.io (optional, paid)
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 );
+
+/**
+ * Is this user an admin? Checks the `admin_users` table by id or email using
+ * the service-role client (RLS-bypassing). Admin-only actions
+ * (approve_suggestion, sync_region) gate on this; the everyday search-fallback
+ * action (sync_single) only requires a valid signed-in user.
+ */
+async function isAdminUser(
+  userId: string,
+  email: string | null | undefined,
+): Promise<boolean> {
+  const { data: byId } = await supabase
+    .from('admin_users')
+    .select('id')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (byId) return true;
+
+  if (email) {
+    const { data: byEmail } = await supabase
+      .from('admin_users')
+      .select('id')
+      .eq('email', email)
+      .maybeSingle();
+    if (byEmail) return true;
+  }
+  return false;
+}
+
+// Per-user daily cap for the course-sync actions. sync_single is reachable by
+// any signed-in user and each call can drive service-role catalog writes +
+// external-API quota, so cap how many a single account can make per UTC day.
+// Generous enough that ordinary course search never hits it. The counter lives
+// in the service-role-only `sync_course_usage` table (no client RLS access), so
+// a user cannot inspect or reset it.
+const MAX_SYNC_CALLS_PER_DAY = 20;
+
+/**
+ * Returns a 429 Response if the user is at/over the daily cap; otherwise records
+ * this call (increments the counter) and returns null. The read-then-write
+ * increment can race under heavy concurrency, but this is a rate-limit backstop
+ * (the real protection is the INSERT-only + escaped-ILIKE hardening), so a small
+ * overshoot is acceptable.
+ */
+async function enforceDailySyncCap(
+  userId: string,
+  corsHeaders: Record<string, string>,
+): Promise<Response | null> {
+  const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
+
+  const { data: usage } = await supabase
+    .from('sync_course_usage')
+    .select('count')
+    .eq('user_id', userId)
+    .eq('usage_date', today)
+    .maybeSingle();
+
+  const current = usage?.count ?? 0;
+  if (current >= MAX_SYNC_CALLS_PER_DAY) {
+    return new Response(
+      JSON.stringify({ error: 'Daily course-sync limit reached' }),
+      { status: 429, headers: corsHeaders }
+    );
+  }
+
+  await supabase
+    .from('sync_course_usage')
+    .upsert(
+      { user_id: userId, usage_date: today, count: current + 1 },
+      { onConflict: 'user_id,usage_date' }
+    );
+
+  return null;
+}
 
 // ────────────────────────────────────────────────────────────
 // Shared types
@@ -241,7 +315,22 @@ function mapGolfApiIoResponse(raw: any): { course: CourseData; holes: HoleData[]
 // Database upsert logic
 // ────────────────────────────────────────────────────────────
 
-async function upsertCourse(courseData: CourseData, holesData: HoleData[]): Promise<string | null> {
+/**
+ * Escape PostgreSQL LIKE/ILIKE metacharacters (`\` `%` `_`) so a value is
+ * matched literally (case-insensitively) rather than as a wildcard pattern.
+ * Backslash must be escaped first. Without this, a course name containing `%`
+ * or `_` becomes a wildcard that fuzzily matches — and, in the non-insert path,
+ * overwrites — an unrelated existing course.
+ */
+function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+}
+
+async function upsertCourse(
+  courseData: CourseData,
+  holesData: HoleData[],
+  insertOnly = false,
+): Promise<string | null> {
   // Try to find existing course by source + source_id or by name
   let courseId: string | null = null;
 
@@ -256,18 +345,27 @@ async function upsertCourse(courseData: CourseData, holesData: HoleData[]): Prom
   }
 
   if (!courseId) {
-    // Fallback: match by name (fuzzy)
+    // Fallback: match by name (case-insensitive exact, metacharacters escaped)
     const { data: existing } = await supabase
       .from('courses')
       .select('id')
-      .ilike('name', courseData.name)
+      .ilike('name', escapeLikePattern(courseData.name))
       .eq('country', courseData.country)
       .maybeSingle();
     courseId = existing?.id ?? null;
   }
 
   if (courseId) {
-    // Update existing
+    // An existing shared-catalog row matched.
+    if (insertOnly) {
+      // Untrusted caller (sync_single): never UPDATE an existing course or
+      // overwrite its holes on behalf of an arbitrary authenticated user — that
+      // would let anyone rewrite the shared catalog by passing a colliding
+      // name. Return the existing id so search still resolves, but leave the
+      // row and its holes untouched.
+      return courseId;
+    }
+    // Update existing (trusted admin / bulk-sync flows only)
     await supabase
       .from('courses')
       .update({
@@ -334,8 +432,50 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    // ── Authenticate the caller ─────────────────────────────
+    // The platform default (verify_jwt=true) only proves the request carries a
+    // valid signed JWT — the public anon key satisfies that. Resolve an actual
+    // end user here and reject anonymous/anon-key calls outright.
+    const token = req.headers.get('Authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: corsHeaders }
+      );
+    }
+    const {
+      data: { user },
+      error: authError,
+    } = await supabase.auth.getUser(token);
+    if (authError || !user) {
+      return new Response(
+        JSON.stringify({ error: 'Unauthorized' }),
+        { status: 401, headers: corsHeaders }
+      );
+    }
+
     const body = await req.json().catch(() => ({}));
     const action = body.action || 'sync_region';
+
+    // Privileged actions promote community data into the live catalog
+    // (approve_suggestion) or fan out bulk paid-API syncs (sync_region), and
+    // must be admin-only. sync_single is the everyday course-search fallback
+    // and stays available to any signed-in user.
+    if (action === 'approve_suggestion' || action === 'sync_region') {
+      if (!(await isAdminUser(user.id, user.email))) {
+        return new Response(
+          JSON.stringify({ error: 'Forbidden' }),
+          { status: 403, headers: corsHeaders }
+        );
+      }
+    }
+
+    // Per-user daily cap on the catalog-sync actions (sync_single is open to
+    // any signed-in user; sync_region is admin-only but still quota-bearing).
+    if (action === 'sync_single' || action === 'sync_region') {
+      const capped = await enforceDailySyncCap(user.id, corsHeaders);
+      if (capped) return capped;
+    }
 
     // ── Action: sync_region ─────────────────────────────────
     // Syncs courses for a region (default: QLD, AU)
@@ -415,7 +555,9 @@ Deno.serve(async (req: Request) => {
         const detail = await fetchGolfCourseAPIDetail(String(results[0].id));
         const mapped = mapGolfCourseAPIResponse(detail || results[0]);
         if (mapped) {
-          const id = await upsertCourse(mapped.course, mapped.holes);
+          // insertOnly: sync_single is reachable by any signed-in user, so it
+          // must never mutate an existing shared course.
+          const id = await upsertCourse(mapped.course, mapped.holes, true);
           return new Response(
             JSON.stringify({ success: true, course_id: id, source: 'golfcourseapi' }),
             { headers: corsHeaders }
@@ -430,7 +572,8 @@ Deno.serve(async (req: Request) => {
         const detail = await fetchGolfApiIoCourse(String(courseId));
         const mapped = mapGolfApiIoResponse(detail);
         if (mapped) {
-          const id = await upsertCourse(mapped.course, mapped.holes);
+          // insertOnly: see note above — never overwrite the shared catalog.
+          const id = await upsertCourse(mapped.course, mapped.holes, true);
           return new Response(
             JSON.stringify({ success: true, course_id: id, source: 'golfapiio' }),
             { headers: corsHeaders }

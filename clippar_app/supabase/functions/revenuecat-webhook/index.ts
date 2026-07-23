@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 
 /**
  * revenuecat-webhook — server-authoritative entitlement sync for Clippar Pro.
@@ -81,6 +81,18 @@ function deriveState(
   event: RcEvent,
   now: number
 ): { status: 'active' | 'trial' | 'expired'; expires_at: string | null } | null {
+  // Sandbox purchases (StoreKit sandbox / TestFlight Apple IDs) cost nothing
+  // but RevenueCat delivers their events to this same production webhook with
+  // environment:'SANDBOX'. Granting entitlements from them would hand out free
+  // Pro on real production profiles, so ack + skip them. A staging deployment
+  // can opt back in with REVENUECAT_ALLOW_SANDBOX=true.
+  if (
+    event.environment === 'SANDBOX' &&
+    Deno.env.get('REVENUECAT_ALLOW_SANDBOX') !== 'true'
+  ) {
+    return null;
+  }
+
   switch (event.type) {
     case 'TEST':
     case 'SUBSCRIBER_ALIAS':

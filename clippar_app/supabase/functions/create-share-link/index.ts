@@ -1,4 +1,4 @@
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 import { crypto } from 'https://deno.land/std/crypto/mod.ts';
 
 const supabase = createClient(

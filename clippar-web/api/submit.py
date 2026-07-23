@@ -5,10 +5,20 @@ Stores in Neon Postgres and syncs to Sender.net.
 
 import json
 import os
+import re
 
 from http.server import BaseHTTPRequestHandler
 import psycopg2
 import requests
+
+# Basic server-side validation limits. The endpoint is public and
+# unauthenticated, so it must not trust the client to have validated anything.
+MAX_BODY_BYTES = 4096
+MAX_NAME_LEN = 120
+MAX_EMAIL_LEN = 254
+ALLOWED_FREQUENCIES = {"", "weekly", "fortnightly", "monthly", "occasional"}
+# Pragmatic RFC-5321-ish email shape check: one @, no spaces, a dotted domain.
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _get_db_conn():
@@ -51,13 +61,33 @@ class handler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        content_length = int(self.headers.get("Content-Length", 0))
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+        except (TypeError, ValueError):
+            content_length = 0
+
+        # Cap the body before reading it so an oversized payload can't be used
+        # to exhaust memory on this public endpoint.
+        if content_length > MAX_BODY_BYTES:
+            self._send_json(413, {"ok": False, "error": "Payload too large"})
+            return
+
         body_bytes = self.rfile.read(content_length)
-        
+
         try:
             body = json.loads(body_bytes.decode("utf-8"))
-        except (json.JSONDecodeError, TypeError):
+        except (json.JSONDecodeError, TypeError, UnicodeDecodeError):
             self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+        if not isinstance(body, dict):
+            self._send_json(400, {"ok": False, "error": "Invalid JSON"})
+            return
+
+        # Honeypot: a hidden form field real users never fill. Bots that blindly
+        # populate every input trip it. Ack with 200 so the bot sees success,
+        # but write nothing and never touch Sender.net.
+        if (body.get("website") or "").strip():
+            self._send_json(200, {"ok": True})
             return
 
         name = (body.get("name") or "").strip()
@@ -66,6 +96,18 @@ class handler(BaseHTTPRequestHandler):
 
         if not name or not email:
             self._send_json(400, {"ok": False, "error": "Name and email are required."})
+            return
+
+        # Server-side format/length validation. Without this the endpoint
+        # accepts arbitrary victim addresses and unbounded strings.
+        if len(name) > MAX_NAME_LEN or len(email) > MAX_EMAIL_LEN:
+            self._send_json(400, {"ok": False, "error": "Name or email too long."})
+            return
+        if not EMAIL_RE.match(email):
+            self._send_json(400, {"ok": False, "error": "Please enter a valid email address."})
+            return
+        if frequency not in ALLOWED_FREQUENCIES:
+            self._send_json(400, {"ok": False, "error": "Invalid frequency."})
             return
 
         try:

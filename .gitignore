@@ -49,3 +49,10 @@ tmp_flip_run/
 # SQLite WAL files
 clippar.db-shm
 clippar.db-wal
+
+# Local secret / binary files that must never be committed
+Mailing key.docx
+# Office lock/owner files (e.g. ~$iling key.docx)
+~$*.docx
+# Packaged VS Code extensions (e.g. clippar_app/kickbacks.vsix)
+*.vsix
