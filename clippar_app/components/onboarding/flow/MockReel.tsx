@@ -16,7 +16,7 @@
  * holding on the end card.
  */
 import { useEffect, useState } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, Image, StyleSheet } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, {
   FadeIn,
@@ -244,7 +244,14 @@ function EndCard({ courseName }: { courseName?: string | null }) {
           halo,
         ]}
       />
-      <Text style={styles.wordmark}>CLIPPAR</Text>
+      <Image
+        source={require('@/assets/images/clippar-logo-stacked.png')}
+        style={styles.wordmark}
+        resizeMode="contain"
+        accessible
+        accessibilityRole="image"
+        accessibilityLabel="Clippar Golf"
+      />
       <Text style={styles.endSub}>{courseName ? courseName : 'Your round, cut to music'}</Text>
       <Text style={styles.endMeta}>18 HOLES · 6 CLIPS · TRACER ON</Text>
     </View>
@@ -297,10 +304,8 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
   wordmark: {
-    color: '#fff',
-    fontSize: 30,
-    fontWeight: '900',
-    letterSpacing: 4,
+    width: 148,
+    height: 96,
   },
   endSub: {
     color: theme.colors.textSecondary,
