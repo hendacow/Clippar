@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView } from 'react-native';
+import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView, Linking } from 'react-native';
 import { router } from 'expo-router';
 import { useRecordingContext } from '@/contexts/RecordingContext';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -17,6 +17,8 @@ import {
   ArrowLeft,
   Settings2,
   SwitchCamera,
+  Smartphone,
+  X,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -40,6 +42,7 @@ import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
 import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from '@/lib/storage';
+import { getMountCardDismissed, dismissMountCard } from '@/lib/mountOffer';
 import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset } from '@/lib/api';
@@ -67,6 +70,12 @@ export default function RecordScreen() {
   const [showPenalty, setShowPenalty] = useState(false);
   const [orphanedRound, setOrphanedRound] = useState<{ id: string; course_name: string } | null>(null);
   const importTarget = useOnboardingTarget('import-card');
+
+  // Clippar Mount cross-sell card (feat/mount-upsell). Lives on the idle
+  // chooser only — never anywhere near the live camera UI. Hidden until the
+  // persisted dismiss flag loads (starts false) so it can't flash for users
+  // who already closed it.
+  const [mountCardVisible, setMountCardVisible] = useState(false);
 
   // Wave 3 mode chooser. The Record tab now shows two cards on entry —
   // Import (clips from Photos) and Live (BLE-triggered camera recording).
@@ -367,6 +376,20 @@ export default function RecordScreen() {
     getSetting('clicker_tutorial_dismissed')
       .then((v) => setTutorialDismissed(v === '1'))
       .catch(() => {});
+  }, []);
+
+  // Load the mount-card dismiss flag once on mount.
+  useEffect(() => {
+    getMountCardDismissed()
+      .then((dismissed) => setMountCardVisible(!dismissed))
+      .catch(() => {});
+  }, []);
+
+  // X on the mount card: hide now, persist so it stays gone.
+  const handleDismissMountCard = useCallback(() => {
+    Haptics.selectionAsync();
+    setMountCardVisible(false);
+    void dismissMountCard();
   }, []);
 
   // Auto-show the clicker tutorial when a Live round becomes active, unless
@@ -721,6 +744,65 @@ export default function RecordScreen() {
             </View>
             <ChevronRight size={20} color={theme.colors.textTertiary} />
           </Pressable>
+
+          {/* Clippar Mount cross-sell — compact, dismissible, idle-state only.
+              The kit is a PHYSICAL product, so the CTA links out to Safari
+              (App Review 3.1.3(e): physical goods must not use IAP). The X
+              persists via lib/mountOffer so the card stays gone. */}
+          {mountCardVisible && (
+            <View
+              style={{
+                marginTop: 16,
+                borderRadius: theme.radius.lg,
+                backgroundColor: theme.colors.surface,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+              }}
+            >
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  Linking.openURL(config.shop.mountUrl).catch(() => {});
+                }}
+                style={({ pressed }) => ({
+                  flexDirection: 'row',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: 14,
+                  paddingRight: 40, // keep text clear of the X
+                  opacity: pressed ? 0.85 : 1,
+                })}
+              >
+                <View
+                  style={{
+                    width: 40,
+                    height: 40,
+                    borderRadius: 20,
+                    backgroundColor: theme.colors.primaryMuted,
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                  }}
+                >
+                  <Smartphone size={20} color={theme.colors.primary} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 14, fontWeight: '600' }}>
+                    Get the Clippar Mount — record hands-free
+                  </Text>
+                  <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 2 }}>
+                    Mount + clicker + charger · {config.shop.mountPriceLabel}
+                  </Text>
+                </View>
+              </Pressable>
+              <Pressable
+                onPress={handleDismissMountCard}
+                hitSlop={10}
+                style={{ position: 'absolute', top: 10, right: 10 }}
+              >
+                <X size={16} color={theme.colors.textTertiary} />
+              </Pressable>
+            </View>
+          )}
         </View>
       </GradientBackground>
     );

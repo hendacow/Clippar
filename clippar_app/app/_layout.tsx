@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { useSalesFlowDone } from '@/lib/salesFlow';
+import { resolvePostAuthRoute } from '@/lib/mountOffer';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
 import { OnboardingProvider } from '@/contexts/OnboardingContext';
@@ -92,7 +93,13 @@ function RootLayout() {
         router.replace('/(auth)/login');
       }
     } else if (user && (inAuthGroup || inOnboardingGroup)) {
-      router.replace('/(tabs)');
+      // New-account handoff (feat/mount-upsell): a freshly created account
+      // gets the one-time Clippar Mount offer before landing on the tabs;
+      // returning logins go straight home. Async because the seen/pending
+      // flags live in SQLite; fail-open to the tabs.
+      void resolvePostAuthRoute(user).then((route) =>
+        router.replace(route as never)
+      );
     }
   }, [user, loading, sales.loaded, sales.done, segments, router]);
 
@@ -181,6 +188,7 @@ function RootLayout() {
               name="paywall"
               options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
             />
+            <Stack.Screen name="mount-offer" options={{ animation: 'fade' }} />
           </Stack>
           <OnboardingHost />
         </BottomSheetModalProvider>
