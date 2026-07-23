@@ -8,7 +8,7 @@
  * expand glyph opens the round fullscreen with sound.
  */
 import { View, Text, Pressable, Dimensions, StyleSheet, Image, Platform } from 'react-native';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Play, Share2, Maximize2, RefreshCw, Film } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -55,10 +55,14 @@ function HeroInlinePlayer({ uri, muted }: { uri: string; muted: boolean }) {
   const { useVideoPlayer, VideoView } = ExpoVideo!;
   const player = useVideoPlayer(uri, (p) => {
     p.loop = true;
-    p.volume = muted ? 0 : 1;
+    p.volume = 0; // First tap always starts muted.
     p.play();
   });
-  player.volume = muted ? 0 : 1;
+  useEffect(() => {
+    try {
+      player.volume = muted ? 0 : 1;
+    } catch {}
+  }, [muted, player]);
   return (
     <VideoView
       player={player}
