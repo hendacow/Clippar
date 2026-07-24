@@ -10,12 +10,14 @@ import {
   Pressable,
 } from 'react-native';
 import { router } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Button } from '@/components/ui/Button';
 import { SocialAuthButtons } from '@/components/auth/SocialAuthButtons';
 import { useAuth } from '@/hooks/useAuth';
 import { resolvePostAuthRoute } from '@/lib/mountOffer';
+import { authContentJustify } from '@/lib/authLayoutLogic';
 
 export default function LoginScreen() {
   const [email, setEmail] = useState('');
@@ -23,6 +25,11 @@ export default function LoginScreen() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const { signIn } = useAuth();
+  const insets = useSafeAreaInsets();
+  // Track content vs viewport so we can center only when it fits — otherwise
+  // top-align so the logo stays fully below the Dynamic Island and reachable.
+  const [viewportHeight, setViewportHeight] = useState(0);
+  const [contentHeight, setContentHeight] = useState(0);
 
   const handleLogin = async () => {
     if (!email.trim() || !password.trim()) {
@@ -52,10 +59,15 @@ export default function LoginScreen() {
         style={{ flex: 1 }}
       >
         <ScrollView
+          onLayout={(e) => setViewportHeight(e.nativeEvent.layout.height)}
+          onContentSizeChange={(_w, h) => setContentHeight(h)}
           contentContainerStyle={{
             flexGrow: 1,
-            justifyContent: 'center',
+            justifyContent: authContentJustify(contentHeight, viewportHeight),
             padding: theme.spacing.lg,
+            // Guarantee the logo clears the status bar / Dynamic Island on every
+            // iPhone, even in the overflow (top-aligned) case.
+            paddingTop: theme.spacing.lg + insets.top,
           }}
           keyboardShouldPersistTaps="handled"
         >

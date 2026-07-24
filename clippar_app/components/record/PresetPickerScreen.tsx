@@ -131,7 +131,7 @@ export function PresetPickerScreen({
                     >
                       <Bookmark size={18} color={theme.colors.accent} />
                       <View style={{ flex: 1 }}>
-                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                        <View style={{ flexDirection: 'row', alignItems: 'flex-start', gap: 8 }}>
                           <Text
                             style={{
                               color: theme.colors.textPrimary,
@@ -139,7 +139,10 @@ export function PresetPickerScreen({
                               fontSize: 15,
                               flexShrink: 1,
                             }}
-                            numberOfLines={1}
+                            // Allow long course names ("Royal Queensland Golf
+                            // Club") a second line instead of truncating to
+                            // "Royal Queensland Golf...".
+                            numberOfLines={2}
                           >
                             {preset.name}
                           </Text>

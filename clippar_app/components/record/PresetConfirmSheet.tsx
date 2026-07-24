@@ -18,6 +18,7 @@
 import { useRef, useEffect, useState } from 'react';
 import { View, Text, Pressable } from 'react-native';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { Flag } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
@@ -46,6 +47,7 @@ export function PresetConfirmSheet({
   ctaLabel,
 }: PresetConfirmSheetProps) {
   const bottomSheetRef = useRef<BottomSheet>(null);
+  const insets = useSafeAreaInsets();
 
   // Local editable copy of the start hole. Resets whenever a new preset
   // is opened so we don't leak the previous preset's chosen hole.
@@ -131,7 +133,11 @@ export function PresetConfirmSheet({
 
         <Pressable
           onPress={onCancel}
-          style={{ alignItems: 'center', paddingTop: 14, paddingBottom: 4 }}
+          // Clear the home indicator / tab bar: the sheet spans to the screen
+          // bottom, so without the safe-area inset "Cancel" sits behind it and
+          // isn't fully tappable. insets.bottom is 0 on devices without a home
+          // indicator, so a small base keeps comfortable spacing everywhere.
+          style={{ alignItems: 'center', paddingTop: 14, paddingBottom: insets.bottom + 12 }}
         >
           <Text
             style={{

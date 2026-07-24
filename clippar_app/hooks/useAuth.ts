@@ -7,6 +7,7 @@ import * as AppleAuthentication from 'expo-apple-authentication';
 import { supabase } from '@/lib/supabase';
 import { iap } from '@/lib/iap';
 import { linkAppleCredentials } from '@/lib/api';
+import { isInvalidRefreshTokenError } from '@/lib/authSessionLogic';
 
 // Required so the browser-based Google OAuth flow completes cleanly when the
 // system browser hands control back to the app. No-op when not in an auth
@@ -19,23 +20,70 @@ export function useAuth() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
+    let cancelled = false;
+
+    // Cold-start session recovery. getSession() attempts a token refresh; when
+    // the stored refresh token is stale/missing GoTrue rejects with an
+    // "Invalid Refresh Token" AuthApiError. Without this try/catch that
+    // rejection is uncaught and surfaces as a red LogBox error on device. We
+    // handle ONLY that case by clearing the dead token and treating the user as
+    // signed out — any other error is logged (not re-thrown, which would just be
+    // a fresh red box) and a VALID session is never disturbed.
+    (async () => {
+      try {
+        const { data: { session } } = await supabase.auth.getSession();
+        if (cancelled) return;
+        setSession(session);
+        setUser(session?.user ?? null);
+        setLoading(false);
+        // Alias the RevenueCat customer to the Supabase user so StoreKit and
+        // web subscriptions resolve to the same person. Fire-and-forget.
+        if (session?.user) void iap.identify(session.user.id);
+      } catch (err) {
+        if (cancelled) return;
+        if (isInvalidRefreshTokenError(err)) {
+          // Stale token that can never be recovered — purge it locally (no
+          // network call) and land cleanly on the login screen. onAuthStateChange
+          // will also fire SIGNED_OUT; both paths converge on a null session.
+          try {
+            await supabase.auth.signOut({ scope: 'local' });
+          } catch {
+            // Best-effort; a failed local sign-out must not resurface an error.
+          }
+          if (cancelled) return;
+          setSession(null);
+          setUser(null);
+          setLoading(false);
+        } else {
+          // Not the stale-token case (e.g. transient/unknown error). Don't
+          // clear a possibly-valid session and don't re-throw (that would be a
+          // fresh uncaught rejection / red box). Log for dev visibility and let
+          // onAuthStateChange's INITIAL_SESSION reconcile the real state.
+          console.warn('[useAuth] getSession failed (non-token error):', err);
+          setLoading(false);
+        }
+      }
+    })();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // TOKEN_REFRESHED, SIGNED_IN, INITIAL_SESSION → carry the fresh session.
+      // SIGNED_OUT (including the local sign-out above) → session is null, which
+      // routes the user to login. In all cases mirror GoTrue's own state rather
+      // than second-guess it.
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
-      // Alias the RevenueCat customer to the Supabase user so StoreKit and
-      // web subscriptions resolve to the same person. Fire-and-forget.
+      if (event === 'SIGNED_OUT') {
+        // Nothing to alias; RevenueCat keeps its anonymous id until next login.
+        return;
+      }
       if (session?.user) void iap.identify(session.user.id);
     });
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      setUser(session?.user ?? null);
-      setLoading(false);
-      if (session?.user) void iap.identify(session.user.id);
-    });
-
-    return () => subscription.unsubscribe();
+    return () => {
+      cancelled = true;
+      subscription.unsubscribe();
+    };
   }, []);
 
   const signIn = useCallback(async (email: string, password: string) => {
