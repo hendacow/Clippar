@@ -1,5 +1,7 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import { View, Text, Pressable, Alert, Platform, StyleSheet, ScrollView, Linking } from 'react-native';
+import { GestureDetector, Gesture } from 'react-native-gesture-handler';
+import { useSharedValue, runOnJS } from 'react-native-reanimated';
 import { router } from 'expo-router';
 import { useIsFocused } from '@react-navigation/native';
 import { useRecordingContext } from '@/contexts/RecordingContext';
@@ -154,6 +156,37 @@ export default function RecordScreen() {
   const [availableLenses, setAvailableLenses] = useState<string[]>([]);
   const [zoomMode, setZoomMode] = useState<'0.5x' | '1x'>('1x');
 
+  // ── Continuous pinch-to-zoom (ADDITIVE — capture-side only) ────────────
+  // Digital zoom applied ON TOP of the selected lens. expo-camera's `zoom`
+  // prop is a normalized 0..1 value (0 = the lens's native framing, 1 = its
+  // max digital zoom); we drive it from a two-finger Pinch gesture over the
+  // preview. Like the lens toggle above, this is a pure capture choice — the
+  // shot detector / auto-trim run on the recorded file afterwards, so zoom
+  // never reaches the detection pipeline. Unlike the lens/flip toggles it is
+  // NOT blocked mid-recording: setting videoZoomFactor is a digital crop that
+  // doesn't reconfigure the AVCaptureSession (safe to ramp while recording,
+  // exactly like the native Camera app).
+  //
+  // `zoom` is the React state passed to CameraView. `zoomShared` mirrors it on
+  // the UI thread so the gesture worklet can read the live value on begin, and
+  // `pinchBaseZoom` snapshots the zoom at gesture start so scaling is relative.
+  const [zoom, setZoom] = useState(0);
+  const [zoomIndicatorVisible, setZoomIndicatorVisible] = useState(false);
+  const zoomShared = useSharedValue(0);
+  const pinchBaseZoom = useSharedValue(0);
+  const lastAppliedZoom = useSharedValue(0);
+  const zoomIndicatorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Pinch feel. (scale - 1) is the fractional finger spread; multiplying by
+  // SENSITIVITY spreads a full pinch across roughly the whole 0..1 range while
+  // keeping small movements fine-grained. iOS maps the normalized 0..1 zoom
+  // non-linearly onto videoZoomFactor (the low end is already compressed), so
+  // low-zoom control stays precise like the native camera. Tune on device.
+  const PINCH_SENSITIVITY = 0.5;
+  // Approximate perceived digital-zoom range for the on-screen indicator only
+  // (NOT an exact optical figure — see zoomLabel below).
+  const MAX_DIGITAL_ZOOM_X = 5;
+
   // Resolve the iOS lens names (localized strings from getAvailableLensesAsync,
   // e.g. "Back Camera", "Back Ultra Wide Camera") to our two framings.
   const ultraWideLens = availableLenses.find((l) => /ultra/i.test(l));
@@ -222,21 +255,100 @@ export default function RecordScreen() {
   // Camera framing handlers — defined after `camera` so they can read
   // isRecording. Both are inert mid-clip so the AVCaptureSession is never
   // reconfigured under a running recording.
+  // Reset digital pinch zoom back to the lens's native framing. Called when
+  // the base lens changes (flip / 0.5×–1× toggle) so pinch zoom never silently
+  // compounds on top of a lens the user just switched to — they always start
+  // fresh at the new framing, matching the native camera.
+  const resetPinchZoom = useCallback(() => {
+    zoomShared.value = 0;
+    lastAppliedZoom.value = 0;
+    setZoom(0);
+  }, [zoomShared, lastAppliedZoom]);
+
   const flipCamera = useCallback(() => {
     if (camera.isRecording) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setFacing((f) => (f === 'back' ? 'front' : 'back'));
     setZoomMode('1x'); // front has no ultra-wide — always land on 1×
-  }, [camera.isRecording]);
+    resetPinchZoom();
+  }, [camera.isRecording, resetPinchZoom]);
 
   const selectZoom = useCallback(
     (mode: '0.5x' | '1x') => {
       if (camera.isRecording) return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setZoomMode(mode);
+      resetPinchZoom();
     },
-    [camera.isRecording]
+    [camera.isRecording, resetPinchZoom]
   );
+
+  // Zoom indicator show/hide. The pill is visible while pinching and lingers
+  // ~0.9s after the fingers lift (like the native camera), then fades out.
+  const showZoomIndicator = useCallback(() => {
+    if (zoomIndicatorTimer.current) {
+      clearTimeout(zoomIndicatorTimer.current);
+      zoomIndicatorTimer.current = null;
+    }
+    setZoomIndicatorVisible(true);
+  }, []);
+
+  const scheduleHideZoomIndicator = useCallback(() => {
+    if (zoomIndicatorTimer.current) clearTimeout(zoomIndicatorTimer.current);
+    zoomIndicatorTimer.current = setTimeout(() => {
+      setZoomIndicatorVisible(false);
+      zoomIndicatorTimer.current = null;
+    }, 900);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (zoomIndicatorTimer.current) clearTimeout(zoomIndicatorTimer.current);
+    },
+    []
+  );
+
+  // Two-finger continuous pinch → digital zoom. The gesture callbacks run as
+  // Reanimated worklets on the UI thread for 60fps smoothness; we only hop to
+  // JS (runOnJS → setZoom) when the value moves by a meaningful step so the
+  // CameraView prop re-renders without flooding the JS thread each frame.
+  const pinchGesture = useMemo(
+    () =>
+      Gesture.Pinch()
+        .onBegin(() => {
+          pinchBaseZoom.value = zoomShared.value;
+          lastAppliedZoom.value = zoomShared.value;
+          runOnJS(showZoomIndicator)();
+        })
+        .onUpdate((e) => {
+          const next = Math.min(
+            1,
+            Math.max(0, pinchBaseZoom.value + (e.scale - 1) * PINCH_SENSITIVITY)
+          );
+          zoomShared.value = next;
+          if (Math.abs(next - lastAppliedZoom.value) >= 0.004 || next === 0 || next === 1) {
+            lastAppliedZoom.value = next;
+            runOnJS(setZoom)(next);
+          }
+        })
+        .onFinalize(() => {
+          runOnJS(setZoom)(zoomShared.value);
+          runOnJS(scheduleHideZoomIndicator)();
+        }),
+    [
+      pinchBaseZoom,
+      zoomShared,
+      lastAppliedZoom,
+      showZoomIndicator,
+      scheduleHideZoomIndicator,
+    ]
+  );
+
+  // Human-readable zoom label for the indicator. Combines the base lens
+  // framing (0.5× ultra-wide vs 1× wide) with the digital multiplier. This is
+  // an APPROXIMATION for UX only — not an exact optical focal length.
+  const baseLensX = zoomMode === '0.5x' && hasUltraWide ? 0.5 : 1;
+  const zoomLabel = `${(baseLensX * (1 + zoom * (MAX_DIGITAL_ZOOM_X - 1))).toFixed(1)}x`;
 
   // TEMP camera-lens diagnostic (dev only — remove after field validation).
   // Prints exactly what this device reports so the 1×/0.5× lens matching can
@@ -1304,10 +1416,15 @@ export default function RecordScreen() {
           Metro reload alone won't include it; the dev client must be rebuilt
           (expo run:ios / new EAS dev build). */}
       {isNative && CameraView ? (
+        <GestureDetector gesture={pinchGesture}>
         <CameraView
           ref={camera.cameraRef}
           style={StyleSheet.absoluteFillObject}
           facing={facing}
+          // Continuous digital zoom (0..1) driven by the two-finger pinch over
+          // the preview, applied on top of `selectedLens`. Capture-side only —
+          // does not affect the recorded-file path into the shot detector.
+          zoom={zoom}
           // iOS lens selection: pins 1× (wide) by default, 0.5× (ultra-wide)
           // when toggled. Undefined until the lens list arrives, then it snaps
           // to the wide lens. No-op on Android (selectedLens is iOS-only).
@@ -1341,10 +1458,23 @@ export default function RecordScreen() {
           // Recording light toggle on (recording settings sheet).
           enableTorch={camera.isRecording && lightEnabled}
         />
+        </GestureDetector>
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: theme.colors.surface, justifyContent: 'center', alignItems: 'center' }]}>
           <Text style={{ color: theme.colors.textTertiary, fontSize: 16 }}>Camera Preview</Text>
           <Text style={{ color: theme.colors.textTertiary, fontSize: 13, marginTop: 4 }}>(Available on device build)</Text>
+        </View>
+      )}
+
+      {/* Pinch-zoom level indicator. Non-interactive (pointerEvents none so it
+          never eats a touch), centered horizontally and parked in the upper-
+          middle of the preview — clear of the ScoreOverlay/badges up top and
+          the record button + hole readouts down at the bottom. Visible while
+          pinching and for ~0.9s after. The x figure is an approximation, not
+          an exact optical focal length. */}
+      {zoomIndicatorVisible && (
+        <View pointerEvents="none" style={styles.zoomIndicator}>
+          <Text style={styles.zoomIndicatorText}>{zoomLabel}</Text>
         </View>
       )}
 
@@ -1683,5 +1813,23 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  zoomIndicator: {
+    position: 'absolute',
+    top: '38%',
+    alignSelf: 'center',
+    backgroundColor: 'rgba(0,0,0,0.55)',
+    borderRadius: theme.radius.full,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderWidth: StyleSheet.hairlineWidth,
+    borderColor: 'rgba(255,255,255,0.18)',
+  },
+  zoomIndicatorText: {
+    color: theme.colors.accentGold,
+    fontSize: 15,
+    fontWeight: '800',
+    letterSpacing: 0.3,
+    fontVariant: ['tabular-nums'],
   },
 });
