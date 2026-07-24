@@ -1,6 +1,6 @@
 console.log("OTA test 2026-05-17");
 import { useEffect, useState } from 'react';
-import { Platform } from 'react-native';
+import { Platform, LogBox } from 'react-native';
 import { Stack, useSegments, useRouter } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -33,6 +33,16 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 // `environment` tag is read from APP_VARIANT (set in app.config.js) so we
 // can filter dev noise out of the prod dashboard. DSN is the public Sentry
 // ingest URL — safe to hardcode (it identifies the project, not a secret).
+// Supabase auth-js logs `AuthApiError: Invalid Refresh Token` to console.error
+// from inside its own _recoverAndRefresh() when a stored refresh token has
+// expired/rotated — it clears the session itself and the app lands on login
+// cleanly (see hooks/useAuth.ts). It's an EXPECTED auth-state transition, not a
+// bug, but RN surfaces console.error as a red LogBox overlay in dev builds and
+// Sentry would capture it as noise. The app-level getSession() try/catch can't
+// intercept it (auth-js doesn't re-throw), so we filter it at the two places it
+// actually shows up: the dev LogBox (below) and Sentry (beforeSend).
+LogBox.ignoreLogs([/Invalid Refresh Token/, /Refresh Token Not Found/]);
+
 Sentry.init({
   dsn: 'https://e55b7e7e2dcc843babf891db909ceb59@o4511382424518656.ingest.us.sentry.io/4511382491365376',
   // 'development' | 'production' (from APP_VARIANT in app.config.js)
@@ -46,6 +56,14 @@ Sentry.init({
   debug: __DEV__,
   // Auto-attach stack traces for console.error too, not just thrown errors.
   attachStacktrace: true,
+  // Drop the expected stale-refresh-token AuthApiError (see note above) so it
+  // doesn't pollute the error dashboard. Any other error passes through.
+  beforeSend(event) {
+    const msg =
+      event.exception?.values?.[0]?.value ?? event.message ?? '';
+    if (/Invalid Refresh Token|Refresh Token Not Found/.test(msg)) return null;
+    return event;
+  },
 });
 
 export { ErrorBoundary } from 'expo-router';
