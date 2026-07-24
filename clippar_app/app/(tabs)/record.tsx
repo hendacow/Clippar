@@ -11,6 +11,7 @@ import {
   AlertTriangle,
   CheckCircle,
   ChevronRight,
+  ChevronLeft,
   AlertCircle,
   Flag,
   Film,
@@ -696,6 +697,17 @@ export default function RecordScreen() {
     round.endHole();
   };
 
+  const handlePreviousHole = () => {
+    // Same mid-clip guard as Next Hole: stepping holes while a clip is still
+    // recording/finalizing would reposition the pointer around a shot that
+    // hasn't landed in round state yet.
+    if (recordingBusy) {
+      Alert.alert('Stop recording first', 'Stop the current clip before moving to the previous hole.');
+      return;
+    }
+    round.previousHole();
+  };
+
   const handlePenaltySelect = (type: PenaltyType) => {
     setShowPenalty(false);
     // Pickup finalizes the hole (and on the last hole, the round) — doing
@@ -1125,13 +1137,13 @@ export default function RecordScreen() {
                     marginTop: 16,
                     marginBottom: 8,
                   }}>
-                    Starting hole
+                    Which hole do you tee off?
                   </Text>
                   <Segmented
                     value={String(startHole)}
                     options={[
-                      { value: '1', label: 'Front 9' },
-                      { value: '10', label: 'Back 9' },
+                      { value: '1', label: 'Hole 1 (Front 9)' },
+                      { value: '10', label: 'Hole 10 (Back 9)' },
                     ]}
                     onChange={(v) => setStartHole(v === '10' ? 10 : 1)}
                   />
@@ -1522,12 +1534,32 @@ export default function RecordScreen() {
             <RecordingIndicator isRecording={camera.isRecording} />
           </Pressable>
 
-          <Pressable onPress={handleEndHole} style={styles.actionButton}>
-            <ChevronRight size={16} color={theme.colors.primary} />
-            <Text style={[styles.actionButtonText, { color: theme.colors.primary }]}>
-              Next Hole
-            </Text>
-          </Pressable>
+          {/* Hole navigation — Previous / Next. Previous is disabled on the
+              first hole played (startHole) since there's nowhere to step back
+              to; a back-nine round clamps at hole 10. Both share the mid-clip
+              guard so a step can't reposition around an in-flight recording. */}
+          <View style={styles.holeNavGroup}>
+            <Pressable
+              onPress={handlePreviousHole}
+              disabled={roundState.currentHole <= roundState.startHole}
+              style={[
+                styles.holeNavButton,
+                roundState.currentHole <= roundState.startHole && { opacity: 0.35 },
+              ]}
+            >
+              <ChevronLeft size={16} color={theme.colors.textSecondary} />
+              <Text style={[styles.actionButtonText, { color: theme.colors.textSecondary }]}>
+                Prev
+              </Text>
+            </Pressable>
+
+            <Pressable onPress={handleEndHole} style={styles.holeNavButton}>
+              <ChevronRight size={16} color={theme.colors.primary} />
+              <Text style={[styles.actionButtonText, { color: theme.colors.primary }]}>
+                Next Hole
+              </Text>
+            </Pressable>
+          </View>
         </View>
       </View>
 
@@ -1593,6 +1625,17 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 4,
     width: 70,
+  },
+  holeNavGroup: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  holeNavButton: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    width: 56,
   },
   actionButtonText: {
     color: '#FF6B6B',

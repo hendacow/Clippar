@@ -7,6 +7,10 @@ import {
   isRoundOver,
   lastHoleOf,
   findLastClipIndexOnHole,
+  previousHoleTarget,
+  resumeShotNumber,
+  upsertHoleScore,
+  orderedHoleNumbers,
   MIN_CLIP_DURATION_MS,
 } from '../lib/liveRecordingLogic';
 
@@ -113,4 +117,83 @@ test('delete-last-shot targets the last clip on the CURRENT hole only', () => {
 test('a hole with no clips yields -1 (nothing to delete)', () => {
   assert.equal(findLastClipIndexOnHole([{ holeNumber: 1 }], 5), -1);
   assert.equal(findLastClipIndexOnHole([], 1), -1);
+});
+
+// ---- previousHoleTarget (manual Previous Hole clamping) ------------------
+
+test('previousHoleTarget steps back one hole', () => {
+  assert.equal(previousHoleTarget(5, 1), 4);
+  assert.equal(previousHoleTarget(18, 1), 17);
+});
+
+test('previousHoleTarget clamps at the round start hole (never below)', () => {
+  // Front-9 / full round: can't go below hole 1.
+  assert.equal(previousHoleTarget(1, 1), null);
+  // Back-nine round: can't go below hole 10.
+  assert.equal(previousHoleTarget(10, 10), null);
+  assert.equal(previousHoleTarget(11, 10), 10);
+});
+
+// ---- resumeShotNumber (shot counter when landing on a hole) --------------
+
+test('resumeShotNumber on a brand-new hole with no clips is 1 (forward advance)', () => {
+  assert.equal(resumeShotNumber([], [], 6), 1);
+});
+
+test('resumeShotNumber appends after existing clips on an unscored hole', () => {
+  const clips = [{ holeNumber: 6 }, { holeNumber: 6 }, { holeNumber: 7 }];
+  assert.equal(resumeShotNumber([], clips, 6), 3);
+});
+
+test('resumeShotNumber restores from a committed score so penalties survive', () => {
+  // Hole 5 was scored 6 (e.g. 4 clips + a 2-stroke penalty). Stepping back
+  // must resume at 7 so re-ending unchanged reproduces 6, not the clip count.
+  const scores = [{ holeNumber: 5, strokes: 6 }];
+  const clips = [
+    { holeNumber: 5 },
+    { holeNumber: 5 },
+    { holeNumber: 5 },
+    { holeNumber: 5 },
+  ];
+  assert.equal(resumeShotNumber(scores, clips, 5), 7);
+});
+
+// ---- upsertHoleScore (idempotent per-hole score list) -------------------
+
+test('upsertHoleScore appends a new hole and keeps the list sorted', () => {
+  const scores = [
+    { holeNumber: 1, strokes: 4 },
+    { holeNumber: 3, strokes: 5 },
+  ];
+  const next = upsertHoleScore(scores, { holeNumber: 2, strokes: 3 });
+  assert.deepEqual(
+    next.map((s) => s.holeNumber),
+    [1, 2, 3]
+  );
+});
+
+test('upsertHoleScore replaces an existing hole (no duplicate, no double-count)', () => {
+  const scores = [
+    { holeNumber: 1, strokes: 4 },
+    { holeNumber: 2, strokes: 5 },
+  ];
+  const next = upsertHoleScore(scores, { holeNumber: 2, strokes: 7 });
+  assert.equal(next.length, 2);
+  assert.deepEqual(next, [
+    { holeNumber: 1, strokes: 4 },
+    { holeNumber: 2, strokes: 7 },
+  ]);
+});
+
+// ---- orderedHoleNumbers (real hole numbers, start-hole aware) ------------
+
+test('orderedHoleNumbers yields real hole numbers for each round shape', () => {
+  assert.deepEqual(orderedHoleNumbers(18, 1), [
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
+  ]);
+  assert.deepEqual(orderedHoleNumbers(9, 1), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+  // Back-nine round renders holes 10–18, NOT 1–9.
+  assert.deepEqual(orderedHoleNumbers(9, 10), [
+    10, 11, 12, 13, 14, 15, 16, 17, 18,
+  ]);
 });

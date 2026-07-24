@@ -118,3 +118,71 @@ export function findLastClipIndexOnHole(
   }
   return -1;
 }
+
+/**
+ * Where "Previous Hole" should land, or null when already on the first hole
+ * played (so the caller can no-op / disable the button). Clamped at
+ * `startHole` — a back-nine round (startHole 10) can never step below 10.
+ */
+export function previousHoleTarget(
+  currentHole: number,
+  startHole: number
+): number | null {
+  const target = currentHole - 1;
+  return target >= startHole ? target : null;
+}
+
+/**
+ * The shot counter to resume on when LANDING on `holeNumber` — used both when
+ * stepping back (Previous Hole) and when stepping forward onto a hole that
+ * already has footage (going back then forward again).
+ *
+ *  - If the hole already has a committed score, resume at strokes+1. This
+ *    preserves penalty strokes that aren't backed by a clip (a water-hazard
+ *    penalty bumps the counter without a video), so re-ending the hole
+ *    unchanged reproduces the same score.
+ *  - Otherwise (a fresh hole, or a hole whose score was never committed),
+ *    resume after its existing clips: clipCount+1. For a brand-new hole with
+ *    no clips this is 1, matching the original forward-advance behaviour.
+ */
+export function resumeShotNumber(
+  scores: ReadonlyArray<{ holeNumber: number; strokes: number }>,
+  clips: ReadonlyArray<{ holeNumber: number }>,
+  holeNumber: number
+): number {
+  const existing = scores.find((s) => s.holeNumber === holeNumber);
+  if (existing) return Math.max(1, existing.strokes) + 1;
+  const clipCount = clips.filter((c) => c.holeNumber === holeNumber).length;
+  return clipCount + 1;
+}
+
+/**
+ * Insert-or-replace a hole's score in the in-memory scores list, keyed by
+ * holeNumber, keeping the list sorted ascending. Manual hole navigation
+ * (Next / Previous Hole) can re-complete a hole that was already scored;
+ * appending blindly would duplicate the entry and double-count totals. This
+ * makes every score-writing branch idempotent per hole.
+ */
+export function upsertHoleScore<T extends { holeNumber: number }>(
+  scores: ReadonlyArray<T>,
+  score: T
+): T[] {
+  const next = scores.filter((s) => s.holeNumber !== score.holeNumber);
+  next.push(score);
+  next.sort((a, b) => a.holeNumber - b.holeNumber);
+  return next;
+}
+
+/**
+ * The real hole numbers a round covers, in play order. A front-9 round
+ * (startHole 1) → [1..9]; a back-nine round (startHole 10) → [10..18]; a full
+ * round → [1..18]. Recording tags each clip/score with these actual numbers
+ * (currentHole = startHole + offset), so the editor/scorecard render 10–18 for
+ * a back-nine round without any 1..N reconstruction.
+ */
+export function orderedHoleNumbers(
+  holesPlayed: 9 | 18,
+  startHole: 1 | 10
+): number[] {
+  return Array.from({ length: holesPlayed }, (_, i) => startHole + i);
+}

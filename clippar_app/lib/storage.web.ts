@@ -33,6 +33,8 @@ export async function saveLocalRound(_round: {
   id: string;
   course_name: string;
   course_id?: string;
+  holes_played?: 9 | 18;
+  start_hole?: 1 | 10;
 }) {}
 
 export async function getOrphanedRounds() {

@@ -596,10 +596,12 @@ export default function ImportRoundScreen() {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     try {
+      const importStartHole: 1 | 10 = startingNine === 'back' ? 10 : 1;
       const round = await createRound({
         course_name: courseName.trim(),
         course_id: selectedCourseId,
         holes_played: holesCount,
+        start_hole: importStartHole,
       });
 
       const roundId = round.id;
@@ -609,6 +611,8 @@ export default function ImportRoundScreen() {
           id: roundId,
           course_name: courseName.trim(),
           course_id: selectedCourseId,
+          holes_played: holesCount === 9 ? 9 : 18,
+          start_hole: importStartHole,
         });
       } catch {}
 

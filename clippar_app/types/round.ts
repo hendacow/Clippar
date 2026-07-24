@@ -60,6 +60,9 @@ export type Round = {
   score_to_par: number | null;
   total_putts: number | null;
   holes_played: number;
+  // Which hole the round tees off on: 1 (front / full) or 10 (back nine).
+  // Nullable for rounds created before migration 015 (those default to 1).
+  start_hole: number | null;
   status: 'recording' | 'uploading' | 'processing' | 'ready' | 'failed';
   reel_url: string | null;
   reel_duration_seconds: number | null;

@@ -109,6 +109,12 @@ export async function createRound(round: {
   course_id?: string;
   course_name: string;
   holes_played?: number;
+  // Which hole the round tees off on (1 = front / full, 10 = back nine).
+  // Persisted to rounds.start_hole (migration 015) so the editor/scorecard
+  // and round recovery know a back-nine round covers holes 10–18. INSERT of
+  // this column is covered by the table-level INSERT grant (migration 013
+  // only column-scoped UPDATE), so the client can set it at creation.
+  start_hole?: 1 | 10;
 }) {
   const user = await requireUser();
 
@@ -119,6 +125,7 @@ export async function createRound(round: {
       course_name: round.course_name,
       course_id: round.course_id,
       holes_played: round.holes_played ?? 18,
+      start_hole: round.start_hole ?? 1,
       status: 'recording',
     })
     .select()
