@@ -6,7 +6,13 @@ import { PENALTY_STROKES } from '@/types/round';
 import type { ShotTypeClassification } from 'shot-detector';
 import { createRound, updateRound, upsertScore } from '@/lib/api';
 import { deleteFile } from 'shot-detector';
-import { lastHoleOf, findLastClipIndexOnHole } from '@/lib/liveRecordingLogic';
+import {
+  lastHoleOf,
+  findLastClipIndexOnHole,
+  previousHoleTarget,
+  resumeShotNumber,
+  upsertHoleScore,
+} from '@/lib/liveRecordingLogic';
 import {
   saveLocalRound,
   updateLocalRound,
@@ -83,6 +89,7 @@ export function useRound() {
         course_name: courseName,
         course_id: courseId,
         holes_played: holesPlayed,
+        start_hole: startHole,
       });
 
       if (!round) throw new Error('Failed to create round');
@@ -91,6 +98,8 @@ export function useRound() {
         id: round.id,
         course_name: courseName,
         course_id: courseId,
+        holes_played: holesPlayed,
+        start_hole: startHole,
       });
 
       setState(createInitialState(
@@ -144,84 +153,16 @@ export function useRound() {
     });
   }, []);
 
-  // Auto hole detection: when classification arrives for a shot, check if
-  // the pattern putt→swing indicates a new hole has started.
-  // The swing that triggered the transition belongs to the NEW hole.
+  // Shot classification tracking. The putt→swing heuristic used to AUTO-advance
+  // the hole here, but it misfired every 2–3 shots on a real hole (a chip read
+  // as 'putt', a normal shot as 'swing') and silently committed phantom hole
+  // scores. Hole advancement is now MANUAL only — Next Hole (endHole) and
+  // Previous Hole. We still track the last shot type (harmless, and keeps the
+  // ref that deleteLastClip / endHole reset in sync) but it no longer moves
+  // holes or writes scores. Per-hole scoring now happens exclusively in the
+  // manual endHole / addPenalty(pickup) / endRoundEarly branches.
   const onShotClassified = useCallback((shotType: ShotTypeClassification) => {
-    const prevType = lastShotTypeRef.current;
     lastShotTypeRef.current = shotType;
-
-    // putt → swing = hole boundary (the swing is on the next hole)
-    if (prevType === 'putt' && shotType === 'swing') {
-      console.log('[useRound] Auto hole detection: putt→swing transition — advancing hole');
-      setState((prev) => {
-        if (!prev || prev.status !== 'in_progress') return prev;
-
-        // Don't auto-advance past the configured last hole. (e.g. for a
-        // front-9 round starting at hole 1, the last hole is 9 — auto
-        // classification shouldn't tick the user into hole 10.)
-        if (prev.currentHole >= lastHoleOf(prev.holesPlayed, prev.startHole)) return prev;
-
-        const par = getParForHole(prev.courseHoles, prev.currentHole);
-        const holeClips = prev.clips.filter((c) => c.holeNumber === prev.currentHole);
-        // The current shot that was just classified as 'swing' belongs to the NEW hole,
-        // so strokes for the completed hole = currentShot - 2
-        // (currentShot was already incremented by recordClip, and the swing shot is on the new hole)
-        const strokes = Math.max(1, prev.currentShot - 2);
-
-        const score: HoleScore = {
-          holeNumber: prev.currentHole,
-          par,
-          strokes,
-          putts: 0,
-          penaltyStrokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
-          isPickup: false,
-          scoreToPar: strokes - par,
-        };
-
-        const newScores = [...prev.scores, score];
-        const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
-        const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
-        const nextHole = prev.currentHole + 1;
-
-        // Persist score
-        saveLocalScore({
-          round_id: prev.roundId,
-          hole_number: prev.currentHole,
-          strokes,
-          putts: 0,
-          penalty_strokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
-          is_pickup: false,
-          par,
-        });
-
-        upsertScore({
-          round_id: prev.roundId,
-          hole_number: prev.currentHole,
-          strokes,
-          putts: 0,
-          penalty_strokes: Math.max(0, strokes - Math.max(0, holeClips.length - 1)),
-          is_pickup: false,
-          par,
-        }).catch(() => {});
-
-        updateLocalRound(prev.roundId, {
-          current_hole: nextHole,
-          current_shot: 1,
-        });
-
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-
-        return {
-          ...prev,
-          scores: newScores,
-          totalScore: newTotalScore,
-          totalPar: newTotalPar,
-          currentHole: nextHole,
-          currentShot: 1,
-        };
-      });
-    }
   }, []);
 
   const setRecording = useCallback((isRecording: boolean) => {
@@ -247,7 +188,10 @@ export function useRound() {
           scoreToPar: pickupScore - par,
         };
 
-        const newScores = [...prev.scores, score];
+        // Replace-or-append (not blind append): the user may have stepped
+        // back to this hole with Previous Hole, so a score for it can already
+        // exist. upsertHoleScore keeps the list de-duplicated and sorted.
+        const newScores = upsertHoleScore(prev.scores, score);
         const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
         const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
         const nextHole = prev.currentHole + 1;
@@ -295,9 +239,13 @@ export function useRound() {
           };
         }
 
+        // Resume the shot counter for the hole we're advancing INTO. Normally
+        // a fresh hole (→ 1), but after a Previous Hole round-trip the next
+        // hole may already have footage / a prior score.
+        const nextShot = resumeShotNumber(newScores, prev.clips, nextHole);
         updateLocalRound(prev.roundId, {
           current_hole: nextHole,
-          current_shot: 1,
+          current_shot: nextShot,
         });
 
         return {
@@ -306,7 +254,7 @@ export function useRound() {
           totalScore: newTotalScore,
           totalPar: newTotalPar,
           currentHole: nextHole,
-          currentShot: 1,
+          currentShot: nextShot,
         };
       }
 
@@ -350,7 +298,10 @@ export function useRound() {
         scoreToPar: strokes - par,
       };
 
-      const newScores = [...prev.scores, score];
+      // Replace-or-append: Previous Hole can reopen an already-scored hole, so
+      // re-ending it must overwrite that hole's entry rather than duplicate it
+      // (a duplicate would double-count totalScore / totalPar).
+      const newScores = upsertHoleScore(prev.scores, score);
       const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
       const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
       const nextHole = prev.currentHole + 1;
@@ -399,9 +350,13 @@ export function useRound() {
         };
       }
 
+      // Resume the shot counter for the hole we're advancing INTO. A fresh
+      // hole → 1; a hole revisited after Previous Hole keeps its existing
+      // footage/score in sync so new shots append instead of overwriting.
+      const nextShot = resumeShotNumber(newScores, prev.clips, nextHole);
       updateLocalRound(prev.roundId, {
         current_hole: nextHole,
-        current_shot: 1,
+        current_shot: nextShot,
       });
 
       return {
@@ -410,7 +365,46 @@ export function useRound() {
         totalScore: newTotalScore,
         totalPar: newTotalPar,
         currentHole: nextHole,
-        currentShot: 1,
+        currentShot: nextShot,
+      };
+    });
+  }, []);
+
+  // Manual "Previous Hole" navigation. Steps currentHole back by one, clamped
+  // at startHole (a back-nine round can't drop below hole 10). Lets the user
+  // fix or add a missed shot on the prior hole after the false auto-advance
+  // removal made all hole movement manual.
+  //
+  // Non-destructive: the prior hole's committed score STAYS in state and in
+  // storage. We only reposition the hole/shot pointers — currentShot resumes at
+  // that hole's committed strokes+1 (so penalty strokes survive and a new clip
+  // appends correctly). Re-ending the hole with Next Hole overwrites the score
+  // in place (upsertHoleScore), so going back then forward never duplicates or
+  // loses a hole.
+  const previousHole = useCallback(() => {
+    setState((prev) => {
+      if (!prev || prev.status !== 'in_progress') return prev;
+
+      const target = previousHoleTarget(prev.currentHole, prev.startHole);
+      if (target === null) return prev; // already on the first hole played
+
+      // Reset shot-type tracking so a stale classification can't leak across
+      // the manual navigation.
+      lastShotTypeRef.current = null;
+
+      const resumeShot = resumeShotNumber(prev.scores, prev.clips, target);
+
+      updateLocalRound(prev.roundId, {
+        current_hole: target,
+        current_shot: resumeShot,
+      });
+
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+      return {
+        ...prev,
+        currentHole: target,
+        currentShot: resumeShot,
       };
     });
   }, []);
@@ -497,12 +491,14 @@ export function useRound() {
         clips,
         totalScore,
         totalPar,
-        // Recovered rounds predate the Wave 3 setup options being
-        // persisted to local storage. Default to a full 18 starting at
-        // hole 1 (the legacy behaviour). Phase D will add these to the
-        // local round row and pull through here.
-        holesPlayed: 18,
-        startHole: 1,
+        // Round setup is now persisted on the local round row, so a recovered
+        // round restores its real shape instead of assuming a full 18 from
+        // hole 1. Legacy rows written before this column existed read back as
+        // NULL and fall back to the pre-Wave-3 default (18 / hole 1), which is
+        // exactly what those rounds were. Normalized to the valid unions so
+        // lastHoleOf (round-end detection) stays correct.
+        holesPlayed: localRound.holes_played === 9 ? 9 : 18,
+        startHole: localRound.start_hole === 10 ? 10 : 1,
         status: 'in_progress',
       });
     } catch (error) {
@@ -541,7 +537,9 @@ export function useRound() {
           isPickup: false,
           scoreToPar: strokes - par,
         };
-        newScores = [...newScores, score];
+        // Replace-or-append so ending early on a hole that was reopened via
+        // Previous Hole doesn't double-count it.
+        newScores = upsertHoleScore(newScores, score);
 
         saveLocalScore({
           round_id: prev.roundId,
@@ -690,6 +688,7 @@ export function useRound() {
     setRecording,
     addPenalty,
     endHole,
+    previousHole,
     endRound,
     endRoundEarly,
     recoverRound,

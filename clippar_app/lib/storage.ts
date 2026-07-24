@@ -117,6 +117,13 @@ async function migrateEditorColumns() {
     // trim / reorder / exclude changes haven't been applied to the saved
     // reel yet.
     'ALTER TABLE local_rounds ADD COLUMN reel_stale INTEGER DEFAULT 0',
+    // Round setup persisted per round so recovery restores the real round
+    // shape (start hole + hole count) instead of assuming a full 18 from
+    // hole 1. Both are needed by lastHoleOf() to know when the round ends;
+    // start_hole also drives the editor/scorecard hole numbering for a
+    // back-nine round (holes 10–18). Legacy rows read back as the defaults.
+    'ALTER TABLE local_rounds ADD COLUMN start_hole INTEGER DEFAULT 1',
+    'ALTER TABLE local_rounds ADD COLUMN holes_played INTEGER DEFAULT 18',
     // Settings table
     `CREATE TABLE IF NOT EXISTS local_settings (
       key TEXT PRIMARY KEY,
@@ -668,15 +675,22 @@ export async function saveLocalRound(round: {
   id: string;
   course_name: string;
   course_id?: string;
+  // Round setup — persisted so recoverRound restores the real shape. Default
+  // to the legacy behaviour (full 18 from hole 1) when a caller omits them.
+  holes_played?: 9 | 18;
+  start_hole?: 1 | 10;
 }) {
   const database = await getDatabase();
   await database.runAsync(
-    `INSERT OR REPLACE INTO local_rounds (id, course_name, course_id, started_at)
-     VALUES (?, ?, ?, ?)`,
+    `INSERT OR REPLACE INTO local_rounds
+       (id, course_name, course_id, started_at, holes_played, start_hole)
+     VALUES (?, ?, ?, ?, ?, ?)`,
     round.id,
     round.course_name,
     round.course_id ?? null,
-    new Date().toISOString()
+    new Date().toISOString(),
+    round.holes_played ?? 18,
+    round.start_hole ?? 1
   );
 }
 
@@ -703,6 +717,10 @@ export async function getLocalRound(roundId: string) {
     status: string;
     started_at: string;
     finished_at: string | null;
+    // NULL for rounds created before the columns were added — recoverRound
+    // normalizes those to the legacy default (18 / hole 1).
+    holes_played: number | null;
+    start_hole: number | null;
   }>(
     'SELECT * FROM local_rounds WHERE id = ?',
     roundId
