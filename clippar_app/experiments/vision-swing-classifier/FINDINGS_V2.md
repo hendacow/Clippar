@@ -177,3 +177,33 @@ part that cannot find the instant.
 Caching motion took an iteration from 50 minutes to 4.5 seconds; the GPU move
 took the embedding build from ~3 hours to ~13 minutes. Neither changed a result,
 but without them this could not have been iterated to convergence.
+
+## Generalization to golfers we have never seen
+
+16 free-licensed clips from mixkit (`~/clippar-test-web/`) — children, women,
+tropical courses, professional cinematography, driving ranges and indoor VR golf.
+Nothing like the training set, which is one golfer at one club on a phone.
+
+Scored with prototypes built entirely from Henry's clips: 14/16 detected.
+
+**What transferred.** The motion stage found real swing moments on body types
+nothing like the training data — a child at the top of the backswing (2033
+@15.21s), a kid mid-swing (2038 @8.47s), putting posture on several (2029, 2030,
+2036), and an indoor VR swing (43566 @5.73s). The hands-only VR clips (43544,
+43553) were correctly rejected.
+
+**What did not.** The gate is measurably weaker off-distribution:
+* 22564 is pure scenery — a pond and a building, no golfer — and returned SWING
+  at 19.90s. A clear false positive.
+* 20870 / 20871 are driving ranges with dozens of tiny distant figures; both got
+  confident timestamps that cannot be verified and should not be trusted.
+
+This is the split predicted before the test: motion is physics and travels;
+the prototypes are fitted to one golfer and travel less well. The honest read is
+that on-device accuracy for a NEW user will sit below the 27/28 measured here,
+and the failure mode will be false positives on golf scenery rather than
+mistimed swings.
+
+Cheapest fix if that proves to matter: add exemplars from other golfers to the
+prototype banks. The banks are averages, so this is additive and needs no
+retraining — `export_prototypes.py` rebuilds the shipped JSON in seconds.
