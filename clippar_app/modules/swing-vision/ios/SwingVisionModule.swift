@@ -246,25 +246,37 @@ public class SwingVisionModule: Module {
     let near = ok.filter { $0.norm >= bestNorm * (1 - params.tieRel) }
     let best = near.max(by: { $0.proto < $1.proto })
 
-    // Stroke type from MOTION AMPLITUDE, not appearance. A putt is a physically
-    // smaller event than a full swing — valley depth median 0.21 vs 0.68.
+    // STROKE TYPE — motion AND pose, never appearance.
     //
-    // Measured on 53 detected clips: motion alone 48/53, the appearance margin
-    // (which prototype wins) 45/53, and per-frame prototype voting — what this
-    // used to do — only 40/53, which trimmed 9 of 24 putts that should have been
-    // left whole. Same lesson as localization: motion carries the signal.
+    // Appearance cannot do this: a trained probe on the golfer-crop embedding
+    // scores 64% and adds nothing over a single motion threshold. Measured on
+    // 53 clips, motion alone 48/53; adding pose takes 37/39 -> 38/39 on the
+    // clips where pose locks on.
     //
-    // The classes genuinely overlap (a distant golfer's full swing can be as
-    // small as a near putt), so ~9% will still be called wrong.
-    let strokeType = (best.map { $0.norm < params.puttNormMax } ?? false) ? "putt" : "swing"
+    // Both must agree it was a full swing, because they fail differently:
+    // motion amplitude is DISTANCE-dependent (a far-away full swing moves fewer
+    // pixels than a near putt), while pose is normalised by the golfer's own
+    // torso and so is distance- and angle-invariant. Pose is advisory — when it
+    // cannot lock on (golfer too small, bodies overlapping) motion decides
+    // alone rather than the clip being guessed at.
+    var strokeType = (best.map { $0.norm < params.puttNormMax } ?? false) ? "putt" : "swing"
+    var wristHeight: Double? = nil
+    if let b = best, strokeType == "swing" {
+      wristHeight = SwingPose.peakWristHeight(asset: asset, tTop: b.tTop)
+      if let wh = wristHeight, wh < SwingPose.fullSwingMinWristHeight {
+        strokeType = "putt"
+      }
+    }
     promise.resolve(result(decision: "SWING", best: best, cands: cands,
                            started: started, motionFps: profile.fps,
-                           duration: duration, strokeType: strokeType))
+                           duration: duration, strokeType: strokeType,
+                           wristHeight: wristHeight))
   }
 
   private func result(decision: String, best: SwingCandidate?, cands: [SwingCandidate],
                       started: CFAbsoluteTime, motionFps: Double,
-                      duration: Double, strokeType: String = "swing") -> [String: Any] {
+                      duration: Double, strokeType: String = "swing",
+                      wristHeight: Double? = nil) -> [String: Any] {
     var out: [String: Any] = [
       "decision": decision,
       "elapsedMs": (CFAbsoluteTimeGetCurrent() - started) * 1000.0,
@@ -280,6 +292,9 @@ public class SwingVisionModule: Module {
       out["confidence"] = b.proto
       out["norm"] = b.norm
       out["strokeType"] = strokeType
+      // Surfaced so the dev harness can show WHY a clip was called a putt, and
+      // distinguish "pose said so" from "pose never locked on".
+      if let wh = wristHeight { out["wristHeight"] = wh }
     }
     return out
   }

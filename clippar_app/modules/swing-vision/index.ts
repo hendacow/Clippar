@@ -41,6 +41,11 @@ export interface LocalizeResult {
   tImpact?: number;
   /** Full clip length, so callers can clamp a trim window to it. */
   durationSec: number;
+  /** Peak wrist height at the stroke, in torso lengths above the shoulders.
+   *  Absent when Vision could not lock on to a body — in which case the stroke
+   *  type came from motion alone. Positive means hands went above the shoulders
+   *  (a full swing); putts sit around -0.65. */
+  wristHeight?: number;
   /** The winning candidate's prototype score. Small by nature (~0.0-0.1): every
    *  frame is a golf course, so the three prototypes sit at cosine ~0.95 to each
    *  other and discrimination lives in small consistent differences. */

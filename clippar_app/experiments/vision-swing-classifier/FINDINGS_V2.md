@@ -237,3 +237,53 @@ The classes genuinely overlap — a distant golfer's full swing can be as small 
 a near putt (full_swing norm ranges 0.11–1.60, putt 0.05–0.55) — so ~9% will
 still be called wrong, and no threshold fixes that. Separating those needs a cue
 that is not amplitude, e.g. the club going above the head.
+
+## Why a human reads these frames and the model cannot
+
+Two experiments, both aimed at "why can you tell it's a putt and the model can't".
+
+**1. The information is not in the golfer crop.** A trained linear probe on the
+MobileCLIP2 embedding at the chosen moment (leave-one-clip-out, n=53):
+
+| features | accuracy |
+|---|---|
+| tight golfer crop (what ships) | 34/53 (64%) |
+| **whole frame (the scene)** | **41/53 (77%)** |
+| whole frame + motion | 48/53 |
+| motion threshold alone | 48/53 |
+
+A trained classifier on the crop does WORSE than one motion threshold, so the
+earlier rule was not merely crude — the signal is absent. Embedding the whole
+frame recovers a lot of it, which identifies the cause: a human calling a putt is
+reading the GREEN, the FLAG and the crouching playing partners, and the crop
+deliberately deletes all of that to zoom on the golfer. But it still adds nothing
+on top of motion, so it is not worth doubling the Core ML cost. NOT SHIPPED.
+
+**2. Pose is a different kind of signal, and it does pay.** Wrist height relative
+to the shoulders, normalised by torso length (Apple Vision, no model to ship):
+
+* pose alone            38/40
+* motion alone          37/39
+* **motion AND pose     38/39**
+
+The reason to want it is not that +1. Motion amplitude is DISTANCE-DEPENDENT — a
+full swing at 40m moves fewer pixels than a putt at 3m, which is exactly the
+"any angle, any distance" complaint. Pose is normalised by the golfer's own
+torso, so it is invariant to distance and to which way they face. The two fail
+differently, which is why requiring both to agree beats either.
+
+Pose locked on for 40/40 clips, including distant golfers — better than expected.
+
+**Two wrong hypotheses on the way, both killed by looking:**
+* "Vision picked the wrong person" — picking the largest body changed nothing.
+* "A wide window caught post-shot movement" — narrowing it changed nothing.
+The actual bug was NORMALISATION: dividing by the VERTICAL shoulder-hip distance
+explodes when a golfer is bent over a putt, because shoulders and hips are then
+at nearly the same height. Using true Euclidean torso length fixed it (37/40 ->
+38/40).
+
+**Remaining limit.** IMG_0558 has two golfers overlapping and Vision returns a
+blended skeleton — wrists apparently above the shoulders during a putt. No
+threshold repairs that. "Any angle, any perspective, always" is not reachable:
+when the golfer is a few dozen pixels tall the information is not in the frame
+for anyone.

@@ -59,10 +59,18 @@ def golfer_box(heat, src_w, src_h, pad=2.6):
     return max(0, x0), max(0, y0), max(2, side)
 
 
-def decode_rgb(path, fps, box, size=SIZE):
+def decode_rgb(path, fps, box, size=SIZE, full_frame=False):
+    """full_frame keeps the WHOLE picture (squashed to square) instead of
+    cropping to the golfer. The tight crop deliberately deletes the green, the
+    flag and the other players — which is exactly the context a human uses to
+    say "that's a putt" — so this variant exists to test whether that discarded
+    scene is where the missing putt-vs-swing signal lives."""
     x0, y0, side = box
+    vf = (f"fps={fps},scale={size}:{size}"
+          if full_frame else
+          f"fps={fps},crop={side}:{side}:{x0}:{y0},scale={size}:{size}")
     cmd = ["ffmpeg", "-v", "error", "-hwaccel", "videotoolbox", "-i", str(path),
-           "-vf", f"fps={fps},crop={side}:{side}:{x0}:{y0},scale={size}:{size}",
+           "-vf", vf,
            "-pix_fmt", "rgb24", "-f", "rawvideo", "-"]
     buf = subprocess.run(cmd, capture_output=True).stdout
     n = len(buf) // (size * size * 3)
@@ -87,6 +95,8 @@ if __name__ == "__main__":
     ap.add_argument("--motion-cache", required=True)
     ap.add_argument("--out", required=True)
     ap.add_argument("--only", nargs="*", default=None, help="limit to these stems")
+    ap.add_argument("--full-frame", action="store_true",
+                    help="embed the whole frame instead of the golfer crop")
     a = ap.parse_args()
     dst_dir = Path(a.out)
     dst_dir.mkdir(parents=True, exist_ok=True)
@@ -105,7 +115,7 @@ if __name__ == "__main__":
             continue
         heat = np.abs(np.diff(gray.astype(np.float32), axis=0)).mean(axis=0)
         box = golfer_box(heat, int(d["src_w"]), int(d["src_h"]))
-        frames = decode_rgb(str(d["path"]), EMBED_FPS, box)
+        frames = decode_rgb(str(d["path"]), EMBED_FPS, box, full_frame=a.full_frame)
         e = embed(frames)
         np.savez_compressed(dst, emb=e, fps=EMBED_FPS, box=np.array(box),
                             path=str(d["path"]), label=str(d["label"]))
