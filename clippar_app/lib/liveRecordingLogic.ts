@@ -186,3 +186,45 @@ export function orderedHoleNumbers(
 ): number[] {
   return Array.from({ length: holesPlayed }, (_, i) => startHole + i);
 }
+
+/**
+ * Where a RESUMED round should pick up. The persisted pointer is clamped into
+ * the round's real hole range, because rounds created before saveLocalRound
+ * seeded `current_hole` wrote a literal 1 even for a back-nine round — which
+ * resumed the user on "hole 1" (off their card, Previous Hole disabled) and
+ * tagged every subsequent clip to a hole they weren't playing.
+ *
+ * The shot counter is only meaningful for the hole it was written on, so when
+ * the hole has to be clamped we hand back null and let the caller derive it
+ * from that hole's own footage/score via resumeShotNumber.
+ */
+export function clampRecoveredPointer(
+  persistedHole: number | null | undefined,
+  persistedShot: number | null | undefined,
+  holesPlayed: 9 | 18,
+  startHole: 1 | 10
+): { hole: number; shot: number | null } {
+  const lastHole = lastHoleOf(holesPlayed, startHole);
+  const hole = Math.min(Math.max(persistedHole ?? startHole, startHole), lastHole);
+  const clamped = hole !== persistedHole;
+  return {
+    hole,
+    shot: clamped || !persistedShot ? null : Math.max(1, persistedShot),
+  };
+}
+
+/**
+ * Put a clip back into the round's clip list in (hole, shot) order rather than
+ * appending it. Used by "Restore deleted shot": appending would place a
+ * restored hole-3 shot after later holes' footage, which the editor renders in
+ * array order within a hole.
+ */
+export function insertClipInOrder<
+  T extends { holeNumber: number; shotNumber: number }
+>(clips: ReadonlyArray<T>, clip: T): T[] {
+  return [...clips, clip].sort((a, b) =>
+    a.holeNumber !== b.holeNumber
+      ? a.holeNumber - b.holeNumber
+      : a.shotNumber - b.shotNumber
+  );
+}

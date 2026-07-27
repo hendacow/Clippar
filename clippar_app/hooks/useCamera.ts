@@ -378,7 +378,15 @@ export function useCamera({
         } | null = null;
         if (getLocation) {
           try {
-            gps = await getLocation();
+            // BOUNDED. This await used to be open-ended, so a cold GPS fix
+            // could hold the save past FINALIZE_SAFETY_MS — at which point the
+            // safety timer cleared isFinalizing, the hole controls unlocked,
+            // and the clip landed after the user had already moved holes. GPS
+            // is optional metadata; a null fix is far cheaper than that.
+            gps = await Promise.race([
+              getLocation(),
+              new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+            ]);
           } catch {
             // GPS optional
           }

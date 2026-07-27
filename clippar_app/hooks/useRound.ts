@@ -1,4 +1,4 @@
-import { useState, useCallback, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { Alert } from 'react-native';
 import * as Haptics from 'expo-haptics';
 import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from '@/types/round';
@@ -12,6 +12,8 @@ import {
   previousHoleTarget,
   resumeShotNumber,
   upsertHoleScore,
+  clampRecoveredPointer,
+  insertClipInOrder,
 } from '@/lib/liveRecordingLogic';
 import {
   saveLocalRound,
@@ -22,7 +24,9 @@ import {
   getClipsForRound,
   deleteLocalRound,
   deleteLocalClip,
+  restoreLocalClip,
   resetRoundData,
+  type LocalClipRow,
 } from '@/lib/storage';
 
 const DEFAULT_PAR = 4;
@@ -72,6 +76,35 @@ export function useRound() {
   // sunlit touchscreen with a glove) would otherwise run the updater twice,
   // scoring a phantom 1-stroke hole and skipping a real one.
   const lastEndHoleAtRef = useRef(0);
+  // Same guard for Previous Hole, which sits right next to Next Hole in the
+  // bottom bar — without it a gloved double-tap steps back two holes.
+  const lastPreviousHoleAtRef = useRef(0);
+
+  // Undo stack for "Delete last shot". Each entry holds the full SQLite row
+  // plus the in-memory ClipMetadata, so a restore puts the shot back in both
+  // places. The underlying video files are deliberately NOT unlinked while a
+  // clip sits on this stack — they're what makes the restore real. Files are
+  // released when an entry is evicted (cap) or the round ends.
+  const deletedStackRef = useRef<
+    { row: LocalClipRow | null; clip: ClipMetadata; fileUris: string[] }[]
+  >([]);
+  // Mirrored into state so the settings sheet re-renders when undo becomes
+  // available (a ref alone wouldn't trigger a render).
+  const [undoableDeleteCount, setUndoableDeleteCount] = useState(0);
+  const UNDO_STACK_LIMIT = 10;
+
+  // Drop the undo stack and unlink the files it was holding onto. Called when
+  // the round ends / is discarded / is reset, at which point an undo is no
+  // longer meaningful and the footage is just dead weight on disk.
+  const purgeDeletedClips = useCallback(() => {
+    for (const entry of deletedStackRef.current) {
+      for (const uri of entry.fileUris) {
+        deleteFile(uri).catch(() => {});
+      }
+    }
+    deletedStackRef.current = [];
+    setUndoableDeleteCount(0);
+  }, []);
 
   const startRound = useCallback(async (
     courseName: string,
@@ -100,6 +133,10 @@ export function useRound() {
         course_id: courseId,
         holes_played: holesPlayed,
         start_hole: startHole,
+        // Persist the scorecard so a resumed round keeps its real pars
+        // (including a custom course scorecard) instead of falling back to
+        // par 4 for every hole.
+        course_holes: courseHoles ? JSON.stringify(courseHoles) : null,
       });
 
       setState(createInitialState(
@@ -142,16 +179,36 @@ export function useRound() {
     }
   }, []);
 
+  // A clip finished saving. Two subtleties:
+  //
+  //  1. HOLE-AWARE COUNTER. A clip's hole is latched when recording STARTS,
+  //     but the save pipeline (trim + detect + write) resolves seconds later,
+  //     by which time the user may have moved holes. Blindly doing
+  //     `currentShot + 1` then bumped the counter of the hole they moved TO
+  //     on behalf of a shot that belongs to the hole they left — which is how
+  //     shot numbers drifted out of sync with the footage. Only advance the
+  //     counter when the clip belongs to the hole we're standing on.
+  //  2. PERSIST THE POINTER. current_hole / current_shot used to be written
+  //     only on a hole CHANGE, so a crash/kill mid-hole resumed with a stale
+  //     shot number and the new clips collided with the existing ones.
   const recordClip = useCallback((clip: ClipMetadata) => {
     setState((prev) => {
       if (!prev) return prev;
+      const isCurrentHole = clip.holeNumber === prev.currentHole;
+      const nextShot = isCurrentHole ? prev.currentShot + 1 : prev.currentShot;
+      if (!isCurrentHole) {
+        console.log(
+          `[useRound] recordClip for hole ${clip.holeNumber} landed while on hole ${prev.currentHole} — shot counter left alone`
+        );
+      }
       return {
         ...prev,
         clips: [...prev.clips, clip],
-        currentShot: prev.currentShot + 1,
+        currentShot: nextShot,
       };
     });
   }, []);
+
 
   // Shot classification tracking. The putt→swing heuristic used to AUTO-advance
   // the hole here, but it misfired every 2–3 shots on a real hole (a chip read
@@ -382,27 +439,85 @@ export function useRound() {
   // in place (upsertHoleScore), so going back then forward never duplicates or
   // loses a hole.
   const previousHole = useCallback(() => {
-    setState((prev) => {
-      if (!prev || prev.status !== 'in_progress') return prev;
+    // Double-tap guard, same as endHole: Previous Hole sits right next to
+    // Next Hole in the bottom bar, and a gloved double-tap would otherwise
+    // step back two holes in one gesture.
+    const now = Date.now();
+    if (now - lastPreviousHoleAtRef.current < 1500) {
+      console.log('[useRound] previousHole ignored — double-tap guard');
+      return;
+    }
+    lastPreviousHoleAtRef.current = now;
 
-      const target = previousHoleTarget(prev.currentHole, prev.startHole);
-      if (target === null) return prev; // already on the first hole played
+    const current = stateRef.current;
+    if (!current || current.status !== 'in_progress') return;
 
-      // Reset shot-type tracking so a stale classification can't leak across
-      // the manual navigation.
-      lastShotTypeRef.current = null;
+    const target = previousHoleTarget(current.currentHole, current.startHole);
+    if (target === null) return; // already on the first hole played
 
-      const resumeShot = resumeShotNumber(prev.scores, prev.clips, target);
+    // COMMIT THE DEPARTING HOLE'S STROKES before stepping away. Penalty
+    // strokes live ONLY in currentShot (addPenalty just increments it), so
+    // leaving a hole without committing threw them away: coming back via Next
+    // Hole, resumeShotNumber fell through to clipCount + 1 and the penalties
+    // were gone. Only commit when the hole actually saw activity
+    // (currentShot > 1) — otherwise we'd write a phantom 1-stroke score for a
+    // hole the user merely passed through.
+    const departing = current.currentHole;
+    const departingStrokes = current.currentShot - 1;
+    const shouldCommitDeparting = departingStrokes >= 1;
+    let scoresAfterCommit = current.scores;
 
-      updateLocalRound(prev.roundId, {
-        current_hole: target,
-        current_shot: resumeShot,
+    if (shouldCommitDeparting) {
+      const par = getParForHole(current.courseHoles, departing);
+      const holeClips = current.clips.filter((c) => c.holeNumber === departing);
+      const penaltyStrokes = Math.max(0, departingStrokes - holeClips.length);
+      scoresAfterCommit = upsertHoleScore(current.scores, {
+        holeNumber: departing,
+        par,
+        strokes: departingStrokes,
+        putts: 0,
+        penaltyStrokes,
+        isPickup: false,
+        scoreToPar: departingStrokes - par,
       });
 
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+      saveLocalScore({
+        round_id: current.roundId,
+        hole_number: departing,
+        strokes: departingStrokes,
+        putts: 0,
+        penalty_strokes: penaltyStrokes,
+        is_pickup: false,
+        par,
+      });
+      upsertScore({
+        round_id: current.roundId,
+        hole_number: departing,
+        strokes: departingStrokes,
+        putts: 0,
+        penalty_strokes: penaltyStrokes,
+        is_pickup: false,
+        par,
+      }).catch(() => {});
+    }
 
+    // Reset shot-type tracking so a stale classification can't leak across
+    // the manual navigation.
+    lastShotTypeRef.current = null;
+
+    const resumeShot = resumeShotNumber(scoresAfterCommit, current.clips, target);
+
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+
+    setState((prev) => {
+      if (!prev || prev.status !== 'in_progress') return prev;
+      const newTotalScore = scoresAfterCommit.reduce((sum, s) => sum + s.strokes, 0);
+      const newTotalPar = scoresAfterCommit.reduce((sum, s) => sum + s.par, 0);
       return {
         ...prev,
+        scores: scoresAfterCommit,
+        totalScore: newTotalScore,
+        totalPar: newTotalPar,
         currentHole: target,
         currentShot: resumeShot,
       };
@@ -414,6 +529,20 @@ export function useRound() {
   // otherwise submit stale totals).
   const stateRef = useRef<RoundState | null>(null);
   stateRef.current = state;
+
+  // Single source of truth for persisting the live hole/shot pointer. Every
+  // mutation (record, next hole, previous hole, delete, undo) flows through
+  // state, so mirroring it here covers them all — and does so as a committed
+  // side effect rather than inside a setState updater, which React is free to
+  // re-run. Before this, the pointer was written only on a hole change, so a
+  // resume after an app kill restored a stale shot number.
+  useEffect(() => {
+    if (!state || state.status !== 'in_progress') return;
+    updateLocalRound(state.roundId, {
+      current_hole: state.currentHole,
+      current_shot: state.currentShot,
+    });
+  }, [state?.roundId, state?.currentHole, state?.currentShot, state?.status]);
 
   const endRound = useCallback(async () => {
     const current = stateRef.current;
@@ -480,12 +609,42 @@ export function useRound() {
       const totalScore = scores.reduce((sum, s) => sum + s.strokes, 0);
       const totalPar = scores.reduce((sum, s) => sum + s.par, 0);
 
+      const holesPlayed: 9 | 18 = localRound.holes_played === 9 ? 9 : 18;
+      const startHole: 1 | 10 = localRound.start_hole === 10 ? 10 : 1;
+
+      // Restore the round's own scorecard. Legacy rows (written before the
+      // column existed) read back NULL and keep the old par-4 behaviour.
+      let courseHoles: HoleData[] | undefined;
+      const rawHoles = (localRound as { course_holes?: string | null }).course_holes;
+      if (rawHoles) {
+        try {
+          const parsed = JSON.parse(rawHoles);
+          if (Array.isArray(parsed) && parsed.length > 0) courseHoles = parsed as HoleData[];
+        } catch {
+          // Corrupt JSON — fall back to no scorecard rather than failing the
+          // whole recovery.
+        }
+      }
+
+      // Clamp the restored pointer into the round's real hole range, and fall
+      // back to the hole's own footage/score when the persisted shot counter
+      // belongs to a different hole. (See clampRecoveredPointer.)
+      const pointer = clampRecoveredPointer(
+        localRound.current_hole,
+        localRound.current_shot,
+        holesPlayed,
+        startHole
+      );
+      const recoveredHole = pointer.hole;
+      const recoveredShot =
+        pointer.shot ?? resumeShotNumber(scores, clips, recoveredHole);
+
       setState({
         roundId,
         courseId: localRound.course_id ?? undefined,
         courseName: localRound.course_name,
-        currentHole: localRound.current_hole,
-        currentShot: localRound.current_shot,
+        currentHole: recoveredHole,
+        currentShot: recoveredShot,
         isRecording: false,
         scores,
         clips,
@@ -497,8 +656,9 @@ export function useRound() {
         // NULL and fall back to the pre-Wave-3 default (18 / hole 1), which is
         // exactly what those rounds were. Normalized to the valid unions so
         // lastHoleOf (round-end detection) stays correct.
-        holesPlayed: localRound.holes_played === 9 ? 9 : 18,
-        startHole: localRound.start_hole === 10 ? 10 : 1,
+        holesPlayed,
+        startHole,
+        courseHoles,
         status: 'in_progress',
       });
     } catch (error) {
@@ -508,12 +668,13 @@ export function useRound() {
 
   const discardRound = useCallback(async (roundId: string) => {
     try {
+      purgeDeletedClips();
       await deleteLocalRound(roundId);
       setState(null);
     } catch (error) {
       console.error('[useRound] Failed to discard round:', error);
     }
-  }, []);
+  }, [purgeDeletedClips]);
 
   const endRoundEarly = useCallback(async () => {
     setState((prev) => {
@@ -585,8 +746,9 @@ export function useRound() {
   }, []);
 
   const resetRound = useCallback(() => {
+    purgeDeletedClips();
     setState(null);
-  }, []);
+  }, [purgeDeletedClips]);
 
   // Reset the round to its just-started state, keeping the same roundId and
   // setup (course / holes / start hole). Used by the recording-screen
@@ -602,6 +764,8 @@ export function useRound() {
     if (!current) return;
 
     lastShotTypeRef.current = null;
+    // Everything is being wiped anyway — release the undo stack's footage.
+    purgeDeletedClips();
     setState(
       createInitialState(
         current.roundId,
@@ -625,7 +789,7 @@ export function useRound() {
     } catch (err) {
       console.log('[useRound] resetToStart failed:', err);
     }
-  }, []);
+  }, [purgeDeletedClips]);
 
   // Delete the most recently recorded clip (the recording screen's
   // "Delete last shot" action). Removes it from in-memory state, decrements
@@ -663,14 +827,27 @@ export function useRound() {
       };
     });
 
-    // Persist: delete the SQLite row (if it has a local id) and best-effort
-    // remove the underlying video file(s).
+    // Persist: delete the SQLite row (if it has a local id) and push the whole
+    // record onto the undo stack. We deliberately DON'T unlink the video files
+    // here any more — they're what an undo restores. They're released when the
+    // entry is evicted from the stack or the round ends (purgeDeletedClips).
     try {
       if (typeof lastClip.id === 'number') {
-        const { fileUris } = await deleteLocalClip(lastClip.id);
-        for (const uri of fileUris) {
-          deleteFile(uri).catch(() => {});
+        const { fileUris, row } = await deleteLocalClip(lastClip.id);
+        deletedStackRef.current = [
+          ...deletedStackRef.current,
+          { row, clip: lastClip, fileUris },
+        ];
+        // Cap the stack; evicting an entry is the point at which its footage
+        // is genuinely gone, so that's when we free the disk.
+        while (deletedStackRef.current.length > UNDO_STACK_LIMIT) {
+          const [evicted, ...rest] = deletedStackRef.current;
+          deletedStackRef.current = rest;
+          for (const uri of evicted.fileUris) {
+            deleteFile(uri).catch(() => {});
+          }
         }
+        setUndoableDeleteCount(deletedStackRef.current.length);
       }
     } catch (err) {
       console.log('[useRound] deleteLastClip persist failed:', err);
@@ -678,6 +855,49 @@ export function useRound() {
 
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
     return true;
+  }, []);
+
+  /**
+   * Undo the most recent "Delete last shot" — re-inserts the SQLite row under
+   * its original id and puts the clip back into round state, restoring the
+   * shot counter if the clip belongs to the hole we're standing on.
+   * Returns the restored clip's hole number, or null if there was nothing to
+   * undo (or the round has moved on).
+   */
+  const undoDeleteClip = useCallback(async (): Promise<number | null> => {
+    const stack = deletedStackRef.current;
+    if (stack.length === 0) return null;
+
+    const entry = stack[stack.length - 1];
+    deletedStackRef.current = stack.slice(0, -1);
+    setUndoableDeleteCount(deletedStackRef.current.length);
+
+    try {
+      if (entry.row) await restoreLocalClip(entry.row);
+    } catch (err) {
+      console.log('[useRound] undoDeleteClip restore failed:', err);
+    }
+
+    setState((prev) => {
+      if (!prev) return prev;
+      // Guard against a double-restore (row already back in state).
+      if (prev.clips.some((c) => c.id === entry.clip.id)) return prev;
+      // Re-insert in shot order so the editor's per-hole ordering is right,
+      // rather than appending the restored clip after later shots.
+      const nextClips = insertClipInOrder(prev.clips, entry.clip);
+      // The counter only moves if the restored shot is on the hole we're on —
+      // restoring a hole-3 shot while standing on hole 5 must not renumber
+      // hole 5's next shot.
+      const onCurrentHole = entry.clip.holeNumber === prev.currentHole;
+      return {
+        ...prev,
+        clips: nextClips,
+        currentShot: onCurrentHole ? prev.currentShot + 1 : prev.currentShot,
+      };
+    });
+
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    return entry.clip.holeNumber;
   }, []);
 
   return {
@@ -696,5 +916,13 @@ export function useRound() {
     resetRound,
     resetToStart,
     deleteLastClip,
+    undoDeleteClip,
+    /** How many deleted shots can still be restored this round. */
+    undoableDeleteCount,
+    /** The hole the most recently deleted shot came from (null if none). */
+    lastDeletedHole:
+      deletedStackRef.current.length > 0
+        ? deletedStackRef.current[deletedStackRef.current.length - 1].clip.holeNumber
+        : null,
   };
 }
