@@ -1,0 +1,12 @@
+{
+  "name": "swing-vision",
+  "version": "0.1.0",
+  "description": "EXPERIMENTAL on-device zero-shot swing/putt/no-shot classifier (MobileCLIP2 image encoder + baked text embeddings). Standalone — does not touch shot-detector.",
+  "main": "index.ts",
+  "author": "Clippar",
+  "license": "MIT",
+  "homepage": "https://clippar.com",
+  "peerDependencies": {
+    "expo": "*"
+  }
+}

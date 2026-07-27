@@ -85,6 +85,7 @@
     "react-native-web": "~0.21.0",
     "react-native-worklets": "0.5.1",
     "shot-detector": "file:modules/shot-detector",
+    "swing-vision": "file:modules/swing-vision",
     "tailwindcss": "^3.3.2",
     "tus-js-client": "^4.3.1"
   },

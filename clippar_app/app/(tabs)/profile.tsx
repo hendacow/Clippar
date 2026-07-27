@@ -117,6 +117,11 @@ function Divider() {
   );
 }
 
+// Branch-local flag (experiment/vision-swing-classifier). Surfaces the
+// experimental on-device swing-vision test screen in the internal preview
+// build. NEVER set true on a branch that ships to the App Store.
+const SHOW_SWING_VISION_EXPERIMENT = true;
+
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
   const { user, signOut } = useAuth();
@@ -576,6 +581,22 @@ export default function ProfileScreen() {
                   title="Tracer Sim (debug)"
                   subtitle="Synthetic GPS shots → rendered tracer arcs"
                   onPress={() => router.push('/(dev)/tracer-sim')}
+                />
+              </>
+            )}
+            {/* EXPERIMENT (branch experiment/vision-swing-classifier only):
+                on-device MobileCLIP2 swing classifier. Shown even in the
+                Release preview build (which is internal distribution, not the
+                App Store) so the on-device speed can be felt on device. This
+                flag is branch-local and never reaches a store build. */}
+            {SHOW_SWING_VISION_EXPERIMENT && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.primary} />}
+                  title="Swing Vision (experimental)"
+                  subtitle="On-device MobileCLIP2 swing/putt classifier — feel the speed"
+                  onPress={() => router.push('/(dev)/swing-vision')}
                 />
               </>
             )}
