@@ -17,7 +17,15 @@ export type VisionClass = 'full_swing' | 'address' | 'putt_chip' | 'no_shot';
 export type FrameScores = Record<VisionClass, number>;
 
 export interface ClassifyResult {
+  /** Softmax scores per frame (relative — always sums to 1). */
   frames: FrameScores[];
+  /**
+   * RAW cosine similarities per frame, aligned with `frames`. This is the
+   * open-set signal: softmax over 4 golf classes is a forced choice, so a clip
+   * with no golf still produces a confident winner. Real golf measures
+   * ~0.31-0.34 here; anything non-golf ~0.06-0.13.
+   */
+  sims: FrameScores[];
   frameCount: number;
   /** Wall-clock time the native classify took, in ms — real device latency. */
   elapsedMs: number;

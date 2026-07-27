@@ -22,6 +22,8 @@ import { GradientBackground } from '@/components/ui/GradientBackground';
 import * as swingVision from 'swing-vision';
 import {
   decideClip,
+  maxScore,
+  DEFAULT_THRESHOLDS,
   VISION_CLASSES,
   type FrameScores,
 } from '../../experiments/vision-swing-classifier/swingVisionLogic';
@@ -29,9 +31,11 @@ import {
 interface RunResult {
   source: string;
   frames: FrameScores[];
+  sims: FrameScores[];
   elapsedMs: number;
   decision: string;
   pooled: FrameScores;
+  inDomainFrames: number;
 }
 
 const SHORT: Record<string, string> = {
@@ -61,13 +65,21 @@ export default function SwingVisionScreen() {
     setResult(null);
     try {
       const out = await swingVision.classifyClip(uri, 8);
-      const { label, pooled } = decideClip(out.frames);
+      // Pass the raw similarities so out-of-domain frames are rejected rather
+      // than forced into one of the four golf classes.
+      const { label, pooled, inDomainFrames } = decideClip(
+        out.frames,
+        DEFAULT_THRESHOLDS,
+        out.sims
+      );
       setResult({
         source,
         frames: out.frames,
+        sims: out.sims ?? [],
         elapsedMs: out.elapsedMs,
         decision: label,
         pooled,
+        inDomainFrames,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -185,6 +197,10 @@ export default function SwingVisionScreen() {
                 <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 4 }}>
                   pooled: {VISION_CLASSES.map((c) => `${SHORT[c]} ${(result.pooled[c] * 100).toFixed(0)}%`).join('   ')}
                 </Text>
+                <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 6 }}>
+                  in-domain frames: {result.inDomainFrames}/{result.frames.length}
+                  {result.inDomainFrames === 0 ? '  → not golf, rejected' : ''}
+                </Text>
               </View>
 
               {/* Per-frame table */}
@@ -198,11 +214,27 @@ export default function SwingVisionScreen() {
                     {SHORT[c]}
                   </Text>
                 ))}
+                <Text style={{ width: 56, color: theme.colors.textTertiary, fontSize: 11, textAlign: 'right' }}>
+                  sim
+                </Text>
               </View>
               {result.frames.map((f, i) => {
                 const top = VISION_CLASSES.reduce((a, b) => (f[a] >= f[b] ? a : b));
+                // Raw similarity = "does this frame look like golf at all?".
+                // Below the gate the row is dimmed — it was excluded entirely.
+                const sim = result.sims[i] ? maxScore(result.sims[i]) : null;
+                const inDomain = sim === null || sim >= DEFAULT_THRESHOLDS.minSimilarity;
                 return (
-                  <View key={i} style={{ flexDirection: 'row', paddingVertical: 3, borderTopWidth: 1, borderTopColor: theme.colors.surfaceBorder }}>
+                  <View
+                    key={i}
+                    style={{
+                      flexDirection: 'row',
+                      paddingVertical: 3,
+                      borderTopWidth: 1,
+                      borderTopColor: theme.colors.surfaceBorder,
+                      opacity: inDomain ? 1 : 0.35,
+                    }}
+                  >
                     <Text style={{ width: 34, color: theme.colors.textSecondary, fontSize: 12 }}>{i + 1}</Text>
                     {VISION_CLASSES.map((c) => (
                       <Text
@@ -218,6 +250,16 @@ export default function SwingVisionScreen() {
                         {(f[c] * 100).toFixed(0)}
                       </Text>
                     ))}
+                    <Text
+                      style={{
+                        width: 56,
+                        fontSize: 12,
+                        textAlign: 'right',
+                        color: inDomain ? theme.colors.textSecondary : theme.colors.accentRed,
+                      }}
+                    >
+                      {sim === null ? '—' : sim.toFixed(2)}
+                    </Text>
                   </View>
                 );
               })}

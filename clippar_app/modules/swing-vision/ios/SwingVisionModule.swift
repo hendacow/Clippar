@@ -176,18 +176,26 @@ public class SwingVisionModule: Module {
     generator.maximumSize = CGSize(width: 512, height: 512)
 
     var frames: [[String: Float]] = []
+    var sims: [[String: Float]] = []
     for i in 0..<frameCount {
       let t = durationSec * (Double(i) + 0.5) / Double(frameCount)
       let time = CMTime(seconds: t, preferredTimescale: 600)
       guard let cg = try? generator.copyCGImage(at: time, actualTime: nil) else { continue }
       if let emb = embed(cgImage: cg, model: model) {
         frames.append(scores(for: emb))
+        sims.append(similarities(for: emb))
       }
     }
 
     let elapsedMs = (CFAbsoluteTimeGetCurrent() - started) * 1000.0
     promise.resolve([
       "frames": frames,
+      // RAW cosine similarities per frame. Critical for open-set rejection:
+      // softmax over only 4 golf classes is a FORCED choice, so a video with
+      // no golf in it still produces a confident-looking winner. The absolute
+      // similarity is what separates real golf (~0.31-0.34) from anything
+      // else (~0.06-0.13). JS gates on this.
+      "sims": sims,
       "frameCount": frames.count,
       "elapsedMs": elapsedMs,
     ])
@@ -208,6 +216,16 @@ public class SwingVisionModule: Module {
     let ptr = arr.dataPointer.bindMemory(to: Float32.self, capacity: arr.count)
     for i in 0..<arr.count { vec[i] = ptr[i] }
     return l2(vec)
+  }
+
+  /// Raw cosine similarity to each class (both sides L2-normalized), WITHOUT
+  /// softmax — the open-set signal.
+  private func similarities(for imageEmbedding: [Float]) -> [String: Float] {
+    var out: [String: Float] = [:]
+    for (i, name) in classNames.enumerated() {
+      out[name] = dot(imageEmbedding, classEmbeddings[i])
+    }
+    return out
   }
 
   private func scores(for imageEmbedding: [Float]) -> [String: Float] {

@@ -34,6 +34,20 @@ export interface DecisionThresholds {
   /** full_swing must beat putt_chip by at least this margin to win, so a
    *  chip's single mini-swing frame doesn't masquerade as a full swing. */
   swingOverPuttMargin: number;
+  /**
+   * OPEN-SET GATE — the most important threshold here.
+   *
+   * Softmax over only 4 golf classes is a FORCED choice: it always sums to 1,
+   * so a clip containing no golf at all still yields a confident-looking
+   * winner. (Measured: a black/UI/random frame scored "swing 47%".) The
+   * absolute cosine similarity is what actually separates domains —
+   *   real golf frames : 0.31 – 0.34
+   *   non-golf frames  : 0.06 – 0.13
+   * so any frame whose BEST similarity is below this is not golf, whatever the
+   * percentages say. Frames below the gate are excluded from pooling; a clip
+   * with no surviving frame is NO_SHOT.
+   */
+  minSimilarity: number;
 }
 
 export const DEFAULT_THRESHOLDS: DecisionThresholds = {
@@ -41,6 +55,9 @@ export const DEFAULT_THRESHOLDS: DecisionThresholds = {
   noShot: 0.5,
   topK: 3,
   swingOverPuttMargin: 0.08,
+  // Midway between the measured out-of-domain ceiling (0.134) and the
+  // in-domain floor (0.315), well clear of both.
+  minSimilarity: 0.22,
 };
 
 /** Cosine similarity of a normalized image embedding to each (normalized)
@@ -106,15 +123,33 @@ export function poolFrames(
  */
 export function decideClip(
   frames: FrameScores[],
-  thresholds: DecisionThresholds = DEFAULT_THRESHOLDS
-): { label: ClipDecision; pooled: FrameScores } {
+  thresholds: DecisionThresholds = DEFAULT_THRESHOLDS,
+  /**
+   * Raw cosine similarities per frame, aligned index-for-index with `frames`.
+   * When supplied, frames whose best similarity falls under
+   * `minSimilarity` are treated as out-of-domain and dropped before pooling.
+   * Omit only for legacy/synthetic callers that have no similarity data.
+   */
+  sims?: FrameScores[]
+): { label: ClipDecision; pooled: FrameScores; inDomainFrames: number } {
+  const empty: FrameScores = { full_swing: 0, address: 0, putt_chip: 0, no_shot: 0 };
   if (frames.length === 0) {
-    return {
-      label: 'UNSURE',
-      pooled: { full_swing: 0, address: 0, putt_chip: 0, no_shot: 0 },
-    };
+    return { label: 'UNSURE', pooled: empty, inDomainFrames: 0 };
   }
-  const pooled = poolFrames(frames, thresholds.topK);
+
+  // OPEN-SET GATE. Keep only frames that actually look like golf at all.
+  const kept =
+    sims && sims.length === frames.length
+      ? frames.filter((_, i) => maxScore(sims[i]) >= thresholds.minSimilarity)
+      : frames;
+
+  // Nothing in the clip resembles golf → it is not a shot, regardless of what
+  // the (forced-choice) percentages claimed.
+  if (kept.length === 0) {
+    return { label: 'NO_SHOT', pooled: empty, inDomainFrames: 0 };
+  }
+
+  const pooled = poolFrames(kept, thresholds.topK);
 
   const swingWinsPutt =
     pooled.full_swing >= pooled.putt_chip + thresholds.swingOverPuttMargin;
@@ -133,5 +168,10 @@ export function decideClip(
     // Golfer present, addressing, no decisive swing seen — don't force a call.
     label = 'UNSURE';
   }
-  return { label, pooled };
+  return { label, pooled, inDomainFrames: kept.length };
+}
+
+/** Highest score across the four classes (used for the open-set gate). */
+export function maxScore(s: FrameScores): number {
+  return Math.max(...VISION_CLASSES.map((c) => s[c]));
 }

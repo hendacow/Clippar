@@ -94,6 +94,79 @@ test('decideClip: empty input → UNSURE, never throws', () => {
   assert.equal(decideClip([]).label, 'UNSURE');
 });
 
+// ── OPEN-SET REJECTION ──────────────────────────────────────────────────────
+// Regression guard for the bug found on device: a video with NO golf in it was
+// classified FULL_SWING at 87%. Cause: softmax over 4 golf classes is a forced
+// choice. The similarity values below are the REAL measured ones.
+
+test('decideClip: a non-golf clip is rejected as NO_SHOT despite confident-looking percentages', () => {
+  // Exactly the on-device failure: softmax says "swing", raw similarity says
+  // nothing here resembles golf (measured 0.06-0.13 for black/UI/random).
+  const frames = [
+    fs(0.47, 0.09, 0.10, 0.34),
+    fs(0.50, 0.11, 0.11, 0.28),
+    fs(0.24, 0.19, 0.41, 0.15),
+    fs(0.47, 0.09, 0.10, 0.34),
+  ];
+  const sims = [
+    fs(0.115, 0.098, 0.100, 0.112),
+    fs(0.134, 0.119, 0.118, 0.128),
+    fs(0.105, 0.103, 0.110, 0.101),
+    fs(0.060, 0.086, 0.085, 0.110),
+  ];
+  const { label, inDomainFrames } = decideClip(frames, DEFAULT_THRESHOLDS, sims);
+  assert.equal(label, 'NO_SHOT');
+  assert.equal(inDomainFrames, 0);
+});
+
+test('decideClip: a real golf clip still passes the open-set gate', () => {
+  const frames = [
+    fs(0.16, 0.43, 0.41, 0.0),
+    fs(0.82, 0.11, 0.08, 0.0),
+    fs(0.49, 0.30, 0.21, 0.0),
+    fs(0.60, 0.20, 0.15, 0.05),
+  ];
+  // Measured in-domain similarities: 0.31-0.34.
+  const sims = [
+    fs(0.317, 0.327, 0.326, 0.266),
+    fs(0.336, 0.316, 0.312, 0.260),
+    fs(0.315, 0.310, 0.306, 0.268),
+    fs(0.320, 0.300, 0.295, 0.255),
+  ];
+  const { label, inDomainFrames } = decideClip(frames, DEFAULT_THRESHOLDS, sims);
+  assert.equal(label, 'FULL_SWING');
+  assert.equal(inDomainFrames, 4);
+});
+
+test('decideClip: mixed clip keeps only the in-domain frames', () => {
+  const frames = [
+    fs(0.9, 0.05, 0.03, 0.02), // junk frame that "looks" like a swing
+    fs(0.20, 0.55, 0.20, 0.05), // real address
+    fs(0.25, 0.50, 0.20, 0.05), // real address
+    fs(0.22, 0.52, 0.21, 0.05), // real address
+  ];
+  const sims = [
+    fs(0.09, 0.05, 0.04, 0.03), // out of domain → dropped
+    fs(0.31, 0.33, 0.32, 0.26),
+    fs(0.30, 0.34, 0.31, 0.26),
+    fs(0.31, 0.33, 0.32, 0.26),
+  ];
+  const { label, inDomainFrames } = decideClip(frames, DEFAULT_THRESHOLDS, sims);
+  assert.equal(inDomainFrames, 3, 'the junk frame is excluded');
+  assert.notEqual(label, 'FULL_SWING', 'junk frame must not drive the decision');
+});
+
+test('minSimilarity sits clear of both measured domains', () => {
+  // Out-of-domain ceiling 0.134, in-domain floor 0.315.
+  assert.ok(DEFAULT_THRESHOLDS.minSimilarity > 0.134);
+  assert.ok(DEFAULT_THRESHOLDS.minSimilarity < 0.315);
+});
+
+test('decideClip: without sims (legacy callers) behaviour is unchanged', () => {
+  const frames = [fs(0.7, 0.15, 0.1, 0.05), fs(0.6, 0.2, 0.15, 0.05)];
+  assert.equal(decideClip(frames).label, 'FULL_SWING');
+});
+
 test('DEFAULT_THRESHOLDS are sane', () => {
   assert.ok(DEFAULT_THRESHOLDS.fullSwing > 0 && DEFAULT_THRESHOLDS.fullSwing < 1);
   assert.ok(DEFAULT_THRESHOLDS.topK >= 1);
