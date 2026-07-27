@@ -48,7 +48,12 @@ export default function SwingVisionScreen() {
   const [error, setError] = useState<string | null>(null);
 
   const available = swingVision.isAvailable();
+  const nativePresent = swingVision.isNativeModulePresent();
   const loadErr = swingVision.lastError();
+  // Distinguish the two failure modes so the cause is unambiguous on device.
+  const diagnostic = !nativePresent
+    ? 'Native module did NOT link into this build.'
+    : loadErr ?? 'Model/embeddings failed to load (no error reported).';
 
   const run = useCallback(async (uri: string, source: string) => {
     setBusy(true);
@@ -123,7 +128,7 @@ export default function SwingVisionScreen() {
             <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>
               {available
                 ? 'MobileCLIP2-S2 image encoder + baked text embeddings bundled.'
-                : loadErr ?? 'The swing-vision native module or its model is not in this build.'}
+                : diagnostic}
             </Text>
           </View>
 

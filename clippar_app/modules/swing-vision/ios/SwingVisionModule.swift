@@ -53,31 +53,77 @@ public class SwingVisionModule: Module {
 
   // MARK: - Resource loading
 
-  private func resourceBundle() -> Bundle? {
-    // The .mlmodelc + json live in the SwingVisionResources bundle declared in
-    // the podspec. Fall back to the module's own bundle for dev layouts.
-    let hostBundle = Bundle(for: type(of: self))
-    if let url = hostBundle.url(forResource: "SwingVisionResources", withExtension: "bundle"),
-       let b = Bundle(url: url) {
-      return b
+  /// Every bundle the resources might live in: the SwingVisionResources bundle
+  /// (podspec resource_bundles), the module's own framework bundle, and main.
+  private func candidateBundles() -> [Bundle] {
+    var bundles: [Bundle] = []
+    let host = Bundle(for: type(of: self))
+    for b in [host, Bundle.main] {
+      if let url = b.url(forResource: "SwingVisionResources", withExtension: "bundle"),
+         let rb = Bundle(url: url) {
+        bundles.append(rb)
+      }
     }
-    return hostBundle
+    bundles.append(host)
+    bundles.append(Bundle.main)
+    return bundles
+  }
+
+  /// Find a resource by base name across every candidate bundle + extension.
+  private func findResource(_ name: String, _ exts: [String]) -> URL? {
+    for b in candidateBundles() {
+      for ext in exts {
+        if let url = b.url(forResource: name, withExtension: ext) {
+          return url
+        }
+      }
+    }
+    return nil
   }
 
   private func loadResources() {
-    guard let bundle = resourceBundle() else {
-      loadError = "resource bundle not found"
+    // The model may ship as an already-compiled .mlmodelc OR as a raw
+    // .mlpackage — CocoaPods resource_bundles copies .mlpackage VERBATIM
+    // (it does NOT compile it the way an app target would). Handle both:
+    // load a .mlmodelc directly; compile a .mlpackage at first launch.
+    var compiledURL = findResource("MobileCLIP2S2Image", ["mlmodelc"])
+      ?? findResource("ClipImageEncoder", ["mlmodelc"])
+
+    if compiledURL == nil,
+       let pkg = findResource("MobileCLIP2S2Image", ["mlpackage"])
+         ?? findResource("ClipImageEncoder", ["mlpackage"]) {
+      do {
+        // Compile once, cache in Application Support so we don't recompile.
+        let cacheDir = try FileManager.default.url(
+          for: .applicationSupportDirectory, in: .userDomainMask,
+          appropriateFor: nil, create: true
+        ).appendingPathComponent("SwingVision", isDirectory: true)
+        try? FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+        let cached = cacheDir.appendingPathComponent(pkg.deletingPathExtension().lastPathComponent + ".mlmodelc")
+        if FileManager.default.fileExists(atPath: cached.path) {
+          compiledURL = cached
+        } else {
+          let tmp = try MLModel.compileModel(at: pkg)
+          try? FileManager.default.removeItem(at: cached)
+          try FileManager.default.copyItem(at: tmp, to: cached)
+          compiledURL = cached
+        }
+      } catch {
+        loadError = "mlpackage compile failed: \(error.localizedDescription)"
+        return
+      }
+    }
+
+    guard let modelURL = compiledURL else {
+      // Report what we DID find so the failure is diagnosable from the app.
+      let host = Bundle(for: type(of: self))
+      let listing = (try? FileManager.default.contentsOfDirectory(atPath: host.bundlePath))?
+        .prefix(20).joined(separator: ", ") ?? "n/a"
+      loadError = "model not found (.mlmodelc/.mlpackage). host bundle has: \(listing)"
       return
     }
-    // Xcode compiles MobileCLIP2S2Image.mlpackage -> .mlmodelc at build time.
-    guard let modelURL =
-            bundle.url(forResource: "MobileCLIP2S2Image", withExtension: "mlmodelc")
-            ?? bundle.url(forResource: "ClipImageEncoder", withExtension: "mlmodelc") else {
-      loadError = "model .mlmodelc not found in bundle"
-      return
-    }
-    guard let embURL = bundle.url(forResource: "class_text_embeddings", withExtension: "json") else {
-      loadError = "class_text_embeddings.json not found in bundle"
+    guard let embURL = findResource("class_text_embeddings", ["json"]) else {
+      loadError = "class_text_embeddings.json not found in any bundle"
       return
     }
     do {
@@ -99,7 +145,7 @@ public class SwingVisionModule: Module {
         self.classEmbeddings = []
       }
     } catch {
-      loadError = "load failed: \(error.localizedDescription)"
+      loadError = "model load failed: \(error.localizedDescription)"
     }
   }
 

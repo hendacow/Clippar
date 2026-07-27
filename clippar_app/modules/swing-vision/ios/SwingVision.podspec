@@ -10,7 +10,11 @@ Pod::Spec.new do |s|
   s.license        = package['license']
   s.author         = package['author']
   s.homepage       = package['homepage']
-  s.platforms      = { :ios => '16.0' }
+  # 14.0 (matches shot-detector) so this module never raises the whole app's
+  # install floor. The Core ML MODEL is compiled for iOS 16, so it simply fails
+  # to load on iOS 15 (feature hides gracefully via isAvailable()); it does not
+  # block install or force an OS update.
+  s.platforms      = { :ios => '14.0' }
   s.swift_version  = '5.4'
   s.source         = { git: '' }
   s.static_framework = true

@@ -26,6 +26,13 @@ export interface ClassifyResult {
 // Optional: absent if the module isn't in this build (e.g. Expo Go, web).
 const native = requireOptionalNativeModule('SwingVision');
 
+/** True when the native module itself linked into this build (regardless of
+ *  whether its model loaded). Lets the UI distinguish "module missing" from
+ *  "model failed to load". */
+export function isNativeModulePresent(): boolean {
+  return !!native;
+}
+
 /** True when the native module AND its bundled model/embeddings are present. */
 export function isAvailable(): boolean {
   try {
