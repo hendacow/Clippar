@@ -1,34 +1,52 @@
 /**
- * swing-vision — EXPERIMENTAL on-device zero-shot swing classifier.
+ * swing-vision — EXPERIMENTAL on-device swing LOCALIZER.
  *
- * Standalone Expo module (does NOT touch shot-detector). The native side runs
- * a bundled MobileCLIP/CLIP image encoder over sampled frames and returns
- * per-frame class scores; pooling + the decision live in
- * `experiments/vision-swing-classifier/swingVisionLogic.ts` so the policy is
- * testable off-device.
+ * Answers "at what second did the golfer swing?", which is what trimming needs.
+ * It does NOT classify shot type: that framing needed absolute, cross-clip
+ * thresholds which drift with lighting, distance and angle, and it failed
+ * (see experiments/vision-swing-classifier/FINDINGS_V2.md).
  *
- * Availability is runtime-gated: on a build without the model bundled,
- * `isAvailable()` is false and callers no-op. Nothing in the app depends on
- * this yet.
+ * Standalone Expo module — does NOT touch shot-detector. Availability is
+ * runtime-gated: on a build without the model bundled, `isAvailable()` is false
+ * and callers no-op. Nothing in the app depends on this yet.
+ *
+ * How it works, because it is not what you'd guess:
+ *  - MOTION finds the instant. Per-frame energy dips where the club reverses at
+ *    the top of the backswing, then spikes ~0.20s later on the downswing. This
+ *    runs on EVERY frame and is a pixel subtraction on 160x90 grayscale.
+ *  - CORE ML only judges ~6 candidate moments, against image prototypes averaged
+ *    from verified frames. It cannot find the instant itself — asked for "top of
+ *    the backswing" it returns the held finish pose ~0.3s later.
  */
 import { requireOptionalNativeModule } from 'expo-modules-core';
 
-export type VisionClass = 'full_swing' | 'address' | 'putt_chip' | 'no_shot';
-export type FrameScores = Record<VisionClass, number>;
+export interface SwingCandidate {
+  /** Top of the backswing — the club's direction reversal. */
+  tTop: number;
+  /** Downswing peak, ~0.20s after tTop. */
+  tImpact: number;
+  /** Valley depth normalised by the clip's motion scale (comparable across clips). */
+  norm: number;
+  /** Image-prototype evidence: max(swing, putt) - negative. */
+  proto: number;
+}
 
-export interface ClassifyResult {
-  /** Softmax scores per frame (relative — always sums to 1). */
-  frames: FrameScores[];
-  /**
-   * RAW cosine similarities per frame, aligned with `frames`. This is the
-   * open-set signal: softmax over 4 golf classes is a forced choice, so a clip
-   * with no golf still produces a confident winner. Real golf measures
-   * ~0.31-0.34 here; anything non-golf ~0.06-0.13.
-   */
-  sims: FrameScores[];
-  frameCount: number;
-  /** Wall-clock time the native classify took, in ms — real device latency. */
+export interface LocalizeResult {
+  decision: 'SWING' | 'NO_SWING';
+  /** Seconds into the clip. Undefined when decision is NO_SWING. */
+  tTop?: number;
+  tImpact?: number;
+  /** The winning candidate's prototype score. Small by nature (~0.0-0.1): every
+   *  frame is a golf course, so the three prototypes sit at cosine ~0.95 to each
+   *  other and discrimination lives in small consistent differences. */
+  confidence?: number;
+  norm?: number;
+  /** Every candidate considered, for debugging why a clip was called wrong. */
+  candidates: SwingCandidate[];
+  /** Wall-clock for the whole localization — real device latency. */
   elapsedMs: number;
+  /** Frames per second the motion pass actually achieved. */
+  motionFps: number;
 }
 
 // Optional: absent if the module isn't in this build (e.g. Expo Go, web).
@@ -41,7 +59,7 @@ export function isNativeModulePresent(): boolean {
   return !!native;
 }
 
-/** True when the native module AND its bundled model/embeddings are present. */
+/** True when the native module AND its model/prototypes are present. */
 export function isAvailable(): boolean {
   try {
     return !!native && native.isAvailable();
@@ -60,14 +78,10 @@ export function lastError(): string | null {
 }
 
 /**
- * Classify a clip by sampling `frameCount` frames. Returns per-frame class
- * scores + real device latency. Rejects if the module/model is unavailable —
+ * Locate the swing in a clip. Rejects if the module/model is unavailable —
  * callers should check isAvailable() first.
  */
-export async function classifyClip(
-  videoUri: string,
-  frameCount = 8
-): Promise<ClassifyResult> {
+export async function localizeSwing(videoUri: string): Promise<LocalizeResult> {
   if (!native) throw new Error('SwingVision native module not present in this build');
-  return native.classifyClip(videoUri, frameCount);
+  return native.localizeSwing(videoUri);
 }

@@ -24,10 +24,12 @@ Pod::Spec.new do |s|
   s.source_files = '**/*.{h,m,mm,swift}'
   s.frameworks = 'Vision', 'AVFoundation', 'CoreML', 'CoreImage'
 
-  # The MobileCLIP2 image encoder (.mlpackage → compiled to .mlmodelc at build)
-  # and the baked class text embeddings, bundled as a resource bundle so we can
-  # locate them at runtime regardless of static-framework packaging.
+  # The MobileCLIP2 image encoder (.mlpackage — CocoaPods copies it verbatim, so
+  # the module compiles it to .mlmodelc on first launch) plus the baked IMAGE
+  # prototypes. The prototypes replace the old class_text_embeddings.json: text
+  # prompts were measured losing to image prototypes badly enough to reject a
+  # textbook bunker swing. ~34 KB against a 69 MB model.
   s.resource_bundles = {
-    'SwingVisionResources' => ['MobileCLIP2S2Image.mlpackage', 'class_text_embeddings.json']
+    'SwingVisionResources' => ['MobileCLIP2S2Image.mlpackage', 'swing_prototypes.json']
   }
 end
