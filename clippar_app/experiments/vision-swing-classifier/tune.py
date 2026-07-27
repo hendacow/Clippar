@@ -74,7 +74,23 @@ def candidates(e, t, up=UP_WINDOW, back=BACK_WINDOW, k=N_CANDIDATES, nms=NMS_GAP
     return out
 
 
-def analyse_cached(npz_path, **kw):
+# Recordings start before the golfer sets up and stop after the ball lands, so
+# the phone is being handled at both ends of every clip — the largest motion in
+# IMG_0523 is the end-of-clip pickup, not the swing.
+#
+# Empirically safe: across all 26 verified tops the closest any real swing comes
+# to a clip edge is 4.08s, so a 2.5s guard keeps a 1.6x margin. It is what fixes
+# IMG_0592, where the golfer climbing out of the bunker and walking past the
+# camera at 18.65s (2.05s from the end of a 20.7s clip) outscored the real swing
+# at 7.28s on BOTH motion and prototype — no ranking rule could have saved it.
+#
+# CAVEAT: 2.5s is set from 26 clips. The rationale generalises (recordings start
+# before setup and end with walking away / picking the phone up) but the exact
+# value does not have a large sample behind it.
+EDGE_GUARD = 2.5
+
+
+def analyse_cached(npz_path, edge_guard=EDGE_GUARD, **kw):
     d = np.load(npz_path, allow_pickle=True)
     gray, fps = d["gray"], float(d["fps"])
     if len(gray) < 4:
@@ -84,6 +100,14 @@ def analyse_cached(npz_path, **kw):
     e = smooth(e_raw, 3)
     t = (np.arange(len(e)) + 0.5) / fps
     cs = candidates(e, t, **kw)
+    dur = float(d["dur"])
+    if edge_guard > 0 and dur > 0:
+        # Scale the guard on short clips. Swing clips run 10-24s so a flat 2.5s
+        # is a small fraction, but putt clips are 4-9s and a flat guard removed
+        # every candidate from IMG_0538 and IMG_0554. Cap at 20% per side so a
+        # 6s clip loses 1.2s rather than 2.5s.
+        g = min(edge_guard, dur * 0.20)
+        cs = [c for c in cs if g <= c["t_top"] <= dur - g]
     return dict(file=Path(str(d["path"])).name, label=str(d["label"]),
                 path=str(d["path"]), dur=float(d["dur"]),
                 fps=fps, src_w=int(d["src_w"]), src_h=int(d["src_h"]),

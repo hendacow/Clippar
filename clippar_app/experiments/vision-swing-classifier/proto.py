@@ -43,6 +43,21 @@ VERIFIED_TOPS = {
     "IMG_0541.MOV": 5.91,
 }
 
+# Putting strokes verified from the candidate grids (cand_grid.py).
+#
+# These need their OWN prototype. A putt legitimately looks nothing like a full
+# swing — no club above the head, body bent over the ball — so genuine putt
+# frames score NEGATIVE against the swing prototype (measured -0.03 to -0.13 on
+# IMG_0538, 0548, 0549), and a single gate rejects them. Scoring against
+# max(swing, putt) is what lets one threshold serve both.
+PUTT_TOPS = {
+    "IMG_0526.MOV": 4.22, "IMG_0528.MOV": 6.04, "IMG_0529.MOV": 5.06,
+    "IMG_0536.MOV": 4.69, "IMG_0537.MOV": 4.49, "IMG_0538.MOV": 1.16,
+    "IMG_0548.MOV": 4.76, "IMG_0549.MOV": 5.17, "IMG_0553.MOV": 3.68,
+    "IMG_0557.MOV": 5.32, "IMG_0558.MOV": 2.85, "IMG_0563.MOV": 9.48,
+    "IMG_0566.MOV": 4.55, "IMG_0570.MOV": 4.32,
+}
+
 # How far from the verified top a frame must be to count as a NEGATIVE from the
 # same clip (address, walking, waggling, watching the ball).
 NEG_EXCLUDE = 2.0
@@ -69,45 +84,55 @@ def norm(v):
 
 
 def build_bank(rows, exclude_file=None):
-    """Return (positive exemplars, negative exemplars) as stacked embeddings."""
-    pos, neg = [], []
+    """Return (swing exemplars, putt exemplars, negative exemplars)."""
+    pos, putt, neg = [], [], []
     for r in rows:
         emb, fps = r["emb"], r["efps"]
         if len(emb) == 0:
             continue
-        t_ver = VERIFIED_TOPS.get(r["file"])
         if r["label"] == "nothing":
             # Whole clip is a negative, but subsample so 25 long clips don't
-            # swamp the 26 positives.
+            # swamp the positives.
             neg.append(emb[::5])
             continue
-        if t_ver is None:
+        t_ver = VERIFIED_TOPS.get(r["file"])
+        t_putt = PUTT_TOPS.get(r["file"])
+        t_ref = t_ver if t_ver is not None else t_putt
+        if t_ref is None:
             continue
         if r["file"] == exclude_file:      # leave-one-clip-out
             continue
-        lo = max(0, int((t_ver - POS_SPREAD) * fps))
-        hi = min(len(emb), int((t_ver + POS_SPREAD) * fps) + 1)
+        lo = max(0, int((t_ref - POS_SPREAD) * fps))
+        hi = min(len(emb), int((t_ref + POS_SPREAD) * fps) + 1)
         if hi > lo:
-            pos.append(emb[lo:hi])
-        # Everything well away from the swing in a golf clip is the HARD
+            (pos if t_ver is not None else putt).append(emb[lo:hi])
+        # Everything well away from the stroke in a golf clip is the HARD
         # negative set: same course, same golfer, same light — just not swinging.
         t = np.arange(len(emb)) / fps
-        far = np.abs(t - t_ver) > NEG_EXCLUDE
+        far = np.abs(t - t_ref) > NEG_EXCLUDE
         if far.any():
             neg.append(emb[far][::3])
     P = np.concatenate(pos) if pos else np.zeros((0, 512), np.float32)
+    Q = np.concatenate(putt) if putt else np.zeros((0, 512), np.float32)
     N = np.concatenate(neg) if neg else np.zeros((0, 512), np.float32)
-    return P, N
+    return P, Q, N
 
 
-def score_frames(emb, P, N, mode="knn", topk=5):
-    """Positive evidence minus negative evidence, per frame."""
+def score_frames(emb, P, N, mode="knn", topk=5, Q=None):
+    """Positive evidence minus negative evidence, per frame.
+
+    With a putt bank Q, a frame is scored against whichever stroke prototype it
+    resembles more — max(swing, putt). A putt does not look like a full swing, so
+    without this a single threshold cannot serve both."""
     if len(emb) == 0 or len(P) == 0:
         return np.zeros(len(emb))
     if mode == "mean":
         p = norm(P.mean(0))
         n = norm(N.mean(0)) if len(N) else np.zeros(P.shape[1], np.float32)
-        return emb @ p - emb @ n
+        best_pos = emb @ p
+        if Q is not None and len(Q):
+            best_pos = np.maximum(best_pos, emb @ norm(Q.mean(0)))
+        return best_pos - emb @ n
     # k-NN: a swing seen face-on and one seen down-the-line are far apart in
     # embedding space, so averaging them blurs both. Nearest-exemplar keeps them
     # distinct.
@@ -122,19 +147,45 @@ def score_frames(emb, P, N, mode="knn", topk=5):
     return pos - negs
 
 
-def pick(ok, rank):
+# Candidates within this fraction of the best motion score count as a "tie" and
+# are decided by the prototype instead.
+#
+# 0.50 measured best: swings 26/26 and putts 9/14. A narrow window (0.10) gives
+# putts 7/14 because a putting stroke is NOT the largest motion in its clip —
+# walking and bending to retrieve the ball are bigger — so the prototype needs
+# real latitude to overrule motion. Widening to 0.80 breaks swings (24/26),
+# where motion genuinely is the best evidence. 0.50 is the point where the
+# prototype can rescue putts without outvoting motion on swings.
+TIE_REL = 0.50
+
+
+def pick(ok, rank, tie_rel=None):
+    # Read the module global at CALL time, not as a default bound at import —
+    # otherwise sweeping TIE_REL silently does nothing.
+    tie_rel = TIE_REL if tie_rel is None else tie_rel
     if rank == "motion":
         return max(ok, key=lambda c: c["norm"])
     if rank == "proto":
         return max(ok, key=lambda c: c["proto"])
+    if rank == "motion_tie":
+        # MOTION DECIDES, CLIP BREAKS TIES.
+        # Ranking purely by motion loses exact ties arbitrarily: on IMG_0592 the
+        # real bunker swing (7.28s) and a golfer climbing out of the bunker
+        # (18.65s) both scored norm 0.33, and the wrong one won on list order.
+        # Ranking purely by prototype is worse (it peaks on the held finish and
+        # moved IMG_0541 from 5.91s to 14.29s), so the prototype only
+        # adjudicates between candidates motion considers equally good.
+        best = max(c["norm"] for c in ok)
+        near = [c for c in ok if c["norm"] >= best * (1 - tie_rel)]
+        return max(near, key=lambda c: c["proto"])
     return max(ok, key=lambda c: c["proto"] * max(c["norm"], 1e-6))
 
 
 def evaluate(rows, mode, min_score, win_before=0.4, win_after=0.9, rank="proto"):
     out = []
     for r in rows:
-        P, N = build_bank(rows, exclude_file=r["file"])   # leave-one-clip-out
-        s = score_frames(r["emb"], P, N, mode)
+        P, Q, N = build_bank(rows, exclude_file=r["file"])   # leave-one-clip-out
+        s = score_frames(r["emb"], P, N, mode, Q=Q)
         fps = r["efps"]
         cands = []
         for c in r["cands"]:
@@ -171,7 +222,7 @@ if __name__ == "__main__":
     ap.add_argument("--emb-cache", required=True)
     ap.add_argument("--mode", choices=["knn", "mean"], default="knn")
     ap.add_argument("--min-score", type=float, default=0.0)
-    ap.add_argument("--rank", choices=["motion","proto","product"], default="proto")
+    ap.add_argument("--rank", choices=["motion","proto","product","motion_tie"], default="proto")
     ap.add_argument("--sweep", action="store_true")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
@@ -182,7 +233,7 @@ if __name__ == "__main__":
     if a.sweep:
         print(f"{'rank':<8} {'min':>7} {'full_swing':>11} {'putt':>8} {'nothing FP':>12}")
         print("-" * 52)
-        for rank in ("motion", "proto", "product"):
+        for rank in ("motion", "motion_tie", "proto", "product"):
             for ms in (-0.02, 0.0, 0.01, 0.02, 0.03, 0.05):
                 g = summarise(evaluate(rows, "mean", ms, rank=rank))
                 print(f"{rank:<8} {ms:>7.2f} {g.get('full_swing',(0,0))[0]:>7}/29"

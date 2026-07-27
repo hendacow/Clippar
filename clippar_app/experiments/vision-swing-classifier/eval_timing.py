@@ -27,7 +27,7 @@ def timing_score(res, tol=TOL):
     hit = miss = missing = 0
     wrong = []
     for r in res:
-        t_ver = proto.VERIFIED_TOPS.get(r["file"])
+        t_ver = proto.VERIFIED_TOPS.get(r["file"]) or proto.PUTT_TOPS.get(r["file"])
         if t_ver is None:
             continue
         if r["decision"] != "SWING":
@@ -50,13 +50,13 @@ if __name__ == "__main__":
     a = ap.parse_args()
 
     rows = proto.load_all(a.motion_cache, a.emb_cache)
-    n_ver = len(proto.VERIFIED_TOPS)
+    n_ver = len(proto.VERIFIED_TOPS) + len(proto.PUTT_TOPS)
     print(f"{n_ver} verified tops; tolerance +/-{TOL}s; leave-one-clip-out\n")
     print(f"{'rank':<9}{'min':>6}{'timing':>10}{'wrong':>7}{'no-call':>9}"
           f"{'putt':>7}{'FP':>5}")
     print("-" * 54)
     best = None
-    for rank in ("motion", "proto", "product"):
+    for rank in ("motion", "motion_tie", "proto", "product"):
         for ms in (-0.02, 0.0, 0.01, 0.02, 0.03):
             res = proto.evaluate(rows, "mean", ms, rank=rank)
             hit, miss, missing, wrong = timing_score(res)

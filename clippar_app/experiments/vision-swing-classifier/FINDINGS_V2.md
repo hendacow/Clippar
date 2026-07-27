@@ -4,14 +4,23 @@ Measured on Henry's 79 labelled clips (`~/clippar-training-clips/`), 2026-07-27.
 This supersedes the shot-TYPE classifier for the question that matters for
 trimming: **at what second did the golfer swing?**
 
-## Headline
+## Headline (final)
 
 | | result |
 |---|---|
 | Full swings, correct time (±0.15s) | **27 / 28 real swings** |
-| Full swings, wrong time | 1 (IMG_0592) |
+| Full swings, wrong time | 0 |
+| Full swings, unverified | 1 (IMG_0584 — golfer tiny and distant) |
 | `nothing/` false positives | 1 / 25 |
-| Putts, correct time | **~1 in 3 — NOT SOLVED** |
+| Putts, correct within ±0.15s of my label | 9 / 14 |
+| Putts landing on genuine putting posture | ~13 / 15 inspected |
+
+IMG_0592 is FIXED (see the edge guard below). The putt figure has an important
+caveat: a putt clip usually contains several putting-posture moments (practice
+strokes, the stroke, a tap-in), so the strict +/-0.15s metric penalises the
+detector for choosing a *different valid* stroke than the one I labelled. On
+IMG_0526 I labelled 4.22s and it chose 2.78s; both are the golfer putting. The
+visual count is the fairer read, the strict count is the conservative one.
 
 `full_swing/` holds 29 clips but **IMG_0525 contains no swing** — verified: the
 only motion above threshold in the whole 18.7s is at 0.02–0.92s (the camera
@@ -65,9 +74,14 @@ sampled frames) and also has the club above the head, while the true top lasts
    `nothing/` clips score a median valley of 0.71 vs 0.68 for real swings,
    completely overlapping.
 
-Ranking must stay on **motion**; CLIP only gates. Ranking by CLIP score moved
-IMG_0541 from the verified-correct 5.91s to 14.29s, because the prototype score
-peaks on the held finish rather than the transition.
+**Motion decides, the prototype breaks ties** (`rank=motion_tie`, TIE_REL=0.50).
+Ranking purely by prototype is worse — it peaks on the held finish and moved
+IMG_0541 from the verified-correct 5.91s to 14.29s. Ranking purely by motion
+loses genuine ties arbitrarily. The tie window matters a lot and differs by shot
+type: at 0.10 putts get 7/14, at 0.50 they get 9/14 with swings still 26/26, and
+at 0.80 swings break (24/26). A putting stroke is NOT the largest motion in its
+clip, so the prototype needs latitude to overrule motion there; on a full swing
+motion genuinely is the best evidence.
 
 ## Text prompts lose to image prototypes
 
@@ -81,33 +95,60 @@ verified timestamps were themselves produced by motion-ranked runs, so the
 "26/26 timing" figure proves the config does not *regress* from what was checked
 by eye; it is not independent evidence.
 
-## Putts are NOT solved
+## Putts — from ~1 in 3 to usable
 
-~1 in 3 correct. Failures are systematic: the detector lands on picking the ball
-out of the hole (IMG_0563), standing on the green (IMG_0566, IMG_0570) or walking
-(IMG_0536), while genuinely missing real strokes (IMG_0528, 0537, 0538, 0548).
+Putts were originally ~1 in 3 correct: the detector landed on picking the ball
+out of the hole, standing on the green or walking, while missing real strokes.
 
 Cause: a putting stroke moves a putter head slowly over ~30cm. Playing partners
 walking, and the golfer bending to retrieve the ball, are far larger motion
 events in the same clip. Measured peaks: full swings ~100, putts 14–49.
 
-**Rejected hypothesis:** that a putt is "small object moves while body stays
-still" and could be separated by moving-pixel spread. Measured compactness
-overlaps completely — real putts 0.21–0.35, wrong picks 0.14–0.27.
+**What fixed it — a SEPARATE putt prototype.** A putt legitimately looks nothing
+like a full swing (no club above the head, body bent over the ball), so genuine
+putt frames scored NEGATIVE against the swing prototype (measured -0.03 to -0.13
+on IMG_0538, 0548, 0549) and one gate rejected them all. Scoring each frame
+against `max(swing_proto, putt_proto)` lets a single threshold serve both.
+Detection went 20/25 -> 24/25 and the picked frames now show putting posture.
 
-**Next step if putts need solving:** build putt-specific image prototypes from
-~15 hand-verified putt frames (the tooling for this — `inspect_cands.py` —
-already exists). Worth noting first that the product may not need it: the stated
-requirement is that a putt is left untrimmed, which is a classification, not a
-localization.
+**Rejected hypothesis:** that a putt is "small object moves while body stays
+still", separable by moving-pixel spread. Measured compactness overlaps
+completely — real putts 0.21–0.35, wrong picks 0.14–0.27. Not shipped.
+
+**Remaining ambiguity:** a putt clip usually holds several putting-posture
+moments (practice strokes, the stroke, a tap-in). "Correct" is genuinely
+ill-defined there, which is why the strict and visual counts differ.
 
 ## A note on the negative set
 
 `nothing/` is all non-golf (a gym, a lake, fireworks, a laptop, tacos) so it only
 tests the easy case. Every false positive that actually bit was
 **golf-course-but-no-swing**: standing in a bunker (IMG_0560), climbing out of one
-(IMG_0592), at address (IMG_0525), walking in the distance (IMG_0584). A useful
-hard-negative set can be built from the non-swing seconds of the swing clips.
+(IMG_0592), at address (IMG_0525), walking in the distance (IMG_0584). Those
+non-swing seconds ARE used as hard negatives when building the prototypes.
+
+The single surviving false positive, IMG_9704, is exactly this case: a golf green
+with a flag and a panning camera, no swing. Its prototype score (+0.020) sits
+just above the swing floor (+0.013) while every other `nothing` clip tops out at
+-0.057 — so one clip breaks an otherwise clean margin.
+
+**Rejected fix:** reject camera pans by fraction-of-frame-in-motion. The false
+positive measures 0.208 and a REAL swing (IMG_0551) measures 0.189; a threshold
+in that 0.019 gap would be fitted to a single clip. Not shipped.
+
+## The edge guard — what fixed IMG_0592
+
+Recordings start before the golfer sets up and end with walking away or picking
+the phone up, so both ends of every clip contain phone handling. On IMG_0592 the
+golfer climbing out of the bunker at 18.65s (2.05s from the end of a 20.7s clip)
+beat the real swing at 7.28s on BOTH motion and prototype — no ranking rule could
+have saved it. Excluding candidates within 2.5s of either edge fixes it.
+
+Empirically safe: across all 26 verified tops the closest a real swing comes to
+an edge is 4.08s, a 1.6x margin. The guard is capped at 20% of duration per side
+because putt clips run 4-9s and a flat 2.5s removed every candidate from
+IMG_0538 and IMG_0554. CAVEAT: 2.5s is set from 26 clips — the rationale
+generalises, the exact value has a small sample behind it.
 
 ## Cost on device
 
@@ -131,6 +172,7 @@ part that cannot find the instant.
     eval_timing.py    timing accuracy against verified tops (not just detection)
     make_sheets.py    contact sheets — the detected frame per clip, labelled
     inspect_cands.py  one frame per candidate: is the right moment even present?
+    cand_grid.py      clips x candidates grid — how the putts were labelled
 
 Caching motion took an iteration from 50 minutes to 4.5 seconds; the GPU move
 took the embedding build from ~3 hours to ~13 minutes. Neither changed a result,
