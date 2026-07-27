@@ -228,3 +228,35 @@ export function insertClipInOrder<
       : a.shotNumber - b.shotNumber
   );
 }
+
+/**
+ * The shot counter AFTER a clip finishes saving. A clip's hole is latched when
+ * recording STARTS, but the save resolves seconds later — by which time the
+ * user may have changed holes. Only advance the counter when the clip belongs
+ * to the hole we're standing on now; otherwise a clip for the hole they LEFT
+ * would bump the counter of the hole they moved TO, drifting shot numbers out
+ * of sync with the footage. Shared by useRound.recordClip and its test so the
+ * exact decision that carried the bug is what's under test.
+ */
+export function nextShotCounterAfterClip(
+  currentShot: number,
+  clipHole: number,
+  currentHole: number
+): number {
+  return clipHole === currentHole ? currentShot + 1 : currentShot;
+}
+
+/**
+ * The strokes to COMMIT for the hole the user is stepping away from with
+ * Previous Hole, or null to leave the hole uncommitted. Penalty strokes live
+ * only in `currentShot` (a water-hazard penalty bumps it with no clip), so
+ * stepping away without committing threw them away — coming back via Next
+ * Hole, resumeShotNumber fell through to clipCount+1 and the penalties were
+ * gone. Commit only when the hole actually saw activity (currentShot > 1);
+ * otherwise we'd write a phantom 1-stroke score for a hole merely passed
+ * through. Shared by useRound.previousHole and its test.
+ */
+export function departingHoleStrokes(currentShot: number): number | null {
+  const strokes = currentShot - 1;
+  return strokes >= 1 ? strokes : null;
+}

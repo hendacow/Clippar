@@ -927,7 +927,13 @@ export async function deleteLocalRound(roundId: string) {
  * window closes; the video files are what make a restore meaningful.
  */
 export async function deleteLocalClip(
-  clipId: number
+  clipId: number,
+  // When the caller offers UNDO, it passes false: staling the same-hole
+  // predecessor's tracer is irreversible (it nulls the column AND unlinks the
+  // rendered file), so doing it at delete time would make a subsequent restore
+  // silently degrade the neighbouring clip. The caller instead commits the
+  // stale later — on undo-stack eviction / round end — via commitClipDeletion.
+  stalePredecessor = true
 ): Promise<{ fileUris: string[]; row: LocalClipRow | null }> {
   const database = await getDatabase();
   const row = await database.getFirstAsync<LocalClipRow>(
@@ -936,8 +942,8 @@ export async function deleteLocalClip(
   );
   // The deleted clip's same-hole predecessor paired with THIS clip's GPS as
   // its landing spot — its tracer no longer matches. Mark it stale before
-  // the row disappears.
-  if (row) {
+  // the row disappears (unless the caller defers it for an undo window).
+  if (row && stalePredecessor) {
     await markPredecessorTracerStale(
       database,
       row.round_id,
@@ -961,6 +967,30 @@ export async function deleteLocalClip(
   ].filter((u): u is string => !!u && u.startsWith('file://'));
   // De-dupe (trimmed often === file_uri) so we don't try to delete twice.
   return { fileUris: [...new Set(fileUris)], row: row ?? null };
+}
+
+/**
+ * Finalise a deletion that was made with `stalePredecessor = false` (i.e. an
+ * undoable delete whose undo window has now closed — the entry was evicted
+ * from the stack, or the round ended). Applies the same-hole predecessor
+ * tracer invalidation that deleteLocalClip deferred, using the deleted row's
+ * own metadata (its DB row is already gone, so we work from the captured row).
+ * No-op today because tracers are prod-disabled; correct for when they ship.
+ */
+export async function commitClipDeletion(row: LocalClipRow): Promise<void> {
+  try {
+    const database = await getDatabase();
+    await markPredecessorTracerStale(
+      database,
+      row.round_id,
+      row.hole_number,
+      row.id,
+      row.sort_order,
+      row.shot_number
+    );
+  } catch {
+    // Best-effort — never throw from a cleanup path.
+  }
 }
 
 /**

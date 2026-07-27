@@ -7,6 +7,8 @@ import {
   resumeShotNumber,
   upsertHoleScore,
   findLastClipIndexOnHole,
+  nextShotCounterAfterClip,
+  departingHoleStrokes,
 } from '../lib/liveRecordingLogic';
 
 // Hole attribution: "when I record on that first hole it won't actually add
@@ -77,13 +79,29 @@ test('insertClipInOrder: does not mutate the original array', () => {
   assert.equal(clips.length, 1);
 });
 
+// ── nextShotCounterAfterClip / departingHoleStrokes (the glue decisions) ─────
+
+test('nextShotCounterAfterClip: advances only when the clip is on the current hole', () => {
+  assert.equal(nextShotCounterAfterClip(3, 5, 5), 4); // same hole → +1
+  assert.equal(nextShotCounterAfterClip(3, 4, 5), 3); // clip landed for a hole we left → unchanged
+});
+
+test('departingHoleStrokes: commits only a hole that saw activity', () => {
+  assert.equal(departingHoleStrokes(1), null); // fresh hole, no shots
+  assert.equal(departingHoleStrokes(2), 1); // 1 shot
+  assert.equal(departingHoleStrokes(6), 5); // 3 shots + 2 penalty strokes
+});
+
 // ── Simulated round: Prev/Next navigation + hole attribution ─────────────────
 
 /**
- * A minimal stand-in for the live round state machine, mirroring the parts of
- * useRound that decide which hole a clip is tagged with. Recording latches the
- * hole at START (as useCamera does), and the clip is only counted against the
- * shot counter if it belongs to the hole currently on screen.
+ * A minimal stand-in for the live round state machine. The bug-carrying
+ * DECISIONS are the real imported functions — clampRecoveredPointer,
+ * resumeShotNumber, upsertHoleScore, previousHoleTarget, findLastClipIndexOnHole,
+ * nextShotCounterAfterClip (recordClip's hole-aware counter) and
+ * departingHoleStrokes (previousHole's penalty-preserving commit). This harness
+ * is only the orchestration around them, so a regression re-introduced into
+ * those functions in useRound would fail here.
  */
 function simulateRound(startHole: 1 | 10, holesPlayed: 9 | 18) {
   const state = {
@@ -104,9 +122,12 @@ function simulateRound(startHole: 1 | 10, holesPlayed: 9 | 18) {
       for (const action of lagActions) action();
       const landed = { holeNumber: hole, shotNumber: shot, id: state.nextId++ };
       state.clips = [...state.clips, landed];
-      // Hole-aware counter (the fix): only advance if the clip is for the
-      // hole we're standing on now.
-      if (landed.holeNumber === state.currentHole) state.currentShot += 1;
+      // Hole-aware counter — the REAL decision from useRound.recordClip.
+      state.currentShot = nextShotCounterAfterClip(
+        state.currentShot,
+        landed.holeNumber,
+        state.currentHole
+      );
       return landed;
     },
     penalty(strokes = 1) {
@@ -125,9 +146,10 @@ function simulateRound(startHole: 1 | 10, holesPlayed: 9 | 18) {
     previousHole() {
       const target = previousHoleTarget(state.currentHole, startHole);
       if (target === null) return false;
-      // The fix: commit the departing hole's strokes so penalties survive.
-      const departingStrokes = state.currentShot - 1;
-      if (departingStrokes >= 1) {
+      // Commit the departing hole's strokes so penalties survive — the REAL
+      // decision from useRound.previousHole.
+      const departingStrokes = departingHoleStrokes(state.currentShot);
+      if (departingStrokes !== null) {
         state.scores = upsertHoleScore(state.scores, {
           holeNumber: state.currentHole,
           strokes: departingStrokes,

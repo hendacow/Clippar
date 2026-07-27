@@ -14,6 +14,8 @@ import {
   upsertHoleScore,
   clampRecoveredPointer,
   insertClipInOrder,
+  nextShotCounterAfterClip,
+  departingHoleStrokes,
 } from '@/lib/liveRecordingLogic';
 import {
   saveLocalRound,
@@ -25,6 +27,7 @@ import {
   deleteLocalRound,
   deleteLocalClip,
   restoreLocalClip,
+  commitClipDeletion,
   resetRoundData,
   type LocalClipRow,
 } from '@/lib/storage';
@@ -98,6 +101,9 @@ export function useRound() {
   // longer meaningful and the footage is just dead weight on disk.
   const purgeDeletedClips = useCallback(() => {
     for (const entry of deletedStackRef.current) {
+      // The undo window is closing for good — NOW apply the predecessor tracer
+      // invalidation that the undoable delete deferred, then free the files.
+      if (entry.row) commitClipDeletion(entry.row);
       for (const uri of entry.fileUris) {
         deleteFile(uri).catch(() => {});
       }
@@ -195,7 +201,11 @@ export function useRound() {
     setState((prev) => {
       if (!prev) return prev;
       const isCurrentHole = clip.holeNumber === prev.currentHole;
-      const nextShot = isCurrentHole ? prev.currentShot + 1 : prev.currentShot;
+      const nextShot = nextShotCounterAfterClip(
+        prev.currentShot,
+        clip.holeNumber,
+        prev.currentHole
+      );
       if (!isCurrentHole) {
         console.log(
           `[useRound] recordClip for hole ${clip.holeNumber} landed while on hole ${prev.currentHole} — shot counter left alone`
@@ -463,11 +473,10 @@ export function useRound() {
     // (currentShot > 1) — otherwise we'd write a phantom 1-stroke score for a
     // hole the user merely passed through.
     const departing = current.currentHole;
-    const departingStrokes = current.currentShot - 1;
-    const shouldCommitDeparting = departingStrokes >= 1;
+    const departingStrokes = departingHoleStrokes(current.currentShot);
     let scoresAfterCommit = current.scores;
 
-    if (shouldCommitDeparting) {
+    if (departingStrokes !== null) {
       const par = getParForHole(current.courseHoles, departing);
       const holeClips = current.clips.filter((c) => c.holeNumber === departing);
       const penaltyStrokes = Math.max(0, departingStrokes - holeClips.length);
@@ -833,16 +842,21 @@ export function useRound() {
     // entry is evicted from the stack or the round ends (purgeDeletedClips).
     try {
       if (typeof lastClip.id === 'number') {
-        const { fileUris, row } = await deleteLocalClip(lastClip.id);
+        // stalePredecessor=false: defer the neighbour's tracer invalidation
+        // until this delete is committed (evicted/round end), so an undo
+        // leaves the predecessor untouched.
+        const { fileUris, row } = await deleteLocalClip(lastClip.id, false);
         deletedStackRef.current = [
           ...deletedStackRef.current,
           { row, clip: lastClip, fileUris },
         ];
         // Cap the stack; evicting an entry is the point at which its footage
-        // is genuinely gone, so that's when we free the disk.
+        // is genuinely gone, so that's when we commit the deletion and free
+        // the disk.
         while (deletedStackRef.current.length > UNDO_STACK_LIMIT) {
           const [evicted, ...rest] = deletedStackRef.current;
           deletedStackRef.current = rest;
+          if (evicted.row) commitClipDeletion(evicted.row);
           for (const uri of evicted.fileUris) {
             deleteFile(uri).catch(() => {});
           }
