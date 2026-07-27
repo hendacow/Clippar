@@ -15,13 +15,19 @@ import { View, Text, ScrollView, Pressable, ActivityIndicator } from 'react-nati
 import { router, Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { ArrowLeft, FolderOpen } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import * as swingVision from 'swing-vision';
+import { trimVideo } from 'shot-detector';
 
 interface RunResult extends swingVision.LocalizeResult {
   source: string;
+  /** What actually plays below: the 5s highlight, or the untouched original. */
+  playbackUri: string;
+  plan: swingVision.TrimPlan;
+  trimMs: number;
 }
 
 export default function SwingVisionScreen() {
@@ -38,18 +44,42 @@ export default function SwingVisionScreen() {
     ? 'Native module did NOT link into this build.'
     : loadErr ?? 'Model/prototypes failed to load (no error reported).';
 
+  // The trimmed highlight (or the untouched original) plays here. expo-video
+  // rebuilds the player when the source changes, so passing state is enough.
+  const player = useVideoPlayer(result?.playbackUri ?? null, (p) => {
+    p.loop = true;
+    p.play();
+  });
+
   const runPicked = useCallback(async () => {
     const res = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ImagePicker.MediaTypeOptions.Videos,
       quality: 1,
     });
     if (res.canceled || !res.assets[0]) return;
+    const uri = res.assets[0].uri;
     setBusy(true);
     setError(null);
     setResult(null);
     try {
-      const out = await swingVision.localizeSwing(res.assets[0].uri);
-      setResult({ ...out, source: res.assets[0].fileName ?? 'Library clip' });
+      const out = await swingVision.localizeSwing(uri);
+      const plan = swingVision.planHighlightTrim(out);
+      let playbackUri = uri;
+      let trimMs = 0;
+      if (plan.trim) {
+        // Passthrough trim — no re-encode, so 4K stays 4K and this is sub-second.
+        const t0 = Date.now();
+        const trimmed = await trimVideo(uri, plan.startSec * 1000, plan.endSec * 1000);
+        trimMs = Date.now() - t0;
+        playbackUri = trimmed.trimmedUri ?? uri;
+      }
+      setResult({
+        ...out,
+        source: res.assets[0].fileName ?? 'Library clip',
+        playbackUri,
+        plan,
+        trimMs,
+      });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -139,7 +169,7 @@ export default function SwingVisionScreen() {
                 {result.decision === 'SWING' && result.tTop !== undefined ? (
                   <>
                     <Text style={{ color: theme.colors.textTertiary, fontSize: 11, letterSpacing: 1 }}>
-                      TOP OF SWING AT
+                      {result.strokeType === 'putt' ? 'PUTTING STROKE AT' : 'TOP OF SWING AT'}
                     </Text>
                     <Text style={{ color: theme.colors.primary, fontSize: 42, fontWeight: '900' }}>
                       {result.tTop.toFixed(2)}s
@@ -162,6 +192,54 @@ export default function SwingVisionScreen() {
                     </Text>
                   </>
                 )}
+              </View>
+
+              {/* The result you actually care about: what a user would end up
+                  watching. Trimmed to 5s for a swing; untouched for a putt or
+                  when nothing was found. */}
+              <View
+                style={{
+                  marginTop: 16, borderRadius: 12, overflow: 'hidden',
+                  borderWidth: 1, borderColor: theme.colors.surfaceBorder,
+                  backgroundColor: '#000',
+                }}
+              >
+                <VideoView
+                  player={player}
+                  style={{ width: '100%', aspectRatio: 9 / 16, maxHeight: 420 }}
+                  contentFit="contain"
+                  nativeControls
+                />
+              </View>
+              <View
+                style={{
+                  flexDirection: 'row', alignItems: 'center', gap: 8,
+                  marginTop: 8, paddingHorizontal: 2,
+                }}
+              >
+                <View
+                  style={{
+                    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 6,
+                    backgroundColor: result.plan.trim
+                      ? 'rgba(40,180,99,0.22)'
+                      : 'rgba(255,255,255,0.10)',
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: result.plan.trim ? theme.colors.primary : theme.colors.textSecondary,
+                      fontSize: 11, fontWeight: '800', letterSpacing: 0.5,
+                    }}
+                  >
+                    {result.plan.trim
+                      ? `TRIMMED ${result.plan.startSec.toFixed(2)}–${result.plan.endSec.toFixed(2)}s`
+                      : 'UNCHANGED'}
+                  </Text>
+                </View>
+                <Text style={{ color: theme.colors.textTertiary, fontSize: 12, flex: 1 }}>
+                  {result.plan.reason}
+                  {result.trimMs > 0 ? `  (${result.trimMs} ms)` : ''}
+                </Text>
               </View>
 
               {/* Candidates: when it is wrong, this says whether the right moment

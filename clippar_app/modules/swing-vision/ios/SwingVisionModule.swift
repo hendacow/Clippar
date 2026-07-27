@@ -179,7 +179,7 @@ public class SwingVisionModule: Module {
       energy: profile.energy, fps: profile.fps, duration: duration, params: params)
     if cands.isEmpty {
       promise.resolve(result(decision: "NO_SWING", best: nil, cands: [],
-                             started: started, motionFps: profile.fps))
+                             started: started, motionFps: profile.fps, duration: duration))
       return
     }
 
@@ -212,6 +212,7 @@ public class SwingVisionModule: Module {
     times.sort()
 
     var scoreAt: [Double: Double] = [:]
+    var puttierAt: [Double: Bool] = [:]
     for t in times {
       let time = CMTime(seconds: t, preferredTimescale: 600)
       guard let cg = try? generator.copyCGImage(at: time, actualTime: nil) else { continue }
@@ -220,8 +221,11 @@ public class SwingVisionModule: Module {
       // max(swing, putt) - negative. A putt looks nothing like a full swing —
       // no club above the head — so scoring putt frames against a swing-only
       // prototype makes them NEGATIVE and one gate rejects them all.
-      let s = max(dot(emb, protoSwing), dot(emb, protoPutt)) - dot(emb, protoNeg)
-      scoreAt[t] = Double(s)
+      let sSwing = dot(emb, protoSwing), sPutt = dot(emb, protoPutt)
+      scoreAt[t] = Double(max(sSwing, sPutt) - dot(emb, protoNeg))
+      // Which prototype won decides whether the clip gets trimmed at all: a
+      // putt is left untouched.
+      puttierAt[t] = sPutt > sSwing
     }
 
     for i in cands.indices {
@@ -235,7 +239,7 @@ public class SwingVisionModule: Module {
     let ok = cands.filter { $0.proto >= params.minScore }
     guard !ok.isEmpty else {
       promise.resolve(result(decision: "NO_SWING", best: nil, cands: cands,
-                             started: started, motionFps: profile.fps))
+                             started: started, motionFps: profile.fps, duration: duration))
       return
     }
     // MOTION DECIDES, THE PROTOTYPE BREAKS TIES. Ranking purely by prototype is
@@ -245,16 +249,38 @@ public class SwingVisionModule: Module {
     let bestNorm = ok.map { $0.norm }.max() ?? 0
     let near = ok.filter { $0.norm >= bestNorm * (1 - params.tieRel) }
     let best = near.max(by: { $0.proto < $1.proto })
+
+    // Stroke type from the winning candidate's strongest frames: a majority of
+    // them scoring putt-side means this is a putt, which the caller leaves
+    // untrimmed.
+    var strokeType = "swing"
+    if let b = best {
+      let inWindow = times
+        .filter { $0 >= b.tTop - params.winBefore - 1e-6 && $0 <= b.tTop + params.winAfter + 1e-6 }
+        .compactMap { t -> (Double, Bool)? in
+          guard let s = scoreAt[t], let p = puttierAt[t] else { return nil }
+          return (s, p)
+        }
+        .sorted { $0.0 > $1.0 }
+        .prefix(3)
+      if !inWindow.isEmpty {
+        let puttVotes = inWindow.filter { $0.1 }.count
+        strokeType = puttVotes * 2 > inWindow.count ? "putt" : "swing"
+      }
+    }
     promise.resolve(result(decision: "SWING", best: best, cands: cands,
-                           started: started, motionFps: profile.fps))
+                           started: started, motionFps: profile.fps,
+                           duration: duration, strokeType: strokeType))
   }
 
   private func result(decision: String, best: SwingCandidate?, cands: [SwingCandidate],
-                      started: CFAbsoluteTime, motionFps: Double) -> [String: Any] {
+                      started: CFAbsoluteTime, motionFps: Double,
+                      duration: Double, strokeType: String = "swing") -> [String: Any] {
     var out: [String: Any] = [
       "decision": decision,
       "elapsedMs": (CFAbsoluteTimeGetCurrent() - started) * 1000.0,
       "motionFps": motionFps,
+      "durationSec": duration,
       "candidates": cands.map {
         ["tTop": $0.tTop, "tImpact": $0.tImpact, "norm": $0.norm, "proto": $0.proto]
       },
@@ -264,6 +290,7 @@ public class SwingVisionModule: Module {
       out["tImpact"] = b.tImpact
       out["confidence"] = b.proto
       out["norm"] = b.norm
+      out["strokeType"] = strokeType
     }
     return out
   }

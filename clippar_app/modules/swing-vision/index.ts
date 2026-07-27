@@ -33,9 +33,14 @@ export interface SwingCandidate {
 
 export interface LocalizeResult {
   decision: 'SWING' | 'NO_SWING';
+  /** Which prototype won at the chosen moment. A 'putt' is left UNTRIMMED —
+   *  the whole clip is the highlight. Undefined when decision is NO_SWING. */
+  strokeType?: 'swing' | 'putt';
   /** Seconds into the clip. Undefined when decision is NO_SWING. */
   tTop?: number;
   tImpact?: number;
+  /** Full clip length, so callers can clamp a trim window to it. */
+  durationSec: number;
   /** The winning candidate's prototype score. Small by nature (~0.0-0.1): every
    *  frame is a golf course, so the three prototypes sit at cosine ~0.95 to each
    *  other and discrimination lives in small consistent differences. */
@@ -85,3 +90,12 @@ export async function localizeSwing(videoUri: string): Promise<LocalizeResult> {
   if (!native) throw new Error('SwingVision native module not present in this build');
   return native.localizeSwing(videoUri);
 }
+
+// Trim policy lives in a pure module so it is testable without expo-modules-core.
+export {
+  planHighlightTrim,
+  HIGHLIGHT_SECONDS,
+  LEAD_IN_SECONDS,
+  type TrimPlan,
+  type HighlightInput,
+} from './highlightTrim';
