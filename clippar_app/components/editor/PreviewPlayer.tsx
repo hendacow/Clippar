@@ -11,7 +11,7 @@ import {
   Image,
   type ViewStyle,
 } from 'react-native';
-import { Scissors, RotateCcw, X, Check, PersonStanding } from 'lucide-react-native';
+import { Scissors, RotateCcw, X, Check, PersonStanding, Pause } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { PoseOverlay } from './PoseOverlay';
@@ -182,10 +182,18 @@ function SimpleTrimPanel({
   clip,
   onSave,
   onCancel,
+  onPreviewChange,
+  alwaysOn = false,
 }: {
   clip: PreviewClip;
   onSave: (startMs: number, endMs: number) => void;
   onCancel: () => void;
+  /** Fired when the handles settle, so the player can loop the new range
+   *  immediately. Deliberately NOT a save: persisting re-cuts the video file and
+   *  writes the DB, which must stay behind an explicit Save. */
+  onPreviewChange?: (startMs: number, endMs: number) => void;
+  /** Panel is docked permanently rather than opened from the scissors button. */
+  alwaysOn?: boolean;
 }) {
   const rawDurationMs = clip.durationMs || 5000;
   const [durationMs, setDurationMs] = useState(rawDurationMs);
@@ -231,6 +239,14 @@ function SimpleTrimPanel({
   const startHandleOriginRef = useRef(0);
   const endHandleOriginRef = useRef(0);
 
+  // Held in a ref because the pan responders are memoised once and would
+  // otherwise capture a stale callback.
+  const onPreviewChangeRef = useRef(onPreviewChange);
+  onPreviewChangeRef.current = onPreviewChange;
+  const commitPreview = useCallback(() => {
+    onPreviewChangeRef.current?.(startMsRef.current, endMsRef.current);
+  }, []);
+
   const startPanResponder = useMemo(
     () =>
       PanResponder.create({
@@ -246,10 +262,10 @@ function SimpleTrimPanel({
           const newMs = Math.round(originMs + deltaMs);
           setStartMs(Math.max(0, Math.min(newMs, endMsRef.current - MIN_TRIM_MS)));
         },
-        onPanResponderRelease: () => {},
-        onPanResponderTerminate: () => {},
+        onPanResponderRelease: commitPreview,
+        onPanResponderTerminate: commitPreview,
       }),
-    []
+    [commitPreview]
   );
 
   const endPanResponder = useMemo(
@@ -267,10 +283,10 @@ function SimpleTrimPanel({
           const newMs = Math.round(originMs + deltaMs);
           setEndMs(Math.min(dur, Math.max(newMs, startMsRef.current + MIN_TRIM_MS)));
         },
-        onPanResponderRelease: () => {},
-        onPanResponderTerminate: () => {},
+        onPanResponderRelease: commitPreview,
+        onPanResponderTerminate: commitPreview,
       }),
-    []
+    [commitPreview]
   );
 
   const msToX = (ms: number) => (ms / durationMs) * TIMELINE_WIDTH;
@@ -309,6 +325,7 @@ function SimpleTrimPanel({
   const handleReset = useCallback(() => {
     setStartMs(0);
     setEndMs(durationMs);
+    onPreviewChangeRef.current?.(0, durationMs);
   }, [durationMs]);
 
   const handleSave = useCallback(() => {
@@ -317,6 +334,13 @@ function SimpleTrimPanel({
     const finalStart = startMs <= 0 ? 0 : startMs;
     onSave(finalStart, finalEnd);
   }, [startMs, endMs, durationMs, onSave]);
+
+  // A docked panel is visible on every clip, so Save must not look actionable
+  // when nothing has moved.
+  const savedStart = clip.trimStartMs ?? 0;
+  const savedEnd =
+    clip.trimEndMs != null && clip.trimEndMs !== -1 ? clip.trimEndMs : durationMs;
+  const isDirty = Math.abs(startMs - savedStart) > 1 || Math.abs(effectiveEndMs - savedEnd) > 1;
 
   const formatMs = (ms: number): string => `${(ms / 1000).toFixed(1)}s`;
   const formatMsFull = (ms: number): string => {
@@ -419,22 +443,27 @@ function SimpleTrimPanel({
         </View>
       </View>
 
-      {/* Buttons */}
+      {/* Buttons. When the panel is docked there is no modal to cancel out of,
+          so Cancel is dropped — Reset restores the full clip. Save stays
+          explicit because it re-cuts the video file and writes the DB. */}
       <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12 }}>
         <Pressable onPress={handleReset} style={styles.trimButton}>
           <RotateCcw size={14} color="rgba(255,255,255,0.7)" />
           <Text style={styles.trimButtonText}>Reset</Text>
         </Pressable>
-        <Pressable
-          onPress={onCancel}
-          style={styles.trimButton}
-        >
-          <X size={14} color="rgba(255,255,255,0.7)" />
-          <Text style={styles.trimButtonText}>Cancel</Text>
-        </Pressable>
+        {!alwaysOn && (
+          <Pressable onPress={onCancel} style={styles.trimButton}>
+            <X size={14} color="rgba(255,255,255,0.7)" />
+            <Text style={styles.trimButtonText}>Cancel</Text>
+          </Pressable>
+        )}
         <Pressable
           onPress={handleSave}
-          style={[styles.trimButton, { backgroundColor: theme.colors.primary + '30' }]}
+          disabled={!isDirty}
+          style={[
+            styles.trimButton,
+            { backgroundColor: theme.colors.primary + '30', opacity: isDirty ? 1 : 0.4 },
+          ]}
         >
           <Check size={14} color={theme.colors.primary} />
           <Text style={[styles.trimButtonText, { color: theme.colors.primary }]}>Save</Text>
@@ -454,6 +483,8 @@ function NativeClipPlayer({
   isTrimming,
   onEnd,
   onCurrentTimeGetter,
+  previewTrim,
+  paused = false,
 }: {
   clip: PreviewClip;
   isTrimming: boolean;
@@ -463,13 +494,20 @@ function NativeClipPlayer({
   // (never inline in render) and cleared on unmount so a disposed player is
   // never read.
   onCurrentTimeGetter?: (getter: (() => number | null) | null) => void;
+  /** Un-persisted bounds from the docked trim panel, so dragging a handle
+   *  changes what loops immediately instead of after Save. */
+  previewTrim?: { startMs: number; endMs: number } | null;
+  /** Press-and-hold on the video pauses; releasing resumes. */
+  paused?: boolean;
 }) {
   const { useVideoPlayer, VideoView } = ExpoVideo!;
 
-  const effectiveStart = clip.trimStartMs ?? clip.startMs ?? 0;
-  const rawEnd = clip.trimEndMs != null && clip.trimEndMs !== -1
-    ? clip.trimEndMs
-    : clip.endMs ?? 0;
+  const effectiveStart = previewTrim?.startMs ?? clip.trimStartMs ?? clip.startMs ?? 0;
+  const rawEnd = previewTrim?.endMs != null
+    ? previewTrim.endMs
+    : clip.trimEndMs != null && clip.trimEndMs !== -1
+      ? clip.trimEndMs
+      : clip.endMs ?? 0;
   const effectiveEnd = rawEnd > 0 ? rawEnd : 0;
 
   const startSec = effectiveStart / 1000;
@@ -566,6 +604,23 @@ function NativeClipPlayer({
       onGetterRef.current?.(null);
     };
   }, [player]);
+  // Press-and-hold pause. Guarded because the player can be disposed mid-gesture
+  // when the clip changes underneath us.
+  useEffect(() => {
+    try {
+      if (paused) player.pause();
+      else player.play();
+    } catch {}
+  }, [paused, player]);
+
+  // Jump to the new in-point as soon as a handle settles, so the loop reflects
+  // the scrub without waiting for Save.
+  useEffect(() => {
+    if (!previewTrim) return;
+    try {
+      player.currentTime = previewTrim.startMs / 1000;
+    } catch {}
+  }, [previewTrim?.startMs, previewTrim?.endMs, player]);
 
   return (
     <VideoView
@@ -631,7 +686,10 @@ export function PreviewPlayer({
   enablePoseOverlay = false,
 }: PreviewPlayerProps) {
   const [currentIndex, setCurrentIndex] = useState(startIndex);
-  const [isTrimming, setIsTrimming] = useState(false);
+  // With trim enabled the panel is DOCKED — no scissors button to press
+  // first. `isTrimming` therefore tracks "the trim UI is up", always true in
+  // that mode, and still gates auto-advance so a clip loops while you edit.
+  const [isTrimming, setIsTrimming] = useState(enableTrim);
   const [showPoseOverlay, setShowPoseOverlay] = useState(false);
   // Live-playhead getter handed up from NativeClipPlayer (seconds, or null
   // when the player is disposed). Stored in a ref so the overlay always
@@ -647,6 +705,10 @@ export function PreviewPlayer({
     return currentTimeGetterRef.current?.() ?? null;
   }, []);
   const [showTransition, setShowTransition] = useState(false);
+  const [isHeld, setIsHeld] = useState(false);
+  // Un-persisted scrub position for the current clip. Cleared on clip change so
+  // it can never leak onto the next one.
+  const [previewTrim, setPreviewTrim] = useState<{ startMs: number; endMs: number } | null>(null);
   const [transitionMeta, setTransitionMeta] = useState<{
     courseName: string;
     date: string;
@@ -747,15 +809,38 @@ export function PreviewPlayer({
     }
   }, [isLast, isTrimming, currentIndex, maybeShowTransition]);
 
+  // Navigation stays live while the docked panel is up — otherwise enabling trim
+  // would strand you on one clip. Only the transition card blocks it.
+  const navBlocked = showTransition || (isTrimming && !enableTrim);
+
   const handleTapLeft = useCallback(() => {
-    if (isTrimming || showTransition) return;
+    if (navBlocked) return;
     setCurrentIndex((i) => Math.max(0, i - 1));
-  }, [isTrimming, showTransition]);
+  }, [navBlocked]);
 
   const handleTapRight = useCallback(() => {
-    if (isTrimming || showTransition) return;
+    if (navBlocked) return;
     advance();
-  }, [advance, isTrimming, showTransition]);
+  }, [advance, navBlocked]);
+
+  // Press-and-hold anywhere on the video pauses; releasing resumes. onPressOut
+  // fires for ordinary taps too, which is harmless — it just clears a hold that
+  // never started.
+  const handleHoldStart = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    setIsHeld(true);
+  }, []);
+  const handleHoldEnd = useCallback(() => setIsHeld(false), []);
+
+  // A scrub belongs to one clip only.
+  useEffect(() => {
+    setPreviewTrim(null);
+    setIsHeld(false);
+  }, [currentIndex, currentClip?.uri]);
+
+  const handlePreviewChange = useCallback((startMs: number, endMs: number) => {
+    setPreviewTrim({ startMs, endMs });
+  }, []);
 
   const handleVideoEnd = useCallback(() => {
     advance();
@@ -773,14 +858,17 @@ export function PreviewPlayer({
 
   const handleTrimSave = useCallback(
     (startMs: number, endMs: number) => {
-      setIsTrimming(false);
+      // Docked panel stays up after saving — there is nowhere to close it to.
+      if (!enableTrim) setIsTrimming(false);
+      setPreviewTrim(null);
       onTrimSave?.(currentIndex, startMs, endMs);
     },
-    [currentIndex, onTrimSave],
+    [currentIndex, onTrimSave, enableTrim],
   );
 
   const handleTrimCancel = useCallback(() => {
     setIsTrimming(false);
+    setPreviewTrim(null);
   }, []);
 
   if (!clips.length || !currentClip) {
@@ -806,6 +894,8 @@ export function PreviewPlayer({
           onCurrentTimeGetter={
             enablePoseOverlay ? handleCurrentTimeGetter : undefined
           }
+          previewTrim={previewTrim}
+          paused={isHeld}
         />
       ) : (
         <WebClipPlaceholder
@@ -826,11 +916,32 @@ export function PreviewPlayer({
         />
       )}
 
-      {/* Tap zones (disabled when trimming or in transition) */}
-      {!isTrimming && !showTransition && (
+      {/* Tap zones: tap to move between clips, hold anywhere to pause. Kept
+          mounted while the docked panel is up so both still work. */}
+      {!navBlocked && (
         <View style={styles.tapZoneRow} pointerEvents="box-none">
-          <Pressable onPress={handleTapLeft} style={styles.tapZone} />
-          <Pressable onPress={handleTapRight} style={styles.tapZone} />
+          <Pressable
+            onPress={handleTapLeft}
+            onLongPress={handleHoldStart}
+            onPressOut={handleHoldEnd}
+            delayLongPress={250}
+            style={styles.tapZone}
+          />
+          <Pressable
+            onPress={handleTapRight}
+            onLongPress={handleHoldStart}
+            onPressOut={handleHoldEnd}
+            delayLongPress={250}
+            style={styles.tapZone}
+          />
+        </View>
+      )}
+
+      {/* Paused affordance — without it a held finger just looks like a freeze. */}
+      {isHeld && (
+        <View style={styles.pausedBadge} pointerEvents="none">
+          <Pause size={14} color="#fff" />
+          <Text style={styles.pausedBadgeText}>Paused</Text>
         </View>
       )}
 
@@ -856,7 +967,7 @@ export function PreviewPlayer({
 
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
               {/* Pose-overlay toggle (live SVG skeleton; native only) */}
-              {enablePoseOverlay && isNative && !isTrimming && (
+              {enablePoseOverlay && isNative && (enableTrim || !isTrimming) && (
                 <Pressable
                   onPress={handlePoseToggle}
                   style={[
@@ -875,15 +986,16 @@ export function PreviewPlayer({
                 </Pressable>
               )}
 
-              {/* Scissors button */}
-              {enableTrim && !isTrimming && (
+              {/* Scissors button — only when the panel is NOT docked. With
+                  enableTrim the trim UI is already on screen. */}
+              {!enableTrim && isTrimming === false && onTrimSave && (
                 <Pressable onPress={handleTrimToggle} style={styles.scissorsBtn}>
                   <Scissors size={18} color={theme.colors.textPrimary} />
                 </Pressable>
               )}
 
               {/* Close button (inside PreviewPlayer so it never overlaps scissors) */}
-              {onDismiss && !isTrimming && (
+              {onDismiss && (enableTrim || !isTrimming) && (
                 <Pressable onPress={onDismiss} style={styles.scissorsBtn}>
                   <X size={18} color={theme.colors.textPrimary} />
                 </Pressable>
@@ -902,12 +1014,15 @@ export function PreviewPlayer({
         />
       )}
 
-      {/* Trim panel */}
+      {/* Trim panel — docked at the bottom whenever trimming is enabled. */}
       {isTrimming && currentClip && (
         <SimpleTrimPanel
+          key={`${currentIndex}-${currentClip.uri}`}
           clip={currentClip}
           onSave={handleTrimSave}
           onCancel={handleTrimCancel}
+          onPreviewChange={handlePreviewChange}
+          alwaysOn={enableTrim}
         />
       )}
     </View>
@@ -940,6 +1055,24 @@ const styles = StyleSheet.create({
   emptyText: {
     color: theme.colors.textTertiary,
     ...theme.typography.body,
+  },
+
+  pausedBadge: {
+    position: 'absolute',
+    top: '46%',
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 12,
+    paddingVertical: 7,
+    borderRadius: 16,
+    backgroundColor: 'rgba(0,0,0,0.55)',
+  },
+  pausedBadgeText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
   },
 
   // Progress bars
