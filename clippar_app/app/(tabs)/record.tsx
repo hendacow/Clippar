@@ -132,6 +132,14 @@ export default function RecordScreen() {
   const [lightEnabled, setLightEnabled] = useState(true);
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [tutorialActive, setTutorialActive] = useState(false);
+  // Two-phase tutorial. 'intro' is a BLOCKING choice card — nothing underneath
+  // it is pressable, so the user can't unknowingly play a real hole while the
+  // camera is in practice mode. Only after they choose "Practise" do we enter
+  // 'coaching', where the card goes non-blocking and clips are discarded on
+  // purpose. This is what previously ate real shots: the coach auto-appeared
+  // over a live round, every clip recorded under it was silently thrown away,
+  // and dismissing it wiped the round back to the start hole.
+  const [tutorialPhase, setTutorialPhase] = useState<'intro' | 'coaching'>('intro');
   const [tutorialDismissed, setTutorialDismissed] = useState(false);
   const [dontShowAgain, setDontShowAgain] = useState(false);
   // Monotonic penalty counter — bumped each time a penalty is applied so the
@@ -227,9 +235,10 @@ export default function RecordScreen() {
     // permission already granted). useCamera only fires it when
     // config.tracer.enabled && config.tracer.captureHeading.
     getHeading: getCurrentHeading,
-    // Tutorial = live practice run: record so the user sees it, but discard
-    // the clip. resetToStart wipes any hole/penalty changes when it ends.
-    practice: tutorialActive,
+    // Practice mode ONLY during the coaching phase the user explicitly opted
+    // into. During 'intro' the card blocks every control, so nothing can be
+    // recorded — and once the tutorial is gone, clips are real again.
+    practice: tutorialActive && tutorialPhase === 'coaching',
     onClipSaved: useCallback(
       (clip: ClipMetadata) => {
         round.recordClip(clip);
@@ -570,8 +579,18 @@ export default function RecordScreen() {
     tutorialShownForRoundRef.current = roundState.roundId;
     setDontShowAgain(false);
     setPenaltyCount(0);
+    // Always open on the blocking intro card, never straight into practice.
+    setTutorialPhase('intro');
     setTutorialActive(true);
   }, [isActive, roundState, tutorialDismissed]);
+
+  // User chose "Practise first" on the intro card — now (and only now) does
+  // the round go into practice mode.
+  const startTutorialPractice = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    setPenaltyCount(0);
+    setTutorialPhase('coaching');
+  }, []);
 
   // End the tutorial (finished OR skipped): stop any practice recording,
   // wipe the round back to a clean slate, persist the dismiss flag, and
@@ -582,14 +601,28 @@ export default function RecordScreen() {
       setTutorialDismissed(true);
       void setSetting('clicker_tutorial_dismissed', '1');
     }
+    const wasPractising = tutorialPhase === 'coaching';
     setTutorialActive(false);
+    setTutorialPhase('intro');
     if (camera.isRecording) {
       if (isNative) camera.stopRecording();
       else camera.simulateRecording();
     }
-    await round.resetToStart();
+    // Only wipe the round if a practice pass actually ran. Declining the intro
+    // card must never touch the round — this reset used to fire unconditionally
+    // and cleared real shots + snapped the hole pointer back to the start hole.
+    if (wasPractising) {
+      await round.resetToStart();
+    }
     setPenaltyCount(0);
-  }, [dontShowAgain, camera.isRecording, camera.stopRecording, camera.simulateRecording, round.resetToStart]);
+  }, [
+    dontShowAgain,
+    tutorialPhase,
+    camera.isRecording,
+    camera.stopRecording,
+    camera.simulateRecording,
+    round.resetToStart,
+  ]);
 
   // Replay from the recording settings sheet. Because replaying runs another
   // practice pass that ends in resetToStart, doing it after real shots would
@@ -599,6 +632,7 @@ export default function RecordScreen() {
     const begin = () => {
       setDontShowAgain(false);
       setPenaltyCount(0);
+      setTutorialPhase('intro');
       setTutorialActive(true);
     };
     const hasProgress =
@@ -646,9 +680,10 @@ export default function RecordScreen() {
       );
       return;
     }
+    const hole = roundState?.currentHole;
     Alert.alert(
-      'Delete last shot',
-      'Remove the most recent clip on this hole? This cannot be undone.',
+      `Delete last shot on hole ${hole}`,
+      `Remove hole ${hole}'s most recent clip? You can restore it from this menu afterwards.`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -658,13 +693,23 @@ export default function RecordScreen() {
             const removed = await round.deleteLastClip();
             setShowRecordingSettings(false);
             if (!removed) {
-              Alert.alert('Nothing to delete', 'No clips recorded on this hole yet.');
+              Alert.alert('Nothing to delete', `No clips recorded on hole ${hole} yet.`);
             }
           },
         },
       ]
     );
-  }, [round.deleteLastClip, recordingBusy]);
+  }, [round.deleteLastClip, recordingBusy, roundState?.currentHole]);
+
+  // Put back the most recently deleted shot. Safe to run at any time — the
+  // clip returns to the hole it was recorded on, not the hole you're on now.
+  const handleUndoDelete = useCallback(async () => {
+    const hole = await round.undoDeleteClip();
+    setShowRecordingSettings(false);
+    if (hole === null) {
+      Alert.alert('Nothing to restore', 'No deleted shots from this round.');
+    }
+  }, [round.undoDeleteClip]);
 
   // Whether the current hole has any clips to delete.
   const canDeleteLastShot = !!roundState?.clips.some(
@@ -1708,15 +1753,22 @@ export default function RecordScreen() {
         onReviewRound={handleReviewRound}
         onDeleteLastShot={handleDeleteLastShot}
         canDeleteLastShot={canDeleteLastShot}
+        currentHole={roundState.currentHole}
+        onUndoDelete={handleUndoDelete}
+        undoableDeleteCount={round.undoableDeleteCount}
+        lastDeletedHole={round.lastDeletedHole}
         onReplayTutorial={handleReplayTutorial}
       />
 
-      {/* Live clicker tutorial — a non-blocking coach over the real
-          recording screen. Real actions fire (camera is in practice mode so
-          clips are discarded); resetToStart wipes the round clean when done.
-          The coach observes recording / hole / penalty state to tick steps. */}
+      {/* Clicker tutorial. Opens on a BLOCKING intro card (nothing underneath
+          is pressable) so practice mode can only ever be entered deliberately;
+          choosing "Practise first" switches it to the non-blocking coach,
+          where real actions fire, clips are discarded, and resetToStart wipes
+          the round clean at the end. Declining leaves the round untouched. */}
       {tutorialActive && (
         <ClickerTutorial
+          phase={tutorialPhase}
+          onStartPractice={startTutorialPractice}
           isRecording={camera.isRecording}
           currentHole={roundState.currentHole}
           penaltyCount={penaltyCount}

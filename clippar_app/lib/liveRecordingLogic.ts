@@ -186,3 +186,77 @@ export function orderedHoleNumbers(
 ): number[] {
   return Array.from({ length: holesPlayed }, (_, i) => startHole + i);
 }
+
+/**
+ * Where a RESUMED round should pick up. The persisted pointer is clamped into
+ * the round's real hole range, because rounds created before saveLocalRound
+ * seeded `current_hole` wrote a literal 1 even for a back-nine round — which
+ * resumed the user on "hole 1" (off their card, Previous Hole disabled) and
+ * tagged every subsequent clip to a hole they weren't playing.
+ *
+ * The shot counter is only meaningful for the hole it was written on, so when
+ * the hole has to be clamped we hand back null and let the caller derive it
+ * from that hole's own footage/score via resumeShotNumber.
+ */
+export function clampRecoveredPointer(
+  persistedHole: number | null | undefined,
+  persistedShot: number | null | undefined,
+  holesPlayed: 9 | 18,
+  startHole: 1 | 10
+): { hole: number; shot: number | null } {
+  const lastHole = lastHoleOf(holesPlayed, startHole);
+  const hole = Math.min(Math.max(persistedHole ?? startHole, startHole), lastHole);
+  const clamped = hole !== persistedHole;
+  return {
+    hole,
+    shot: clamped || !persistedShot ? null : Math.max(1, persistedShot),
+  };
+}
+
+/**
+ * Put a clip back into the round's clip list in (hole, shot) order rather than
+ * appending it. Used by "Restore deleted shot": appending would place a
+ * restored hole-3 shot after later holes' footage, which the editor renders in
+ * array order within a hole.
+ */
+export function insertClipInOrder<
+  T extends { holeNumber: number; shotNumber: number }
+>(clips: ReadonlyArray<T>, clip: T): T[] {
+  return [...clips, clip].sort((a, b) =>
+    a.holeNumber !== b.holeNumber
+      ? a.holeNumber - b.holeNumber
+      : a.shotNumber - b.shotNumber
+  );
+}
+
+/**
+ * The shot counter AFTER a clip finishes saving. A clip's hole is latched when
+ * recording STARTS, but the save resolves seconds later — by which time the
+ * user may have changed holes. Only advance the counter when the clip belongs
+ * to the hole we're standing on now; otherwise a clip for the hole they LEFT
+ * would bump the counter of the hole they moved TO, drifting shot numbers out
+ * of sync with the footage. Shared by useRound.recordClip and its test so the
+ * exact decision that carried the bug is what's under test.
+ */
+export function nextShotCounterAfterClip(
+  currentShot: number,
+  clipHole: number,
+  currentHole: number
+): number {
+  return clipHole === currentHole ? currentShot + 1 : currentShot;
+}
+
+/**
+ * The strokes to COMMIT for the hole the user is stepping away from with
+ * Previous Hole, or null to leave the hole uncommitted. Penalty strokes live
+ * only in `currentShot` (a water-hazard penalty bumps it with no clip), so
+ * stepping away without committing threw them away — coming back via Next
+ * Hole, resumeShotNumber fell through to clipCount+1 and the penalties were
+ * gone. Commit only when the hole actually saw activity (currentShot > 1);
+ * otherwise we'd write a phantom 1-stroke score for a hole merely passed
+ * through. Shared by useRound.previousHole and its test.
+ */
+export function departingHoleStrokes(currentShot: number): number | null {
+  const strokes = currentShot - 1;
+  return strokes >= 1 ? strokes : null;
+}

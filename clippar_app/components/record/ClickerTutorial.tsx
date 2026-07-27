@@ -70,6 +70,16 @@ const STEPS: StepMeta[] = [
 ];
 
 export interface ClickerTutorialProps {
+  /**
+   * 'intro'    — blocking choice card: practise, or go straight to playing.
+   *              Nothing underneath is pressable, so the user can never be
+   *              unknowingly in practice mode (where clips are discarded).
+   * 'coaching' — the live, non-blocking coach. Clips ARE discarded here, on
+   *              purpose, and the round is reset when it ends.
+   */
+  phase: 'intro' | 'coaching';
+  /** Intro card: user chose to practise. */
+  onStartPractice: () => void;
   /** Live recording state (camera.isRecording). */
   isRecording: boolean;
   /** Live current hole number (round.state.currentHole). */
@@ -87,6 +97,8 @@ export interface ClickerTutorialProps {
 }
 
 export function ClickerTutorial({
+  phase,
+  onStartPractice,
   isRecording,
   currentHole,
   penaltyCount,
@@ -126,9 +138,12 @@ export function ClickerTutorial({
     });
   }, [isRecording]);
 
-  // Detect hole advance.
+  // Detect a hole CHANGE (either direction). Requiring an increase meant that
+  // pressing Previous Hole during practice could push the hole back to (or
+  // below) the baseline, after which the step could never complete and the
+  // card stayed up indefinitely.
   useEffect(() => {
-    if (currentHole > initialHoleRef.current) {
+    if (currentHole !== initialHoleRef.current) {
       setDone((d) => (d['next-hole'] ? d : { ...d, 'next-hole': true }));
     }
   }, [currentHole]);
@@ -153,6 +168,92 @@ export function ClickerTutorial({
   const allDone = doneCount === STEPS.length;
   // The active step is the first not-yet-done one (drives the headline).
   const activeStep = STEPS.find((s) => !done[s.key]) ?? null;
+
+  // ── Intro: blocking choice ────────────────────────────────────────────────
+  // The scrim swallows every touch, so the record button / hole controls
+  // underneath cannot fire while this is up.
+  if (phase === 'intro') {
+    return (
+      <View style={[styles.wrapper, styles.scrim]} pointerEvents="auto">
+        <View style={[styles.card, { marginTop: 0 }]} pointerEvents="auto">
+          <View style={styles.headerRow}>
+            <View style={styles.practiceBadge}>
+              <Text style={styles.practiceBadgeText}>BEFORE YOU TEE OFF</Text>
+            </View>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+              {connected ? (
+                <Bluetooth size={12} color={theme.colors.primary} />
+              ) : (
+                <BluetoothOff size={12} color={theme.colors.textTertiary} />
+              )}
+              <Text
+                style={{
+                  color: connected ? theme.colors.primary : theme.colors.textTertiary,
+                  fontSize: 11,
+                  fontWeight: '600',
+                }}
+              >
+                {connected ? 'Clicker connected' : 'No clicker'}
+              </Text>
+            </View>
+          </View>
+
+          <Text style={styles.headline}>Practise the clicker?</Text>
+          <Text style={styles.instruction}>
+            A quick run-through of the four clicker actions. Nothing you record
+            during practice is saved, and your round resets to the start when
+            you finish.
+          </Text>
+
+          <Button
+            title="Practise first"
+            onPress={onStartPractice}
+            style={{ marginTop: 16 }}
+          />
+
+          <Pressable onPress={onSkip} hitSlop={8} style={{ marginTop: 14 }}>
+            <Text
+              style={{
+                color: theme.colors.textPrimary,
+                fontSize: 14,
+                fontWeight: '700',
+                textAlign: 'center',
+              }}
+            >
+              No — start recording for real
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={() => onDontShowAgainChange(!dontShowAgain)}
+            hitSlop={8}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              marginTop: 16,
+            }}
+          >
+            <View
+              style={[
+                styles.checkbox,
+                dontShowAgain && {
+                  backgroundColor: theme.colors.primary,
+                  borderColor: theme.colors.primary,
+                },
+              ]}
+            >
+              {dontShowAgain && <Check size={11} color="#fff" />}
+            </View>
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>
+              Don't ask again
+            </Text>
+          </Pressable>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.wrapper} pointerEvents="box-none">
@@ -274,6 +375,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
     alignItems: 'center',
     zIndex: 40,
+  },
+  // Intro phase only: dims and, more importantly, absorbs all touches.
+  scrim: {
+    backgroundColor: 'rgba(0,0,0,0.72)',
+    justifyContent: 'center',
   },
   card: {
     marginTop: 150,

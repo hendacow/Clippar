@@ -4,14 +4,14 @@
  * the always-visible bottom bar:
  *   • Recording light (torch) on/off toggle
  *   • Review round so far (opens the scorecard/editor)
- *   • Delete last shot
+ *   • Delete last shot on the current hole (+ restore it)
  *   • Replay the clicker tutorial
  */
 import { useRef, useEffect } from 'react';
 import { View, Text, Pressable } from 'react-native';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import * as Haptics from 'expo-haptics';
-import { Flashlight, FlashlightOff, ListVideo, Trash2, GraduationCap } from 'lucide-react-native';
+import { Flashlight, FlashlightOff, ListVideo, Trash2, GraduationCap, Undo2 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 
 interface RecordingSettingsSheetProps {
@@ -22,6 +22,13 @@ interface RecordingSettingsSheetProps {
   onReviewRound: () => void;
   onDeleteLastShot: () => void;
   canDeleteLastShot: boolean;
+  /** The hole the delete action would act on — shown in the label. */
+  currentHole: number;
+  onUndoDelete: () => void;
+  /** Deleted shots still restorable this round. */
+  undoableDeleteCount: number;
+  /** Hole the most recently deleted shot came from. */
+  lastDeletedHole: number | null;
   onReplayTutorial: () => void;
 }
 
@@ -33,6 +40,10 @@ export function RecordingSettingsSheet({
   onReviewRound,
   onDeleteLastShot,
   canDeleteLastShot,
+  currentHole,
+  onUndoDelete,
+  undoableDeleteCount,
+  lastDeletedHole,
   onReplayTutorial,
 }: RecordingSettingsSheetProps) {
   const sheetRef = useRef<BottomSheet>(null);
@@ -48,7 +59,7 @@ export function RecordingSettingsSheet({
     <BottomSheet
       ref={sheetRef}
       index={0}
-      snapPoints={['50%']}
+      snapPoints={['62%']}
       enablePanDownToClose
       onClose={onDismiss}
       backgroundStyle={{ backgroundColor: theme.colors.surface }}
@@ -140,7 +151,34 @@ export function RecordingSettingsSheet({
           </View>
         </Pressable>
 
-        {/* Delete last shot — destructive */}
+        {/* Undo delete — only shown once something has been deleted */}
+        {undoableDeleteCount > 0 && (
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              onUndoDelete();
+            }}
+            style={rowStyle}
+          >
+            <Undo2 size={20} color={theme.colors.primary} />
+            <View style={{ flex: 1 }}>
+              <Text style={[rowTitle, { color: theme.colors.primary }]}>
+                Restore deleted shot
+              </Text>
+              <Text style={rowSub}>
+                {lastDeletedHole !== null
+                  ? `Put the last shot you deleted back on hole ${lastDeletedHole}.`
+                  : 'Put the last shot you deleted back.'}
+                {undoableDeleteCount > 1 ? ` (${undoableDeleteCount} available)` : ''}
+              </Text>
+            </View>
+          </Pressable>
+        )}
+
+        {/* Delete last shot on the CURRENT hole — destructive.
+            The hole number is in the label because the action is scoped to
+            whichever hole you're standing on: step back to hole 3 and it
+            deletes hole 3's last shot, not the round's last shot. */}
         <Pressable
           onPress={() => {
             if (!canDeleteLastShot) return;
@@ -153,12 +191,12 @@ export function RecordingSettingsSheet({
           <Trash2 size={20} color={theme.colors.accentRed} />
           <View style={{ flex: 1 }}>
             <Text style={[rowTitle, { color: theme.colors.accentRed }]}>
-              Delete last shot
+              Delete last shot on hole {currentHole}
             </Text>
             <Text style={rowSub}>
               {canDeleteLastShot
-                ? 'Remove the most recent clip on this hole.'
-                : 'No clips recorded on this hole yet.'}
+                ? `Removes hole ${currentHole}'s most recent clip only. You can restore it.`
+                : `No clips recorded on hole ${currentHole} yet.`}
             </Text>
           </View>
         </Pressable>

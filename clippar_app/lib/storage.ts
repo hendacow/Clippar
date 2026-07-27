@@ -124,6 +124,12 @@ async function migrateEditorColumns() {
     // back-nine round (holes 10–18). Legacy rows read back as the defaults.
     'ALTER TABLE local_rounds ADD COLUMN start_hole INTEGER DEFAULT 1',
     'ALTER TABLE local_rounds ADD COLUMN holes_played INTEGER DEFAULT 18',
+    // The round's scorecard (HoleData[] as JSON), captured at round start.
+    // Without it, recoverRound restored a round with no pars and scored every
+    // hole against DEFAULT_PAR 4 — silently discarding the user's custom
+    // course scorecard the moment they resumed. Stored locally (not fetched)
+    // so it survives with no signal, which is the on-course norm.
+    'ALTER TABLE local_rounds ADD COLUMN course_holes TEXT',
     // Settings table
     `CREATE TABLE IF NOT EXISTS local_settings (
       key TEXT PRIMARY KEY,
@@ -679,18 +685,30 @@ export async function saveLocalRound(round: {
   // to the legacy behaviour (full 18 from hole 1) when a caller omits them.
   holes_played?: 9 | 18;
   start_hole?: 1 | 10;
+  /** HoleData[] serialised as JSON — the round's pars. */
+  course_holes?: string | null;
 }) {
   const database = await getDatabase();
+  const startHole = round.start_hole ?? 1;
   await database.runAsync(
     `INSERT OR REPLACE INTO local_rounds
-       (id, course_name, course_id, started_at, holes_played, start_hole)
-     VALUES (?, ?, ?, ?, ?, ?)`,
+       (id, course_name, course_id, started_at, holes_played, start_hole,
+        course_holes, current_hole, current_shot)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     round.id,
     round.course_name,
     round.course_id ?? null,
     new Date().toISOString(),
     round.holes_played ?? 18,
-    round.start_hole ?? 1
+    startHole,
+    round.course_holes ?? null,
+    // Seed the live pointers from the round's real starting hole. They used
+    // to fall to the column DEFAULT 1, so a back-nine round (start hole 10)
+    // was persisted as "hole 1" and Resume restored it on hole 1 — every
+    // clip recorded after a resume was then tagged to the wrong hole, and
+    // Previous Hole was disabled because currentHole (1) <= startHole (10).
+    startHole,
+    1
   );
 }
 
@@ -902,28 +920,30 @@ export async function deleteLocalRound(roundId: string) {
  *
  * Also pulls the clip out of the upload queue so a just-deleted shot
  * doesn't get pushed to Storage after the fact.
+ *
+ * Returns `row` — the ENTIRE deleted record — so the caller can hand it to
+ * restoreLocalClip() and undo the delete. A caller that intends to offer
+ * undo must therefore NOT delete the returned fileUris until the undo
+ * window closes; the video files are what make a restore meaningful.
  */
 export async function deleteLocalClip(
-  clipId: number
-): Promise<{ fileUris: string[] }> {
+  clipId: number,
+  // When the caller offers UNDO, it passes false: staling the same-hole
+  // predecessor's tracer is irreversible (it nulls the column AND unlinks the
+  // rendered file), so doing it at delete time would make a subsequent restore
+  // silently degrade the neighbouring clip. The caller instead commits the
+  // stale later — on undo-stack eviction / round end — via commitClipDeletion.
+  stalePredecessor = true
+): Promise<{ fileUris: string[]; row: LocalClipRow | null }> {
   const database = await getDatabase();
-  const row = await database.getFirstAsync<{
-    round_id: string;
-    hole_number: number;
-    sort_order: number;
-    shot_number: number;
-    file_uri: string | null;
-    trimmed_file_uri: string | null;
-    original_file_uri: string | null;
-    tracer_file_uri: string | null;
-  }>(
-    'SELECT round_id, hole_number, sort_order, shot_number, file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips WHERE id = ?',
+  const row = await database.getFirstAsync<LocalClipRow>(
+    'SELECT * FROM local_clips WHERE id = ?',
     clipId
   );
   // The deleted clip's same-hole predecessor paired with THIS clip's GPS as
   // its landing spot — its tracer no longer matches. Mark it stale before
-  // the row disappears.
-  if (row) {
+  // the row disappears (unless the caller defers it for an undo window).
+  if (row && stalePredecessor) {
     await markPredecessorTracerStale(
       database,
       row.round_id,
@@ -946,7 +966,79 @@ export async function deleteLocalClip(
     row?.tracer_file_uri,
   ].filter((u): u is string => !!u && u.startsWith('file://'));
   // De-dupe (trimmed often === file_uri) so we don't try to delete twice.
-  return { fileUris: [...new Set(fileUris)] };
+  return { fileUris: [...new Set(fileUris)], row: row ?? null };
+}
+
+/**
+ * Finalise a deletion that was made with `stalePredecessor = false` (i.e. an
+ * undoable delete whose undo window has now closed — the entry was evicted
+ * from the stack, or the round ended). Applies the same-hole predecessor
+ * tracer invalidation that deleteLocalClip deferred, using the deleted row's
+ * own metadata (its DB row is already gone, so we work from the captured row).
+ * No-op today because tracers are prod-disabled; correct for when they ship.
+ */
+export async function commitClipDeletion(row: LocalClipRow): Promise<void> {
+  try {
+    const database = await getDatabase();
+    await markPredecessorTracerStale(
+      database,
+      row.round_id,
+      row.hole_number,
+      row.id,
+      row.sort_order,
+      row.shot_number
+    );
+  } catch {
+    // Best-effort — never throw from a cleanup path.
+  }
+}
+
+/**
+ * A full local_clips record, as returned by `SELECT *`. The columns the code
+ * actually reaches for are typed; the index signature covers the rest (the
+ * table has ~30 columns, all of which restoreLocalClip round-trips verbatim).
+ */
+export type LocalClipRow = {
+  id: number;
+  round_id: string;
+  hole_number: number;
+  shot_number: number;
+  sort_order: number;
+  file_uri: string | null;
+  trimmed_file_uri: string | null;
+  original_file_uri: string | null;
+  tracer_file_uri: string | null;
+  [column: string]: unknown;
+};
+
+/**
+ * Re-insert a clip row that deleteLocalClip() removed, preserving its
+ * original primary key so anything holding that id (round state, the
+ * editor, the upload queue) lines back up. Powers "Undo delete" on the
+ * recording screen.
+ *
+ * Column names come from the row the database itself handed us, so the
+ * dynamic SQL is built from DB-controlled identifiers, not user input.
+ * Returns false if a row with that id already exists (nothing to undo).
+ */
+export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
+  const database = await getDatabase();
+  const existing = await database.getFirstAsync<{ id: number }>(
+    'SELECT id FROM local_clips WHERE id = ?',
+    row.id
+  );
+  if (existing) return false;
+
+  const columns = Object.keys(row);
+  if (columns.length === 0) return false;
+  const placeholders = columns.map(() => '?').join(', ');
+  const values = columns.map((c) => (row[c] as never) ?? null);
+
+  await database.runAsync(
+    `INSERT INTO local_clips (${columns.join(', ')}) VALUES (${placeholders})`,
+    ...values
+  );
+  return true;
 }
 
 /**
