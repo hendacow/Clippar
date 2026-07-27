@@ -42,6 +42,9 @@ struct LocalizerParams {
   var motionHeight = 90
   var energyPercentile = 99.5
   var embedFps = 10.0
+  /// Below this motion valley depth the stroke is a putt, which is left
+  /// untrimmed. Measured: putts median 0.21, full swings median 0.68.
+  var puttNormMax = 0.45
 }
 
 enum SwingLocalizer {

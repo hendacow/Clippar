@@ -207,3 +207,33 @@ mistimed swings.
 Cheapest fix if that proves to matter: add exemplars from other golfers to the
 prototype banks. The banks are averages, so this is additive and needs no
 retraining — `export_prototypes.py` rebuilds the shipped JSON in seconds.
+
+## Stroke type (trim vs leave whole) — motion again, not appearance
+
+The trim decision hangs on `strokeType`, and it was NEVER measured until Henry
+asked whether putts actually stayed untrimmed. They did not: the original rule —
+majority vote of "which prototype wins" over the winning candidate's best three
+frames — got 40/53, trimming 9 of 24 putts that should have been left whole.
+
+Measured on the 53 detected swing/putt clips:
+
+| rule | correct |
+|---|---|
+| per-frame prototype voting (original) | 40/53 |
+| pooled appearance margin (putt vs swing prototype) | 45/53 |
+| **motion valley depth alone** | **48/53** |
+| both combined | 49/53 |
+
+Motion wins because a putt is a physically smaller event: valley depth median
+**0.21** versus **0.68** for a full swing. The combined rule buys one extra clip
+for a second tuned parameter on 53 samples, which is how you overfit — so the
+shipped rule is the single threshold `norm < 0.45`.
+
+End-to-end after the change:
+* putts left whole  **21/24** (was 15/24)
+* swings trimmed    **26/29** (was 25/29)
+
+The classes genuinely overlap — a distant golfer's full swing can be as small as
+a near putt (full_swing norm ranges 0.11–1.60, putt 0.05–0.55) — so ~9% will
+still be called wrong, and no threshold fixes that. Separating those needs a cue
+that is not amplitude, e.g. the club going above the head.

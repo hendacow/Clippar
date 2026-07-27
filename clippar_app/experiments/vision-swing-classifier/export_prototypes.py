@@ -70,6 +70,13 @@ def main():
             "motionHeight": 90,
             "energyPercentile": 99.5,
             "embedFps": 10.0,
+            # Stroke type is decided by MOTION AMPLITUDE, not appearance. A putt
+            # is a physically smaller event than a full swing (valley depth
+            # median 0.21 vs 0.68). Measured on 53 detected clips: motion alone
+            # 48/53 correct, the appearance margin 45/53, and per-frame
+            # prototype voting only 40/53. Same lesson as localization — motion
+            # carries the signal, CLIP is the weaker cue.
+            "puttNormMax": 0.45,
         },
         "counts": {
             "swingExemplars": int(len(P)),
