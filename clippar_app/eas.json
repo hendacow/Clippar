@@ -84,6 +84,23 @@
         "APP_VARIANT": "development",
         "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       }
+    },
+    "appstandalone": {
+      "distribution": "internal",
+      "channel": "preview",
+      "environment": "production",
+      "prebuildCommand": "expo prebuild --clean --no-install",
+      "ios": {
+        "simulator": false,
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "autoIncrement": true,
+      "env": {
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
+      }
     }
   },
   "submit": {
