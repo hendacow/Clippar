@@ -2128,6 +2128,129 @@ public class ShotDetectorModule: Module {
         return container
     }
 
+    /// Collapse a static card tree into ONE bitmap-backed layer.
+    ///
+    /// Why: `AVVideoCompositionCoreAnimationTool` re-composites the layer tree
+    /// it is handed on EVERY frame of the export. `fastBuildHoleCard` produces
+    /// ~60 layers (~58 of them `CATextLayer`, which means glyph layout +
+    /// rasterisation), and none of it changes over the segment's lifetime — the
+    /// card is 100% static (no `CAAnimation` is ever added to it; the legacy
+    /// path's cross-hole fades are gone because segments cut at hole
+    /// boundaries). Rasterising once and blitting a single image per frame
+    /// replaces ~60 layer composites per frame with 1.
+    ///
+    /// ─────────────────────────────────────────────────────────────────────
+    /// COORDINATE SPACE — read this before touching the rasterisation.
+    /// ─────────────────────────────────────────────────────────────────────
+    /// `AVVideoCompositionCoreAnimationTool` renders a detached layer tree in
+    /// CoreAnimation's NATIVE space: origin bottom-left, +y pointing UP, and
+    /// glyphs drawn upright. That is exactly why `fastBuildHoleCard` computes
+    /// `cardY = renderSize.height - cardHeight - topPadding` to pin the card to
+    /// the TOP of the frame, and why the rows walk DOWNWARD by SUBTRACTING
+    /// (`row2Y = row1Y - row2Height - rowGap`).
+    ///
+    /// Note what this is NOT: it is not a mirrored framebuffer. If the tool
+    /// simply flipped the rendered image, today's exported reels would show
+    /// upside-down text — they don't. Only the ORIGIN differs; the content is
+    /// drawn the right way up. That is the same convention as an untouched
+    /// `CGBitmapContext`, which also has its origin at the bottom-left with +y
+    /// up and no CTM flip.
+    ///
+    /// So `render(in:)` into a raw `CGBitmapContext` reproduces the tool's
+    /// output 1:1 and NO flip transform belongs here. Applying one would put
+    /// the card at the bottom of the frame and mirror the hole strip.
+    ///
+    /// This is also precisely why `UIGraphicsImageRenderer` must NOT be used:
+    /// its context arrives PRE-FLIPPED for UIKit (CTM scaled y = -1, translated
+    /// by the height) so that y-DOWN UIKit geometry comes out upright. Feeding
+    /// this y-UP tree into it is the double-flip trap — the card would land at
+    /// the bottom, and because the flip lives in the CTM rather than in the
+    /// layer geometry, the glyphs are at risk of coming out upside down too.
+    ///
+    /// Double-flip audit of the whole chain, end to end:
+    ///   1. Nothing in this file sets `isGeometryFlipped`, `contentsAreFlipped`
+    ///      or a negative-y `CATransform3D` on the card, its container, or the
+    ///      parent/video layers in `fastExportSegment`. There is no existing
+    ///      flip to cancel against.
+    ///   2. `CGContext.makeImage()` on an unflipped bitmap context yields a
+    ///      `CGImage` whose row 0 is the highest-y row that was drawn — i.e.
+    ///      the visual TOP. Draw-then-read round-trips without inversion.
+    ///   3. CoreAnimation draws a `contents` image right way up in whichever
+    ///      geometry the tree uses (this is what `contentsAreFlipped()` exists
+    ///      to arrange), so row 0 lands on the visually-top edge of the flat
+    ///      layer's frame. This is the same behaviour every "burn a watermark
+    ///      into a video" recipe relies on when it assigns a `CGImage` to a
+    ///      layer inside this exact tool.
+    /// Net: one consistent orientation, zero flips, nothing to compound.
+    ///
+    /// Steps 1-3 are proved, not assumed: the harness in
+    /// `scratchpad/cardproof/` extracts THIS function and `fastBuildHoleCard`
+    /// verbatim from this file, renders 18/9/1-hole cards to PNG, and also
+    /// renders the flattened layer a second time to confirm the
+    /// bitmap→`contents`→re-render round trip is pixel-identical to the direct
+    /// render (i.e. that step 3 is an identity, not a flip).
+    ///
+    /// Scale: the bitmap is exactly `renderSize` PIXELS, matching
+    /// `videoComposition.renderSize` 1:1 — video is 1 pixel per point, so
+    /// there is nothing to supersample at composite time. The text layers keep
+    /// their `contentsScale = UIScreen.main.scale`; that now costs at most one
+    /// oversampled glyph pass during this single rasterisation instead of one
+    /// on every frame, and keeping it maximises the chance of byte-identical
+    /// output versus today.
+    ///
+    /// Memory: one `renderSize` BGRA8888 bitmap — 1080x1920 ≈ 8.3 MB, alive
+    /// only for the duration of its own segment export, so ≤ 3 in flight at
+    /// the maximum worker count (≈25 MB). Deliberately NOT cached across
+    /// segments: an 18-hole round has 18 distinct cards and holding them all
+    /// would cost ~150 MB to save a handful of ~10 ms rasterisations during a
+    /// multi-minute export — a bad trade against jetsam, which has no fallback
+    /// here.
+    ///
+    /// Returns the original tree unchanged if the bitmap can't be made, so a
+    /// rasterisation failure degrades to today's behaviour rather than
+    /// dropping the scorecard.
+    private func fastFlattenCard(_ card: CALayer, renderSize: CGSize) -> CALayer {
+        let pixelWidth = Int(renderSize.width.rounded())
+        let pixelHeight = Int(renderSize.height.rounded())
+        guard pixelWidth > 0, pixelHeight > 0 else { return card }
+
+        // BGRA8888 premultiplied — the native surface format, so CoreAnimation
+        // blits it without a conversion pass. Zero-filled == transparent, which
+        // is what the areas outside the card need to be.
+        guard let ctx = CGContext(
+            data: nil,
+            width: pixelWidth,
+            height: pixelHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else {
+            print("[Clippar.Compose] card rasterise: could not create bitmap context — keeping live layer tree")
+            return card
+        }
+
+        // NO CTM flip. See the coordinate-space note above: the context is
+        // already in the same bottom-left-origin, +y-up space the animation
+        // tool renders in.
+        card.render(in: ctx)
+
+        guard let image = ctx.makeImage() else {
+            print("[Clippar.Compose] card rasterise: makeImage failed — keeping live layer tree")
+            return card
+        }
+
+        let flat = CALayer()
+        flat.frame = CGRect(origin: .zero, size: renderSize)
+        // 1 image pixel per layer point, matching the video's own scale, so
+        // `.resize` is an exact 1:1 blit with no filtering.
+        flat.contentsScale = 1
+        flat.contentsGravity = .resize
+        flat.isOpaque = false
+        flat.contents = image
+        return flat
+    }
+
     /// Export one segment (a hole's clips) with its static card burned in.
     private func fastExportSegment(
         clips: [FastParsedClip],
@@ -2434,7 +2557,12 @@ public class ShotDetectorModule: Module {
                 autoreleasepool {
                     let overlay: CALayer?
                     if let sc = scorecard, let holeIndex = segment.holeIndex {
-                        overlay = self.fastBuildHoleCard(sc: sc, index: holeIndex, renderSize: renderSize)
+                        // Rasterise the ~60-layer card ONCE here, per segment.
+                        // The animation tool then blits a single bitmap per
+                        // frame instead of re-compositing the whole tree.
+                        // See fastFlattenCard for the coordinate-space proof.
+                        let card = self.fastBuildHoleCard(sc: sc, index: holeIndex, renderSize: renderSize)
+                        overlay = self.fastFlattenCard(card, renderSize: renderSize)
                     } else {
                         overlay = nil
                     }
