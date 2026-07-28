@@ -90,13 +90,54 @@ function ensureClipsDir(): Promise<string> {
     // and the next call retries.
     clipsDirReady = FileSystemLegacy!
       .makeDirectoryAsync(dir, { intermediates: true })
-      .then(() => dir)
+      .then(async () => {
+        await markClipsDirExcludedFromBackup(dir);
+        return dir;
+      })
       .catch((err) => {
         clipsDirReady = null;
         throw err;
       });
   }
   return clipsDirReady;
+}
+
+/**
+ * MEDIA-002. `documentDirectory` is NSDocumentDirectory, which iOS includes in
+ * iCloud/iTunes backups by default — so every raw clip we persist here is
+ * copied to Apple and restored onto whatever device restores that backup, even
+ * for a user who deliberately left Cloud backup OFF and is told on
+ * profile/storage-settings that their clips are not in the cloud. Marking the
+ * directory NSURLIsExcludedFromBackupKey once, at creation, makes that promise
+ * true for everything written into it afterwards.
+ *
+ * expo-file-system cannot set that key, so it goes through the native
+ * shot-detector module. THE CONTROL IS NOT YET IN FORCE: the native
+ * `excludeFromBackup` function does not exist in ShotDetectorModule.swift yet,
+ * so this currently resolves `excluded: false` and logs. Do not treat clips as
+ * backup-excluded until that native function ships (it also needs a matching
+ * NSFileProtection class on the directory and on clippar.db) — this call site
+ * exists so there is exactly one place to wire it up, not because it is done.
+ *
+ * Failure here is never fatal: losing the exclusion must not stop a user from
+ * saving their round.
+ */
+let backupExclusionAttempted = false;
+async function markClipsDirExcludedFromBackup(dir: string): Promise<void> {
+  if (backupExclusionAttempted) return;
+  backupExclusionAttempted = true;
+  try {
+    const { excludeFromBackup } = await import('@/modules/shot-detector');
+    const result = await excludeFromBackup(dir);
+    if (!result.excluded) {
+      console.warn(
+        '[media] clips/ is NOT excluded from iCloud backup:',
+        result.reason ?? 'unknown'
+      );
+    }
+  } catch (err) {
+    console.warn('[media] backup-exclusion attempt failed', err);
+  }
 }
 
 /**

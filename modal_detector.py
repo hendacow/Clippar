@@ -10,12 +10,16 @@ Usage:
   modal serve modal_detector.py           # dev mode with hot-reload
 
 Endpoints:
-  POST /detect_shots_batch   — detect shots in multiple clips (returns trim points)
   POST /run_full_pipeline    — full end-to-end: download → detect → trim → merge → post-process → upload
+
+Every endpoint here is a public HTTPS URL, so each one authenticates the caller
+against a shared secret (see `_pipeline_secret_ok`) before doing any work.
 """
 
+import hmac
 import modal
 import os
+import re
 
 # ---------------------------------------------------------------------------
 # Modal app + container image
@@ -49,6 +53,87 @@ detector_image = (
     .add_local_file("config.yaml", remote_path="/app/config.yaml")
     .add_local_dir("models", remote_path="/app/models")
 )
+
+
+# The one secret every endpoint needs. `required_keys` is enforced by Modal at
+# deploy time, so a secret that is missing the pipeline shared secret or the
+# Supabase credentials fails loudly on `modal deploy` instead of silently
+# deploying an endpoint that either can't authenticate callers or has no
+# credentials of its own (which is what made the old body-supplied
+# `supabase_url` / `supabase_key` look necessary in the first place).
+pipeline_secrets = [
+    modal.Secret.from_name(
+        "supabase-credentials",
+        required_keys=[
+            "SUPABASE_URL",
+            "SUPABASE_SERVICE_KEY",
+            "CLIPPAR_PIPELINE_SECRET",
+        ],
+    )
+]
+
+
+# ---------------------------------------------------------------------------
+# Request authentication + input validation
+# ---------------------------------------------------------------------------
+
+_UUID_RE = re.compile(
+    r"\A[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+    r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\Z"
+)
+
+# Only container formats the detector can actually open. Anything else is
+# either a mistake or an attempt to drop a file the container will later read
+# as something other than video.
+_ALLOWED_CLIP_SUFFIXES = (".mp4", ".mov")
+
+
+def _pipeline_secret_ok(supplied) -> bool:
+    """Constant-time check of the caller's shared secret.
+
+    `run_full_pipeline` is a *public* HTTPS URL: Modal derives it from the app
+    and function name, and the exact URL is committed in
+    `supabase/functions/process-round/index.ts` and `worker.py`. Without this
+    gate anyone on the internet — no Clippar account needed — can POST a body
+    and start a T4 + 16GB container for up to 15 minutes, billed to us, in a
+    loop. It also skips every control process-round enforces (JWT auth, round
+    ownership, the daily dispatch cap and the atomic `dispatch_claimed_at`
+    claim): those guard the Supabase front door only, and this endpoint is a
+    second door onto the same job.
+
+    Fails closed. If CLIPPAR_PIPELINE_SECRET is absent from the Modal secret,
+    every request is rejected rather than every request being let through.
+    """
+    expected = os.environ.get("CLIPPAR_PIPELINE_SECRET", "")
+    if not expected or not isinstance(supplied, str) or not supplied:
+        return False
+    return hmac.compare_digest(supplied, expected)
+
+
+def _safe_clip_filename(idx: int, remote_name) -> str | None:
+    """Map a remote object name to a server-generated local filename.
+
+    The remote name arrives in the JSON body of the storage listing response,
+    so it is not ours: `pathlib` treats an absolute component as a *replacement*
+    for the directory, and `../` escapes it, which turned
+    `inputs_dir / remote_name` into an arbitrary-file-write inside a container
+    that holds the Supabase service-role key — e.g. overwriting
+    `/app/shot_detector.py`, which the next warm invocation imports and runs.
+    Nothing downstream needs the original name (the detector globs the input
+    directory), so we never let a remote string reach the filesystem.
+
+    `idx` is the position in the name-sorted listing, so the resulting order
+    matches the previous behaviour of `sorted(inputs_dir.glob("*"))`.
+    Returns None if the object is not a clip we should have downloaded.
+    """
+    from pathlib import PurePosixPath
+
+    if not isinstance(remote_name, str) or not remote_name:
+        return None
+    suffix = PurePosixPath(remote_name).suffix.lower()
+    if suffix not in _ALLOWED_CLIP_SUFFIXES:
+        return None
+    return f"clip{idx:03d}{suffix}"
 
 
 # ---------------------------------------------------------------------------
@@ -93,33 +178,58 @@ def _download_clips_parallel(supabase_url, supabase_key, job_id, inputs_dir):
         f"{supabase_url}/storage/v1/object/list/clips",
         headers={**headers, "Content-Type": "application/json"},
         json={"prefix": f"{job_id}/", "limit": 100},
+        timeout=60,
     )
     if list_resp.status_code != 200:
         return []
 
-    files = [
-        f for f in list_resp.json()
-        if f.get("name", "").endswith((".mp4", ".mov", ".MP4", ".MOV"))
-    ]
+    # Sort by remote name so the server-generated clip000/clip001/... numbering
+    # preserves the ordering the pipeline used to get from
+    # `sorted(inputs_dir.glob("*"))` over the original names.
+    files = sorted(
+        (
+            f for f in list_resp.json()
+            if isinstance(f.get("name"), str)
+            and f["name"].lower().endswith(_ALLOWED_CLIP_SUFFIXES)
+        ),
+        key=lambda f: f["name"],
+    )
     if not files:
         return []
 
-    def _download_one(f):
-        fname = f["name"]
+    inputs_root = Path(inputs_dir).resolve()
+
+    def _download_one(idx_and_file):
+        idx, f = idx_and_file
+        remote_name = f["name"]
+        # Never derive an on-disk name from the listing response — see
+        # _safe_clip_filename. A remote name of "../../../app/shot_detector.py"
+        # would otherwise be written straight over the module this container
+        # imports on the next warm invocation.
+        local_name = _safe_clip_filename(idx, remote_name)
+        if local_name is None or "/" in remote_name or "\\" in remote_name:
+            return remote_name, 0
         dl = requests.get(
-            f"{supabase_url}/storage/v1/object/clips/{job_id}/{fname}",
+            f"{supabase_url}/storage/v1/object/clips/{job_id}/{remote_name}",
             headers=headers, timeout=120,
         )
         if dl.status_code == 200 and len(dl.content) > 1000:
-            out_path = Path(inputs_dir) / fname
+            out_path = (inputs_root / local_name).resolve()
+            # Belt and braces: the name is ours, so this can only fail if the
+            # generator above is ever changed to trust input again.
+            if out_path.parent != inputs_root:
+                return remote_name, 0
             out_path.write_bytes(dl.content)
-            return fname, len(dl.content)
-        return fname, 0
+            return local_name, len(dl.content)
+        return remote_name, 0
 
     results = []
     # Download up to 8 clips concurrently
     with ThreadPoolExecutor(max_workers=8) as pool:
-        futures = {pool.submit(_download_one, f): f for f in files}
+        futures = {
+            pool.submit(_download_one, (idx, f)): f
+            for idx, f in enumerate(files, 1)
+        }
         for fut in as_completed(futures):
             fname, size = fut.result()
             if size > 0:

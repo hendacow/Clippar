@@ -58,9 +58,24 @@ if command -v deno >/dev/null 2>&1; then
   done
   [ "$fail" = "0" ] && echo "PASS  all edge functions typecheck"
 
-  dt="$(deno test --quiet "$APP"/supabase/functions/_shared/ 2>&1 | tail -3)"
+  # Run EVERY function test, not just _shared/. An earlier version of this script
+  # pointed only at _shared/ and reported green while
+  # delete-account/index.test.ts was erroring out entirely.
+  #
+  # --allow-env is required: importing a function module runs its top-level
+  # Deno.env.get('SUPABASE_URL'), and without the flag Deno kills the run with
+  # NotCapable before a single test executes. That looks like a broken test; it
+  # is a missing permission.
+  # Dummy Supabase env: importing a function module constructs its service-role
+  # client at TOP LEVEL, and createClient throws "supabaseUrl is required" on an
+  # undefined URL — before any test body runs. delete-account/index.test.ts has
+  # been unrunnable for that reason since PR #66; its 10 tests silently never
+  # executed. The values are never used to reach anything, they only have to
+  # parse as a URL and a non-empty key.
+  dt="$(SUPABASE_URL=https://test.supabase.co SUPABASE_SERVICE_ROLE_KEY=test-key \
+        deno test --quiet --allow-env "$APP"/supabase/functions/ 2>&1 | tail -4)"
   echo "$dt"
-  echo "$dt" | grep -q "0 failed" || { echo "FAIL  deno tests"; fail=1; }
+  echo "$dt" | grep -qE "[0-9]+ passed \| 0 failed" || { echo "FAIL  deno tests"; fail=1; }
 else
   echo "SKIP  deno not on PATH — edge functions unverified"
 fi

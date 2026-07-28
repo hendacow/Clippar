@@ -36,13 +36,30 @@ export function ShareSheet({
   const [shareLink, setShareLink] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<ActionState>('idle');
   const [shareState, setShareState] = useState<ActionState>('idle');
+  const [linkState, setLinkState] = useState<ActionState>('idle');
 
+  // MERELY OPENING THIS SHEET MUST NOT TOUCH THE NETWORK.
+  // This effect used to call getShareUrl(roundId) here, which runs
+  // ensureReelUploaded → uploadReelToStorage: opening the sheet pushed the
+  // whole stitched reel — the user's footage AND its original ambient audio —
+  // to Supabase Storage and minted a permanent share_token, before the user
+  // had picked any action. The reel is local-only by default (the editor
+  // writes a file:// reel_url) and cloud backup is off by default, so this
+  // silently overrode the user's opt-out and contradicted the copy on
+  // profile/storage-settings ("Cloud backup off — clips not in the cloud").
+  // Dismissing the sheet did not undo it. Minting now happens only inside
+  // handleCopyLink, behind an explicit confirmation — see MEDIA-001.
+  // The other three actions are deliberately local-only: Save to Camera Roll,
+  // the native share sheet and Instagram Stories all read `reelUrl` off disk.
   useEffect(() => {
     if (visible) {
       bottomSheetRef.current?.snapToIndex(0);
       setSaveState('idle');
       setShareState('idle');
-      getShareUrl(roundId).then(setShareLink);
+      setLinkState('idle');
+      // Drop any link minted for a previous round so the confirmation is
+      // re-shown per round rather than silently reusing a stale token.
+      setShareLink(null);
     } else {
       bottomSheetRef.current?.close();
     }
@@ -79,18 +96,70 @@ export function ShareSheet({
     setShareState('idle');
   };
 
-  const handleCopyLink = async () => {
-    if (!shareLink) return;
+  const copyToClipboard = useCallback(async (url: string) => {
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
     // Use Clipboard if available, fallback to Alert
     try {
       const Clipboard = require('expo-clipboard');
-      await Clipboard.setStringAsync(shareLink);
+      await Clipboard.setStringAsync(url);
       Alert.alert('Copied!', 'Share link copied to clipboard.');
     } catch {
-      Alert.alert('Share Link', shareLink);
+      Alert.alert('Share Link', url);
     }
-  };
+  }, []);
+
+  // getShareUrl is the ONLY path in this sheet that leaves the device: it
+  // uploads the reel and mints a share_token that never expires. It runs here
+  // and nowhere else, and only after the user has said yes to a dialog that
+  // says so in plain words — a tap on "Copy Link" alone is not consent to
+  // publish a golfer's footage, because the user may be reaching for it to
+  // check what it does.
+  const mintAndCopyLink = useCallback(async () => {
+    setLinkState('loading');
+    try {
+      const url = await getShareUrl(roundId);
+      if (!url) {
+        Alert.alert(
+          'Could not create link',
+          'Your reel could not be uploaded. Check your connection and try again.'
+        );
+        return;
+      }
+      setShareLink(url);
+      await copyToClipboard(url);
+    } catch {
+      Alert.alert(
+        'Could not create link',
+        'Your reel could not be uploaded. Check your connection and try again.'
+      );
+    } finally {
+      setLinkState('idle');
+    }
+  }, [roundId, copyToClipboard]);
+
+  const handleCopyLink = useCallback(() => {
+    if (linkState === 'loading') return;
+    // Already uploaded earlier in this sheet session — the user consented then,
+    // and re-copying the same link uploads nothing new.
+    if (shareLink) {
+      void copyToClipboard(shareLink);
+      return;
+    }
+    Alert.alert(
+      'Create a share link?',
+      'This uploads this reel to Clippar so anyone with the link can watch it. ' +
+        'Save to Camera Roll and Share Video keep the video on your device.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Upload & copy link',
+          onPress: () => {
+            void mintAndCopyLink();
+          },
+        },
+      ]
+    );
+  }, [linkState, shareLink, copyToClipboard, mintAndCopyLink]);
 
   const handleInstagramStories = async () => {
     if (!reelUrl) return;
@@ -150,12 +219,19 @@ export function ShareSheet({
           loading={shareState === 'loading'}
         />
 
-        {/* Copy Link */}
+        {/* Copy Link — the only action here that uploads anything */}
         <ActionRow
           icon={Link2}
-          label="Copy Link"
+          label={
+            linkState === 'loading'
+              ? 'Uploading reel...'
+              : shareLink
+                ? 'Copy Link'
+                : 'Create Share Link'
+          }
           onPress={handleCopyLink}
-          disabled={!shareLink}
+          disabled={!reelUrl || linkState === 'loading'}
+          loading={linkState === 'loading'}
         />
 
         {/* Instagram Stories */}
