@@ -419,6 +419,8 @@ function NativeClipPlayer({
   showPoseOverlay = false,
   paused = false,
   seekNonce = 0,
+  rate = 1,
+  onReachedEnd,
 }: {
   uri: string;
   trimStartMs: number;
@@ -434,6 +436,12 @@ function NativeClipPlayer({
    *  new start. A save can leave both the uri and the bounds unchanged, so
    *  neither of those effects would fire on their own. */
   seekNonce?: number;
+  /** Playback speed, for skimming a round quickly. Forced to 1 while editing. */
+  rate?: number;
+  /** Called when the clip reaches its trim end. Absent means LOOP instead —
+   *  which is what happens mid-edit, so adjusting handles replays the range
+   *  you are editing rather than moving on. */
+  onReachedEnd?: () => void;
 }) {
   // CRITICAL: never early-return before calling hooks. ExpoVideo is non-null
   // because the caller gates on `isNative`; the non-null assertion is safe.
@@ -447,6 +455,8 @@ function NativeClipPlayer({
   const endSecRef = useRef(endSec);
   const draggingHandleRef = useRef(draggingHandle);
   const pausedRef = useRef(paused);
+  const onReachedEndRef = useRef(onReachedEnd);
+  onReachedEndRef.current = onReachedEnd;
   startSecRef.current = startSec;
   endSecRef.current = endSec;
   draggingHandleRef.current = draggingHandle;
@@ -539,6 +549,14 @@ function NativeClipPlayer({
     });
   }, [startSec, endSec, player, seekTarget, draggingHandle, runOnPlayer, seekNonce]);
 
+  // Playback speed. Applied on its own so changing speed never disturbs the
+  // playhead — expo-video keeps `playbackRate` across seeks.
+  useEffect(() => {
+    runOnPlayer(player, (p) => {
+      p.playbackRate = rate;
+    });
+  }, [rate, player, runOnPlayer, uri]);
+
   // Press-and-hold to pause. Kept out of the seek effect above so releasing
   // resumes from where the finger landed rather than jumping to a handle.
   useEffect(() => {
@@ -558,8 +576,17 @@ function NativeClipPlayer({
 
       runOnPlayer(player, (p) => {
         if (p.currentTime >= endSecRef.current - 0.05) {
-          p.currentTime = startSecRef.current;
-          p.play();
+          const advance = onReachedEndRef.current;
+          if (advance) {
+            // Pause first: the parent swaps the source, and letting the old
+            // clip keep running into its tail is what produced a flash of the
+            // wrong frame between clips.
+            p.pause();
+            advance();
+          } else {
+            p.currentTime = startSecRef.current;
+            p.play();
+          }
         }
       });
     }, LOOP_POLL_MS);
@@ -573,8 +600,13 @@ function NativeClipPlayer({
     try {
       sub = player.addListener('playToEnd', () => {
         runOnPlayer(player, (p) => {
-          p.currentTime = startSecRef.current;
-          p.play();
+          const advance = onReachedEndRef.current;
+          if (advance) {
+            advance();
+          } else {
+            p.currentTime = startSecRef.current;
+            p.play();
+          }
         });
       });
     } catch {
@@ -1158,6 +1190,10 @@ export default function PreviewScreen() {
   const [trimPanelHeight, setTrimPanelHeight] = useState(0);
   // A finger held on the video pauses playback until it lifts.
   const [isHeld, setIsHeld] = useState(false);
+  // Skim speed, chosen by the user and REMEMBERED across clips. Editing drops
+  // to 1x (you cannot judge a trim at 3x) but must not forget the choice —
+  // moving to the next clip resumes at whatever was selected.
+  const [previewSpeed, setPreviewSpeed] = useState(1);
   // Live trim bounds from the trim panel (drives the video player in real time)
   const [liveTrimStart, setLiveTrimStart] = useState(0);
   const [liveTrimEnd, setLiveTrimEnd] = useState(-1);
@@ -1394,6 +1430,18 @@ export default function PreviewScreen() {
   }, []);
   const handleHoldEnd = useCallback(() => setIsHeld(false), []);
 
+  const cycleSpeed = useCallback(() => {
+    Haptics.selectionAsync();
+    setPreviewSpeed((r) => (r === 1 ? 1.5 : r === 1.5 ? 2 : r === 2 ? 3 : 1));
+  }, []);
+
+  // Reaching the end of a clip moves to the next one. At the last clip it
+  // loops rather than dropping the user out of the reel — being ejected on a
+  // timer is the surprise this screen is meant to avoid.
+  const handleReachedEnd = useCallback(() => {
+    setCurrentIndex((i) => Math.min(i + 1, allClips.length - 1));
+  }, [allClips.length]);
+
   const toggleMusic = useCallback(() => {
     Haptics.selectionAsync();
     setMusicEnabled((prev) => !prev);
@@ -1450,6 +1498,17 @@ export default function PreviewScreen() {
           draggingHandle={draggingHandle}
           showPoseOverlay={showPoseOverlay && !trimMode}
           paused={isHeld}
+          // 1x while editing: a trim cannot be judged at 3x. The user's choice
+          // is remembered and resumes on the next clip.
+          rate={trimMode ? 1 : previewSpeed}
+          // Omitted mid-edit, and on the LAST clip — absent means loop, which
+          // is what both of those want. Passing a handler that clamps to the
+          // same index would leave the player paused at the end instead.
+          onReachedEnd={
+            !trimMode && currentIndex < allClips.length - 1
+              ? handleReachedEnd
+              : undefined
+          }
         />
       ) : currentClip ? (
         <WebClipPlaceholder clip={currentClip} />
@@ -1559,6 +1618,34 @@ export default function PreviewScreen() {
                 <PersonStanding size={18} color={showPoseOverlay ? theme.colors.primary : 'rgba(255,255,255,0.7)'} />
               </Pressable>
             )}
+
+            {/* Skim speed. Shown dimmed at 1x so it reads as available rather
+                than active, and greyed while editing, when it is forced to 1x. */}
+            <Pressable
+              onPress={cycleSpeed}
+              disabled={trimMode}
+              hitSlop={10}
+              style={{
+                height: 36, minWidth: 44, paddingHorizontal: 8, borderRadius: 18,
+                backgroundColor:
+                  !trimMode && previewSpeed !== 1
+                    ? theme.colors.primary + '40'
+                    : 'rgba(0,0,0,0.5)',
+                justifyContent: 'center', alignItems: 'center',
+                opacity: trimMode ? 0.4 : 1,
+              }}
+            >
+              <Text
+                style={{
+                  color: !trimMode && previewSpeed !== 1
+                    ? theme.colors.primary
+                    : 'rgba(255,255,255,0.7)',
+                  fontSize: 13, fontWeight: '800',
+                }}
+              >
+                {trimMode ? '1x' : `${previewSpeed}x`}
+              </Text>
+            </Pressable>
 
             {/* Music toggle */}
             <Pressable
