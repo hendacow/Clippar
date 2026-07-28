@@ -347,3 +347,37 @@ separated is putt-vs-everything, not chip-vs-swing.
 branch never ran. `puttFallbackNormMax = 0.60` has no evidence behind it beyond
 the argument that a wrongly trimmed putt costs more than a wrongly untrimmed
 shot. The clips that would exercise it are the ones this set does not contain.
+
+### IMG_0592, resolved (2026-07-28)
+
+The clip was picking 17.02s — the golfer walking out of the bunker — over the
+real shot at 7.28s (club up at 7.28, sand explodes at 7.68, both verified from
+frames). The shot LEADS on motion, 0.327 to 0.283. It loses because the wrong
+instant beats it on the prototype by 0.0099, on a scale where every frame is a
+golf course and the three prototypes sit at cosine ~0.95 to each other. Noise
+was deciding the answer.
+
+Three fixes tried, all measured end-to-end (42 clips with verified instants;
+a shot counts only if its window holds the shot AND it is classified a shot):
+
+| change | trim-ok | 0592 |
+|---|---|---|
+| unchanged | 40/42 | 17.02 wrong |
+| tieRel 0.50 -> 0.10 | 39/42 | 7.28 right |
+| prototype must win by a margin | 38/42 | 7.28 right |
+| **edgeGuard 2.5 -> 4.0** | **41/42** | **7.28 right** |
+
+The first two fix 0592 by taking away the prototype's latitude, and that
+latitude is doing real work: on putts the stroke is not the largest motion in
+the clip (walking is), so removing it costs more putts than it wins shots.
+
+The edge guard is free instead, because the 20% cap means it only bites on
+clips longer than 12.5s. No verified instant across the 42 moves inside the
+guard; the tightest headroom is 0.14s on a 5.1s putt clip, and that clip is
+governed by the cap, not by this value — it is unaffected by the change.
+
+Note the earlier claim that a 2.5s guard "fixes IMG_0592" was true only under
+this file's k-NN ranking. Same lesson as above: tune against the function that
+ships.
+
+Only IMG_0558 now fails — the two overlapping golfers, unchanged.

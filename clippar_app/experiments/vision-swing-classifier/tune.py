@@ -78,16 +78,18 @@ def candidates(e, t, up=UP_WINDOW, back=BACK_WINDOW, k=N_CANDIDATES, nms=NMS_GAP
 # the phone is being handled at both ends of every clip — the largest motion in
 # IMG_0523 is the end-of-clip pickup, not the swing.
 #
-# Empirically safe: across all 26 verified tops the closest any real swing comes
-# to a clip edge is 4.08s, so a 2.5s guard keeps a 1.6x margin. It is what fixes
-# IMG_0592, where the golfer climbing out of the bunker and walking past the
-# camera at 18.65s (2.05s from the end of a 20.7s clip) outscored the real swing
-# at 7.28s on BOTH motion and prototype — no ranking rule could have saved it.
+# 4.0, raised from 2.5 after re-measuring on the DEVICE path.
 #
-# CAVEAT: 2.5s is set from 26 clips. The rationale generalises (recordings start
-# before setup and end with walking away / picking the phone up) but the exact
-# value does not have a large sample behind it.
-EDGE_GUARD = 2.5
+# 2.5 was set against this file's k-NN ranking, under which it did fix IMG_0592.
+# The device ships averaged prototypes and ranks differently: there the golfer
+# walking out of the bunker at 17.02s (3.7s from the end of a 20.7s clip) still
+# survived the guard and beat the real shot at 7.28s — not on motion, where the
+# shot leads 0.327 to 0.283, but on the prototype by 0.0099.
+#
+# Free because of the 20% cap: for any clip under 12.5s this is a no-op, and
+# across 42 labelled clips no verified instant moves inside the guard (tightest
+# headroom 0.14s, on a 5.1s putt clip governed by the cap, not by this value).
+EDGE_GUARD = 4.0
 
 
 def analyse_cached(npz_path, edge_guard=EDGE_GUARD, **kw):

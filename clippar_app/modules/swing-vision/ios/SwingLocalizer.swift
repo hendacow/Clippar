@@ -30,7 +30,23 @@ struct SwingCandidate {
 struct LocalizerParams {
   var minScore = -0.02
   var tieRel = 0.50
-  var edgeGuard = 2.5
+  /// Seconds trimmed off each end before candidates are considered. Recordings
+  /// start before the golfer sets up and end with them walking away or picking
+  /// the phone up, so both ends contain motion that is not the shot.
+  ///
+  /// 4.0, not the 2.5 this shipped with. On IMG_0592 the golfer walking out of
+  /// the bunker at 17.02s (3.7s before the end of a 20.7s clip) beat the real
+  /// shot at 7.28s — not on motion, where the shot leads 0.327 to 0.283, but on
+  /// the prototype by 0.0099, which is noise on a scale where every frame is a
+  /// golf course. 2.5 was validated against the experiment's k-NN ranking,
+  /// which picks different candidates than the averaged prototypes that ship.
+  ///
+  /// Costs nothing because of the 20% cap below: for any clip under 12.5s this
+  /// is a no-op, and no verified instant across the 42 labelled clips moves
+  /// inside the guard. Tried first and rejected, both measured end-to-end:
+  /// tightening tieRel (40/42 -> 39/42, trades this clip for putts) and making
+  /// the prototype win by a margin (40/42 -> 38/42).
+  var edgeGuard = 4.0
   var edgeGuardMaxFrac = 0.20
   var upWindow = 0.34
   var backWindow = 0.70
