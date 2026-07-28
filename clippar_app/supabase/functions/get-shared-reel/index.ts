@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
+import { clientIp, enforceRateLimit, RATE_LIMITS } from '../_shared/rateLimit.ts';
 
 /**
  * get-shared-reel — PUBLIC signer for the shared-reel viewer at
@@ -68,6 +69,24 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: cors });
   }
+
+  // ── Rate limit by client IP ──
+  // This is the only endpoint with no JWT, so there is no user to key on. Share
+  // tokens are 128-bit random and were never enumerable, but nothing stopped one
+  // host pulling this in a loop, and every call costs a database read plus a
+  // signed-URL mint. Keyed on the LAST X-Forwarded-For entry — see clientIp(),
+  // the leftmost entry is caller-controlled and would hand out a fresh bucket per
+  // request.
+  //
+  // Counted before the token is even read, so a flood of malformed requests is
+  // limited too.
+  const limited = await enforceRateLimit(
+    supabase,
+    RATE_LIMITS.getSharedReel,
+    clientIp(req),
+    cors,
+  );
+  if (limited) return limited;
 
   try {
     // ── Extract the share token from GET query or POST body ──

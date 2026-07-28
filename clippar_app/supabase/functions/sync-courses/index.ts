@@ -17,6 +17,7 @@
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
+import { enforceRateLimits } from '../_shared/rateLimit.ts';
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,
@@ -61,40 +62,30 @@ const MAX_SYNC_CALLS_PER_DAY = 20;
 
 /**
  * Returns a 429 Response if the user is at/over the daily cap; otherwise records
- * this call (increments the counter) and returns null. The read-then-write
- * increment can race under heavy concurrency, but this is a rate-limit backstop
- * (the real protection is the INSERT-only + escaped-ILIKE hardening), so a small
- * overshoot is acceptable.
+ * this call and returns null.
+ *
+ * This used to SELECT the count, compare it, then UPSERT count + 1 against the
+ * `sync_course_usage` table, and its own comment conceded that the increment
+ * "can race under heavy concurrency" while calling a small overshoot acceptable.
+ * The overshoot is not small. An attacker does not send requests one at a time —
+ * fire 200 concurrently, every one reads the same pre-increment value, every one
+ * passes the comparison, and 20-a-day is not a limit at all.
+ *
+ * Now delegates to the shared limiter, where the increment and the read are a
+ * single INSERT ... ON CONFLICT DO UPDATE ... RETURNING. Concurrent callers
+ * serialise on the row lock and each sees a distinct count. Same cap, same
+ * response shape, no race. See migration 016.
  */
 async function enforceDailySyncCap(
   userId: string,
   corsHeaders: Record<string, string>,
 ): Promise<Response | null> {
-  const today = new Date().toISOString().slice(0, 10); // UTC YYYY-MM-DD
-
-  const { data: usage } = await supabase
-    .from('sync_course_usage')
-    .select('count')
-    .eq('user_id', userId)
-    .eq('usage_date', today)
-    .maybeSingle();
-
-  const current = usage?.count ?? 0;
-  if (current >= MAX_SYNC_CALLS_PER_DAY) {
-    return new Response(
-      JSON.stringify({ error: 'Daily course-sync limit reached' }),
-      { status: 429, headers: corsHeaders }
-    );
-  }
-
-  await supabase
-    .from('sync_course_usage')
-    .upsert(
-      { user_id: userId, usage_date: today, count: current + 1 },
-      { onConflict: 'user_id,usage_date' }
-    );
-
-  return null;
+  return enforceRateLimits(
+    supabase,
+    { bucket: 'sync-courses', limit: MAX_SYNC_CALLS_PER_DAY, windowSeconds: 86_400 },
+    userId,
+    corsHeaders,
+  );
 }
 
 // ────────────────────────────────────────────────────────────

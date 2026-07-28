@@ -4,6 +4,7 @@ import {
   getAppleConfig,
   revokeAppleToken,
 } from '../_shared/apple.ts';
+import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
 
 /**
  * delete-account — App Review 5.1.1(v) in-app account deletion.
@@ -242,6 +243,18 @@ export async function handler(req: Request): Promise<Response> {
       data: { user },
     } = await supabase.auth.getUser(token);
     if (!user) return json({ error: 'Unauthorized' }, 401);
+
+    // Self-scoped and idempotent, so this is not an abuse target in the usual
+    // sense — but each call fans out across auth, several tables and an outbound
+    // token revocation to Apple on our developer credentials. A loop here is a
+    // loop against Apple. Five a day is far past any legitimate use.
+    const limited = await enforceRateLimits(
+      supabase,
+      RATE_LIMITS.deleteAccount,
+      user.id,
+      corsHeaders,
+    );
+    if (limited) return limited;
 
     await purgeAndDeleteUser(supabase as unknown as DeleteClient, user.id);
 

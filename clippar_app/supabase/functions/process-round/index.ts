@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
+import { enforceRateLimits } from '../_shared/rateLimit.ts';
 
 const MODAL_PIPELINE_URL =
   'https://hendacow--clippar-shot-detector-run-full-pipeline.modal.run';
@@ -61,6 +62,32 @@ Deno.serve(async (req: Request) => {
     // (config.processing.maxJobsPerDay = 2) so real usage, including retries of
     // a failed round, is never blocked.
     const MAX_DISPATCHES_PER_DAY = 10;
+
+    // ATOMIC CEILING, checked first.
+    //
+    // The dispatch count below is a SELECT followed by a decision, which races:
+    // fire 200 concurrent requests naming 200 different rounds and every one of
+    // them reads the same pre-dispatch count, every one passes, and every one
+    // claims its own round successfully — because the per-round claim is atomic
+    // but the per-DAY cap was not. Each of those is a ~14-minute Modal GPU job we
+    // pay for, which makes this the most expensive endpoint in the product to
+    // leave unguarded.
+    //
+    // Deliberately kept ALONGSIDE the dispatch count rather than replacing it,
+    // because the two measure different things. This counts ATTEMPTS and never
+    // decrements; the query below counts rounds still holding a claim, and a
+    // failed dispatch resets `dispatch_claimed_at` to null so a retry is not
+    // penalised. Replacing it would mean a user whose rounds keep failing burns
+    // their quota on our bugs. So this ceiling sits higher (20 attempts) and only
+    // bites on the concurrency abuse the other check cannot see.
+    const attemptLimited = await enforceRateLimits(
+      supabase,
+      { bucket: 'process-round-attempts', limit: 20, windowSeconds: 86_400 },
+      user.id,
+      { 'Content-Type': 'application/json' },
+    );
+    if (attemptLimited) return attemptLimited;
+
     const startOfDayUtc = new Date();
     startOfDayUtc.setUTCHours(0, 0, 0, 0);
     const { count: dispatchesToday } = await supabase

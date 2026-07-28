@@ -6,6 +6,7 @@ import {
   generateAppleClientSecret,
   getAppleConfig,
 } from '../_shared/apple.ts';
+import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
 
 /**
  * apple-link — capture an Apple refresh token at Sign-in-with-Apple time so the
@@ -51,6 +52,17 @@ export async function handler(req: Request): Promise<Response> {
       data: { user },
     } = await supabase.auth.getUser(token);
     if (!user) return json({ error: 'Unauthorized' }, 401);
+
+    // Linking happens once or twice in an account's life. Each call exchanges an
+    // authorization code with Apple, so a burst is both a signal that someone is
+    // probing and a way to spend our quota against Apple's endpoint.
+    const limited = await enforceRateLimits(
+      supabase,
+      RATE_LIMITS.appleLink,
+      user.id,
+      corsHeaders,
+    );
+    if (limited) return limited;
 
     const appleConfig = getAppleConfig();
     if (!appleConfig) {
