@@ -6,12 +6,23 @@
  * decision of what a user ends up watching is worth testing on its own.
  */
 
-/** Total length of the trimmed highlight. */
+/** Total length of the trimmed highlight. DEFAULT ONLY — the app passes its own
+ *  window, which the user can change in Profile → Trim settings. */
 export const HIGHLIGHT_SECONDS = 5.0;
 /** How much of that sits BEFORE impact — enough to see the backswing, leaving
  *  the remainder for the strike and the ball flight, which is the part worth
- *  watching. */
+ *  watching. DEFAULT ONLY, same as above. */
 export const LEAD_IN_SECONDS = 2.0;
+
+/** Window override. Without this the policy would silently replace whatever the
+ *  user configured with its own 5s — the app's own default is 4s (2.5s before
+ *  impact, 1.5s after), so ignoring it is a visible change nobody asked for. */
+export interface TrimWindow {
+  /** Seconds kept BEFORE impact. */
+  leadInSec?: number;
+  /** Total clip length in seconds. */
+  totalSec?: number;
+}
 
 /** The minimum a localization result must provide to plan a trim. */
 export interface HighlightInput {
@@ -43,7 +54,9 @@ export interface TrimPlan {
  *   - a putt — the whole clip is the moment;
  *   - a clip already shorter than the highlight length.
  */
-export function planHighlightTrim(r: HighlightInput): TrimPlan {
+export function planHighlightTrim(r: HighlightInput, w: TrimWindow = {}): TrimPlan {
+  const total = w.totalSec ?? HIGHLIGHT_SECONDS;
+  const leadIn = Math.min(w.leadInSec ?? LEAD_IN_SECONDS, total);
   const whole = (reason: string): TrimPlan => ({
     trim: false, startSec: 0, endSec: r.durationSec, reason,
   });
@@ -62,19 +75,19 @@ export function planHighlightTrim(r: HighlightInput): TrimPlan {
         : 'putt — left unchanged',
     );
   }
-  if (r.durationSec <= HIGHLIGHT_SECONDS) {
-    return whole(`clip is ${r.durationSec.toFixed(1)}s — already under ${HIGHLIGHT_SECONDS}s`);
+  if (r.durationSec <= total) {
+    return whole(`clip is ${r.durationSec.toFixed(1)}s — already under ${total}s`);
   }
   // Centre the window on impact, then SLIDE it fully inside the clip rather
-  // than shortening it — a swing near either end still yields a full 5s.
+  // than shortening it — a swing near either end still yields a full window.
   const start = Math.min(
-    Math.max(r.tImpact - LEAD_IN_SECONDS, 0),
-    r.durationSec - HIGHLIGHT_SECONDS
+    Math.max(r.tImpact - leadIn, 0),
+    r.durationSec - total
   );
   return {
     trim: true,
     startSec: start,
-    endSec: start + HIGHLIGHT_SECONDS,
-    reason: `swing at ${r.tImpact.toFixed(2)}s — trimmed to ${HIGHLIGHT_SECONDS}s`,
+    endSec: start + total,
+    reason: `swing at ${r.tImpact.toFixed(2)}s — trimmed to ${total}s`,
   };
 }

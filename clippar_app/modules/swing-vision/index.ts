@@ -111,5 +111,6 @@ export {
   HIGHLIGHT_SECONDS,
   LEAD_IN_SECONDS,
   type TrimPlan,
+  type TrimWindow,
   type HighlightInput,
 } from './highlightTrim';

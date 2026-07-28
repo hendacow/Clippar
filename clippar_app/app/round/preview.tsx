@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Scissors, Check, RotateCcw, Music, VolumeX, PersonStanding } from 'lucide-react-native';
+import { X, Check, RotateCcw, Music, VolumeX, PersonStanding, Pause } from 'lucide-react-native';
 import { PoseOverlay } from '@/components/editor/PoseOverlay';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -55,12 +55,16 @@ function ScorecardOverlay({
   allClips,
   holes,
   courseName,
+  bottomOffset = 0,
 }: {
   clip: EditorClip;
   clipIndex: number;
   allClips: EditorClip[];
   holes: EditorHoleSection[];
   courseName: string;
+  /** Lift above the docked trim panel. Measured rather than assumed — the
+   *  panel's height changes with the safe-area inset and the clip's labels. */
+  bottomOffset?: number;
 }) {
   const currentHole = holes.find((h) => h.holeNumber === clip.holeNumber);
   if (!currentHole) return null;
@@ -121,7 +125,7 @@ function ScorecardOverlay({
     <View
       style={{
         position: 'absolute',
-        bottom: 24,
+        bottom: 24 + bottomOffset,
         left: 12,
         right: 12,
       }}
@@ -364,6 +368,7 @@ function NativeClipPlayer({
   seekTarget = 'start',
   draggingHandle = 'none',
   showPoseOverlay = false,
+  paused = false,
 }: {
   uri: string;
   trimStartMs: number;
@@ -374,6 +379,9 @@ function NativeClipPlayer({
   seekTarget?: 'start' | 'end';
   draggingHandle?: 'none' | 'start' | 'end';
   showPoseOverlay?: boolean;
+  /** Press-and-hold anywhere on the video. Held separately from the trim
+   *  seeking above, which drives the player from the handles. */
+  paused?: boolean;
 }) {
   // CRITICAL: never early-return before calling hooks. ExpoVideo is non-null
   // because the caller gates on `isNative`; the non-null assertion is safe.
@@ -387,10 +395,12 @@ function NativeClipPlayer({
   const endSecRef = useRef(endSec);
   const isTrimmingRef = useRef(isTrimming);
   const draggingHandleRef = useRef(draggingHandle);
+  const pausedRef = useRef(paused);
   startSecRef.current = startSec;
   endSecRef.current = endSec;
   isTrimmingRef.current = isTrimming;
   draggingHandleRef.current = draggingHandle;
+  pausedRef.current = paused;
 
   const player = useVideoPlayer(uri, (p) => {
     p.loop = false;
@@ -409,19 +419,28 @@ function NativeClipPlayer({
       player.pause();
       player.currentTime = startSec;
     } else {
-      // Not dragging (handle released): seek and play
+      // Not dragging (handle released): seek and play — unless a finger is
+      // holding the video paused, which must win over the handle seek.
       player.currentTime = seekTarget === 'end'
         ? Math.max(0, endSec - 0.1)
         : startSec;
-      player.play();
+      if (!pausedRef.current) player.play();
     }
   }, [startSec, endSec, player, seekTarget, draggingHandle]);
+
+  // Press-and-hold to pause. Kept out of the seek effect above so releasing
+  // resumes from where the finger landed rather than jumping to a handle.
+  useEffect(() => {
+    if (paused) player.pause();
+    else if (draggingHandleRef.current === 'none') player.play();
+  }, [paused, player]);
 
   // Poll to enforce trim end boundary + loop in trim mode
   useEffect(() => {
     const interval = setInterval(() => {
-      // Don't interfere with playback while user is dragging a handle
-      if (draggingHandleRef.current !== 'none') return;
+      // Don't interfere with playback while user is dragging a handle, or
+      // while a finger is holding the video paused.
+      if (draggingHandleRef.current !== 'none' || pausedRef.current) return;
 
       const currentTime = player.currentTime;
       const end = endSecRef.current;
@@ -513,6 +532,8 @@ function InlineTrimPanel({
   onBoundsChange,
   onSeekTarget,
   onDraggingHandle,
+  docked = false,
+  onHeight,
 }: {
   clip: EditorClip;
   onSave: (startMs: number, endMs: number, sourceOverride?: { sourceUri: string; durationMs: number }) => void;
@@ -520,6 +541,13 @@ function InlineTrimPanel({
   onBoundsChange: (startMs: number, endMs: number) => void;
   onSeekTarget?: (target: 'start' | 'end') => void;
   onDraggingHandle?: (handle: 'none' | 'start' | 'end') => void;
+  /** Panel is permanently on screen rather than opened from the scissors
+   *  button. Hides Cancel, which meant "close the panel" and now has nothing
+   *  to close — Reset already covers "undo my edit". */
+  docked?: boolean;
+  /** Measured height, so the scorecard can sit above the panel instead of
+   *  underneath it. */
+  onHeight?: (h: number) => void;
 }) {
   const initialBounds = getInitialTrimBounds(clip, clip.durationMs || 5000);
   const [durationMs, setDurationMs] = useState(clip.durationMs || 5000);
@@ -713,6 +741,7 @@ function InlineTrimPanel({
 
   return (
     <View
+      onLayout={(e) => onHeight?.(e.nativeEvent.layout.height)}
       style={{
         position: 'absolute',
         bottom: 0,
@@ -843,17 +872,21 @@ function InlineTrimPanel({
           <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Reset</Text>
         </Pressable>
 
-        <Pressable
-          onPress={onCancel}
-          style={{
-            flexDirection: 'row', alignItems: 'center', gap: 6,
-            paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
-            backgroundColor: 'rgba(255,255,255,0.12)',
-          }}
-        >
-          <X size={14} color="rgba(255,255,255,0.7)" />
-          <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
-        </Pressable>
+        {/* Cancel closed the panel. With the panel docked there is nothing to
+            close, and Reset already undoes the edit. */}
+        {!docked && (
+          <Pressable
+            onPress={onCancel}
+            style={{
+              flexDirection: 'row', alignItems: 'center', gap: 6,
+              paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
+              backgroundColor: 'rgba(255,255,255,0.12)',
+            }}
+          >
+            <X size={14} color="rgba(255,255,255,0.7)" />
+            <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
+          </Pressable>
+        )}
 
         <Pressable
           onPress={handleSave}
@@ -891,8 +924,18 @@ export default function PreviewScreen() {
   });
   const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Trim state
-  const [trimMode, setTrimMode] = useState(false);
+  // Trim state.
+  //
+  // The panel is DOCKED — always on screen, no scissors button to press first.
+  // `trimMode` therefore no longer means "the trim UI is up" (it always is); it
+  // means "the user is mid-edit", which is what has to suppress auto-advance
+  // and clip navigation. Without that split, docking the panel would have
+  // frozen the reel on its first clip, since every one of those behaviours was
+  // gated on `!trimMode`.
+  const [trimDirty, setTrimDirty] = useState(false);
+  const [trimPanelHeight, setTrimPanelHeight] = useState(0);
+  // A finger held on the video pauses playback until it lifts.
+  const [isHeld, setIsHeld] = useState(false);
   // Live trim bounds from the trim panel (drives the video player in real time)
   const [liveTrimStart, setLiveTrimStart] = useState(0);
   const [liveTrimEnd, setLiveTrimEnd] = useState(-1);
@@ -904,6 +947,12 @@ export default function PreviewScreen() {
   const [draggingHandle, setDraggingHandle] = useState<'none' | 'start' | 'end'>('none');
   // URI to use in trim mode (original for auto-trimmed clips)
   const [trimModeUri, setTrimModeUri] = useState<string | null>(null);
+
+  // "The user is mid-edit." Dragging a handle, or having moved one without
+  // saving yet. While true the reel holds on this clip — it would be hostile to
+  // advance out from under someone adjusting the handles — and the player loops
+  // the trimmed range so the edit can be seen.
+  const trimMode = trimDirty || draggingHandle !== 'none';
 
   // Music state
   const [musicEnabled, setMusicEnabled] = useState(false);
@@ -923,26 +972,31 @@ export default function PreviewScreen() {
   const allClips = editor.getAllClipsInOrder();
   const currentClip = allClips[currentIndex];
 
-  // When entering trim mode, initialize live bounds and URI
+  // Initialise live bounds and URI for the CURRENT CLIP. This used to fire on
+  // entering trim mode; with the panel docked there is no such moment, so it
+  // now runs per clip — otherwise clip 2 onwards would inherit clip 1's bounds.
   useEffect(() => {
-    if (trimMode && currentClip) {
-      // Default trim bounds to the detected swing window when the user
-      // hasn't customized — InlineTrimPanel re-runs the same calculation
-      // against the actual probed duration once it loads.
-      const initialBounds = getInitialTrimBounds(currentClip, currentClip.durationMs);
-      setLiveTrimStart(initialBounds.startMs);
-      setLiveTrimEnd(initialBounds.endMs);
-      // Use original URI for auto-trimmed clips so the trimmer shows full video
-      if (currentClip.autoTrimmed && currentClip.originalUri && currentClip.originalUri !== currentClip.sourceUri) {
-        setTrimModeUri(currentClip.originalUri);
-      } else {
-        setTrimModeUri(currentClip.sourceUri);
-      }
-      setSeekTarget('start');
-    } else {
+    if (!currentClip) {
       setTrimModeUri(null);
+      return;
     }
-  }, [trimMode]);
+    // Default trim bounds to the detected swing window when the user
+    // hasn't customized — InlineTrimPanel re-runs the same calculation
+    // against the actual probed duration once it loads.
+    const initialBounds = getInitialTrimBounds(currentClip, currentClip.durationMs);
+    setLiveTrimStart(initialBounds.startMs);
+    setLiveTrimEnd(initialBounds.endMs);
+    // Show the ORIGINAL video for auto-trimmed clips so the handles have
+    // something to move over — a pre-trimmed file has nothing left to cut.
+    if (currentClip.autoTrimmed && currentClip.originalUri && currentClip.originalUri !== currentClip.sourceUri) {
+      setTrimModeUri(currentClip.originalUri);
+    } else {
+      setTrimModeUri(currentClip.sourceUri);
+    }
+    setSeekTarget('start');
+    setTrimDirty(false);
+    lastBoundsAppliedRef.current = null;
+  }, [currentClip?.id]);
 
   // Background music
   useEffect(() => {
@@ -1041,6 +1095,10 @@ export default function PreviewScreen() {
     lastBoundsAppliedRef.current = { startMs, endMs };
     setLiveTrimStart(startMs);
     setLiveTrimEnd(endMs);
+    // First real movement marks the clip dirty, which is what holds the reel
+    // here. `last === null` is the panel reporting its initial bounds on mount,
+    // not the user touching anything, so it must not count.
+    if (last) setTrimDirty(true);
   }, []);
 
   const handleSeekTarget = useCallback((target: 'start' | 'end') => {
@@ -1052,7 +1110,9 @@ export default function PreviewScreen() {
       if (currentClip) {
         editor.updateTrim(currentClip.id, startMs, endMs, sourceOverride);
       }
-      setTrimMode(false);
+      // The panel stays docked; saving just commits the edit and releases the
+      // reel to carry on playing.
+      setTrimDirty(false);
       // Bump the generation so the player remounts with the new trim bounds
       setPlayerGeneration((g) => g + 1);
     },
@@ -1060,15 +1120,17 @@ export default function PreviewScreen() {
   );
 
   const handleTrimCancel = useCallback(() => {
-    setTrimMode(false);
+    setTrimDirty(false);
     // Bump generation to restart playback cleanly
     setPlayerGeneration((g) => g + 1);
   }, []);
 
-  const toggleTrimMode = useCallback(() => {
+  // Press-and-hold anywhere on the video to pause; lifting resumes.
+  const handleHoldStart = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setTrimMode((prev) => !prev);
+    setIsHeld(true);
   }, []);
+  const handleHoldEnd = useCallback(() => setIsHeld(false), []);
 
   const toggleMusic = useCallback(() => {
     Haptics.selectionAsync();
@@ -1118,36 +1180,71 @@ export default function PreviewScreen() {
           durationMs={playerDuration}
           isTrimming={trimMode}
           onEnd={handleVideoEnd}
-          seekTarget={trimMode ? seekTarget : 'start'}
-          draggingHandle={trimMode ? draggingHandle : 'none'}
+          seekTarget={seekTarget}
+          draggingHandle={draggingHandle}
           showPoseOverlay={showPoseOverlay && !trimMode}
+          paused={isHeld}
         />
       ) : currentClip ? (
         <WebClipPlaceholder clip={currentClip} />
       ) : null}
 
-      {/* Tap zones — disabled in trim mode */}
+      {/* Tap zones: tap to move between clips, hold anywhere to pause. Only
+          suppressed mid-edit, so that adjusting a handle cannot navigate the
+          unsaved edit away. Bounded above the docked panel so a drag on the
+          timeline is never stolen by the tap zone. */}
       {!trimMode && (
         <View
           style={{
-            position: 'absolute', top: 0, bottom: 0, left: 0, right: 0,
+            position: 'absolute', top: 0, left: 0, right: 0,
+            bottom: trimPanelHeight,
             flexDirection: 'row',
           }}
           pointerEvents="box-none"
         >
-          <Pressable onPress={handleTapLeft} style={{ flex: 1 }} />
-          <Pressable onPress={handleTapRight} style={{ flex: 1 }} />
+          <Pressable
+            onPress={handleTapLeft}
+            onLongPress={handleHoldStart}
+            onPressOut={handleHoldEnd}
+            delayLongPress={250}
+            style={{ flex: 1 }}
+          />
+          <Pressable
+            onPress={handleTapRight}
+            onLongPress={handleHoldStart}
+            onPressOut={handleHoldEnd}
+            delayLongPress={250}
+            style={{ flex: 1 }}
+          />
         </View>
       )}
 
-      {/* Scorecard overlay — always visible, hides during trim */}
-      {currentClip && !trimMode && (
+      {/* Paused affordance — without it a held finger just looks like a freeze. */}
+      {isHeld && (
+        <View
+          style={{
+            position: 'absolute', top: insets.top + 64, alignSelf: 'center',
+            flexDirection: 'row', alignItems: 'center', gap: 6,
+            paddingHorizontal: 10, paddingVertical: 6, borderRadius: 14,
+            backgroundColor: 'rgba(0,0,0,0.65)',
+          }}
+          pointerEvents="none"
+        >
+          <Pause size={14} color="#fff" />
+          <Text style={{ color: '#fff', fontSize: 12, fontWeight: '600' }}>Paused</Text>
+        </View>
+      )}
+
+      {/* Scorecard overlay — stays up while trimming now that the panel is
+          docked, lifted clear of it by the panel's measured height. */}
+      {currentClip && (
         <ScorecardOverlay
           clip={currentClip}
           clipIndex={currentIndex}
           allClips={allClips}
           holes={editor.state.holes}
           courseName={editor.state.courseName}
+          bottomOffset={trimPanelHeight}
         />
       )}
 
@@ -1183,7 +1280,7 @@ export default function PreviewScreen() {
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
             {/* Pose-overlay toggle (analytical replay). Native only; hidden in
                 trim mode where the skeleton would distract from handle drags. */}
-            {isNative && !trimMode && (
+            {isNative && (
               <Pressable
                 onPress={() => setShowPoseOverlay((v) => !v)}
                 hitSlop={10}
@@ -1214,18 +1311,8 @@ export default function PreviewScreen() {
               )}
             </Pressable>
 
-            {/* Trim toggle */}
-            <Pressable
-              onPress={toggleTrimMode}
-              hitSlop={10}
-              style={{
-                width: 36, height: 36, borderRadius: 18,
-                backgroundColor: trimMode ? theme.colors.primary : 'rgba(0,0,0,0.5)',
-                justifyContent: 'center', alignItems: 'center',
-              }}
-            >
-              <Scissors size={16} color="#fff" />
-            </Pressable>
+            {/* The scissors button is gone — the trim panel is docked at the
+                bottom, so there is nothing left to open. */}
 
             {/* Close */}
             <Pressable
@@ -1243,15 +1330,19 @@ export default function PreviewScreen() {
         </View>
       </View>
 
-      {/* Inline trim panel */}
-      {trimMode && currentClip && (
+      {/* Trim panel — DOCKED. Keyed on the clip so the handles reset to the
+          new clip's bounds instead of carrying the previous clip's over. */}
+      {currentClip && (
         <InlineTrimPanel
+          key={currentClip.id}
           clip={currentClip}
           onSave={handleTrimSave}
           onCancel={handleTrimCancel}
           onBoundsChange={handleTrimBoundsChange}
           onSeekTarget={handleSeekTarget}
           onDraggingHandle={setDraggingHandle}
+          docked
+          onHeight={setTrimPanelHeight}
         />
       )}
     </View>

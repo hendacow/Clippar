@@ -84,3 +84,30 @@ test('a SWING decision with no impact time is treated as no detection', () => {
   const p = planHighlightTrim(res({ tImpact: undefined }));
   assert.equal(p.trim, false);
 });
+
+// The app's own window is 4s (2500ms before impact, 1500ms after) and the user
+// can change it in Profile → Trim settings. Left to its defaults this policy
+// would impose 5s on every trimmed clip instead — a visible change nobody
+// asked for — so the caller's window has to win.
+test('the callers window overrides the built-in default', () => {
+  const p = planHighlightTrim(res({ tImpact: 8 }), { leadInSec: 2.5, totalSec: 4 });
+  assert.equal(p.trim, true);
+  assert.equal(p.startSec, 8 - 2.5);
+  assert.ok(Math.abs(p.endSec - p.startSec - 4) < 1e-9);
+});
+
+test('a clip shorter than the CALLERS window is left whole', () => {
+  // 4.5s clip against a 4s window trims; against the 5s default it would not.
+  const short = planHighlightTrim(res({ durationSec: 4.5, tImpact: 2 }));
+  assert.equal(short.trim, false);
+  const withWindow = planHighlightTrim(
+    res({ durationSec: 4.5, tImpact: 2 }), { leadInSec: 2.5, totalSec: 4 },
+  );
+  assert.equal(withWindow.trim, true);
+});
+
+test('a lead-in longer than the total window cannot invert the range', () => {
+  const p = planHighlightTrim(res({ tImpact: 8 }), { leadInSec: 9, totalSec: 4 });
+  assert.ok(p.endSec > p.startSec);
+  assert.ok(p.startSec >= 0);
+});
