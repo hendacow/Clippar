@@ -416,6 +416,7 @@ function NativeClipPlayer({
   draggingHandle = 'none',
   showPoseOverlay = false,
   paused = false,
+  seekNonce = 0,
 }: {
   uri: string;
   trimStartMs: number;
@@ -427,6 +428,10 @@ function NativeClipPlayer({
   /** Press-and-hold anywhere on the video. Held separately from the trim
    *  seeking above, which drives the player from the handles. */
   paused?: boolean;
+  /** Bumped by the parent after a trim save to pull the playhead back to the
+   *  new start. A save can leave both the uri and the bounds unchanged, so
+   *  neither of those effects would fire on their own. */
+  seekNonce?: number;
 }) {
   // CRITICAL: never early-return before calling hooks. ExpoVideo is non-null
   // because the caller gates on `isNative`; the non-null assertion is safe.
@@ -445,10 +450,21 @@ function NativeClipPlayer({
   draggingHandleRef.current = draggingHandle;
   pausedRef.current = paused;
 
-  const player = useVideoPlayer(uri, (p) => {
+  // ONE player for the whole screen, and it is NEVER recreated.
+  //
+  // This used to be `useVideoPlayer(uri, ...)` inside a component keyed on
+  // `${clip.id}_${playerGeneration}`, so BOTH the hook and the component
+  // rebuilt the player on every clip change and again on every trim save.
+  // AVFoundation does not tear an AVPlayer and its decoder down synchronously,
+  // so tapping quickly stacked live decoders on 4K clips until iOS killed the
+  // process — which is why the app vanished to the home screen with no crash
+  // dialog rather than showing a red box.
+  //
+  // A null initial source is explicitly allowed (VideoSource includes null);
+  // the source arrives via replaceAsync below, which is what expo-video's own
+  // docs recommend over rebuilding the player.
+  const player = useVideoPlayer(null, (p) => {
     p.loop = false;
-    p.currentTime = startSecRef.current;
-    p.play();
   });
 
   type PlayerHandle = typeof player;
@@ -470,6 +486,34 @@ function NativeClipPlayer({
     [],
   );
 
+  // Swap the SOURCE on the existing player instead of building a new one.
+  //
+  // Guarded against overlap: replaceAsync is async, and tapping quickly can
+  // start a second swap before the first resolves. `swapSeqRef` makes the
+  // stale one a no-op so a late-resolving swap cannot seek or play a clip the
+  // user has already moved past.
+  const swapSeqRef = useRef(0);
+  useEffect(() => {
+    if (!uri) return;
+    const seq = ++swapSeqRef.current;
+    let cancelled = false;
+    (async () => {
+      try {
+        await player.replaceAsync(uri);
+      } catch {
+        return; // released mid-swap, or an unreadable file
+      }
+      if (cancelled || seq !== swapSeqRef.current) return;
+      runOnPlayer(player, (p) => {
+        p.currentTime = startSecRef.current;
+        if (!pausedRef.current) p.play();
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [uri, player, runOnPlayer]);
+
   // When trim bounds change, seek based on which handle is being dragged
   useEffect(() => {
     runOnPlayer(player, (p) => {
@@ -490,7 +534,7 @@ function NativeClipPlayer({
         if (!pausedRef.current) p.play();
       }
     });
-  }, [startSec, endSec, player, seekTarget, draggingHandle, runOnPlayer]);
+  }, [startSec, endSec, player, seekTarget, draggingHandle, runOnPlayer, seekNonce]);
 
   // Press-and-hold to pause. Kept out of the seek effect above so releasing
   // resumes from where the finger landed rather than jumping to a handle.
@@ -790,25 +834,54 @@ function InlineTrimPanel({
       return;
     }
     let cancelled = false;
+
+    // THIS USED TO BE 12 CONCURRENT getThumbnailAsync CALLS.
+    //
+    // Each one opens its own AVAssetImageGenerator over what is often a 4K
+    // file. The old `cancelled` flag only suppressed the RESULT — the native
+    // work carried on to completion — and this panel is keyed on the clip, so
+    // every tap remounted it and started another 12. Tapping through five
+    // clips could leave ~60 generators alive over 4K video at once, which is
+    // a far larger spike than the video player itself and the most likely
+    // reason iOS killed the process.
+    //
+    // Now: settle first, then a small pool, checking `cancelled` before each
+    // frame so a superseded clip stops within one thumbnail instead of
+    // finishing all twelve.
+    const THUMB_CONCURRENCY = 3;
+    const SETTLE_MS = 250;
+
     const generateThumbs = async () => {
       const thumbs: (string | null)[] = new Array(THUMB_COUNT).fill(null);
       const interval = durationMs / THUMB_COUNT;
-      const promises = Array.from({ length: THUMB_COUNT }, async (_, i) => {
-        if (cancelled) return;
-        try {
-          const time = Math.round(i * interval + interval / 2);
-          const result = await VideoThumbnails!.getThumbnailAsync(videoUri, {
-            time,
-            quality: 0.3,
-          });
-          if (!cancelled) thumbs[i] = result.uri;
-        } catch {}
-      });
-      await Promise.all(promises);
+      let next = 0;
+      const worker = async () => {
+        while (!cancelled) {
+          const i = next++;
+          if (i >= THUMB_COUNT) return;
+          try {
+            const time = Math.round(i * interval + interval / 2);
+            const result = await VideoThumbnails!.getThumbnailAsync(videoUri, {
+              time,
+              quality: 0.3,
+            });
+            if (cancelled) return;
+            thumbs[i] = result.uri;
+          } catch {}
+        }
+      };
+      await Promise.all(
+        Array.from({ length: Math.min(THUMB_CONCURRENCY, THUMB_COUNT) }, worker),
+      );
       if (!cancelled) setFilmstripThumbs([...thumbs]);
     };
-    generateThumbs();
-    return () => { cancelled = true; };
+
+    // Don't start at all while the user is still tapping through clips.
+    const settle = setTimeout(generateThumbs, SETTLE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(settle);
+    };
   }, [activeUri, clip.sourceUri, durationMs]);
 
   // ---- AUTO-SAVE ----------------------------------------------------------
@@ -1357,7 +1430,13 @@ export default function PreviewScreen() {
       {/* Video player */}
       {currentClip?.sourceUri && isNative ? (
         <NativeClipPlayer
-          key={`${currentClip.id}_${playerGeneration}`}
+          // NO key. Keying this on the clip tore the whole player down and
+          // built another on every clip change and every trim save; the source
+          // swap is handled inside via replaceAsync instead. `playerGeneration`
+          // is now a re-seek nonce rather than a remount trigger — a save can
+          // land without changing either the uri or the bounds, and that still
+          // needs the playhead pulled back to the new start.
+          seekNonce={playerGeneration}
           uri={trimMode && trimModeUri ? trimModeUri : currentClip.sourceUri}
           trimStartMs={playerTrimStart}
           trimEndMs={playerTrimEnd}

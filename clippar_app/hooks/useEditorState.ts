@@ -6,7 +6,8 @@ import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTrac
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
 import { visionDetectAndTrim } from '@/lib/visionTrim';
-import { isTrimInFlight } from '@/lib/trimInFlight';
+import { isTrimInFlight, markTrimInFlight, clearTrimInFlight } from '@/lib/trimInFlight';
+import { emitPipelineEvent } from '@/lib/pipelineEvents';
 import { config } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
@@ -539,15 +540,26 @@ export function useEditorState(roundId: string | undefined) {
 
   // ---- Lazy trim processing ----
 
-  // Cancellation flag — set to true when the editor unmounts to abort background processing
+  // Cancellation flag for the auto-trim batch. NOTE: it is no longer raised on
+  // unmount. Auto-trim is one of the two long jobs the user must be able to walk
+  // away from (the other is compose) — killing it when the editor unmounts meant
+  // "leave the editor" silently threw away the work in progress, and made the
+  // global "N of M trimmed" indicator a lie the moment you navigated. The batch
+  // now runs to completion in the background; it persists to SQLite as it goes,
+  // registers each clip in lib/trimInFlight so a re-mounted editor can't start a
+  // duplicate pass over the same file, and broadcasts trim:* events so the app
+  // shell can show progress from anywhere. The flag is kept for future explicit
+  // cancellation (a "stop trimming" affordance) and is still honoured by both
+  // the worker loop and processOneClip.
   const trimCancelledRef = useRef(false);
-  // Same pattern for the shot-tracer batch (processAllTracers).
+  // The shot-tracer batch keeps the old behaviour: it is decorative, gated off
+  // by default (config.tracer), and has no global progress surface — so there
+  // is nothing to be gained by burning the battery for it off-screen.
   const tracerCancelledRef = useRef(false);
 
-  // Clean up on unmount: cancel any in-progress trim/tracer processing
+  // Clean up on unmount: cancel in-progress tracer rendering (see above).
   useEffect(() => {
     return () => {
-      trimCancelledRef.current = true;
       tracerCancelledRef.current = true;
     };
   }, []);
@@ -845,7 +857,7 @@ export function useEditorState(roundId: string | undefined) {
 
       // Check for cancellation before each clip
       if (trimCancelledRef.current) {
-        console.log('[useEditorState] Trim processing cancelled (unmount)');
+        console.log('[useEditorState] Trim processing cancelled');
         return;
       }
 
@@ -1130,6 +1142,7 @@ export function useEditorState(roundId: string | undefined) {
     // instead and re-checks. One worker is always exempt, so the queue still
     // drains — worst case the batch degrades to sequential rather than dying.
     let parked = 0;
+    let completed = 0;
     const runWorker = async () => {
       for (;;) {
         if (trimCancelledRef.current) return;
@@ -1149,13 +1162,63 @@ export function useEditorState(roundId: string | undefined) {
         }
         const clip = clipQueue.shift();
         if (!clip) return;
-        await processOneClip(clip);
+        // REPORTING ONLY (see the trim:* events in lib/pipelineEvents.ts).
+        // Registering the clip in the shared in-flight registry is what lets
+        // the batch outlive this screen safely: a re-mounted editor starts its
+        // own batch, sees these ids and skips them instead of running a second
+        // detect+trim on the same file.
+        const flightId = parseInt(clip.id, 10);
+        if (!Number.isNaN(flightId)) markTrimInFlight(flightId);
+        try {
+          await processOneClip(clip);
+        } finally {
+          if (!Number.isNaN(flightId)) clearTrimInFlight(flightId);
+          completed++;
+          emitPipelineEvent({
+            type: 'trim:progress',
+            roundId: state.roundId,
+            completed,
+            total,
+          });
+        }
       }
     };
-    await Promise.all(Array.from({ length: concurrency }, runWorker));
+    // Broadcast the batch so it is visible from anywhere in the app, not just
+    // from the editor screen. `trim:complete` is emitted from a finally so a
+    // thrown or cancelled batch can never strand the indicator.
+    emitPipelineEvent({
+      type: 'trim:start',
+      roundId: state.roundId,
+      courseName: state.courseName ?? null,
+      total,
+    });
+    try {
+      await Promise.all(Array.from({ length: concurrency }, runWorker));
+    } finally {
+      emitPipelineEvent({ type: 'trim:complete', roundId: state.roundId });
+    }
 
     console.log('[useEditorState] All untrimmed clips processed');
-  }, [state.holes, getTrimSettings, resolveDetection, updateClipInState]);
+  }, [
+    state.holes,
+    state.roundId,
+    state.courseName,
+    getTrimSettings,
+    resolveDetection,
+    updateClipInState,
+  ]);
+
+  /**
+   * Explicit auto-trim cancellation. The batch deliberately no longer stops
+   * when the editor unmounts, so the ONE caller that genuinely needs it to stop
+   * has to ask by name: the mid-round "Review round so far" editor sits on top
+   * of a live camera session, and trim workers would fight it for video
+   * decoders and memory. The batch still emits its terminal trim:complete, so
+   * the global indicator clears either way.
+   */
+  const cancelTrim = useCallback(() => {
+    trimCancelledRef.current = true;
+  }, []);
 
   // ---- Shot-tracer batch (config.tracer) ----
 
@@ -1447,6 +1510,7 @@ export function useEditorState(roundId: string | undefined) {
     getAllClipsInOrder,
     trimClip,
     processAllUntrimmed,
+    cancelTrim,
     processAllTracers,
   };
 }

@@ -18,6 +18,7 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
+import { useUploadContext } from '@/contexts/UploadContext';
 import { emitPipelineEvent, subscribePipeline } from '@/lib/pipelineEvents';
 import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
@@ -48,6 +49,23 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 // can never strand across a real failure — no matter which code path or which
 // editor instance ended the job.
 const inFlightComposeRoundIds = new Set<string>();
+
+// ---------------------------------------------------------------------------
+// Concurrent auto-trim guard — the compose lock's sibling.
+//
+// The auto-trim batch now survives this screen unmounting (see
+// useEditorState's trimCancelledRef note), which is what makes the global
+// "N of M trimmed" indicator honest. The cost is that re-opening the editor
+// while a batch is still draining would otherwise fire a SECOND batch over the
+// same round: lib/trimInFlight only registers the handful of clips workers
+// physically hold at that instant, so every clip still sitting in the queue
+// looks free and gets picked up twice — double detect+trim on one file, one
+// orphaned output, double native load.
+//
+// Module-scoped so it holds across remounts, and released from the batch
+// promise's `finally` so a thrown or cancelled batch can't strand it.
+const inFlightTrimRoundIds = new Set<string>();
+
 let composeLockReleaserInstalled = false;
 function installComposeLockReleaser() {
   if (composeLockReleaserInstalled) return;
@@ -585,6 +603,10 @@ export default function EditorScreen() {
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
   const { state } = editor;
+  // Live auto-trim batch counters from the pipeline broadcaster. Used for the
+  // banner below so the count stays honest even when the batch that is running
+  // was started by an earlier mount of this screen (see ownsTrimBatchRef).
+  const { trim: trimJob, compose: composeJob } = useUploadContext();
 
   // Re-read trim state from SQLite when returning from another screen
   const hasMountedRef = useRef(false);
@@ -599,6 +621,22 @@ export default function EditorScreen() {
     }, [editor.reload])
   );
 
+  // Is this screen on top right now? Both long jobs it starts (auto-trim and
+  // compose) deliberately outlive it, so anything user-visible that fires at
+  // the END of a job — navigation, alerts — must check this first. A compose
+  // that finishes 40s after the user walked away must not yank them out of
+  // whatever screen they moved on to; the global JobProgressPill and the
+  // Home/round-detail status surfaces carry the outcome instead.
+  const focusedRef = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      focusedRef.current = true;
+      return () => {
+        focusedRef.current = false;
+      };
+    }, [])
+  );
+
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
   // Long-press a clip → opens the clip-actions menu (move to hole / exclude
@@ -611,6 +649,14 @@ export default function EditorScreen() {
   const isTrimming = untrimmedCount > 0;
   const hasUntrimmedClips = isTrimming;
 
+  // Banner counters. The live batch is the better source when it is running for
+  // this round: it counts the clips actually queued for trimming, and it stays
+  // correct when the batch belongs to a detached earlier mount whose clip flags
+  // this instance never sees change. Falls back to the derived clip counts.
+  const trimBatchLive = trimJob.active && trimJob.roundId === state.roundId && trimJob.total > 0;
+  const trimBatchDone = trimBatchLive ? trimJob.completed : allClips.length - untrimmedCount;
+  const trimBatchTotal = trimBatchLive ? trimJob.total : allClips.length;
+
   // F17: while any tracer render is pending, Export / per-hole save+share /
   // multi-select must wait — composeReel and the tracer batch would
   // otherwise run concurrent AVAssetExportSessions, and the output would be
@@ -621,13 +667,59 @@ export default function EditorScreen() {
 
   // Start processAllUntrimmed once when loading finishes (guarded by ref)
   const trimStartedRef = useRef(false);
+  // True only while a batch THIS mount actually owns is running. A batch left
+  // over from an earlier mount keeps going in the background and updates the
+  // detached instance's state, not ours — so when that one finishes we have to
+  // re-read SQLite, whereas our own keeps us in sync clip by clip and a reload
+  // would just flash the loading screen for nothing.
+  const ownsTrimBatchRef = useRef(false);
   useEffect(() => {
     if (state.loading || trimStartedRef.current) return;
     const untrimmed = state.holes.flatMap((h) => h.clips).filter((c) => c.needsTrim);
     if (untrimmed.length === 0) return;
+    // A batch started by an earlier mount is still draining this round —
+    // let it finish rather than racing it (see inFlightTrimRoundIds). Its
+    // progress is on the global pill and, once it lands, trim:complete below
+    // pulls the finished clips into this screen.
+    if (inFlightTrimRoundIds.has(state.roundId)) {
+      console.log(
+        `[Editor] trim batch already in-flight for round ${state.roundId} — not starting a second`,
+      );
+      return;
+    }
+    inFlightTrimRoundIds.add(state.roundId);
     trimStartedRef.current = true;
-    editor.processAllUntrimmed();
+    ownsTrimBatchRef.current = true;
+    editor
+      .processAllUntrimmed()
+      .catch((e) => console.warn('[Editor] trim batch failed:', e))
+      .finally(() => {
+        inFlightTrimRoundIds.delete(state.roundId);
+        ownsTrimBatchRef.current = false;
+      });
   }, [state.loading]);
+
+  // Review mode is opened FROM the recording screen, which stays mounted and
+  // holds the camera. A trim batch left running there would fight the live
+  // capture for video decoders and memory, so the mid-round editor keeps the
+  // old behaviour: closing it stops the batch. The import editor — the flow
+  // this whole background-progress feature exists for — does not.
+  useEffect(() => {
+    if (!isReview) return;
+    return () => {
+      editor.cancelTrim();
+    };
+  }, [isReview, editor.cancelTrim]);
+
+  // Pick up the results of a background trim batch we don't own.
+  useEffect(() => {
+    return subscribePipeline((event) => {
+      if (event.type !== 'trim:complete') return;
+      if (event.roundId !== state.roundId) return;
+      if (ownsTrimBatchRef.current) return;
+      editor.reload();
+    });
+  }, [state.roundId, editor.reload]);
 
   // Start the shot-tracer batch once auto-trim has fully settled (tracers
   // pair clips by GPS and render onto the TRIMMED files, so they must run
@@ -654,6 +746,21 @@ export default function EditorScreen() {
   const [composeProgress, setComposeProgress] = useState('');
   const [exportProgress, setExportProgress] = useState<StitchProgressEvent | null>(null);
 
+  // A compose for THIS round that is running without this mount owning it —
+  // i.e. the user backgrounded the export and later re-opened the editor. The
+  // local `composing` flag died with the old mount, so the pipeline broadcaster
+  // is the only thing that still knows. Without this the export sheet would
+  // offer a fresh "Create Highlight Reel" that the concurrency guard silently
+  // swallows, which looks exactly like a broken button.
+  const composeLive = composeJob.active && composeJob.roundId === state.roundId;
+  const composeBusy = composing || composeLive;
+  const composeBusyLabel = composing
+    ? composeProgress
+    : composeJob.stageLabel || 'Building your reel…';
+  const composeBusyPercent = composing
+    ? (exportProgress ? exportProgress.percent : null)
+    : composeJob.percent;
+
   // Navigate back if there's a screen to go back to, otherwise drop to the
   // library tab. The editor is reachable via `router.replace`
   // (e.g. straight from the upload flow after recording), in which case the
@@ -675,13 +782,17 @@ export default function EditorScreen() {
     }
     Alert.alert(
       'Leave Editor?',
-      'Your edits are saved as a draft. You can come back to finish later.',
+      composing
+        ? "Your edits are saved as a draft. Your reel keeps building in the background — you'll see the progress wherever you are."
+        : isTrimming
+          ? "Your edits are saved as a draft. Clips keep auto-trimming in the background — you'll see the progress wherever you are."
+          : 'Your edits are saved as a draft. You can come back to finish later.',
       [
         { text: 'Stay', style: 'cancel' },
         { text: 'Leave', style: 'default', onPress: leaveEditor },
       ]
     );
-  }, [totalClips, leaveEditor]);
+  }, [totalClips, leaveEditor, composing, isTrimming]);
 
   const handleClipEdit = useCallback((clip: EditorClip) => {
     setTrimClip(clip);
@@ -1336,6 +1447,12 @@ export default function EditorScreen() {
             setComposing(false);
             setExportProgress(null);
             setExportModalVisible(false);
+            // Only navigate for a user who actually waited here. If they hid
+            // the sheet and walked off, this job is a background job now — the
+            // global pill shows "Reel ready — tap to watch" and the round is
+            // READY wherever they look. Navigating from under them would be a
+            // bug, not a convenience.
+            if (!focusedRef.current) return;
             // Land straight on the reel with the one-tap Save & Share CTA
             // instead of an alert that dumps the user back on Home.
             router.replace(`/round/${state.roundId}?exported=1`);
@@ -1353,6 +1470,12 @@ export default function EditorScreen() {
           roundId: state.roundId,
           cause: composeFailureCause(msg),
         });
+        // A backgrounded compose reports its failure through the pipeline bus:
+        // the round goes FAILED and the Home status card / reel stage offer
+        // "Tap to try again". Interrupting an unrelated screen with a modal
+        // alert on top of that is noise, so the alerts below are for the user
+        // who is still sitting on this screen.
+        if (!focusedRef.current) return;
         if (msg.includes('native rebuild') || msg.includes('not available')) {
           Alert.alert(
             'Native Build Required',
@@ -1605,7 +1728,7 @@ export default function EditorScreen() {
         >
           <ActivityIndicator size="small" color={theme.colors.primary} />
           <Text style={{ color: theme.colors.primary, fontSize: 13, fontWeight: '600', flex: 1 }}>
-            Auto-trimming clips... {allClips.length - untrimmedCount} of {allClips.length}
+            Auto-trimming clips... {trimBatchDone} of {trimBatchTotal}
           </Text>
         </View>
       )}
@@ -2043,8 +2166,10 @@ export default function EditorScreen() {
               </Text>
             </View>
 
-            {/* Composing progress */}
-            {composing && (
+            {/* Composing progress — shown for a job this mount started AND for
+                one it merely inherited (composeLive), so re-opening the sheet
+                mid-render tells the truth instead of offering a dead button. */}
+            {composeBusy && (
               <View
                 style={{
                   marginBottom: 16,
@@ -2064,12 +2189,22 @@ export default function EditorScreen() {
                 >
                   <ActivityIndicator size="small" color={theme.colors.primary} />
                   <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
-                    {composeProgress}
+                    {composeBusyLabel}
                   </Text>
                 </View>
+                <Text
+                  style={{
+                    color: theme.colors.textTertiary,
+                    fontSize: 11,
+                    textAlign: 'center',
+                    marginTop: 6,
+                  }}
+                >
+                  You can keep using the app — this finishes on its own.
+                </Text>
 
-                {/* Progress bar */}
-                {exportProgress && (
+                {/* Progress bar — real native percent only, never invented. */}
+                {composeBusyPercent != null && (
                   <View
                     style={{
                       marginTop: 10,
@@ -2084,7 +2219,7 @@ export default function EditorScreen() {
                         height: '100%',
                         borderRadius: 3,
                         backgroundColor: theme.colors.primary,
-                        width: `${Math.min(100, Math.max(0, exportProgress.percent))}%`,
+                        width: `${Math.min(100, Math.max(0, composeBusyPercent))}%`,
                       }}
                     />
                   </View>
@@ -2095,19 +2230,45 @@ export default function EditorScreen() {
             {/* Export button */}
             <Pressable
               onPress={handleExportConfirm}
-              disabled={composing}
+              disabled={composeBusy}
               style={{
-                backgroundColor: composing ? theme.colors.surfaceBorder : theme.colors.primary,
+                backgroundColor: composeBusy ? theme.colors.surfaceBorder : theme.colors.primary,
                 paddingVertical: 16,
                 borderRadius: theme.radius.lg,
                 alignItems: 'center',
-                opacity: composing ? 0.6 : 1,
+                opacity: composeBusy ? 0.6 : 1,
               }}
             >
               <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>
-                {composing ? 'Composing...' : 'Create Highlight Reel'}
+                {composeBusy ? 'Composing...' : 'Create Highlight Reel'}
               </Text>
             </Pressable>
+
+            {/* Backgrounding the export. The render is a detached native job —
+                it never depended on this sheet, or on this screen, staying up.
+                Before this button the only way out was to guess that tapping
+                the dimmed backdrop worked, so the export read as a screen you
+                were trapped on. Progress follows the user via the global pill. */}
+            {composeBusy && (
+              <Pressable
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setExportModalVisible(false);
+                }}
+                style={{ paddingVertical: 14, alignItems: 'center' }}
+                accessibilityRole="button"
+              >
+                <Text
+                  style={{
+                    color: theme.colors.textSecondary,
+                    fontSize: 14,
+                    fontWeight: '600',
+                  }}
+                >
+                  Continue in the background
+                </Text>
+              </Pressable>
+            )}
           </Pressable>
         </Pressable>
       </Modal>

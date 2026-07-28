@@ -4,6 +4,8 @@
  * Emitters:
  *   - app/round/editor.tsx composeReel flow → compose:* events
  *     (on-device reel composition — "building/stitching a reel")
+ *   - hooks/useEditorState.ts processAllUntrimmed → trim:* events
+ *     (the auto-trim batch that runs after a round import)
  *   - lib/uploadQueue.ts → backup:* events
  *     (cloud clip backup — never a reel state; never yields PROCESSING)
  *
@@ -42,6 +44,18 @@ export type PipelineEvent =
     }
   | { type: 'compose:complete'; roundId: string }
   | { type: 'compose:error'; roundId: string; cause: string }
+  /**
+   * Auto-trim batch (import pipeline). The batch is a plain "N of M clips
+   * done" counter — there is no per-clip percent to report, and inventing one
+   * would be the fake-percent mistake compose:progress exists to avoid.
+   *
+   * `trim:complete` is TERMINAL and is emitted from a `finally`, so it fires
+   * on success, on a thrown batch, and on cancellation alike — a subscriber
+   * can treat it as "the indicator must go away now" without a watchdog.
+   */
+  | { type: 'trim:start'; roundId: string; courseName: string | null; total: number }
+  | { type: 'trim:progress'; roundId: string; completed: number; total: number }
+  | { type: 'trim:complete'; roundId: string }
   | { type: 'backup:progress'; roundId: string; currentClip: number; totalClips: number }
   | { type: 'backup:paused' }
   | { type: 'backup:complete'; roundId: string }

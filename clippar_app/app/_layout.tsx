@@ -16,6 +16,7 @@ import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
 import { OnboardingProvider } from '@/contexts/OnboardingContext';
 import { OnboardingHost } from '@/components/onboarding/OnboardingHost';
+import { JobProgressPill } from '@/components/shared/JobProgressPill';
 import {
   getBiometricPreference,
   authenticateWithBiometrics,
@@ -220,6 +221,10 @@ function RootLayout() {
             />
             <Stack.Screen name="mount-offer" options={{ animation: 'fade' }} />
           </Stack>
+          {/* Sits above every route (like OnboardingHost) so a compose or
+              auto-trim job stays visible no matter where the user navigates.
+              Non-blocking: box-none container, only the pill takes touches. */}
+          <JobProgressPill />
           <OnboardingHost />
         </BottomSheetModalProvider>
       </GestureHandlerRootView>

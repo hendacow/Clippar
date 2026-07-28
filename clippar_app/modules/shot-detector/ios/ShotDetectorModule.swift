@@ -1842,6 +1842,52 @@ public class ShotDetectorModule: Module {
         return segments
     }
 
+    /// Split oversized segments so the worker pool actually has something to
+    /// parallelise.
+    ///
+    /// Grouping by hole alone leaves the pool starved in the exact rounds that
+    /// take longest: a 1- or 2-hole round produces 1-2 segments, so a 3-worker
+    /// pool runs one giant serial export. It also leaves a long tail whenever
+    /// one hole holds far more clips than the rest — the pool idles waiting on
+    /// that single segment.
+    ///
+    /// Splitting inside a hole is safe: every sub-segment carries the SAME
+    /// hole card (the card only changes at hole boundaries), the clips stay in
+    /// order, and the pieces are glued back with the passthrough concat. The
+    /// output is byte-for-byte the same content, just cut into more GOPs.
+    private func fastSplitSegments(
+        _ segments: [(holeIndex: Int?, clips: [FastParsedClip])],
+        concurrency: Int
+    ) -> [(holeIndex: Int?, clips: [FastParsedClip])] {
+        let totalSec = segments.reduce(0.0) { acc, seg in
+            acc + seg.clips.reduce(0.0) { $0 + $1.durationSec }
+        }
+        guard totalSec > 0 else { return segments }
+        // Aim for ~3 segments per worker: enough to keep every worker fed and
+        // keep the tail short, without paying export-session setup cost on a
+        // swarm of tiny pieces. Never chop below 10s for the same reason.
+        let targetSec = max(10.0, totalSec / Double(max(1, concurrency) * 3))
+
+        var out: [(holeIndex: Int?, clips: [FastParsedClip])] = []
+        for segment in segments {
+            var chunk: [FastParsedClip] = []
+            var chunkSec = 0.0
+            for clip in segment.clips {
+                chunk.append(clip)
+                chunkSec += clip.durationSec
+                if chunkSec >= targetSec {
+                    out.append((holeIndex: segment.holeIndex, clips: chunk))
+                    chunk = []
+                    chunkSec = 0
+                }
+            }
+            if !chunk.isEmpty {
+                out.append((holeIndex: segment.holeIndex, clips: chunk))
+            }
+        }
+        return out
+    }
+
     /// The full scorecard card for ONE hole's state, as a static layer tree.
     /// Layout is a line-for-line replica of the legacy whole-reel overlay —
     /// but with only this hole's dynamic layers and no cross-hole fade
@@ -2087,7 +2133,8 @@ public class ShotDetectorModule: Module {
         clips: [FastParsedClip],
         overlay: CALayer?,
         renderSize: CGSize,
-        outputURL: URL
+        outputURL: URL,
+        onProgress: ((Float) -> Void)? = nil
     ) throws {
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
@@ -2155,7 +2202,14 @@ public class ShotDetectorModule: Module {
 
         let sem = DispatchSemaphore(value: 0)
         session.exportAsynchronously { sem.signal() }
-        sem.wait()
+        // Poll rather than block: a single segment routinely runs longer than
+        // the JS-side 30s stall watchdog, and with progress only reported on
+        // segment COMPLETION a perfectly healthy compose gets flipped to
+        // FAILED while it is still encoding. Reporting fractional progress
+        // keeps the watchdog fed and the progress bar honest.
+        while sem.wait(timeout: .now() + 0.5) == .timedOut {
+            onProgress?(session.progress)
+        }
         guard session.status == .completed else {
             throw FastComposeError(
                 stage: "segment",
@@ -2163,10 +2217,20 @@ public class ShotDetectorModule: Module {
                 code: (session.error as NSError?)?.code ?? 0
             )
         }
+        onProgress?(1.0)
     }
 
-    /// Concatenate the (format-uniform) segment files without re-encoding.
-    private func fastPassthroughConcat(segmentURLs: [URL], outputURL: URL) throws -> CMTime {
+    /// Lay every (format-uniform) segment file end to end in one composition.
+    /// Nothing is decoded or re-encoded here — the export that consumes this
+    /// composition is a container-level remux.
+    ///
+    /// Pass `includeAudio: false` when music is in play: the clip audio then
+    /// travels through the audio mix instead, so it must not also be copied in
+    /// raw or it would play twice.
+    private func fastBuildConcatComposition(
+        segmentURLs: [URL],
+        includeAudio: Bool
+    ) throws -> (composition: AVMutableComposition, duration: CMTime) {
         let composition = AVMutableComposition()
         guard let videoTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
             throw FastComposeError(stage: "concat", message: "could not create video track")
@@ -2184,7 +2248,7 @@ public class ShotDetectorModule: Module {
             } catch {
                 throw FastComposeError(stage: "concat", message: "insert failed: \(error.localizedDescription)")
             }
-            if let srcAudio = asset.tracks(withMediaType: .audio).first {
+            if includeAudio, let srcAudio = asset.tracks(withMediaType: .audio).first {
                 if audioTrack == nil {
                     audioTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
                 }
@@ -2192,42 +2256,74 @@ public class ShotDetectorModule: Module {
             }
             insertTime = CMTimeAdd(insertTime, asset.duration)
         }
+        return (composition, insertTime)
+    }
 
+    /// Passthrough (remux) export shared by the concat and the music mux.
+    /// Polls progress for the same watchdog reason as `fastExportSegment` —
+    /// remuxing a multi-hundred-MB reel can itself outlast 30s.
+    private func fastPassthroughExport(
+        asset: AVAsset,
+        outputURL: URL,
+        stage: String,
+        onProgress: ((Float) -> Void)? = nil
+    ) throws {
         try? FileManager.default.removeItem(at: outputURL)
-        guard let session = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetPassthrough) else {
-            throw FastComposeError(stage: "concat", message: "could not create passthrough session")
+        guard let session = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetPassthrough) else {
+            throw FastComposeError(stage: stage, message: "could not create passthrough session")
         }
         session.outputURL = outputURL
         session.outputFileType = .mp4
         session.shouldOptimizeForNetworkUse = true
         let sem = DispatchSemaphore(value: 0)
         session.exportAsynchronously { sem.signal() }
-        sem.wait()
+        while sem.wait(timeout: .now() + 0.5) == .timedOut {
+            onProgress?(session.progress)
+        }
         guard session.status == .completed else {
+            // Don't leave a half-written reel-sized file behind — the caller
+            // is about to retry through the legacy path on a device that is
+            // already under memory/disk pressure.
+            try? FileManager.default.removeItem(at: outputURL)
             throw FastComposeError(
-                stage: "concat",
+                stage: stage,
                 message: session.error?.localizedDescription ?? "status \(session.status.rawValue)",
                 code: (session.error as NSError?)?.code ?? 0
             )
         }
-        return insertTime
+        onProgress?(1.0)
     }
 
-    /// Mix music under the reel audio WITHOUT re-encoding video: audio-only
-    /// mixed export (M4A preset honors audioMix), then a passthrough mux of
-    /// the untouched concat video + the mixed audio.
-    private func fastMixMusic(concatURL: URL, musicURL: URL, totalDuration: CMTime, outputURL: URL) throws {
-        let concatAsset = AVURLAsset(url: concatURL)
+    /// Build the mixed audio bed (clip audio + looped music) as a standalone
+    /// M4A. Audio-only export honors an audioMix and runs at many× realtime;
+    /// the video is never touched. The caller muxes this in during the single
+    /// passthrough export that writes the final reel.
+    ///
+    /// Reads the segment files directly rather than a concatenated
+    /// intermediate, so the reel-sized file only ever gets written ONCE.
+    /// Returns the temp M4A URL — the caller owns deleting it.
+    private func fastMixMusicTrack(
+        segmentURLs: [URL],
+        musicURL: URL,
+        totalDuration: CMTime
+    ) throws -> URL {
         let musicAsset = AVURLAsset(url: musicURL)
 
         let audioComp = AVMutableComposition()
         var clipAudioTrack: AVMutableCompositionTrack? = nil
-        if let srcAudio = concatAsset.tracks(withMediaType: .audio).first {
-            clipAudioTrack = audioComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-            try? clipAudioTrack?.insertTimeRange(
-                CMTimeRange(start: .zero, duration: concatAsset.duration),
-                of: srcAudio, at: .zero
-            )
+        var clipInsert = CMTime.zero
+        for url in segmentURLs {
+            let asset = AVURLAsset(url: url)
+            if let srcAudio = asset.tracks(withMediaType: .audio).first {
+                if clipAudioTrack == nil {
+                    clipAudioTrack = audioComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+                }
+                try? clipAudioTrack?.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: asset.duration),
+                    of: srcAudio, at: clipInsert
+                )
+            }
+            clipInsert = CMTimeAdd(clipInsert, asset.duration)
         }
         guard let srcMusic = musicAsset.tracks(withMediaType: .audio).first,
               let musicTrack = audioComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
@@ -2265,7 +2361,6 @@ public class ShotDetectorModule: Module {
         let mixedURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("reel_audio_\(UUID().uuidString).m4a")
         try? FileManager.default.removeItem(at: mixedURL)
-        defer { try? FileManager.default.removeItem(at: mixedURL) }
         guard let audioSession = AVAssetExportSession(asset: audioComp, presetName: AVAssetExportPresetAppleM4A) else {
             throw FastComposeError(stage: "music", message: "could not create audio export session")
         }
@@ -2276,45 +2371,14 @@ public class ShotDetectorModule: Module {
         audioSession.exportAsynchronously { semA.signal() }
         semA.wait()
         guard audioSession.status == .completed else {
+            try? FileManager.default.removeItem(at: mixedURL)
             throw FastComposeError(
                 stage: "music",
                 message: audioSession.error?.localizedDescription ?? "audio mix failed",
                 code: (audioSession.error as NSError?)?.code ?? 0
             )
         }
-
-        let muxComp = AVMutableComposition()
-        guard let vSrc = concatAsset.tracks(withMediaType: .video).first,
-              let vDst = muxComp.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-            throw FastComposeError(stage: "mux", message: "video track unavailable")
-        }
-        do {
-            try vDst.insertTimeRange(CMTimeRange(start: .zero, duration: concatAsset.duration), of: vSrc, at: .zero)
-        } catch {
-            throw FastComposeError(stage: "mux", message: error.localizedDescription)
-        }
-        let mixedAsset = AVURLAsset(url: mixedURL)
-        if let aSrc = mixedAsset.tracks(withMediaType: .audio).first,
-           let aDst = muxComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-            try? aDst.insertTimeRange(CMTimeRange(start: .zero, duration: mixedAsset.duration), of: aSrc, at: .zero)
-        }
-        try? FileManager.default.removeItem(at: outputURL)
-        guard let muxSession = AVAssetExportSession(asset: muxComp, presetName: AVAssetExportPresetPassthrough) else {
-            throw FastComposeError(stage: "mux", message: "could not create mux session")
-        }
-        muxSession.outputURL = outputURL
-        muxSession.outputFileType = .mp4
-        muxSession.shouldOptimizeForNetworkUse = true
-        let semM = DispatchSemaphore(value: 0)
-        muxSession.exportAsynchronously { semM.signal() }
-        semM.wait()
-        guard muxSession.status == .completed else {
-            throw FastComposeError(
-                stage: "mux",
-                message: muxSession.error?.localizedDescription ?? "mux failed",
-                code: (muxSession.error as NSError?)?.code ?? 0
-            )
-        }
+        return mixedURL
     }
 
     /// Orchestrator. Throws on any failure — the caller falls back to the
@@ -2327,8 +2391,19 @@ public class ShotDetectorModule: Module {
         startTime: CFTimeInterval
     ) throws {
         let (parsed, renderSize) = try fastParseClips(clips)
-        let segments = fastGroupSegments(parsed, scorecard: scorecard)
-        print("[Clippar.Compose] FAST path: \(parsed.count) clips → \(segments.count) segments renderSize=\(renderSize)")
+
+        // Concurrency is decided BEFORE segmentation so segmentation can size
+        // the pieces to the pool. Each session holds a full decode +
+        // CoreAnimation-composite + encode pipeline, so adapt the worker count
+        // to memory headroom (same policy as the JS trim pool): a jetsam kill
+        // here has NO fallback — the whole app dies.
+        let availableMB = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
+        let segmentConcurrency = availableMB > 1500 ? 3 : (availableMB > 700 ? 2 : 1)
+
+        let holeSegments = fastGroupSegments(parsed, scorecard: scorecard)
+        let segments = fastSplitSegments(holeSegments, concurrency: segmentConcurrency)
+        print("[Clippar.Compose] FAST path: \(parsed.count) clips → \(holeSegments.count) hole groups → \(segments.count) segments renderSize=\(renderSize)")
+        print("[Clippar.Compose] FAST segment concurrency=\(segmentConcurrency) (availableMB=\(String(format: "%.0f", availableMB)))")
         sendEvent("onStitchProgress", [
             "phase": "composing", "current": 0, "total": clips.count, "percent": 10.0,
         ])
@@ -2339,18 +2414,15 @@ public class ShotDetectorModule: Module {
         }
         defer { segmentURLs.forEach { try? FileManager.default.removeItem(at: $0) } }
 
-        // Export segments concurrently. Each session holds a full
-        // decode + CoreAnimation-composite + encode pipeline, so adapt the
-        // worker count to memory headroom (same policy as the JS trim pool):
-        // a jetsam kill here has NO fallback — the whole app dies.
-        let availableMB = Double(os_proc_available_memory()) / (1024.0 * 1024.0)
-        let segmentConcurrency = availableMB > 1500 ? 3 : (availableMB > 700 ? 2 : 1)
-        print("[Clippar.Compose] FAST segment concurrency=\(segmentConcurrency) (availableMB=\(String(format: "%.0f", availableMB)))")
         let gate = DispatchSemaphore(value: segmentConcurrency)
         let group = DispatchGroup()
         let stateQueue = DispatchQueue(label: "clippar.fastcompose.state")
         var firstError: Error? = nil
         var completedSegments = 0
+        // Fractional progress per in-flight segment, so the JS side keeps
+        // getting events while a long segment encodes (see fastExportSegment).
+        var segmentProgress = [Int: Double]()
+        var lastEmit: CFTimeInterval = 0
 
         for (i, segment) in segments.enumerated() {
             group.enter()
@@ -2370,9 +2442,28 @@ public class ShotDetectorModule: Module {
                         try self.fastExportSegment(
                             clips: segment.clips, overlay: overlay,
                             renderSize: renderSize, outputURL: segmentURLs[i]
-                        )
+                        ) { fraction in
+                            stateQueue.sync {
+                                segmentProgress[i] = Double(fraction)
+                                // Throttle: 3 workers polling at 2Hz would
+                                // otherwise spam the JS bridge.
+                                let now = CACurrentMediaTime()
+                                guard now - lastEmit >= 0.4 else { return }
+                                lastEmit = now
+                                let done = segmentProgress.values.reduce(0, +)
+                                let pct = 10.0 + 75.0 * min(1.0, done / Double(segments.count))
+                                self.sendEvent("onStitchProgress", [
+                                    "phase": "exporting",
+                                    "current": completedSegments,
+                                    "total": segments.count,
+                                    "percent": pct,
+                                ])
+                            }
+                        }
                         stateQueue.sync {
                             completedSegments += 1
+                            segmentProgress[i] = 1.0
+                            lastEmit = CACurrentMediaTime()
                             let pct = 10.0 + 75.0 * Double(completedSegments) / Double(segments.count)
                             self.sendEvent("onStitchProgress", [
                                 "phase": "exporting",
@@ -2390,31 +2481,58 @@ public class ShotDetectorModule: Module {
         group.wait()
         if let err = (stateQueue.sync { firstError }) { throw err }
 
-        let concatURL = tmpDir.appendingPathComponent("reel_concat_\(UUID().uuidString).mp4")
-        defer { try? FileManager.default.removeItem(at: concatURL) }
-        let totalDuration = try fastPassthroughConcat(segmentURLs: segmentURLs, outputURL: concatURL)
+        // ---- Finalize: ONE write of the reel-sized file ----
+        // Resolve music first. When there is music the clip audio travels
+        // through the mix, so the concat composition carries video only and
+        // the mixed bed is muxed into the same single passthrough export.
+        // (The previous shape wrote the whole reel twice: concat file, then a
+        // mux file. For a 7-minute 1080p reel that is a few hundred MB of
+        // pointless I/O.)
+        var musicURL: URL? = nil
+        if let musicUriStr = musicUri, !musicUriStr.isEmpty {
+            let candidate = resolveFileURL(musicUriStr)
+            if FileManager.default.fileExists(atPath: candidate.path) { musicURL = candidate }
+        }
+
+        let (concatComp, totalDuration) = try fastBuildConcatComposition(
+            segmentURLs: segmentURLs,
+            includeAudio: musicURL == nil
+        )
         sendEvent("onStitchProgress", [
-            "phase": "exporting", "current": segments.count, "total": segments.count, "percent": 92.0,
+            "phase": "exporting", "current": segments.count, "total": segments.count, "percent": 86.0,
         ])
+
+        var mixedAudioURL: URL? = nil
+        defer { if let m = mixedAudioURL { try? FileManager.default.removeItem(at: m) } }
+        var hasMusic = false
+        if let musicURL = musicURL {
+            let mixedURL = try fastMixMusicTrack(
+                segmentURLs: segmentURLs, musicURL: musicURL, totalDuration: totalDuration
+            )
+            mixedAudioURL = mixedURL
+            let mixedAsset = AVURLAsset(url: mixedURL)
+            if let aSrc = mixedAsset.tracks(withMediaType: .audio).first,
+               let aDst = concatComp.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+                try? aDst.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: mixedAsset.duration), of: aSrc, at: .zero
+                )
+            }
+            hasMusic = true
+        }
 
         let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
             .appendingPathComponent("reel_\(UUID().uuidString).mp4")
-        try? FileManager.default.removeItem(at: outputURL)
-
-        var hasMusic = false
-        if let musicUriStr = musicUri, !musicUriStr.isEmpty {
-            let musicURL = resolveFileURL(musicUriStr)
-            if FileManager.default.fileExists(atPath: musicURL.path) {
-                try fastMixMusic(concatURL: concatURL, musicURL: musicURL, totalDuration: totalDuration, outputURL: outputURL)
-                hasMusic = true
-            }
-        }
-        if !hasMusic {
-            do {
-                try FileManager.default.moveItem(at: concatURL, to: outputURL)
-            } catch {
-                throw FastComposeError(stage: "finalize", message: error.localizedDescription)
-            }
+        try fastPassthroughExport(
+            asset: concatComp,
+            outputURL: outputURL,
+            stage: hasMusic ? "mux" : "concat"
+        ) { fraction in
+            self.sendEvent("onStitchProgress", [
+                "phase": "exporting",
+                "current": segments.count,
+                "total": segments.count,
+                "percent": 88.0 + 11.0 * Double(fraction),
+            ])
         }
 
         let elapsed = CACurrentMediaTime() - startTime

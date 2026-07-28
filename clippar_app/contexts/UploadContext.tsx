@@ -11,9 +11,13 @@
  *     (enqueueRoundUpload / processUploadQueue).
  *
  * What remains here is a read-only broadcaster: it subscribes to
- * lib/pipelineEvents.ts (fed by the editor's composeReel flow and the
- * backup queue) and folds the events into ComposeState/BackupState for
- * the UI. It also runs the 30s compose watchdog — but only AFTER the native
+ * lib/pipelineEvents.ts (fed by the editor's composeReel flow, the auto-trim
+ * batch and the backup queue) and folds the events into
+ * ComposeState/TrimState/BackupState for the UI. Both long-running on-device
+ * jobs — compose and auto-trim — outlive the screen that started them, so this
+ * broadcaster is what makes them visible from anywhere in the app
+ * (components/shared/JobProgressPill.tsx renders it in the app shell).
+ * It also runs the 30s compose watchdog — but only AFTER the native
  * composeReel stage has begun (compose:stage → 'composing'). A stalled native
  * render with no progress for 30s flips to FAILED ("Rendering didn't finish"),
  * so there is never an eternal spinner; the pre-native clip-recovery/music
@@ -60,9 +64,25 @@ export interface BackupState {
   totalClips: number;
 }
 
+/**
+ * Auto-trim batch state (the post-import "N of M clips trimmed" job).
+ *
+ * Deliberately a count, not a percent: the batch has no sub-clip progress to
+ * report, and a synthesised percent would be exactly the fake-progress lie the
+ * compose pipeline already refuses to tell.
+ */
+export interface TrimState {
+  active: boolean;
+  roundId: string | null;
+  courseName: string | null;
+  completed: number;
+  total: number;
+}
+
 interface UploadContextType {
   compose: ComposeState;
   backup: BackupState;
+  trim: TrimState;
   /** Clear a surfaced compose failure (after the user taps "Try again"). */
   dismissComposeError: () => void;
 }
@@ -87,9 +107,27 @@ const INITIAL_BACKUP: BackupState = {
   totalClips: 0,
 };
 
+const INITIAL_TRIM: TrimState = {
+  active: false,
+  roundId: null,
+  courseName: null,
+  completed: 0,
+  total: 0,
+};
+
+/**
+ * Trim stall backstop. `trim:complete` is emitted from a `finally` so it
+ * should always arrive — but if the JS batch dies in a way that skips it
+ * (a hard crash inside the worker pool, a hot reload mid-batch), this stops
+ * the global indicator from sitting at "9 of 12" forever. Generous on
+ * purpose: a single long clip can occupy a worker for tens of seconds.
+ */
+const TRIM_STALL_MS = 180_000;
+
 const UploadContext = createContext<UploadContextType>({
   compose: INITIAL_COMPOSE,
   backup: INITIAL_BACKUP,
+  trim: INITIAL_TRIM,
   dismissComposeError: () => {},
 });
 
@@ -100,10 +138,13 @@ export function useUploadContext() {
 export function UploadProvider({ children }: { children: ReactNode }) {
   const [compose, setCompose] = useState<ComposeState>(INITIAL_COMPOSE);
   const [backup, setBackup] = useState<BackupState>(INITIAL_BACKUP);
+  const [trim, setTrim] = useState<TrimState>(INITIAL_TRIM);
 
   // Watchdog bookkeeping — refreshed on every compose event.
   const lastComposeSignalRef = useRef<number>(0);
   const activeComposeRoundRef = useRef<string | null>(null);
+  // Same, for the trim batch's much simpler stall backstop.
+  const lastTrimSignalRef = useRef<number>(0);
 
   useEffect(() => {
     const unsubscribe = subscribePipeline((event: PipelineEvent) => {
@@ -179,6 +220,31 @@ export function UploadProvider({ children }: { children: ReactNode }) {
             failedCause: event.cause,
           }));
           break;
+        case 'trim:start':
+          lastTrimSignalRef.current = Date.now();
+          setTrim({
+            active: true,
+            roundId: event.roundId,
+            courseName: event.courseName,
+            completed: 0,
+            total: event.total,
+          });
+          break;
+        case 'trim:progress':
+          lastTrimSignalRef.current = Date.now();
+          setTrim((prev) => ({
+            ...prev,
+            active: true,
+            roundId: event.roundId,
+            completed: event.completed,
+            total: event.total,
+          }));
+          break;
+        case 'trim:complete':
+          // Terminal for the batch — success, failure and cancellation all
+          // land here, so the indicator always clears.
+          setTrim(INITIAL_TRIM);
+          break;
         case 'backup:progress':
           setBackup({
             status: 'uploading',
@@ -229,6 +295,21 @@ export function UploadProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, [compose.nativeStarted]);
 
+  // Trim stall backstop. Unlike compose there is no FAILED state to surface —
+  // a wedged batch just means the indicator is lying, so we silently drop it.
+  // Any clip that never got trimmed keeps needs_trim=1 in SQLite and the next
+  // editor visit retries it, exactly as it does today.
+  useEffect(() => {
+    if (!trim.active) return;
+    const interval = setInterval(() => {
+      if (Date.now() - lastTrimSignalRef.current > TRIM_STALL_MS) {
+        console.warn('[UploadContext] trim batch went quiet — clearing indicator');
+        setTrim(INITIAL_TRIM);
+      }
+    }, 10_000);
+    return () => clearInterval(interval);
+  }, [trim.active]);
+
   const dismissComposeError = useCallback(() => {
     setCompose((prev) => ({
       ...prev,
@@ -239,7 +320,7 @@ export function UploadProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
-    <UploadContext.Provider value={{ compose, backup, dismissComposeError }}>
+    <UploadContext.Provider value={{ compose, backup, trim, dismissComposeError }}>
       {children}
     </UploadContext.Provider>
   );
