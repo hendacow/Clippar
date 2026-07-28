@@ -135,9 +135,19 @@ Deno.serve(async (req: Request) => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           job_id: round_id,
-          supabase_url: supabaseUrl,
-          supabase_key: supabaseServiceKey,
-          neon_database_url: '',
+          // Shared secret proving this request came from us. The Modal endpoint
+          // is a public HTTPS URL whose address is committed in this very file,
+          // so without this anyone can POST it and start a 15-minute T4 job on
+          // our account, skipping every control above (JWT, ownership, the daily
+          // cap, the atomic claim) — those guard the Supabase front door, and
+          // Modal is a second door onto the same job.
+          pipeline_secret: Deno.env.get('CLIPPAR_PIPELINE_SECRET') ?? '',
+          // supabase_url / supabase_key deliberately NOT sent. The container
+          // reads both from its own Modal secret now. Sending them meant this
+          // function handed the full SERVICE ROLE key across the network on
+          // every dispatch, and — because the container used the caller's URL in
+          // preference to its own — anyone who could reach that endpoint could
+          // point it at their own host and be handed the key.
         }),
         signal: controller.signal,
       });

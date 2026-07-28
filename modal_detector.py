@@ -342,6 +342,11 @@ def detect_shots_batch(request: dict) -> dict:
 
     Returns JSON with per-clip trim points + shot info.
     """
+    # AUTHENTICATE FIRST — before importing, allocating or touching the GPU.
+    # This is a public HTTPS URL; see _pipeline_secret_ok.
+    if not _pipeline_secret_ok(request.get("pipeline_secret")):
+        return {"error": "unauthorized"}
+
     import sys
     import tempfile
     import time
@@ -351,8 +356,12 @@ def detect_shots_batch(request: dict) -> dict:
     from shot_detector import load_config, detect_shots
 
     clips = request.get("clips", [])
-    supabase_url = request.get("supabase_url", "")
-    supabase_key = request.get("supabase_key", "")
+    # Environment only — see the note in run_full_pipeline. A caller-supplied
+    # base URL here is an SSRF primitive, and because the key travels as an
+    # Authorization header to whatever host that URL names, it exfiltrates the
+    # service-role key to an attacker-chosen server.
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
 
     if not clips:
         return {"error": "No clips provided"}
@@ -494,6 +503,15 @@ def run_full_pipeline(request: dict) -> dict:
       - supabase_key: service role key
       - neon_database_url: optional Neon Postgres for job status
     """
+    # AUTHENTICATE FIRST. Every line below this is billable: the function is
+    # declared with gpu="T4", memory=16384 and timeout=900, so one unauthorised
+    # POST buys an attacker fifteen minutes of GPU on our account, and a loop
+    # buys as many as they like. This check must stay the first statement in the
+    # body — putting it after the imports or after any allocation means we pay
+    # for the rejected requests too.
+    if not _pipeline_secret_ok(request.get("pipeline_secret")):
+        return {"error": "unauthorized"}
+
     import sys
     import time
     import tempfile
@@ -507,12 +525,43 @@ def run_full_pipeline(request: dict) -> dict:
     from post_process import post_process as _post_process
 
     job_id = request.get("job_id")
-    supabase_url = request.get("supabase_url", "") or os.environ.get("SUPABASE_URL", "")
-    supabase_key = request.get("supabase_key", "") or os.environ.get("SUPABASE_SERVICE_KEY", "")
-    neon_url = request.get("neon_database_url", "")
 
-    if not job_id or not supabase_url or not supabase_key:
-        return {"error": "job_id, supabase_url, supabase_key required"}
+    # Credentials come from the CONTAINER's own Modal secret, never from the
+    # request body.
+    #
+    # These used to read `request.get(...) or os.environ.get(...)`, so a caller
+    # value took precedence. That is both halves of a serious bug at once:
+    #
+    #   - SSRF. `supabase_url` is interpolated straight into the storage list
+    #     and download URLs below, so a caller pointed the container's outbound
+    #     requests anywhere — including cloud metadata endpoints.
+    #   - Credential exfiltration. Worse, `supabase_key` is sent as an `apikey`
+    #     and `Authorization: Bearer` header to whatever host `supabase_url`
+    #     names. Supply your own URL, omit the key so the env fallback provides
+    #     OURS, and the container posts the Supabase SERVICE ROLE key to your
+    #     server on the first request.
+    #
+    # There was never a legitimate reason for the caller to choose either: the
+    # only real caller is our own process-round edge function, pointing at our
+    # own project. Pinning them to the environment closes the whole class, and
+    # means process-round no longer has to hand the service-role key across the
+    # network at all.
+    supabase_url = os.environ.get("SUPABASE_URL", "")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY", "")
+
+    # Same reasoning: this is a Postgres connection string that the job connects
+    # OUT to. Caller-supplied, it is an SSRF primitive pointed at the internal
+    # network, and any job metadata written by update_job() lands in a database
+    # the caller controls.
+    neon_url = os.environ.get("NEON_DATABASE_URL", "")
+
+    if not job_id:
+        return {"error": "job_id required"}
+    if not supabase_url or not supabase_key:
+        # Fail closed and say nothing useful to the caller — a misconfigured
+        # container must not fall back to trusting the request body.
+        print("[Pipeline] SUPABASE_URL / SUPABASE_SERVICE_KEY missing from the Modal secret")
+        return {"error": "pipeline misconfigured"}
 
     headers = {
         "apikey": supabase_key,
