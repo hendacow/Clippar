@@ -18,8 +18,6 @@ import { theme } from '@/constants/theme';
 import { useEditorState } from '@/hooks/useEditorState';
 import { trimVideo } from 'shot-detector';
 import { type EditorClip, type EditorHoleSection, getInitialTrimBounds } from '@/types/editor';
-// TEMPORARY — jetsam hunt. Remove with lib/memoryTrace.ts.
-import { memMark } from '@/lib/memoryTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -516,7 +514,6 @@ function NativeClipPlayer({
         return; // released mid-swap, or an unreadable file
       }
       if (cancelled || seq !== swapSeqRef.current) return;
-      memMark('player:swapped');
       runOnPlayer(player, (p) => {
         p.currentTime = startSecRef.current;
         if (!pausedRef.current) p.play();
@@ -887,7 +884,6 @@ function InlineTrimPanel({
     const SETTLE_MS = 250;
 
     const generateThumbs = async () => {
-      memMark('thumbs:start');
       const thumbs: (string | null)[] = new Array(THUMB_COUNT).fill(null);
       const interval = durationMs / THUMB_COUNT;
       let next = 0;
@@ -909,7 +905,6 @@ function InlineTrimPanel({
       await Promise.all(
         Array.from({ length: Math.min(THUMB_CONCURRENCY, THUMB_COUNT) }, worker),
       );
-      memMark('thumbs:done');
       if (!cancelled) setFilmstripThumbs([...thumbs]);
     };
 

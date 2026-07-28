@@ -17,8 +17,6 @@ import { UploadProvider } from '@/contexts/UploadContext';
 import { OnboardingProvider } from '@/contexts/OnboardingContext';
 import { OnboardingHost } from '@/components/onboarding/OnboardingHost';
 import { JobProgressPill } from '@/components/shared/JobProgressPill';
-// TEMPORARY — jetsam hunt. Remove with lib/memoryTrace.ts once found.
-import { startMemoryTrace } from '@/lib/memoryTrace';
 import {
   getBiometricPreference,
   authenticateWithBiometrics,
@@ -190,9 +188,6 @@ function RootLayout() {
       } catch (e) {
         console.log('[Startup] initializeUploadQueueProcessor skipped:', e);
       }
-
-      // TEMPORARY — jetsam hunt. Dev-only, no-ops in production.
-      startMemoryTrace();
     })();
   }, [loading]);
 
