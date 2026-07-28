@@ -43,8 +43,21 @@ struct LocalizerParams {
   var energyPercentile = 99.5
   var embedFps = 10.0
   /// Below this motion valley depth the stroke is a putt, which is left
-  /// untrimmed. Measured: putts median 0.21, full swings median 0.68.
-  var puttNormMax = 0.45
+  /// untrimmed. FALLBACK ONLY — used when Vision could not lock on to a body,
+  /// because pose separates the classes far better (see SwingPose).
+  ///
+  /// Deliberately looser than the 0.45 that motion used when it decided alone.
+  /// The two failure modes are not symmetric: trimming a putt by mistake throws
+  /// away footage the user wanted, while leaving a shot whole merely fails to
+  /// help. So with the better signal unavailable, lean toward leaving it alone.
+  ///
+  /// NOT MEASURED. On all 56 labelled clips Vision locked on to a body, so this
+  /// path never executed and there is no evidence for 0.60 over any other
+  /// value — it is the asymmetry argument above and nothing more. The clips
+  /// that would exercise it (golfer too small or too occluded for Vision) are
+  /// exactly the ones absent from the set. Treat it as a guess until a clip
+  /// actually falls through here.
+  var puttFallbackNormMax = 0.60
 }
 
 enum SwingLocalizer {

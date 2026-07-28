@@ -27,9 +27,32 @@ test('a full swing is trimmed to exactly the highlight length', () => {
 });
 
 test('a putt is left UNCHANGED', () => {
-  const p = planHighlightTrim(res({ strokeType: 'putt' }));
+  const p = planHighlightTrim(res({ strokeType: 'putt', wristHeight: -0.65 }));
   assert.equal(p.trim, false);
   assert.match(p.reason, /putt/);
+});
+
+// A chip is a SHOT and must be trimmed. This is the case the old rule got
+// wrong: motion decided, a chip's amplitude looks like a putt's, and the clip
+// came back whole. Chips measure -0.21..+0.14 in wrist height, comfortably
+// above the -0.485 bar, so the only thing that had to change was letting pose
+// answer at all.
+test('a chip is trimmed like any other shot', () => {
+  const p = planHighlightTrim(
+    res({ strokeType: 'swing', wristHeight: -0.185, tImpact: 8 }),
+  );
+  assert.equal(p.trim, true);
+  assert.ok(Math.abs(p.endSec - p.startSec - HIGHLIGHT_SECONDS) < 1e-9);
+});
+
+// 'putt' with no pose reading is a residue label, not a detection — footage
+// with no golf in it lands there too. The clip is left alone either way, so
+// only the wording must not overclaim.
+test('a putt decided WITHOUT pose does not claim to have seen a putt', () => {
+  const p = planHighlightTrim(res({ strokeType: 'putt' }));
+  assert.equal(p.trim, false);
+  assert.doesNotMatch(p.reason, /putt/);
+  assert.match(p.reason, /no shot detected/);
 });
 
 test('no detection leaves the clip UNCHANGED', () => {

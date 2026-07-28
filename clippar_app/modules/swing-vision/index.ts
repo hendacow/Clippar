@@ -33,8 +33,15 @@ export interface SwingCandidate {
 
 export interface LocalizeResult {
   decision: 'SWING' | 'NO_SWING';
-  /** Which prototype won at the chosen moment. A 'putt' is left UNTRIMMED —
-   *  the whole clip is the highlight. Undefined when decision is NO_SWING. */
+  /** Shot-or-putt. A 'putt' is left UNTRIMMED — the whole clip is the
+   *  highlight. Undefined when decision is NO_SWING.
+   *
+   *  'swing' means ANY shot worth trimming: full swings, chips, pitches and
+   *  bunker shots all land here. It is not a claim about club or technique —
+   *  the trim policy only ever asks shot-or-putt, so that is all this answers.
+   *
+   *  Decided by body pose (wrist height in torso lengths), falling back to
+   *  motion amplitude when Vision cannot lock on to a body. */
   strokeType?: 'swing' | 'putt';
   /** Seconds into the clip. Undefined when decision is NO_SWING. */
   tTop?: number;
@@ -42,9 +49,11 @@ export interface LocalizeResult {
   /** Full clip length, so callers can clamp a trim window to it. */
   durationSec: number;
   /** Peak wrist height at the stroke, in torso lengths above the shoulders.
-   *  Absent when Vision could not lock on to a body — in which case the stroke
-   *  type came from motion alone. Positive means hands went above the shoulders
-   *  (a full swing); putts sit around -0.65. */
+   *  This is what DECIDES strokeType; absent means Vision could not lock on to
+   *  a body and motion amplitude was used instead.
+   *
+   *  Measured ranges: putts -0.79..-0.53, chips -0.21..+0.14, full swings
+   *  -0.44..+0.69. The shot/putt bar sits at -0.485, in the gap between them. */
   wristHeight?: number;
   /** The winning candidate's prototype score. Small by nature (~0.0-0.1): every
    *  frame is a golf course, so the three prototypes sit at cosine ~0.95 to each

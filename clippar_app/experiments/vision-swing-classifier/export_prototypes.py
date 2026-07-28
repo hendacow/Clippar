@@ -70,13 +70,16 @@ def main():
             "motionHeight": 90,
             "energyPercentile": 99.5,
             "embedFps": 10.0,
-            # Stroke type is decided by MOTION AMPLITUDE, not appearance. A putt
-            # is a physically smaller event than a full swing (valley depth
-            # median 0.21 vs 0.68). Measured on 53 detected clips: motion alone
-            # 48/53 correct, the appearance margin 45/53, and per-frame
-            # prototype voting only 40/53. Same lesson as localization — motion
-            # carries the signal, CLIP is the weaker cue.
-            "puttNormMax": 0.45,
+            # Stroke type is decided by POSE (SwingPose.shotMinWristHeight);
+            # this bar only applies when Vision cannot lock on to a body.
+            #
+            # It is NOT the old 0.45. Appearance never worked here (prototype
+            # voting 40/53), and motion alone tops out at 48/56 because a chip's
+            # amplitude looks like a putt's. Pose-decides-motion-falls-back is
+            # 53/56. Since the fallback now only runs on the hard clips, it is
+            # biased toward leaving the clip whole: a wrongly trimmed putt loses
+            # footage, a wrongly untrimmed shot merely loses the convenience.
+            "puttFallbackNormMax": 0.60,
         },
         "counts": {
             "swingExemplars": int(len(P)),

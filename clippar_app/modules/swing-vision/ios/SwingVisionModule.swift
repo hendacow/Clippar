@@ -144,7 +144,11 @@ public class SwingVisionModule: Module {
         params.winBefore = pr["winBefore"] ?? params.winBefore
         params.winAfter = pr["winAfter"] ?? params.winAfter
         params.embedFps = pr["embedFps"] ?? params.embedFps
-        params.puttNormMax = pr["puttNormMax"] ?? params.puttNormMax
+        // Read the old key too: a bundle exported before pose became the
+        // primary signal only carries `puttNormMax`, and silently falling back
+        // to the built-in default would hide that the file is stale.
+        params.puttFallbackNormMax = pr["puttFallbackNormMax"]
+          ?? pr["puttNormMax"] ?? params.puttFallbackNormMax
         if let n = pr["nCandidates"] { params.nCandidates = Int(n) }
         if let w = pr["motionWidth"] { params.motionWidth = Int(w) }
         if let h = pr["motionHeight"] { params.motionHeight = Int(h) }
@@ -246,26 +250,42 @@ public class SwingVisionModule: Module {
     let near = ok.filter { $0.norm >= bestNorm * (1 - params.tieRel) }
     let best = near.max(by: { $0.proto < $1.proto })
 
-    // STROKE TYPE — motion AND pose, never appearance.
+    // STROKE TYPE — POSE DECIDES, motion is only the fallback.
     //
-    // Appearance cannot do this: a trained probe on the golfer-crop embedding
-    // scores 64% and adds nothing over a single motion threshold. Measured on
-    // 53 clips, motion alone 48/53; adding pose takes 37/39 -> 38/39 on the
-    // clips where pose locks on.
+    // "swing" here means A SHOT WORTH TRIMMING, which includes chips, pitches
+    // and bunker shots. The only question the trim policy asks is shot-or-putt.
     //
-    // Both must agree it was a full swing, because they fail differently:
-    // motion amplitude is DISTANCE-dependent (a far-away full swing moves fewer
-    // pixels than a near putt), while pose is normalised by the golfer's own
-    // torso and so is distance- and angle-invariant. Pose is advisory — when it
-    // cannot lock on (golfer too small, bodies overlapping) motion decides
-    // alone rather than the clip being guessed at.
-    var strokeType = (best.map { $0.norm < params.puttNormMax } ?? false) ? "putt" : "swing"
+    // This used to be the other way round: motion decided and pose could only
+    // DEMOTE a swing to a putt. That structure could never classify a chip.
+    // A chip's motion amplitude is modest, so motion called it a putt, and pose
+    // — the one signal that gets chips right — was never consulted at all.
+    //
+    // Measured on 56 clips (25 putts, 21 full swings, 10 chips), with both the
+    // instant AND the wrist height taken from THIS code path rather than the
+    // experiment's k-NN ranking, which picks different instants:
+    //     motion decides, pose demotes  49/56   chips 6/10   swings 20/21
+    //     pose decides, motion fallback 52/56   chips 9/10   swings 21/21
+    // It costs one putt (IMG_0582, +0.055) and wins four.
+    //
+    // Pose is the better signal because motion amplitude is DISTANCE-dependent
+    // — a full swing filmed from 40m moves fewer pixels than a putt filmed from
+    // 3m — while wrist height is normalised by the golfer's own torso and so is
+    // invariant to distance and camera angle. Motion still decides when Vision
+    // cannot lock on to a body at all (golfer too small in frame), and it uses
+    // a deliberately conservative bar there — see puttFallbackNormMax.
+    //
+    // Cost: pose now runs on putts too, which it previously skipped. That is
+    // ~29 body-pose requests, around 0.7s, on clips that used to skip them.
     var wristHeight: Double? = nil
-    if let b = best, strokeType == "swing" {
+    if let b = best {
       wristHeight = SwingPose.peakWristHeight(asset: asset, tTop: b.tTop)
-      if let wh = wristHeight, wh < SwingPose.fullSwingMinWristHeight {
-        strokeType = "putt"
-      }
+    }
+    let strokeType: String
+    if let wh = wristHeight {
+      strokeType = wh < SwingPose.shotMinWristHeight ? "putt" : "swing"
+    } else {
+      strokeType = (best.map { $0.norm < params.puttFallbackNormMax } ?? true)
+        ? "putt" : "swing"
     }
     promise.resolve(result(decision: "SWING", best: best, cands: cands,
                            started: started, motionFps: profile.fps,

@@ -19,6 +19,10 @@ export interface HighlightInput {
   strokeType?: 'swing' | 'putt';
   tImpact?: number;
   durationSec: number;
+  /** Present when body pose decided the stroke type; absent when it could not
+   *  lock on and motion amplitude was the fallback. Only affects the `reason`
+   *  string — see the note on honest wording in planHighlightTrim. */
+  wristHeight?: number;
 }
 
 export interface TrimPlan {
@@ -46,7 +50,18 @@ export function planHighlightTrim(r: HighlightInput): TrimPlan {
   if (r.decision !== 'SWING' || r.tImpact === undefined) {
     return whole('no swing detected — left unchanged');
   }
-  if (r.strokeType === 'putt') return whole('putt — left unchanged');
+  if (r.strokeType === 'putt') {
+    // Be honest about which signal said so. 'putt' is a residue label: with no
+    // body to measure, anything whose motion is too small to be a shot lands
+    // here, including footage with no golf in it at all. Claiming "putt" for
+    // that reads as a detection when it was a failure to detect. The ACTION is
+    // identical either way, so only the wording changes.
+    return whole(
+      r.wristHeight === undefined
+        ? 'no shot detected — left unchanged'
+        : 'putt — left unchanged',
+    );
+  }
   if (r.durationSec <= HIGHLIGHT_SECONDS) {
     return whole(`clip is ${r.durationSec.toFixed(1)}s — already under ${HIGHLIGHT_SECONDS}s`);
   }

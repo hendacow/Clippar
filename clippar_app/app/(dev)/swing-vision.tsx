@@ -169,7 +169,14 @@ export default function SwingVisionScreen() {
                 {result.decision === 'SWING' && result.tTop !== undefined ? (
                   <>
                     <Text style={{ color: theme.colors.textTertiary, fontSize: 11, letterSpacing: 1 }}>
-                      {result.strokeType === 'putt' ? 'PUTTING STROKE AT' : 'TOP OF SWING AT'}
+                      {/* Say which signal decided, because 'putt' with no pose
+                          reading is a residue label — anything too small to be
+                          a shot lands there, including non-golf footage. */}
+                      {result.strokeType === 'putt'
+                        ? result.wristHeight === undefined
+                          ? 'NO SHOT FOUND — STRONGEST MOTION AT'
+                          : 'PUTTING STROKE AT'
+                        : 'STROKE AT'}
                     </Text>
                     <Text style={{ color: theme.colors.primary, fontSize: 42, fontWeight: '900' }}>
                       {result.tTop.toFixed(2)}s

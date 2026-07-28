@@ -13,19 +13,32 @@
 //  Core ML cost.
 //
 //  Pose is a different KIND of signal: wrist height relative to the shoulders,
-//  normalised by torso length. Measured 38/40 alone, and combined with motion
-//  38/39 versus 37/39 for motion alone.
+//  normalised by torso length. Motion amplitude is DISTANCE-DEPENDENT — a full
+//  swing filmed from 40m away moves fewer pixels than a putt filmed from 3m,
+//  which is precisely the "any angle, any distance" failure. Pose is normalised
+//  by the golfer's own torso, so it is invariant to how far away the golfer is
+//  and which way round they stand.
 //
-//  The reason to want it is not that +1. Motion amplitude is DISTANCE-DEPENDENT:
-//  a full swing filmed from 40m away moves fewer pixels than a putt filmed from
-//  3m, which is precisely the "any angle, any distance" failure. Pose is
-//  normalised by the golfer's own torso, so it is invariant to how far away and
-//  which way round they are.
+//  WHY IT IS NOW THE PRIMARY SIGNAL, NOT AN ADVISOR
+//  Chips proved the old arrangement wrong. Motion used to decide and pose was
+//  only allowed to demote a swing to a putt — so a chip, whose amplitude looks
+//  like a putt's, was called a putt and pose was never asked. On 56 clips
+//  (25 putts, 21 full swings, 10 chips): motion-decides 49/56 with 6/10 chips;
+//  pose-decides-motion-falls-back 52/56 with 9/10.
 //
-//  KNOWN LIMIT: overlapping bodies. On IMG_0558 two golfers stand almost on top
-//  of each other and Vision returns a blended skeleton — wrists apparently above
-//  the shoulders during a putt. Picking the largest person does not fix it. That
-//  clip is the single remaining error and no threshold repairs it.
+//  KNOWN LIMITS, all measured and all left in place:
+//   - Overlapping bodies. On IMG_0558 two golfers stand almost on top of each
+//     other and Vision returns a blended skeleton — wrists apparently above the
+//     shoulders during a putt. Picking the largest person does not fix it.
+//   - IMG_0582 (+0.055) and IMG_0579 (-0.243), putts that read too high. The
+//     first is the one clip this rule loses that the old one kept.
+//   - IMG_0592, a chip read at -0.762. NOT a pose failure: the localizer picks
+//     17.02s, which is not the shot, so pose is asked about the wrong instant
+//     and answers correctly about it. No threshold here can fix that clip.
+//
+//  A tighter bar does not help. Moving it to -0.22 rescues IMG_0579 but loses
+//  IMG_0596, a genuine full swing at -0.438 — net zero, and it trades a putt
+//  for a swing, which is the worse direction.
 //
 import AVFoundation
 import Vision
@@ -39,9 +52,22 @@ enum SwingPose {
   static let winAfter = 0.9
   static let step = 0.05
 
-  /// Above this, the hands went high enough to be a full swing. Below it, they
-  /// stayed at putting height. Units are torso lengths above the shoulder line.
-  static let fullSwingMinWristHeight = -0.52
+  /// Above this the hands left putting height, so a SHOT was played and the
+  /// clip is worth trimming. Below it, the stroke was a putt and the whole clip
+  /// is the highlight. Units are torso lengths above the shoulder line.
+  ///
+  /// Set from the measured gap between the two classes, not guessed:
+  ///     putts   -0.79 .. -0.53   (n=12 of 14; two outliers, see below)
+  ///     chips   -0.21 .. +0.14   (n=9 of 10)
+  ///     swings  -0.44 .. +0.69   (n=20)
+  /// so putts top out at -0.532 and shots bottom out at -0.438. This sits at
+  /// the midpoint of that gap.
+  ///
+  /// Note the name: a CHIP is a shot, and chips sit nowhere near full swings on
+  /// this scale (-0.21..+0.14 against +0.55..+0.69). Calling the bar
+  /// "fullSwingMin" invited the mistake of raising it to exclude chips, which
+  /// is exactly backwards — chips must land ABOVE it.
+  static let shotMinWristHeight = -0.485
 
   /// Peak wrist height over the stroke, in torso lengths above the shoulders.
   /// Returns nil when pose never locked on — the caller must then fall back to

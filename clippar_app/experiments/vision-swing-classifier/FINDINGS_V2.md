@@ -287,3 +287,63 @@ blended skeleton — wrists apparently above the shoulders during a putt. No
 threshold repairs that. "Any angle, any perspective, always" is not reachable:
 when the golfer is a few dozen pixels tall the information is not in the frame
 for anyone.
+
+---
+
+## Chips (2026-07-28) — and a measurement error that hid them
+
+Henry reported chips coming back as putts, so untrimmed. Two things turned out
+to be wrong, and the second was worse than the first.
+
+**1. The `full_swing` set was contaminated with chips.** Eight of the ten clips
+in his `chip/` folder are byte-identical duplicates of clips labelled
+`full_swing` here. Every "full swing" accuracy figure above was computed over a
+set that silently mixed the two classes. It also explains the bimodal wrist
+heights noted earlier — the low cluster was never a measurement artifact, it
+was the chips.
+
+**2. The evaluation scored with a different function than the device runs.**
+`proto.score_frames(mode="knn")` votes over individual exemplars.
+`SwingVisionModule` ships three AVERAGED prototypes and scores a frame as
+`max(dot(swing), dot(putt)) - dot(negative)`. Those are not the same function
+and they choose different candidates: on IMG_0592 the k-NN path picks 7.28s
+(the real bunker shot) and the device path picks 17.02s. Since pose is measured
+AT the chosen instant, a threshold tuned on k-NN instants is tuned on moments
+the phone never looks at. Everything below is re-measured on the device path.
+
+**The structural bug.** Motion decided the stroke type and pose was only allowed
+to DEMOTE a swing to a putt. A chip's motion amplitude looks like a putt's, so
+motion called it a putt and pose — the one signal that gets chips right — was
+never consulted. No threshold could have fixed this; the wiring was wrong.
+
+Wrist height separates the classes cleanly once measured at the right instant:
+
+| class | range | n |
+|---|---|---|
+| putt | -0.82 .. -0.53 | 22 of 25 |
+| chip | -0.21 .. +0.28 | 9 of 10 |
+| full swing | -0.44 .. +0.69 | 21 |
+
+Putts top out at -0.532, shots bottom out at -0.438, so the bar sits at -0.485.
+Note chips are nowhere near full swings on this scale — the class that has to be
+separated is putt-vs-everything, not chip-vs-swing.
+
+**Result** (56 clips: 25 putts, 21 full swings, 10 chips):
+
+| rule | overall | chips | swings | putts |
+|---|---|---|---|---|
+| motion decides, pose demotes | 49/56 | 6/10 | 20/21 | 23/25 |
+| pose decides, motion falls back | 52/56 | 9/10 | 21/21 | 22/25 |
+
+**What is still wrong.**
+* IMG_0592 — the localizer picks 17.02s, which is not the shot. A stroke-type
+  problem only in appearance; the instant is wrong upstream.
+* IMG_0558 — overlapping golfers, unchanged from before.
+* IMG_0582, IMG_0579 — putts reading too high. Tightening the bar to -0.22
+  rescues 0579 but loses IMG_0596, a real swing at -0.438. Net zero, and it
+  trades a putt for a swing, which is the worse direction.
+
+**The motion fallback is untested.** Pose locked on for 56/56 clips, so that
+branch never ran. `puttFallbackNormMax = 0.60` has no evidence behind it beyond
+the argument that a wrongly trimmed putt costs more than a wrongly untrimmed
+shot. The clips that would exercise it are the ones this set does not contain.
