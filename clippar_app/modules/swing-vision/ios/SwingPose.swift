@@ -72,33 +72,41 @@ enum SwingPose {
   /// Peak wrist height over the stroke, in torso lengths above the shoulders.
   /// Returns nil when pose never locked on — the caller must then fall back to
   /// motion rather than guess.
-  static func peakWristHeight(asset: AVAsset, tTop: Double) -> Double? {
-    let gen = AVAssetImageGenerator(asset: asset)
-    gen.appliesPreferredTrackTransform = true
-    gen.requestedTimeToleranceBefore = .zero
-    gen.requestedTimeToleranceAfter = .zero
-    gen.maximumSize = CGSize(width: 1280, height: 1280)
+  /// `generator` lets the caller hand over the SAME AVAssetImageGenerator the
+  /// Core ML pass already used on this asset, instead of standing up a second
+  /// decode pipeline over the same file for these 29 frames. Sampling times,
+  /// tolerances and the 1280px cap are unchanged either way, so the answer is
+  /// the same — see SwingLocalizer.makeFrameGenerator.
+  static func peakWristHeight(
+    asset: AVAsset, tTop: Double, generator: AVAssetImageGenerator? = nil
+  ) -> Double? {
+    let gen = generator ?? SwingLocalizer.makeFrameGenerator(asset: asset)
 
-    var best: Double?
+    // Same instants the `while t <= end` loop asked for, materialised up front
+    // so they can be decoded in one ordered pass (SwingLocalizer.forEachFrame).
+    var times: [Double] = []
     var t = max(0, tTop - winBefore)
     let end = tTop + winAfter
     while t <= end {
-      defer { t += step }
-      guard let cg = try? gen.copyCGImage(at: CMTime(seconds: t, preferredTimescale: 600),
-                                          actualTime: nil) else { continue }
+      times.append(t)
+      t += step
+    }
+
+    var best: Double?
+    SwingLocalizer.forEachFrame(generator: gen, times: times) { _, cg in
       let req = VNDetectHumanBodyPoseRequest()
       guard (try? VNImageRequestHandler(cgImage: cg, options: [:]).perform([req])) != nil,
-            let all = req.results, !all.isEmpty else { continue }
+            let all = req.results, !all.isEmpty else { return }
 
       // The golfer taking the shot is the one nearest the camera, so the biggest
       // torso. (Does not rescue overlapping bodies — see the note above.)
-      guard let obs = all.max(by: { torso($0) < torso($1) }), torso(obs) > 0.01 else { continue }
+      guard let obs = all.max(by: { torso($0) < torso($1) }), torso(obs) > 0.01 else { return }
 
       func pt(_ j: VNHumanBodyPoseObservation.JointName) -> VNRecognizedPoint? {
         guard let p = try? obs.recognizedPoint(j), p.confidence > 0.15 else { return nil }
         return p
       }
-      guard let ls = pt(.leftShoulder), let rs = pt(.rightShoulder) else { continue }
+      guard let ls = pt(.leftShoulder), let rs = pt(.rightShoulder) else { return }
       let shoulderY = (ls.location.y + rs.location.y) / 2
       let span = torso(obs)
       // Vision's y increases UPWARD in normalised image coordinates.

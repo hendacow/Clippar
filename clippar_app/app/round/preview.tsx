@@ -11,7 +11,7 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Check, RotateCcw, Music, VolumeX, PersonStanding, Pause } from 'lucide-react-native';
+import { X, RotateCcw, Music, VolumeX, PersonStanding, Pause } from 'lucide-react-native';
 import { PoseOverlay } from '@/components/editor/PoseOverlay';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -42,6 +42,28 @@ const HANDLE_WIDTH = 24;
 const MIN_TRIM_MS = 500;
 const THUMB_COUNT = 12;
 const THUMB_WIDTH = Math.floor(TIMELINE_WIDTH / THUMB_COUNT);
+
+/** Two sets of trim bounds this close together are the SAME edit. The panel
+ *  works in whole milliseconds and the handles snap, so a scrub out-and-back
+ *  lands a millisecond or two off where it started; without a tolerance that
+ *  would auto-save (and re-encode) a clip nobody actually changed. */
+const BOUNDS_EPSILON_MS = 25;
+
+/** Taps closer together than this are dropped. Each accepted tap tears down
+ *  one expo-video player and builds another; letting a burst through stacks
+ *  live native players on top of each other. See the crash notes on
+ *  `NativeClipPlayer`. */
+const TAP_DEBOUNCE_MS = 220;
+
+function boundsEqual(
+  a: { startMs: number; endMs: number },
+  b: { startMs: number; endMs: number },
+): boolean {
+  return (
+    Math.abs(a.startMs - b.startMs) <= BOUNDS_EPSILON_MS &&
+    Math.abs(a.endMs - b.endMs) <= BOUNDS_EPSILON_MS
+  );
+}
 
 // ============================================================
 // SCORECARD OVERLAY — persistent, looks like a real scorecard
@@ -354,17 +376,42 @@ function formatMsFull(ms: number): string {
 }
 
 // ============================================================
-// NATIVE VIDEO PLAYER — respects trim bounds, loops in trim mode
+// NATIVE VIDEO PLAYER — respects trim bounds, ALWAYS loops.
 // ExpoVideo is guaranteed non-null because the caller gates on `isNative`.
 // Hooks are called unconditionally to respect the Rules of Hooks.
+//
+// Auto-advance is gone: when a clip reaches its trim end (or the end of the
+// file) it loops back to the trim start. Moving between clips is the tap
+// zones' job and nothing else's, so this component no longer takes an `onEnd`.
+//
+// ---- WHY EVERY PLAYER CALL IS GUARDED ----
+// `useVideoPlayer` is `useReleasingSharedObject` underneath, and that hook
+// releases the previous player *during render* when the source uri changes:
+//
+//     const object = useMemo(() => {
+//       if (!newObject || !dependenciesAreEqual) {
+//         objectRef.current?.release();   // <-- render phase
+//         newObject = factory();
+//       ...
+//     }, [JSON.stringify(parsedSource)]);
+//
+// The 50 ms poll below and the `playToEnd` listener are still bound to that
+// instance until React flushes passive effects — a separate task — so there is
+// a real window in which they fire against a released object. Per
+// expo-modules-core, a released SharedObject throws on *any* native call
+// ("no longer associated with its native counterpart"), and an uncaught throw
+// inside a timer callback is fatal in a release build.
+//
+// `livePlayerRef` is written during render, so a stale callback can tell it is
+// stale before it touches native at all; the try/catch covers the remaining
+// teardown orderings (on unmount React runs this hook's release cleanup BEFORE
+// the clearInterval / listener-removal cleanups declared after it).
 // ============================================================
 function NativeClipPlayer({
   uri,
   trimStartMs,
   trimEndMs,
   durationMs,
-  isTrimming,
-  onEnd,
   seekTarget = 'start',
   draggingHandle = 'none',
   showPoseOverlay = false,
@@ -374,8 +421,6 @@ function NativeClipPlayer({
   trimStartMs: number;
   trimEndMs: number; // -1 = full
   durationMs: number;
-  isTrimming: boolean;
-  onEnd: () => void;
   seekTarget?: 'start' | 'end';
   draggingHandle?: 'none' | 'start' | 'end';
   showPoseOverlay?: boolean;
@@ -393,12 +438,10 @@ function NativeClipPlayer({
 
   const startSecRef = useRef(startSec);
   const endSecRef = useRef(endSec);
-  const isTrimmingRef = useRef(isTrimming);
   const draggingHandleRef = useRef(draggingHandle);
   const pausedRef = useRef(paused);
   startSecRef.current = startSec;
   endSecRef.current = endSec;
-  isTrimmingRef.current = isTrimming;
   draggingHandleRef.current = draggingHandle;
   pausedRef.current = paused;
 
@@ -408,69 +451,94 @@ function NativeClipPlayer({
     p.play();
   });
 
+  type PlayerHandle = typeof player;
+
+  const livePlayerRef = useRef<PlayerHandle>(player);
+  livePlayerRef.current = player;
+
+  /** Run `fn` against `target` only while it is still this component's live
+   *  player, and never let a released-object throw escape. */
+  const runOnPlayer = useCallback(
+    (target: PlayerHandle, fn: (p: PlayerHandle) => void) => {
+      if (livePlayerRef.current !== target) return;
+      try {
+        fn(target);
+      } catch {
+        // Released mid-call (unmount / source swap race) — nothing to do.
+      }
+    },
+    [],
+  );
+
   // When trim bounds change, seek based on which handle is being dragged
   useEffect(() => {
-    if (draggingHandle === 'end') {
-      // Dragging right handle: pause and show end frame
-      player.pause();
-      player.currentTime = Math.max(0, endSec - 0.1);
-    } else if (draggingHandle === 'start') {
-      // Dragging left handle: pause and show start frame
-      player.pause();
-      player.currentTime = startSec;
-    } else {
-      // Not dragging (handle released): seek and play — unless a finger is
-      // holding the video paused, which must win over the handle seek.
-      player.currentTime = seekTarget === 'end'
-        ? Math.max(0, endSec - 0.1)
-        : startSec;
-      if (!pausedRef.current) player.play();
-    }
-  }, [startSec, endSec, player, seekTarget, draggingHandle]);
+    runOnPlayer(player, (p) => {
+      if (draggingHandle === 'end') {
+        // Dragging right handle: pause and show end frame
+        p.pause();
+        p.currentTime = Math.max(0, endSec - 0.1);
+      } else if (draggingHandle === 'start') {
+        // Dragging left handle: pause and show start frame
+        p.pause();
+        p.currentTime = startSec;
+      } else {
+        // Not dragging (handle released): seek and play — unless a finger is
+        // holding the video paused, which must win over the handle seek.
+        p.currentTime = seekTarget === 'end'
+          ? Math.max(0, endSec - 0.1)
+          : startSec;
+        if (!pausedRef.current) p.play();
+      }
+    });
+  }, [startSec, endSec, player, seekTarget, draggingHandle, runOnPlayer]);
 
   // Press-and-hold to pause. Kept out of the seek effect above so releasing
   // resumes from where the finger landed rather than jumping to a handle.
   useEffect(() => {
-    if (paused) player.pause();
-    else if (draggingHandleRef.current === 'none') player.play();
-  }, [paused, player]);
+    runOnPlayer(player, (p) => {
+      if (paused) p.pause();
+      else if (draggingHandleRef.current === 'none') p.play();
+    });
+  }, [paused, player, runOnPlayer]);
 
-  // Poll to enforce trim end boundary + loop in trim mode
+  // Poll the trim end boundary and LOOP. Never advances — the reel only moves
+  // when the user taps a tap zone.
   useEffect(() => {
     const interval = setInterval(() => {
       // Don't interfere with playback while user is dragging a handle, or
       // while a finger is holding the video paused.
       if (draggingHandleRef.current !== 'none' || pausedRef.current) return;
 
-      const currentTime = player.currentTime;
-      const end = endSecRef.current;
-      const start = startSecRef.current;
-
-      if (currentTime >= end - 0.05) {
-        if (isTrimmingRef.current) {
-          // In trim mode: loop back to start
-          player.currentTime = start;
-          player.play();
+      runOnPlayer(player, (p) => {
+        if (p.currentTime >= endSecRef.current - 0.05) {
+          p.currentTime = startSecRef.current;
+          p.play();
         }
-        // In normal mode: onEnd fires via playToEnd listener
-      }
+      });
     }, LOOP_POLL_MS);
 
     return () => clearInterval(interval);
-  }, [player]);
+  }, [player, runOnPlayer]);
 
-  // Handle natural end of video
+  // Natural end of the file — loop rather than advance.
   useEffect(() => {
-    const sub = player.addListener('playToEnd', () => {
-      if (isTrimmingRef.current) {
-        player.currentTime = startSecRef.current;
-        player.play();
-      } else {
-        onEnd();
-      }
-    });
-    return () => sub.remove();
-  }, [player, onEnd]);
+    let sub: { remove: () => void } | null = null;
+    try {
+      sub = player.addListener('playToEnd', () => {
+        runOnPlayer(player, (p) => {
+          p.currentTime = startSecRef.current;
+          p.play();
+        });
+      });
+    } catch {
+      // Player already released — nothing to subscribe to.
+    }
+    return () => {
+      try {
+        sub?.remove();
+      } catch {}
+    };
+  }, [player, runOnPlayer]);
 
   return (
     <View style={{ flex: 1 }}>
@@ -481,12 +549,13 @@ function NativeClipPlayer({
         nativeControls={false}
       />
       {/* LIVE pose-overlay (toggle). Render-only; never baked into exports.
-          getCurrentTimeSec is wrapped in try/catch because the expo-video
-          player can be disposed mid-poll during a clip change / seek. */}
+          The playhead getter checks liveness first and still try/catches,
+          because the player can be released mid-poll on a clip change. */}
       {showPoseOverlay && (
         <PoseOverlay
           uri={uri}
           getCurrentTimeSec={() => {
+            if (livePlayerRef.current !== player) return null;
             try {
               return player.currentTime;
             } catch {
@@ -528,23 +597,25 @@ function WebClipPlaceholder({ clip }: { clip: EditorClip }) {
 function InlineTrimPanel({
   clip,
   onSave,
-  onCancel,
+  onNoChange,
+  onBusyChange,
   onBoundsChange,
   onSeekTarget,
   onDraggingHandle,
-  docked = false,
   onHeight,
 }: {
   clip: EditorClip;
   onSave: (startMs: number, endMs: number, sourceOverride?: { sourceUri: string; durationMs: number }) => void;
-  onCancel: () => void;
+  /** The user let go of a handle but landed back on the committed bounds, so
+   *  there is nothing to save. The parent still needs telling, to drop out of
+   *  "mid-edit" — but it must not touch the clip. */
+  onNoChange?: () => void;
+  /** An auto-save is re-encoding. The parent holds the reel still until it
+   *  lands, so a tap can't navigate away from a half-written clip. */
+  onBusyChange?: (busy: boolean) => void;
   onBoundsChange: (startMs: number, endMs: number) => void;
   onSeekTarget?: (target: 'start' | 'end') => void;
   onDraggingHandle?: (handle: 'none' | 'start' | 'end') => void;
-  /** Panel is permanently on screen rather than opened from the scissors
-   *  button. Hides Cancel, which meant "close the panel" and now has nothing
-   *  to close — Reset already covers "undo my edit". */
-  docked?: boolean;
   /** Measured height, so the scorecard can sit above the panel instead of
    *  underneath it. */
   onHeight?: (h: number) => void;
@@ -555,6 +626,14 @@ function InlineTrimPanel({
   const [endMs, setEndMs] = useState(initialBounds.endMs);
   const [activeUri, setActiveUri] = useState<string | null>(clip.sourceUri);
   const [savingTrim, setSavingTrim] = useState(false);
+
+  // The bounds this clip arrived with — its auto-detected or previously saved
+  // window. Revert puts the clip back to exactly this. The panel is keyed on
+  // clip.id by the parent, so this is naturally per-clip.
+  const originalBoundsRef = useRef({ ...initialBounds });
+  // The bounds currently committed to the editor. Auto-save diffs against
+  // these, so scrubbing out and back re-encodes nothing.
+  const committedBoundsRef = useRef({ ...initialBounds });
 
   // Auto-probe original for full-timeline.
   // Dep must be `clip.id` (stable primitive), NOT the `clip` object — the
@@ -582,6 +661,10 @@ function InlineTrimPanel({
             const bounds = getInitialTrimBounds(clip, dur);
             setStartMs(bounds.startMs);
             setEndMs(bounds.endMs);
+            // The probe re-bases the whole timeline onto the original file, so
+            // the revert target and the auto-save baseline move with it.
+            originalBoundsRef.current = { ...bounds };
+            committedBoundsRef.current = { ...bounds };
           }
         } catch {}
       })();
@@ -602,6 +685,20 @@ function InlineTrimPanel({
 
   const startHandleOriginRef = useRef(0);
   const endHandleOriginRef = useRef(0);
+
+  // Callback + value mirrors, so the PanResponders (memoised once) and the
+  // commit routine always see the latest props without being rebuilt mid-drag.
+  const activeUriRef = useRef(activeUri);
+  activeUriRef.current = activeUri;
+  const onSaveRef = useRef(onSave);
+  onSaveRef.current = onSave;
+  const onNoChangeRef = useRef(onNoChange);
+  onNoChangeRef.current = onNoChange;
+  const onBusyChangeRef = useRef(onBusyChange);
+  onBusyChangeRef.current = onBusyChange;
+  /** Filled in below; declared up here so the PanResponders and the commit's
+   *  own re-entrancy check can reach it. */
+  const commitTrimRef = useRef<() => void>(() => {});
 
   // Notify parent of bounds changes so the video player can seek.
   // Ref-guarded: skip when the values haven't actually moved. Without
@@ -639,10 +736,13 @@ function InlineTrimPanel({
         onPanResponderRelease: () => {
           onDraggingHandle?.('none');
           onSeekTarget?.('start');
+          // AUTO-SAVE: commit on release, not on every drag frame.
+          commitTrimRef.current();
         },
         onPanResponderTerminate: () => {
           onDraggingHandle?.('none');
           onSeekTarget?.('start');
+          commitTrimRef.current();
         },
       }),
     [onSeekTarget, onDraggingHandle]
@@ -667,10 +767,12 @@ function InlineTrimPanel({
         onPanResponderRelease: () => {
           onDraggingHandle?.('none');
           onSeekTarget?.('end');
+          commitTrimRef.current();
         },
         onPanResponderTerminate: () => {
           onDraggingHandle?.('none');
           onSeekTarget?.('end');
+          commitTrimRef.current();
         },
       }),
     [onSeekTarget, onDraggingHandle]
@@ -709,35 +811,97 @@ function InlineTrimPanel({
     return () => { cancelled = true; };
   }, [activeUri, clip.sourceUri, durationMs]);
 
-  const handleReset = useCallback(() => {
-    setStartMs(0);
-    setEndMs(durationMs);
-  }, [durationMs]);
+  // ---- AUTO-SAVE ----------------------------------------------------------
+  // There is no Save button. Letting go of a handle commits, and committing
+  // bounds that match what is already stored is a complete no-op: no
+  // trimVideo, no file write, no editor update, no player remount.
+  const commitInFlightRef = useRef(false);
+  const commitPendingRef = useRef(false);
 
-  const handleSave = useCallback(async () => {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    const finalEnd = endMs >= durationMs ? -1 : endMs;
-    const finalStart = startMs <= 0 ? 0 : startMs;
-
-    // If editing from original, re-trim to create a new file
-    if (clip.autoTrimmed && activeUri && activeUri === clip.originalUri) {
-      setSavingTrim(true);
-      try {
-        const trimEnd = finalEnd === -1 ? durationMs : finalEnd;
-        const result = await trimVideo(activeUri, finalStart, trimEnd);
-        onSave(finalStart, finalEnd, {
-          sourceUri: result.trimmedUri,
-          durationMs: trimEnd - finalStart,
-        });
-      } catch {
-        onSave(finalStart, finalEnd);
-      } finally {
-        setSavingTrim(false);
-      }
-    } else {
-      onSave(finalStart, finalEnd);
+  const commitTrim = useCallback(async () => {
+    // A re-encode can outlast the next drag. Queue rather than interleave.
+    if (commitInFlightRef.current) {
+      commitPendingRef.current = true;
+      return;
     }
-  }, [startMs, endMs, durationMs, onSave, clip.autoTrimmed, clip.originalUri, activeUri]);
+
+    const dur = durationMsRef.current;
+    const nextStart = Math.max(0, startMsRef.current);
+    const nextEnd = endMsRef.current;
+
+    if (boundsEqual({ startMs: nextStart, endMs: nextEnd }, committedBoundsRef.current)) {
+      // Nothing moved (or it moved and came back) — leave the video as is.
+      onNoChangeRef.current?.();
+      return;
+    }
+
+    commitInFlightRef.current = true;
+    committedBoundsRef.current = { startMs: nextStart, endMs: nextEnd };
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success).catch(() => {});
+
+    const finalEnd = nextEnd >= dur - BOUNDS_EPSILON_MS ? -1 : nextEnd;
+    const finalStart = nextStart <= BOUNDS_EPSILON_MS ? 0 : nextStart;
+    const source = activeUriRef.current;
+
+    try {
+      // Editing against the original file, so a new trimmed file is needed.
+      if (clip.autoTrimmed && source && source === clip.originalUri) {
+        setSavingTrim(true);
+        const trimEnd = finalEnd === -1 ? dur : finalEnd;
+        try {
+          const result = await trimVideo(source, finalStart, trimEnd);
+          onSaveRef.current(finalStart, finalEnd, {
+            sourceUri: result.trimmedUri,
+            durationMs: trimEnd - finalStart,
+          });
+        } catch {
+          onSaveRef.current(finalStart, finalEnd);
+        }
+      } else {
+        onSaveRef.current(finalStart, finalEnd);
+      }
+    } catch {
+      // Nothing here may reject: the PanResponder calls this fire-and-forget,
+      // so an escaping rejection would surface as an unhandled promise.
+    } finally {
+      setSavingTrim(false);
+      commitInFlightRef.current = false;
+      if (commitPendingRef.current) {
+        commitPendingRef.current = false;
+        commitTrimRef.current();
+      }
+    }
+  }, [clip.autoTrimmed, clip.originalUri]);
+
+  commitTrimRef.current = commitTrim;
+
+  // Keep the parent's "mid-edit" flag alive for the whole re-encode, not just
+  // until the finger lifts.
+  useEffect(() => {
+    onBusyChangeRef.current?.(savingTrim);
+  }, [savingTrim]);
+  useEffect(() => () => { onBusyChangeRef.current?.(false); }, []);
+
+  // ---- REVERT -------------------------------------------------------------
+  // Puts the clip back to the bounds it had when this screen opened it — its
+  // auto-detected window, or whatever was saved previously. (This replaces the
+  // old "Reset", which stretched the handles to the whole file — a different,
+  // and less useful, thing.)
+  const atOriginalBounds = boundsEqual(
+    { startMs, endMs: effectiveEndMs },
+    originalBoundsRef.current,
+  );
+
+  const handleRevert = useCallback(() => {
+    const target = originalBoundsRef.current;
+    // Write the mirrors too: commitTrim reads refs, and those are only synced
+    // during render, which has not happened yet at this point.
+    startMsRef.current = target.startMs;
+    endMsRef.current = target.endMs;
+    setStartMs(target.startMs);
+    setEndMs(target.endMs);
+    commitTrimRef.current();
+  }, []);
 
   return (
     <View
@@ -858,51 +1022,32 @@ function InlineTrimPanel({
         </View>
       </View>
 
-      {/* Buttons */}
-      <View style={{ flexDirection: 'row', justifyContent: 'center', gap: 12 }}>
+      {/* Buttons — trims save themselves when a handle is released, so there
+          is no Save/tick. The only action left is putting the clip back the
+          way it was found. */}
+      <View style={{ flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 12, minHeight: 34 }}>
         <Pressable
-          onPress={handleReset}
+          onPress={handleRevert}
+          disabled={savingTrim || atOriginalBounds}
           style={{
             flexDirection: 'row', alignItems: 'center', gap: 6,
             paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
             backgroundColor: 'rgba(255,255,255,0.12)',
+            opacity: savingTrim || atOriginalBounds ? 0.4 : 1,
           }}
         >
           <RotateCcw size={14} color="rgba(255,255,255,0.7)" />
-          <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Reset</Text>
+          <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Revert</Text>
         </Pressable>
 
-        {/* Cancel closed the panel. With the panel docked there is nothing to
-            close, and Reset already undoes the edit. */}
-        {!docked && (
-          <Pressable
-            onPress={onCancel}
-            style={{
-              flexDirection: 'row', alignItems: 'center', gap: 6,
-              paddingHorizontal: 14, paddingVertical: 8, borderRadius: 20,
-              backgroundColor: 'rgba(255,255,255,0.12)',
-            }}
-          >
-            <X size={14} color="rgba(255,255,255,0.7)" />
-            <Text style={{ color: 'rgba(255,255,255,0.7)', fontSize: 13, fontWeight: '600' }}>Cancel</Text>
-          </Pressable>
+        {savingTrim && (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <ActivityIndicator size="small" color={theme.colors.primary} />
+            <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: '600' }}>
+              Saving
+            </Text>
+          </View>
         )}
-
-        <Pressable
-          onPress={handleSave}
-          disabled={savingTrim}
-          style={{
-            flexDirection: 'row', alignItems: 'center', gap: 6,
-            paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20,
-            backgroundColor: theme.colors.primary,
-            opacity: savingTrim ? 0.5 : 1,
-          }}
-        >
-          <Check size={14} color="#fff" />
-          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-            {savingTrim ? 'Saving...' : 'Save'}
-          </Text>
-        </Pressable>
       </View>
     </View>
   );
@@ -922,17 +1067,16 @@ export default function PreviewScreen() {
     const parsed = parseInt(startIndex ?? '0', 10);
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
   });
-  const autoAdvanceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Trim state.
   //
   // The panel is DOCKED — always on screen, no scissors button to press first.
   // `trimMode` therefore no longer means "the trim UI is up" (it always is); it
-  // means "the user is mid-edit", which is what has to suppress auto-advance
-  // and clip navigation. Without that split, docking the panel would have
-  // frozen the reel on its first clip, since every one of those behaviours was
-  // gated on `!trimMode`.
+  // means "the user is mid-edit", which is what has to hold the reel still
+  // while a handle is moving or an auto-save is encoding.
   const [trimDirty, setTrimDirty] = useState(false);
+  // An auto-save is re-encoding in the trim panel.
+  const [trimBusy, setTrimBusy] = useState(false);
   const [trimPanelHeight, setTrimPanelHeight] = useState(0);
   // A finger held on the video pauses playback until it lifts.
   const [isHeld, setIsHeld] = useState(false);
@@ -945,14 +1089,16 @@ export default function PreviewScreen() {
   const [seekTarget, setSeekTarget] = useState<'start' | 'end'>('start');
   // Track which handle is actively being dragged (for live frame seeking)
   const [draggingHandle, setDraggingHandle] = useState<'none' | 'start' | 'end'>('none');
+  const draggingHandleRef = useRef(draggingHandle);
+  draggingHandleRef.current = draggingHandle;
   // URI to use in trim mode (original for auto-trimmed clips)
   const [trimModeUri, setTrimModeUri] = useState<string | null>(null);
 
-  // "The user is mid-edit." Dragging a handle, or having moved one without
-  // saving yet. While true the reel holds on this clip — it would be hostile to
-  // advance out from under someone adjusting the handles — and the player loops
-  // the trimmed range so the edit can be seen.
-  const trimMode = trimDirty || draggingHandle !== 'none';
+  // "The user is mid-edit." Dragging a handle, or having moved one whose
+  // auto-save has not landed yet. While true the tap zones are withdrawn, so a
+  // stray tap can't navigate away from an edit that is still encoding, and the
+  // player runs off the ORIGINAL file over the live handle positions.
+  const trimMode = trimDirty || trimBusy || draggingHandle !== 'none';
 
   // Music state
   const [musicEnabled, setMusicEnabled] = useState(false);
@@ -970,7 +1116,25 @@ export default function PreviewScreen() {
   );
 
   const allClips = editor.getAllClipsInOrder();
-  const currentClip = allClips[currentIndex];
+
+  // Clamp on read. `currentIndex` can briefly sit past the end — clips can be
+  // excluded from under us by a reload, and rapid taps used to overshoot via
+  // stale closures. Rendering `undefined` blanked the whole screen, which read
+  // as a crash; clamping keeps a clip on screen and the effect below pulls the
+  // state back in line.
+  const safeIndex = allClips.length > 0
+    ? Math.min(Math.max(currentIndex, 0), allClips.length - 1)
+    : 0;
+  const currentClip = allClips[safeIndex];
+
+  const clipCountRef = useRef(allClips.length);
+  clipCountRef.current = allClips.length;
+
+  useEffect(() => {
+    if (allClips.length > 0 && currentIndex !== safeIndex) {
+      setCurrentIndex(safeIndex);
+    }
+  }, [currentIndex, safeIndex, allClips.length]);
 
   // Initialise live bounds and URI for the CURRENT CLIP. This used to fire on
   // entering trim mode; with the panel docked there is no such moment, so it
@@ -1045,42 +1209,41 @@ export default function PreviewScreen() {
     };
   }, []);
 
-  // Auto-advance for web
-  useEffect(() => {
-    if (!isNative && currentClip) {
-      autoAdvanceRef.current = setTimeout(() => {
-        if (currentIndex < allClips.length - 1) {
-          setCurrentIndex((i) => i + 1);
-        }
-      }, 3000);
-      return () => {
-        if (autoAdvanceRef.current) clearTimeout(autoAdvanceRef.current);
-      };
-    }
-  }, [currentIndex, currentClip, allClips.length]);
+  // NO AUTO-ADVANCE, anywhere. Clips loop until the user taps. (The web
+  // fallback used to run a 3s timer here; it advanced the reel by itself, so
+  // it is gone too — web shows the placeholder and waits like native does.)
 
+  /** Swallow taps that arrive inside the previous tap's remount window. Each
+   *  accepted tap changes the player's key, which tears one expo-video player
+   *  down and stands another up; a burst stacks live native players because
+   *  React does not run the old one's cleanup until the next passive-effect
+   *  flush. */
+  const tapLockUntilRef = useRef(0);
+  const claimTap = useCallback(() => {
+    const now = Date.now();
+    if (now < tapLockUntilRef.current) return false;
+    tapLockUntilRef.current = now + TAP_DEBOUNCE_MS;
+    return true;
+  }, []);
+
+  // Both handlers clamp INSIDE the updater. The old code tested the captured
+  // `currentIndex` and then applied `i => i + 1`, so two taps batched into one
+  // render both passed a guard computed from the same stale index and the
+  // reel stepped twice — straight past the end of the array.
   const handleTapLeft = useCallback(() => {
     if (trimMode) return;
-    if (currentIndex > 0) setCurrentIndex((i) => i - 1);
-  }, [currentIndex, trimMode]);
+    if (!claimTap()) return;
+    setCurrentIndex((i) => Math.max(0, i - 1));
+  }, [trimMode, claimTap]);
 
   const handleTapRight = useCallback(() => {
     if (trimMode) return;
-    if (currentIndex < allClips.length - 1) {
-      setCurrentIndex((i) => i + 1);
-    } else {
-      router.back();
-    }
-  }, [currentIndex, allClips.length, trimMode]);
-
-  const handleVideoEnd = useCallback(() => {
-    if (trimMode) return;
-    if (currentIndex < allClips.length - 1) {
-      setCurrentIndex((i) => i + 1);
-    } else {
-      router.back();
-    }
-  }, [currentIndex, allClips.length, trimMode]);
+    if (!claimTap()) return;
+    // The last clip holds. Tapping past the end used to call router.back(),
+    // which meant a stray tap dropped you out of the reel — and a burst of
+    // taps called it repeatedly. Leaving is the X button's job now.
+    setCurrentIndex((i) => Math.min(i + 1, Math.max(0, clipCountRef.current - 1)));
+  }, [trimMode, claimTap]);
 
   // Ref-guarded handler — drops calls where nothing changed. The
   // setState calls below would normally short-circuit on identical
@@ -1096,9 +1259,11 @@ export default function PreviewScreen() {
     setLiveTrimStart(startMs);
     setLiveTrimEnd(endMs);
     // First real movement marks the clip dirty, which is what holds the reel
-    // here. `last === null` is the panel reporting its initial bounds on mount,
-    // not the user touching anything, so it must not count.
-    if (last) setTrimDirty(true);
+    // here. Two reports must NOT count: `last === null` is the panel announcing
+    // its initial bounds on mount, and a report with no handle down is the
+    // panel moving the handles itself (Revert) — that one commits immediately,
+    // so marking it dirty would leave the screen stuck mid-edit forever.
+    if (last && draggingHandleRef.current !== 'none') setTrimDirty(true);
   }, []);
 
   const handleSeekTarget = useCallback((target: 'start' | 'end') => {
@@ -1107,11 +1272,29 @@ export default function PreviewScreen() {
 
   const handleTrimSave = useCallback(
     (startMs: number, endMs: number, sourceOverride?: { sourceUri: string; durationMs: number }) => {
-      if (currentClip) {
-        editor.updateTrim(currentClip.id, startMs, endMs, sourceOverride);
+      if (!currentClip) return;
+
+      // Second line of defence for "never re-encode when nothing changed": the
+      // panel already refuses to run trimVideo for an unchanged window, and
+      // this refuses to write state or remount the player for one. A remount
+      // is not free — it disposes and rebuilds a native AVPlayer.
+      const committedStart = currentClip.trimStartMs ?? 0;
+      const committedEnd = currentClip.trimEndMs ?? -1;
+      const unchanged =
+        !sourceOverride &&
+        Math.abs(startMs - committedStart) <= BOUNDS_EPSILON_MS &&
+        (endMs === committedEnd ||
+          (endMs !== -1 &&
+            committedEnd !== -1 &&
+            Math.abs(endMs - committedEnd) <= BOUNDS_EPSILON_MS));
+
+      if (unchanged) {
+        setTrimDirty(false);
+        return;
       }
-      // The panel stays docked; saving just commits the edit and releases the
-      // reel to carry on playing.
+
+      editor.updateTrim(currentClip.id, startMs, endMs, sourceOverride);
+      // The panel stays docked; the save just commits and releases the reel.
       setTrimDirty(false);
       // Bump the generation so the player remounts with the new trim bounds
       setPlayerGeneration((g) => g + 1);
@@ -1119,10 +1302,11 @@ export default function PreviewScreen() {
     [currentClip, editor]
   );
 
-  const handleTrimCancel = useCallback(() => {
+  /** The panel released a handle back onto the bounds it already had. Drop out
+   *  of "mid-edit" and touch absolutely nothing else — no editor write, no
+   *  remount. */
+  const handleTrimNoChange = useCallback(() => {
     setTrimDirty(false);
-    // Bump generation to restart playback cleanly
-    setPlayerGeneration((g) => g + 1);
   }, []);
 
   // Press-and-hold anywhere on the video to pause; lifting resumes.
@@ -1178,8 +1362,6 @@ export default function PreviewScreen() {
           trimStartMs={playerTrimStart}
           trimEndMs={playerTrimEnd}
           durationMs={playerDuration}
-          isTrimming={trimMode}
-          onEnd={handleVideoEnd}
           seekTarget={seekTarget}
           draggingHandle={draggingHandle}
           showPoseOverlay={showPoseOverlay && !trimMode}
@@ -1240,7 +1422,7 @@ export default function PreviewScreen() {
       {currentClip && (
         <ScorecardOverlay
           clip={currentClip}
-          clipIndex={currentIndex}
+          clipIndex={safeIndex}
           allClips={allClips}
           holes={editor.state.holes}
           courseName={editor.state.courseName}
@@ -1256,7 +1438,7 @@ export default function PreviewScreen() {
         }}
         pointerEvents="box-none"
       >
-        <ProgressDots total={allClips.length} current={currentIndex} />
+        <ProgressDots total={allClips.length} current={safeIndex} />
 
         <View
           style={{
@@ -1271,7 +1453,7 @@ export default function PreviewScreen() {
                   Hole {currentClip.holeNumber} · Stroke {currentClip.shotNumber}
                 </Text>
                 <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12 }}>
-                  {currentIndex + 1} of {allClips.length}
+                  {safeIndex + 1} of {allClips.length}
                 </Text>
               </>
             )}
@@ -1337,11 +1519,11 @@ export default function PreviewScreen() {
           key={currentClip.id}
           clip={currentClip}
           onSave={handleTrimSave}
-          onCancel={handleTrimCancel}
+          onNoChange={handleTrimNoChange}
+          onBusyChange={setTrimBusy}
           onBoundsChange={handleTrimBoundsChange}
           onSeekTarget={handleSeekTarget}
           onDraggingHandle={setDraggingHandle}
-          docked
           onHeight={setTrimPanelHeight}
         />
       )}

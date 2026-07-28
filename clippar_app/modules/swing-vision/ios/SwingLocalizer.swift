@@ -130,10 +130,17 @@ enum SwingLocalizer {
     var frameCount = 0
 
     while let sample = output.copyNextSampleBuffer() {
-      guard let px = CMSampleBufferGetImageBuffer(sample) else { continue }
+      // Per-frame pool. A 20s 4K clip is ~1200 iterations and AVFoundation
+      // hands back autoreleased buffers on every one of them; without a pool
+      // they all live until this function returns, which is the difference
+      // between a flat ~30MB and a sawtooth that peaks in the hundreds. Same
+      // discipline shot-detector already applies around detectAndTrim, and it
+      // is what makes several of these safe to run concurrently.
+      autoreleasepool {
+      guard let px = CMSampleBufferGetImageBuffer(sample) else { return }
       CVPixelBufferLockBaseAddress(px, .readOnly)
       defer { CVPixelBufferUnlockBaseAddress(px, .readOnly) }
-      guard let base = CVPixelBufferGetBaseAddressOfPlane(px, 0) else { continue }
+      guard let base = CVPixelBufferGetBaseAddressOfPlane(px, 0) else { return }
       let stride = CVPixelBufferGetBytesPerRowOfPlane(px, 0)
       let src = base.assumingMemoryBound(to: UInt8.self)
       let srcH = min(reqH, CVPixelBufferGetHeightOfPlane(px, 0))
@@ -181,6 +188,7 @@ enum SwingLocalizer {
       }
       swap(&prev, &cur)
       havePrev = true
+      } // autoreleasepool
     }
     reader.cancelReading()
     guard energy.count >= 3, frameCount > 1 else { return nil }
@@ -195,6 +203,113 @@ enum SwingLocalizer {
 
   private static func stride2(from: Int, through: Int, by: Int) -> StrideThrough<Int> {
     return Swift.stride(from: from, through: through, by: by)
+  }
+
+  // MARK: - Batched frame extraction
+
+  /// Pull an ORDERED list of exact times out of one asset and hand each decoded
+  /// frame to `body` on the CALLING thread, while the generator decodes ahead.
+  ///
+  /// WHY NOT `copyCGImage` IN A LOOP (which is what this replaces)
+  /// Two separate costs, both paid ~80 times per clip on the Core ML pass and
+  /// ~29 more on the pose pass:
+  ///
+  ///  1. Apple's own guidance for `copyCGImage` is to use the asynchronous
+  ///     batch API when you want more than one image, because the generator can
+  ///     service a whole ordered request list from a single forward decode pass
+  ///     instead of re-establishing state per call. With zero tolerance every
+  ///     call has to land on an exact frame, so a per-call seek is expensive:
+  ///     the decoder has to restart at the preceding keyframe.
+  ///  2. `copyCGImage` is strictly serial with whatever you do next. Here that
+  ///     "next" is Core ML or Vision — a different engine (ANE/GPU) from the
+  ///     video decoder. Serialised, the clip costs decode+infer per frame;
+  ///     overlapped, it costs max(decode, infer).
+  ///
+  /// NOT MEASURED on device — the reasoning above plus Apple's documented
+  /// guidance is the whole case for it. What IS guaranteed is that the OUTPUT
+  /// is unchanged: same generator settings, same zero tolerances, same times,
+  /// same order, failures skipped exactly as `try?` skipped them.
+  ///
+  /// BACK-PRESSURE, so this cannot become a memory problem: at most `prefetch`
+  /// decoded frames are ever held. The generator's callback blocks once the
+  /// buffer is full, which stalls decoding rather than queueing frames. At the
+  /// 1280px cap that is ~6.5MB per frame, so the default bounds this at ~13MB.
+  ///
+  /// Deadlock-free: the producer blocks only while the buffer is non-empty, and
+  /// the consumer only leaves the loop when the buffer is empty, so the two can
+  /// never both be parked.
+  static func forEachFrame(
+    generator: AVAssetImageGenerator,
+    times: [Double],
+    prefetch: Int = 2,
+    _ body: (Double, CGImage) -> Void
+  ) {
+    guard !times.isEmpty else { return }
+    let cap = max(1, prefetch)
+    let cmTimes = times.map { CMTime(seconds: $0, preferredTimescale: 600) }
+    // Map back from the callback's requestedTime to the caller's Double. Built
+    // on CMTime.value (all share timescale 600) so no float compare is needed.
+    var byValue: [Int64: Double] = [:]
+    for (i, ct) in cmTimes.enumerated() { byValue[ct.value] = times[i] }
+
+    let cond = NSCondition()
+    var buffer: [(Double, CGImage)] = []
+    var delivered = 0
+    var bailed = false
+    let expected = times.count
+    // Hang-breaker, NOT a policy. AVFoundation promises one callback per
+    // requested time, so this should never fire; if it ever did, the old
+    // copyCGImage loop would simply have skipped a frame while this would wedge
+    // the trim batch forever. Deliberately far beyond any plausible decode.
+    let deadline = Date().addingTimeInterval(Double(expected) * 2.0 + 30.0)
+
+    // Deprecated in iOS 18 in favour of `images(for:)`, which needs iOS 16 and
+    // this pod ships back to iOS 14. Kept deliberately.
+    generator.generateCGImagesAsynchronously(forTimes: cmTimes.map { NSValue(time: $0) }) {
+      requested, image, _, result, _ in
+      cond.lock()
+      while buffer.count >= cap && !bailed {
+        if !cond.wait(until: deadline) { break }
+      }
+      if !bailed, result == .succeeded, let img = image {
+        buffer.append((byValue[requested.value] ?? CMTimeGetSeconds(requested), img))
+      }
+      delivered += 1
+      cond.broadcast()
+      cond.unlock()
+    }
+
+    while true {
+      cond.lock()
+      while buffer.isEmpty && delivered < expected && !bailed {
+        if !cond.wait(until: deadline) { bailed = true }
+      }
+      if buffer.isEmpty {
+        if delivered < expected { bailed = true }
+        cond.broadcast()
+        cond.unlock()
+        break
+      }
+      let item = buffer.removeFirst()
+      cond.broadcast()
+      cond.unlock()
+      autoreleasepool { body(item.0, item.1) }
+    }
+    // Once bailed, stop the generator so its remaining callbacks return
+    // immediately instead of decoding frames nobody is going to read.
+    if bailed { generator.cancelAllCGImageGeneration() }
+  }
+
+  /// The generator both the Core ML pass and the pose pass use. One object for
+  /// both passes so the second does not stand up a fresh decode pipeline over
+  /// the same file. Settings are the ones both passes already used.
+  static func makeFrameGenerator(asset: AVAsset) -> AVAssetImageGenerator {
+    let gen = AVAssetImageGenerator(asset: asset)
+    gen.appliesPreferredTrackTransform = true
+    gen.requestedTimeToleranceBefore = .zero
+    gen.requestedTimeToleranceAfter = .zero
+    gen.maximumSize = CGSize(width: 1280, height: 1280)
+    return gen
   }
 
   static func smooth(_ v: [Double], _ k: Int = 3) -> [Double] {

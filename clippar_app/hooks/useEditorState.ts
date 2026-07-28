@@ -13,6 +13,46 @@ import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor'
 const DEFAULT_PAR = 4;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
+// ---- Throttled memory sampling ----
+//
+// getMemoryStats() is not free: it crosses the bridge, then enumerates the
+// caches directory and stats EVERY file in it to compute cachesDirMB — and it
+// does that on a `.utility` QoS queue, which the scheduler is entitled to
+// starve while the trim workers are hammering the CPU at `.userInitiated`.
+// The trim loop used to `await` it twice per clip purely to print a log line,
+// so on a 90-clip round that is 180 low-priority round-trips sitting directly
+// on the critical path.
+//
+// One shared sample, reused for up to TTL ms by every caller, with in-flight
+// de-duplication so N workers asking at once cause ONE native call. The
+// BEFORE/AFTER log lines can now show the same numbers when two workers land
+// inside the same window — they are diagnostics, and that is the trade.
+type MemorySample = Awaited<ReturnType<typeof getMemoryStats>>;
+const MEMORY_SAMPLE_TTL_MS = 1500;
+let memorySample: MemorySample | null = null;
+let memorySampledAt = 0;
+let memorySampleInFlight: Promise<MemorySample | null> | null = null;
+
+async function sampleMemory(
+  maxAgeMs: number = MEMORY_SAMPLE_TTL_MS
+): Promise<MemorySample | null> {
+  if (memorySample && Date.now() - memorySampledAt < maxAgeMs) return memorySample;
+  if (memorySampleInFlight) return memorySampleInFlight;
+  memorySampleInFlight = getMemoryStats()
+    .then((s) => {
+      memorySample = s;
+      memorySampledAt = Date.now();
+      return s;
+    })
+    .catch(() => null)
+    .finally(() => {
+      memorySampleInFlight = null;
+    });
+  return memorySampleInFlight;
+}
+
+const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 // Conditionally import local storage (only works on native with expo-sqlite)
 let storage: typeof import('@/lib/storage') | null = null;
 if (isNative) {
@@ -653,6 +693,17 @@ export function useEditorState(roundId: string | undefined) {
           updatedClip.impactTimeMs = result.impactTimeMs;
         }
 
+        // The impact instant is meaningful even when NO trim file was made —
+        // a full swing in a clip already shorter than the trim window. Kept in
+        // sync with what the SQLite branches below persist.
+        if (
+          result.found &&
+          typeof result.impactTimeMs === 'number' &&
+          result.impactTimeMs > 0
+        ) {
+          updatedClip.impactTimeMs = result.impactTimeMs;
+        }
+
         // Update React state
         updateClipInState(clipId, () => updatedClip);
 
@@ -691,7 +742,18 @@ export function useEditorState(roundId: string | undefined) {
               .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
               .catch(() => {});
           } else {
-            // No swing found — mark as processed anyway so we don't retry
+            // No swing found — mark as processed anyway so we don't retry.
+            // Also reached by a SWING whose clip was already shorter than the
+            // trim window; that case carries a real impact instant, so persist
+            // it rather than discarding it. See the matching branch in
+            // processOneClip for the full rationale. The `> 0` guard keeps the
+            // shot-detector fallback's "nothing found" result writing NULL.
+            const impactMs =
+              result.found &&
+              typeof result.impactTimeMs === 'number' &&
+              result.impactTimeMs > 0
+                ? result.impactTimeMs
+                : null;
             await storage
               .updateClipEditorState(numId, {
                 trim_start_ms: 0,
@@ -699,7 +761,12 @@ export function useEditorState(roundId: string | undefined) {
               })
               .catch(() => {});
             await storage
-              .markClipTrimmed(numId, originalSourceUri, null, null)
+              .markClipTrimmed(
+                numId,
+                originalSourceUri,
+                impactMs,
+                impactMs === null ? null : result.confidence ?? null
+              )
               .catch(() => {});
           }
         }
@@ -753,13 +820,16 @@ export function useEditorState(roundId: string | undefined) {
     const total = untrimmedClips.length;
     if (total === 0) return;
 
-    // Log initial memory stats
+    // Log initial memory stats. Forced fresh (maxAge 0); the concurrency
+    // decision further down reuses this same sample rather than asking twice.
     try {
-      const initialStats = await getMemoryStats();
-      console.log(
-        `[MEMORY] === START: ${total} clips to process ===\n` +
-        `[MEMORY] Available: ${initialStats.availableMemoryMB}MB | Used: ${initialStats.usedMemoryMB}MB | Free disk: ${initialStats.freeDiskMB}MB | Caches: ${initialStats.cachesDirMB}MB`
-      );
+      const initialStats = await sampleMemory(0);
+      if (initialStats) {
+        console.log(
+          `[MEMORY] === START: ${total} clips to process ===\n` +
+          `[MEMORY] Available: ${initialStats.availableMemoryMB}MB | Used: ${initialStats.usedMemoryMB}MB | Free disk: ${initialStats.freeDiskMB}MB | Caches: ${initialStats.cachesDirMB}MB`
+        );
+      }
     } catch {}
 
     // Track the last few shot classifications per-hole so the 3-tier classifier
@@ -780,15 +850,19 @@ export function useEditorState(roundId: string | undefined) {
       }
 
       try {
-        // Log memory BEFORE each clip
+        // Log memory BEFORE each clip. Throttled + shared (see sampleMemory) —
+        // this used to be an unconditional native round-trip per clip on a
+        // low-priority queue, blocking the worker before it had done any work.
         try {
-          const before = await getMemoryStats();
-          console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${total} BEFORE: Available: ${before.availableMemoryMB}MB | Used: ${before.usedMemoryMB}MB | Free disk: ${before.freeDiskMB}MB`
-          );
-          // CRASH WARNING: if available memory drops below 200MB
-          if (before.availableMemoryMB > 0 && before.availableMemoryMB < 200) {
-            console.warn(`[MEMORY] ⚠️ LOW MEMORY WARNING: Only ${before.availableMemoryMB}MB available! iOS may kill the app soon.`);
+          const before = await sampleMemory();
+          if (before) {
+            console.log(
+              `[MEMORY] Clip ${clipIdx + 1}/${total} BEFORE: Available: ${before.availableMemoryMB}MB | Used: ${before.usedMemoryMB}MB | Free disk: ${before.freeDiskMB}MB`
+            );
+            // CRASH WARNING: if available memory drops below 200MB
+            if (before.availableMemoryMB > 0 && before.availableMemoryMB < 200) {
+              console.warn(`[MEMORY] ⚠️ LOW MEMORY WARNING: Only ${before.availableMemoryMB}MB available! iOS may kill the app soon.`);
+            }
           }
         } catch {}
 
@@ -843,6 +917,17 @@ export function useEditorState(roundId: string | undefined) {
           updatedClip.impactTimeMs = result.impactTimeMs;
         }
 
+        // The impact instant is meaningful even when NO trim file was made —
+        // a full swing in a clip already shorter than the trim window. Kept in
+        // sync with what the SQLite branches below persist.
+        if (
+          result.found &&
+          typeof result.impactTimeMs === 'number' &&
+          result.impactTimeMs > 0
+        ) {
+          updatedClip.impactTimeMs = result.impactTimeMs;
+        }
+
         // Update React state
         updateClipInState(clip.id, () => updatedClip);
 
@@ -881,8 +966,31 @@ export function useEditorState(roundId: string | undefined) {
               })
               .catch(() => {});
           } else {
+            // "Mark processed, keep the original." Two very different things
+            // land here: a genuine NO_SWING, and a SWING in a clip that was
+            // ALREADY shorter than the trim window (visionTrim.ts returns
+            // found:true, trimmedUri:null, shotType:'swing' for that). The
+            // second one HAS a real impact instant and this branch used to
+            // throw it away — which also meant processAllTracers later skipped
+            // the clip as 'no-impact', because impact_time_ms is the only
+            // thing the arc can be anchored on.
+            //
+            // Guarded on found + a POSITIVE impact so the shot-detector
+            // fallback path is untouched: when it reports nothing found it
+            // sends impactTimeMs 0, which still writes NULL exactly as before.
+            const impactMs =
+              result.found &&
+              typeof result.impactTimeMs === 'number' &&
+              result.impactTimeMs > 0
+                ? result.impactTimeMs
+                : null;
             await storage
-              .markClipTrimmed(numId, originalSourceUri, null, null)
+              .markClipTrimmed(
+                numId,
+                originalSourceUri,
+                impactMs,
+                impactMs === null ? null : result.confidence ?? null
+              )
               .catch(() => {});
           }
         }
@@ -892,11 +1000,13 @@ export function useEditorState(roundId: string | undefined) {
 
         // Log memory AFTER each clip (including cleanup)
         try {
-          const after = await getMemoryStats();
-          console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${total} AFTER:  Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB` +
-            ` | ${result.found ? 'TRIMMED' : 'no swing'} (hole ${clip.holeNumber}, shot ${clip.shotNumber})`
-          );
+          const after = await sampleMemory();
+          if (after) {
+            console.log(
+              `[MEMORY] Clip ${clipIdx + 1}/${total} AFTER:  Available: ${after.availableMemoryMB}MB | Used: ${after.usedMemoryMB}MB | Free disk: ${after.freeDiskMB}MB` +
+              ` | ${result.found ? 'TRIMMED' : 'no swing'} (hole ${clip.holeNumber}, shot ${clip.shotNumber})`
+            );
+          }
         } catch {}
 
         // VERBOSE TRIM DETAIL — exposes what detectAndTrim actually returned
@@ -925,10 +1035,12 @@ export function useEditorState(roundId: string | undefined) {
         );
         // Log memory even on failure
         try {
-          const errStats = await getMemoryStats();
-          console.log(
-            `[MEMORY] Clip ${clipIdx + 1}/${total} FAILED: Available: ${errStats.availableMemoryMB}MB | Used: ${errStats.usedMemoryMB}MB`
-          );
+          const errStats = await sampleMemory();
+          if (errStats) {
+            console.log(
+              `[MEMORY] Clip ${clipIdx + 1}/${total} FAILED: Available: ${errStats.availableMemoryMB}MB | Used: ${errStats.usedMemoryMB}MB`
+            );
+          }
         } catch {}
         // CRITICAL: mark the failed clip as processed so it doesn't block the
         // "Auto-trimming X of Y" spinner forever and doesn't keep Export/Preview
@@ -963,22 +1075,78 @@ export function useEditorState(roundId: string | undefined) {
     // genuinely parallelize pose/audio analysis + export across cores.
     const clipQueue = [...untrimmedClips];
 
-    // Adaptive concurrency: pose frames + AVAssetExportSession are memory-
-    // heavy and iOS kills the app under pressure (hence all the [MEMORY]
-    // logging in this file). Scale workers to headroom; floor 1, cap 3.
+    // ---- Adaptive concurrency ----
+    //
+    // WHAT ACTUALLY BOUNDS THIS, in order:
+    //
+    //  1. MEMORY. Per clip the peak is the video decoder's working set plus a
+    //     couple of decoded 1280px frames plus Core ML / Vision transients.
+    //     os_proc_available_memory() is the headroom before jetsam, so the
+    //     budget below is expressed directly against it and nothing else.
+    //  2. THE NEURAL ENGINE. Both expensive stages of visionDetectAndTrim —
+    //     the MobileCLIP2 embeddings and VNDetectHumanBodyPoseRequest — run on
+    //     the ANE, which services requests one at a time. Past a handful of
+    //     workers the extra clips are queueing on shared silicon, not running,
+    //     while still each holding a decoder and frame buffers. That is why
+    //     there is a hard cap and why raising it further buys nothing.
+    //  3. The hardware video decoder, which serves a limited number of
+    //     concurrent sessions and is the other thing every worker needs.
+    //
+    // NOT the export: trimVideo is AVAssetExportPresetPassthrough, a container
+    // remux with no encoder session (ShotDetectorModule.trimVideoPassthrough),
+    // so it is neither the memory nor the session bottleneck people assume.
+    //
+    // NOT MEASURED on device. The cap and the budget are reasoned from the
+    // above; what changed underneath them is that swing-vision now scopes its
+    // decoded frames with autoreleasepool and holds at most 2 decoded frames at
+    // a time (SwingVisionModule / SwingLocalizer.forEachFrame), so per-worker
+    // peak is lower and flatter than it was when 3 was chosen.
+    const MEM_RESERVE_MB = 300; // never spend the last of the headroom
+    const MEM_PER_WORKER_MB = 200;
+    const MAX_CONCURRENCY = 4;
+    // Below this a worker parks rather than starting another clip.
+    const LOW_MEMORY_FLOOR_MB = 350;
+    const PARK_MS = 500;
+
     let concurrency = 2;
-    try {
-      const mb = (await getMemoryStats()).availableMemoryMB;
-      if (mb > 0) concurrency = mb > 1500 ? 3 : mb > 700 ? 2 : 1;
-    } catch {}
-    concurrency = Math.max(1, Math.min(concurrency, clipQueue.length));
+    const startStats = await sampleMemory();
+    const startMb = startStats?.availableMemoryMB ?? -1;
+    if (startMb > 0) {
+      concurrency = Math.floor((startMb - MEM_RESERVE_MB) / MEM_PER_WORKER_MB);
+    }
+    concurrency = Math.max(
+      1,
+      Math.min(concurrency, MAX_CONCURRENCY, clipQueue.length)
+    );
     console.log(
-      `[useEditorState] trim batch: ${total} clips in round order, concurrency=${concurrency}`
+      `[useEditorState] trim batch: ${total} clips in round order, ` +
+        `concurrency=${concurrency} (available=${startMb}MB)`
     );
 
+    // Staying adaptive DOWNWARD matters as much as the starting number: the
+    // opening reading is taken before a single clip has been decoded, so it
+    // says nothing about what this round's clips actually cost. A worker that
+    // is about to pick up a new clip while headroom is under the floor parks
+    // instead and re-checks. One worker is always exempt, so the queue still
+    // drains — worst case the batch degrades to sequential rather than dying.
+    let parked = 0;
     const runWorker = async () => {
       for (;;) {
         if (trimCancelledRef.current) return;
+        while (!trimCancelledRef.current && concurrency - parked > 1) {
+          const stats = await sampleMemory();
+          const avail = stats?.availableMemoryMB ?? -1;
+          // avail <= 0 means the native module didn't answer — don't throttle
+          // on a non-answer, that would serialise every non-iOS build.
+          if (avail <= 0 || avail >= LOW_MEMORY_FLOOR_MB) break;
+          parked++;
+          console.warn(
+            `[MEMORY] only ${avail}MB free — parking a trim worker ` +
+              `(${concurrency - parked}/${concurrency} active)`
+          );
+          await delay(PARK_MS);
+          parked--;
+        }
         const clip = clipQueue.shift();
         if (!clip) return;
         await processOneClip(clip);

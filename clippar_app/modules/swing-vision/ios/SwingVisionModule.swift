@@ -162,6 +162,14 @@ public class SwingVisionModule: Module {
   // MARK: - Localization
 
   private func localize(videoUri: String, promise: Promise) {
+    // One pool around the whole call. Decoded frames, Vision request handlers
+    // and Core ML feature values are autoreleased, and a GCD block's implicit
+    // pool is only drained when the block ENDS — so without this, ~110 decoded
+    // frames' worth of temporaries pile up for the whole clip. That peak is
+    // what caps how many clips can run at once; the batch below adds a second,
+    // tighter pool per frame. shot-detector wraps detectAndTrim for exactly
+    // this reason (see ShotDetectorModule.detectAndTrimVideo).
+    autoreleasepool {
     guard let model = visionModel, !protoSwing.isEmpty else {
       promise.reject("E_UNAVAILABLE", loadError ?? "swing localizer not loaded")
       return
@@ -197,11 +205,8 @@ public class SwingVisionModule: Module {
     let centre = SwingLocalizer.mapNormalized(
       CGPoint(x: boxRaw.midX, y: boxRaw.midY), rotation: rotation)
 
-    let generator = AVAssetImageGenerator(asset: asset)
-    generator.appliesPreferredTrackTransform = true
-    generator.requestedTimeToleranceBefore = .zero
-    generator.requestedTimeToleranceAfter = .zero
-    generator.maximumSize = CGSize(width: 1280, height: 1280)
+    // ONE generator for BOTH the Core ML pass and the pose pass below.
+    let generator = SwingLocalizer.makeFrameGenerator(asset: asset)
 
     // One embedding per distinct sample time — candidate windows can overlap.
     var times: [Double] = []
@@ -216,12 +221,14 @@ public class SwingVisionModule: Module {
     }
     times.sort()
 
+    // `times` is already sorted, which is what lets the generator serve the
+    // whole list from one forward decode pass instead of ~80 exact-frame seeks,
+    // and lets that decoding overlap with Core ML on the ANE. Frames, crops and
+    // times are identical to the copyCGImage loop this replaces.
     var scoreAt: [Double: Double] = [:]
-    for t in times {
-      let time = CMTime(seconds: t, preferredTimescale: 600)
-      guard let cg = try? generator.copyCGImage(at: time, actualTime: nil) else { continue }
-      guard let cropped = squareCrop(cg, centreNormalized: centre, boxRaw: boxRaw) else { continue }
-      guard let emb = embed(cgImage: cropped, model: model) else { continue }
+    SwingLocalizer.forEachFrame(generator: generator, times: times) { t, cg in
+      guard let cropped = squareCrop(cg, centreNormalized: centre, boxRaw: boxRaw) else { return }
+      guard let emb = embed(cgImage: cropped, model: model) else { return }
       // max(swing, putt) - negative. A putt looks nothing like a full swing —
       // no club above the head — so scoring putt frames against a swing-only
       // prototype makes them NEGATIVE and one gate rejects them all.
@@ -278,7 +285,7 @@ public class SwingVisionModule: Module {
     // ~29 body-pose requests, around 0.7s, on clips that used to skip them.
     var wristHeight: Double? = nil
     if let b = best {
-      wristHeight = SwingPose.peakWristHeight(asset: asset, tTop: b.tTop)
+      wristHeight = SwingPose.peakWristHeight(asset: asset, tTop: b.tTop, generator: generator)
     }
     let strokeType: String
     if let wh = wristHeight {
@@ -291,6 +298,7 @@ public class SwingVisionModule: Module {
                            started: started, motionFps: profile.fps,
                            duration: duration, strokeType: strokeType,
                            wristHeight: wristHeight))
+    } // autoreleasepool
   }
 
   private func result(decision: String, best: SwingCandidate?, cands: [SwingCandidate],
