@@ -8,17 +8,28 @@ const secureStore =
     ? (require('expo-secure-store') as typeof import('expo-secure-store'))
     : null;
 
-// BLE Manager — requires native build, crashes in Expo Go
+// BLE Manager class — resolved at import, but NEVER instantiated here.
+//
+// This used to run `new blePlx.BleManager(); testManager.destroy();` at module
+// scope as a "is the native module linked?" probe. That constructor allocates
+// a CBCentralManager, which on iOS 13+ is exactly what raises the
+// NSBluetoothAlwaysUsageDescription TCC prompt. expo-router eagerly requires
+// every file under app/, and app/(tabs)/record.tsx → hooks/useShutter.ts →
+// here, so the probe ran at COLD START: a Bluetooth permission dialog before
+// login, before onboarding, with nothing on screen to justify it — and a
+// well-known App Review rejection (spec 5.7 BLE permission overreach, 6.5
+// "scan only while pairing").
+//
+// Nothing is allocated now until the user explicitly taps Scan or connects on
+// app/profile/bluetooth.tsx (see ensureManager below). Presence of the class is
+// checked without constructing it; a missing native module (Expo Go) surfaces
+// as a constructor throw inside ensureManager instead, which is handled there.
 let BleManager: any = null;
-let bleAvailable = false;
+let bleModuleLoaded = false;
 try {
   if (Platform.OS !== 'web') {
-    const blePlx = require('react-native-ble-plx');
-    // Instantiate to verify native module is linked (fails in Expo Go)
-    const testManager = new blePlx.BleManager();
-    testManager.destroy();
-    BleManager = blePlx.BleManager;
-    bleAvailable = true;
+    BleManager = require('react-native-ble-plx').BleManager;
+    bleModuleLoaded = typeof BleManager === 'function';
   }
 } catch {
   // Native module not available (Expo Go or web)
@@ -42,11 +53,32 @@ export function useBLE() {
   const retryCount = useRef(0);
   const maxRetries = 5;
 
-  // Initialize BLE manager once — only on dev builds with native modules
-  useEffect(() => {
-    if (!bleAvailable) return;
-    managerRef.current = new BleManager();
+  /**
+   * Allocate the CBCentralManager — and with it the iOS Bluetooth prompt —
+   * ONLY on an explicit user action. Called from startScan and
+   * connectToDevice, both of which are reachable only from the pairing screen
+   * (app/profile/bluetooth.tsx). Returns null when BLE is unusable, so every
+   * caller degrades to a no-op instead of throwing.
+   *
+   * This replaces a mount effect that constructed a manager for every useBLE()
+   * in the tree. The construction itself is the permission ask; deferring it
+   * is the whole control.
+   */
+  const ensureManager = useCallback((): any | null => {
+    if (managerRef.current) return managerRef.current;
+    if (!bleModuleLoaded) return null;
+    try {
+      managerRef.current = new BleManager();
+    } catch {
+      // Native module not linked (Expo Go) — the constructor is where that
+      // shows up now that there is no module-scope probe.
+      managerRef.current = null;
+    }
+    return managerRef.current;
+  }, []);
 
+  // Tear down whatever was activated, on unmount only.
+  useEffect(() => {
     return () => {
       managerRef.current?.destroy();
       managerRef.current = null;
@@ -111,7 +143,11 @@ export function useBLE() {
   );
 
   const startScan = useCallback(async () => {
-    if (!bleAvailable || !managerRef.current) {
+    // First activation point: the user tapped "Scan for Devices". This is the
+    // earliest moment a CBCentralManager (and therefore the iOS Bluetooth
+    // prompt) may exist.
+    const manager = ensureManager();
+    if (!manager) {
       console.log('[BLE] Scanning not available (Expo Go or web)');
       return;
     }
@@ -121,7 +157,7 @@ export function useBLE() {
 
     const seen = new Set<string>();
 
-    managerRef.current.startDeviceScan(
+    manager.startDeviceScan(
       null,
       { allowDuplicates: false },
       (error: any, device: any) => {
@@ -148,7 +184,7 @@ export function useBLE() {
       managerRef.current?.stopDeviceScan();
       setConnectionState((prev) => (prev === 'scanning' ? 'disconnected' : prev));
     }, SCAN_TIMEOUT_MS);
-  }, []);
+  }, [ensureManager]);
 
   const stopScan = useCallback(() => {
     managerRef.current?.stopDeviceScan();
@@ -161,9 +197,13 @@ export function useBLE() {
 
   const connectToDevice = useCallback(
     async (device: BLEDevice) => {
-      if (!bleAvailable || !managerRef.current) return;
+      // Second activation point: the user tapped a discovered device on the
+      // pairing screen. Normally the manager already exists (they scanned to
+      // get here) — ensureManager keeps this path honest if it doesn't.
+      const manager = ensureManager();
+      if (!manager) return;
 
-      managerRef.current.stopDeviceScan();
+      manager.stopDeviceScan();
       if (scanTimerRef.current) {
         clearTimeout(scanTimerRef.current);
         scanTimerRef.current = null;
@@ -171,7 +211,7 @@ export function useBLE() {
 
       setConnectionState('connecting');
       try {
-        const nativeDevice = await managerRef.current.connectToDevice(device.id, {
+        const nativeDevice = await manager.connectToDevice(device.id, {
           autoConnect: true,
           requestMTU: 256,
         });
@@ -197,7 +237,7 @@ export function useBLE() {
         deviceRef.current = null;
       }
     },
-    [subscribeToHID]
+    [subscribeToHID, ensureManager]
   );
 
   const disconnect = useCallback(async () => {
@@ -214,8 +254,14 @@ export function useBLE() {
     retryCount.current = 0;
   }, []);
 
+  // Reconnect after a DROP inside an already-active session. Deliberately uses
+  // managerRef directly and never ensureManager: if no manager exists, the
+  // user is not in the pairing flow and we must not allocate one (which is
+  // what would make the app connect to a SecureStore-persisted device — with
+  // five exponential-backoff retries — outside any pairing screen, and burn
+  // battery doing it mid-round).
   const attemptReconnect = useCallback(async () => {
-    if (!bleAvailable || !managerRef.current || retryCount.current >= maxRetries) return;
+    if (!managerRef.current || retryCount.current >= maxRetries) return;
 
     const storedDeviceId = await secureStore?.getItemAsync(STORED_DEVICE_KEY);
     if (!storedDeviceId) return;
@@ -256,18 +302,19 @@ export function useBLE() {
     }, delay);
   }, [subscribeToHID]);
 
-  // Auto-reconnect on mount
-  useEffect(() => {
-    if (bleAvailable && managerRef.current) {
-      const sub = managerRef.current.onStateChange((state: string) => {
-        if (state === 'PoweredOn') {
-          attemptReconnect();
-          sub?.remove();
-        }
-      }, true);
-      return () => sub?.remove();
-    }
-  }, [attemptReconnect]);
+  // NO auto-reconnect on mount.
+  //
+  // This used to register onStateChange(..., true) — which fires immediately —
+  // and reconnect to the stored device id the moment Bluetooth reported
+  // PoweredOn, for every mounted useBLE(). Combined with the module-scope
+  // manager that meant the app both prompted for Bluetooth and started
+  // connecting at launch, outside any pairing flow (spec 6.5: scan only while
+  // pairing). Reconnection now happens only from onDisconnected inside a
+  // session the user started on the pairing screen.
+  //
+  // Nothing is lost for the shipped hardware: iOS blocks BLE GATT access to
+  // paired HID devices, so off-the-shelf shutters never used this path at all
+  // (see the header of hooks/useShutter.ts) — they arrive as key/volume events.
 
   const simulatePress = useCallback(() => {
     emitPress();

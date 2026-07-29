@@ -1,6 +1,11 @@
 import Stripe from 'https://esm.sh/stripe@14.25.0?target=deno';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
+import {
+  PRICE_CURRENCY,
+  resolvePriceCents,
+  resolveProductType,
+} from './pricing.ts';
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!, {
   apiVersion: '2024-04-10',
@@ -11,18 +16,11 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 );
 
-// Server-authoritative price table. The amount charged is derived here from a
-// fixed product catalog, NEVER from the client body — a client-supplied amount
-// let any authenticated user pay 1 cent for a physical kit. Prices (in cents)
-// mirror constants/config.ts (standardPriceCents / premiumPriceCents) and the
-// currency is fixed. Update both together when pricing changes.
-const PRICE_TABLE_AUD_CENTS: Record<string, number> = {
-  standard: 5900,
-  premium: 6900,
-};
-const PRICE_CURRENCY = 'aud';
+// Price table and the allowlist lookup live in ./pricing.ts — see the comment
+// there for why the table has a null prototype and why the lookup is an
+// own-property test rather than `table[key] === undefined`.
 
-Deno.serve(async (req: Request) => {
+const handler = async (req: Request): Promise<Response> => {
   try {
     // Authenticate BEFORE parsing the body. Parsing first meant an unauthenticated
     // caller could make us decode arbitrary JSON, and malformed input landed in the
@@ -69,10 +67,9 @@ Deno.serve(async (req: Request) => {
 
     // Resolve the price from the server-side catalog, ignoring any
     // client-supplied amount/currency. Unknown products are rejected.
-    const resolvedType =
-      typeof product_type === 'string' ? product_type : 'standard';
-    const amount = PRICE_TABLE_AUD_CENTS[resolvedType];
-    if (amount === undefined) {
+    const resolvedType = resolveProductType(product_type);
+    const amount = resolvePriceCents(product_type);
+    if (amount === null) {
       return new Response(
         JSON.stringify({ error: 'Unknown product' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
@@ -109,4 +106,11 @@ Deno.serve(async (req: Request) => {
       }
     );
   }
-});
+};
+
+// Guarded so `deno test` can import the pure helpers above without binding a
+// port (same pattern as delete-account / revenuecat-webhook). Supabase runs
+// index.ts as the entry module, so this is true in production.
+if (import.meta.main) {
+  Deno.serve(handler);
+}

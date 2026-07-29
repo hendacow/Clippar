@@ -1,4 +1,9 @@
 import * as SQLite from 'expo-sqlite';
+import {
+  ownedRoundsClause,
+  isRowVisible,
+  shouldClaimLegacyRows,
+} from './localScope';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
@@ -148,10 +153,72 @@ async function migrateEditorColumns() {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )`,
+    // Owner of the round: the Supabase user id that created it. One db file
+    // is shared by every account that signs in on this handset and sign-out
+    // does not wipe it (see lib/localScope.ts for why it must not), so this
+    // column is what stops the next account being offered the previous
+    // account's unfinished round and its playable video. Nullable only for
+    // rows written before this migration — those are claimed once, on first
+    // read with a session (currentScopeUserId below). Clips and scores inherit
+    // it through round_id.
+    'ALTER TABLE local_rounds ADD COLUMN user_id TEXT',
   ];
   for (const sql of migrations) {
     try { await db.execAsync(sql + ';'); } catch {} // column/table already exists
   }
+}
+
+// ────────────────────────────────────────────────────────────
+// Per-user scoping of the shared local database
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Last user id we successfully resolved this process. Used ONLY to answer a
+ * transient getSession() failure (a Keychain-busy window, say) without hiding
+ * a golfer's own round from them mid-round. It is overwritten with `null` on a
+ * clean signed-out read, so it can never serve a departed user's id to the
+ * next account: signing in as B necessarily produced a successful getSession
+ * that set this to B.
+ */
+let lastKnownUserId: string | null = null;
+let legacyRoundsClaimed = false;
+
+async function sessionUserId(): Promise<string | null> {
+  try {
+    // Lazy require, matching this file's existing style (shot-detector), so
+    // importing storage never drags the auth client in at module load.
+    const { supabase } = require('./supabase') as typeof import('./supabase');
+    const { data, error } = await supabase.auth.getSession();
+    if (error) return lastKnownUserId;
+    lastKnownUserId = data.session?.user?.id ?? null;
+    return lastKnownUserId;
+  } catch {
+    return lastKnownUserId;
+  }
+}
+
+/**
+ * Resolve the signed-in user for a scoped read, claiming any pre-migration
+ * rows for them first (see shouldClaimLegacyRows). Doing the backfill here —
+ * on the read path — rather than in a background task means a scoped query can
+ * never race ahead of it and report "no unfinished round" to the very user who
+ * recorded one.
+ */
+async function currentScopeUserId(database: SQLite.SQLiteDatabase): Promise<string | null> {
+  const userId = await sessionUserId();
+  if (shouldClaimLegacyRows(userId, legacyRoundsClaimed)) {
+    try {
+      await database.runAsync(
+        'UPDATE local_rounds SET user_id = ? WHERE user_id IS NULL',
+        userId!
+      );
+      legacyRoundsClaimed = true;
+    } catch {
+      // Older schema without the column, or a locked db — retry on the next
+      // read rather than latching the flag, so the rows aren't left orphaned.
+    }
+  }
+  return userId;
 }
 
 export async function updateClipEditorState(
@@ -690,11 +757,23 @@ export async function saveLocalRound(round: {
 }) {
   const database = await getDatabase();
   const startHole = round.start_hole ?? 1;
+  // Stamp the owner at creation. INSERT OR REPLACE rewrites the whole row, so
+  // user_id MUST be in the column list — leaving it out would null the stamp
+  // on every re-save and hand the round back to the unscoped state.
+  const userId = await currentScopeUserId(database);
+  if (!userId) {
+    // A round should never be written without a session (every path into
+    // recording is behind the auth gate), but if the session momentarily
+    // can't be read we must not leave the row stamped with nobody and
+    // therefore invisible to its own owner forever. Re-arm the one-time claim
+    // so the next scoped read adopts it for whoever is actually signed in.
+    legacyRoundsClaimed = false;
+  }
   await database.runAsync(
     `INSERT OR REPLACE INTO local_rounds
        (id, course_name, course_id, started_at, holes_played, start_hole,
-        course_holes, current_hole, current_shot)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        course_holes, current_hole, current_shot, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     round.id,
     round.course_name,
     round.course_id ?? null,
@@ -708,25 +787,48 @@ export async function saveLocalRound(round: {
     // clip recorded after a resume was then tagged to the wrong hole, and
     // Previous Hole was disabled because currentHole (1) <= startHole (10).
     startHole,
-    1
+    1,
+    userId
   );
 }
 
+/**
+ * Unfinished rounds to offer as "Resume" on the record tab.
+ *
+ * Scoped to the signed-in user: this read is what the next person to sign in
+ * on a shared/handed-over handset sees, and unscoped it handed them the
+ * previous golfer's round — course, scores, GPS and every raw swing video,
+ * playable and exportable (see lib/localScope.ts). Two layers on purpose: the
+ * SQL predicate, and an ownership filter on the rows that come back.
+ */
 export async function getOrphanedRounds() {
   const database = await getDatabase();
-  return database.getAllAsync<{
+  const userId = await currentScopeUserId(database);
+  const scope = ownedRoundsClause(userId);
+  const rows = await database.getAllAsync<{
     id: string;
     course_name: string;
     status: string;
     started_at: string;
+    user_id: string | null;
   }>(
-    "SELECT * FROM local_rounds WHERE status = 'in_progress'"
+    `SELECT * FROM local_rounds WHERE status = 'in_progress' AND ${scope.sql}`,
+    ...scope.params
   );
+  return rows.filter((r) => isRowVisible(r.user_id, userId));
 }
 
+/**
+ * Load one local round. Scoped as well as getOrphanedRounds — this is what
+ * recoverRound() and the editor hydrate from, so an id that leaked by any
+ * other route (a share link, a stale nav param) still can't pull another
+ * account's round off this device.
+ */
 export async function getLocalRound(roundId: string) {
   const database = await getDatabase();
-  return database.getFirstAsync<{
+  const userId = await currentScopeUserId(database);
+  const scope = ownedRoundsClause(userId);
+  const row = await database.getFirstAsync<{
     id: string;
     course_name: string;
     course_id: string | null;
@@ -739,10 +841,13 @@ export async function getLocalRound(roundId: string) {
     // normalizes those to the legacy default (18 / hole 1).
     holes_played: number | null;
     start_hole: number | null;
+    user_id: string | null;
   }>(
-    'SELECT * FROM local_rounds WHERE id = ?',
-    roundId
+    `SELECT * FROM local_rounds WHERE id = ? AND ${scope.sql}`,
+    roundId,
+    ...scope.params
   );
+  return isRowVisible(row?.user_id, userId) ? row : null;
 }
 
 export async function updateLocalRound(
@@ -1211,8 +1316,22 @@ export async function enqueueRoundForUpload(
   );
 }
 
+/**
+ * Rounds still waiting to back up. Scoped through their round's owner.
+ *
+ * This is not just a read-side leak: uploadQueue.processUploadQueue() takes
+ * whatever this returns and calls uploadRoundClips(roundId, <currently signed-in
+ * user>.id). Unscoped, a round user A queued before signing out was uploaded
+ * into user B's Supabase account the moment B connected — A's swing video
+ * copied into a stranger's cloud storage and attributed to them. The queue has
+ * no owner column of its own; it inherits ownership from local_rounds, which
+ * every queued round has (uploadQueue only enqueues rounds created through
+ * saveLocalRound).
+ */
 export async function getQueuedRoundUploads() {
   const database = await getDatabase();
+  const userId = await currentScopeUserId(database);
+  const scope = ownedRoundsClause(userId);
   return database.getAllAsync<{
     round_id: string;
     course_name: string | null;
@@ -1223,7 +1342,11 @@ export async function getQueuedRoundUploads() {
     created_at: string;
     updated_at: string;
   }>(
-    "SELECT * FROM local_upload_queue WHERE status IN ('pending', 'error') ORDER BY created_at"
+    `SELECT * FROM local_upload_queue
+      WHERE status IN ('pending', 'error')
+        AND round_id IN (SELECT id FROM local_rounds WHERE ${scope.sql})
+      ORDER BY created_at`,
+    ...scope.params
   );
 }
 
@@ -1317,6 +1440,28 @@ export async function updateClipFileUris(
 // app_settings table needed.)
 
 /**
+ * Round ids belonging to the signed-in user. Backs the explicit, user-initiated
+ * "remove my videos from this phone" action (lib/localWipe.ts) — deliberately
+ * scoped, so that action can never reach into another account's rounds.
+ * Returns [] when no session can be resolved: with no known owner we delete
+ * nothing rather than everything.
+ */
+export async function listLocalRoundIdsForCurrentUser(): Promise<string[]> {
+  const database = await getDatabase();
+  const userId = await currentScopeUserId(database);
+  const scope = ownedRoundsClause(userId);
+  try {
+    const rows = await database.getAllAsync<{ id: string; user_id: string | null }>(
+      `SELECT id, user_id FROM local_rounds WHERE ${scope.sql}`,
+      ...scope.params
+    );
+    return rows.filter((r) => isRowVisible(r.user_id, userId)).map((r) => r.id);
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Wipe every local table. Used by account deletion so a fresh sign-in (or a
  * different user on the same device) starts from a clean slate — no leftover
  * clips, rounds, scores, queued uploads, or settings from the deleted account.
@@ -1324,21 +1469,108 @@ export async function updateClipFileUris(
  * We DELETE rows rather than dropping the database file so the open handle
  * stays valid and the schema survives for the next user. Best-effort per
  * table: a missing table (older/failed migration) must not abort the wipe.
+ *
+ * The URI harvest is NOT optional. Dropping local_clips destroys the only
+ * record of where the video lives, so a wipe that deletes rows first leaves
+ * every raw clip in documentDirectory/clips/ forever: invisible to the app,
+ * unreachable by any UI, still counted against the user's storage and still
+ * copied into every subsequent iCloud backup — after we told them "everything
+ * in your Clippar account is erased forever". Mirrors deleteLocalRound above.
  */
 export async function clearLocalDatabase(): Promise<void> {
   const database = await getDatabase();
-  const tables = [
-    'local_clips',
-    'local_rounds',
-    'local_scores',
-    'local_upload_queue',
-    'local_settings',
+
+  // SCOPED TO ONE ACCOUNT. This was an unqualified `DELETE FROM` over every
+  // table, plus deleteFile() on every clip URI in the database. On a phone two
+  // golfers share — a clubhouse loaner, a partner's handset — user A deleting
+  // THEIR account destroyed user B's rounds and unlinked B's raw video. That is
+  // the worst outcome this product has: a round is recorded once, on a course,
+  // and cannot be re-recorded. Wiping the deleting user's data must never reach
+  // anyone else's.
+  //
+  // `local_rounds.user_id` is the ownership anchor; clips, scores and queued
+  // uploads hang off `round_id`, so they scope through it. Resolved here rather
+  // than passed in, so there is one way to answer "who is this" and callers
+  // cannot get it wrong (same as listLocalRoundIdsForCurrentUser above).
+  const ownerUserId = await currentScopeUserId(database);
+  if (!ownerUserId) {
+    // Fail CLOSED. With no resolvable session we cannot tell whose rows these
+    // are, and deleting nothing is the right answer — wipeLocalUserData's
+    // directory sweep is still a backstop for orphaned files, and data left on
+    // a device its owner still controls is a far smaller harm than destroying a
+    // second user's irreplaceable footage. Failing open here is precisely the
+    // bug described above.
+    console.warn('[storage] clearLocalDatabase: no resolvable owner — refusing to wipe');
+    return;
+  }
+
+  const ownedRounds = 'SELECT id FROM local_rounds WHERE user_id = ?';
+
+  let fileUris: string[] = [];
+  try {
+    const rows = await database.getAllAsync<{
+      file_uri: string | null;
+      trimmed_file_uri: string | null;
+      original_file_uri: string | null;
+      tracer_file_uri: string | null;
+    }>(
+      `SELECT file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri
+         FROM local_clips WHERE round_id IN (${ownedRounds})`,
+      [ownerUserId]
+    );
+    fileUris = [
+      ...new Set(
+        rows
+          .flatMap((r) => [
+            r.file_uri,
+            r.trimmed_file_uri,
+            r.original_file_uri,
+            r.tracer_file_uri,
+          ])
+          .filter((u): u is string => !!u && u.startsWith('file://'))
+      ),
+    ];
+  } catch {
+    // Older schemas may lack the editor columns — non-fatal, rows still drop
+    // and localWipe's directory sweep is the backstop for the files.
+  }
+
+  // Children first, then the rounds they hang off — otherwise the subquery that
+  // identifies them has nothing left to match.
+  const scopedDeletes: Array<[string, string[]]> = [
+    [`DELETE FROM local_clips        WHERE round_id IN (${ownedRounds})`, [ownerUserId]],
+    [`DELETE FROM local_scores       WHERE round_id IN (${ownedRounds})`, [ownerUserId]],
+    [`DELETE FROM local_upload_queue WHERE round_id IN (${ownedRounds})`, [ownerUserId]],
+    ['DELETE FROM local_rounds       WHERE user_id = ?', [ownerUserId]],
+    // local_settings is keyed by name with no owner column, and most of it is
+    // device preference (trim window, playback speed) that belongs to the
+    // handset rather than the account — wiping it would reset the OTHER user's
+    // app. The one genuinely per-account entry is the Pro cache, which
+    // subscription.ts keys as `pro.status_cache.<userId>`, so remove exactly
+    // that and leave the rest alone.
+    ['DELETE FROM local_settings     WHERE key = ?', [`pro.status_cache.${ownerUserId}`]],
   ];
-  for (const table of tables) {
+  for (const [sql, params] of scopedDeletes) {
     try {
-      await database.runAsync(`DELETE FROM ${table}`);
+      await database.runAsync(sql, params);
     } catch {
       // Table may not exist on a partially-migrated db — keep going.
+    }
+  }
+
+  // Unlink the videos now their rows are gone. Lazy require keeps this module
+  // free of the shot-detector native dependency at load time (same import-cycle
+  // concern as deleteLocalRound); each delete is fire-and-forget so a missing
+  // file can't wedge or throw.
+  if (fileUris.length > 0) {
+    try {
+      const shotDetector =
+        require('../modules/shot-detector') as typeof import('../modules/shot-detector');
+      for (const uri of fileUris) {
+        shotDetector.deleteFile(uri).catch(() => {});
+      }
+    } catch {
+      // shot-detector unavailable (e.g. web build) — rows are already gone.
     }
   }
 }

@@ -6,9 +6,23 @@
 # code — those still need a full `eas build`.
 #
 # Promotion model (matches `eas.json` channels):
-#   default push to main → preview channel  → updates your daily "Clippar"
-#                                              internal install (built from
+#   default push to main → preview channel  → updates your daily internal
+#                                              install (built from the
 #                                              `preview` profile)
+#
+# NOTE ON THE `preview` PROFILE — eas.json is JSON and cannot carry the comment,
+# so it lives here, next to the trigger that makes it matter. `preview` used to
+# declare `"environment": "production"` and no APP_VARIANT, which meant this
+# workflow pushed an unreviewed JS bundle, on every merge to main, with no
+# approval gate, to an internal build that carried the App Store bundle id
+# (com.clippar.app), the `clippar://` URL scheme, and the PRODUCTION Supabase
+# project. Test rounds and orphaned Storage objects landed in the production
+# dataset and deep-link routing was undefined on any device with both installed.
+# It now builds as the staging variant against the non-production project, so
+# what this job auto-publishes can no longer touch production data. Do not put
+# `"environment": "production"` back on a non-store profile —
+# scripts/verify-build-env.js (wired into every prebuildCommand) fails the build
+# if you do.
 #   workflow_dispatch with branch=development → updates "Clippar Dev" build
 #                                              (your dev client install)
 #   workflow_dispatch with branch=staging → updates "Clippar Staging" build
@@ -63,15 +77,26 @@ jobs:
       run:
         working-directory: clippar_app
     steps:
+      # ── Why every `uses:` below is a 40-char commit SHA and not a tag ────────
+      # A git tag is movable by whoever publishes the action. `@v8` means
+      # "whatever the expo org points v8 at today", so a compromised or coerced
+      # maintainer force-pushing that tag executes their code in THIS job — the
+      # job that holds EXPO_TOKEN. That token is an EAS account access token:
+      # with it an attacker runs `eas update --branch production` and pushes an
+      # arbitrary JS bundle over-the-air to every App Store install of Clippar,
+      # with no App Review in the way. EAS Update code signing is not enabled
+      # (dashboard item, owner: henry), so the malicious bundle is accepted on
+      # the next cold start. Pinning to a SHA makes the code that runs here
+      # immutable. Keep the `# vN` trailing comment so Dependabot can bump these.
       - name: Check out repo
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           # Need parent commit so we can build a meaningful release message
           # from `git log` — depth 2 is enough.
           fetch-depth: 2
 
       - name: Set up Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
@@ -81,10 +106,16 @@ jobs:
         run: npm ci
 
       - name: Set up Expo + EAS CLI
-        uses: expo/expo-github-action@v8
+        uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8
         with:
-          eas-version: latest
-          token: ${{ secrets.EXPO_TOKEN }}
+          # Pin the CLI too: `latest` re-resolves on every run, so the tool that
+          # publishes to production is not the tool that was reviewed.
+          eas-version: 21.4.0
+          # `token:` deliberately NOT passed. This third-party action only needs
+          # to install the CLI; EXPO_TOKEN is exported to the `eas update` step
+          # below, which is our own shell. Handing the credential to an action we
+          # do not control, when the step that actually needs it already has it,
+          # is blast radius for nothing.
 
       - name: Resolve update parameters
         id: params

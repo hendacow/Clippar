@@ -112,12 +112,19 @@ function ensureClipsDir(): Promise<string> {
  * true for everything written into it afterwards.
  *
  * expo-file-system cannot set that key, so it goes through the native
- * shot-detector module. THE CONTROL IS NOT YET IN FORCE: the native
- * `excludeFromBackup` function does not exist in ShotDetectorModule.swift yet,
- * so this currently resolves `excluded: false` and logs. Do not treat clips as
- * backup-excluded until that native function ships (it also needs a matching
- * NSFileProtection class on the directory and on clippar.db) — this call site
- * exists so there is exactly one place to wire it up, not because it is done.
+ * shot-detector module, which also raises the directory's Data Protection class
+ * to CompleteUnlessOpen (see excludeFromBackupImpl in ShotDetectorModule.swift).
+ * Both are directory-level, so every clip written afterwards inherits them and
+ * no future write site has to remember.
+ *
+ * The native function is optional-by-arity, so a JS-only OTA update landing on
+ * an older binary still reports `native-unavailable` rather than pretending —
+ * a false here means the clips ARE still being backed up, and no caller may
+ * report otherwise on its behalf.
+ *
+ * Still uncovered (different owning modules, not reachable from here):
+ * documentDirectory/exports/ written by lib/clipShare.ts, and the clippar.db
+ * SQLite file with its per-shot GPS columns.
  *
  * Failure here is never fatal: losing the exclusion must not stop a user from
  * saving their round.

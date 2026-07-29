@@ -122,6 +122,14 @@ public class ShotDetectorModule: Module {
             }
         }
 
+        // MEDIA-002. Mark a file/directory NSURLIsExcludedFromBackupKey and raise
+        // its Data Protection class — see excludeFromBackupImpl for why.
+        // expo-file-system exposes neither, which is the only reason this lives
+        // in the shot-detector module rather than in JS.
+        AsyncFunction("excludeFromBackup") { (fileUri: String, promise: Promise) in
+            self.excludeFromBackupImpl(fileUri: fileUri, promise: promise)
+        }
+
         // Get current memory + disk stats for crash diagnostics.
         // Returns availableMemoryMB, usedMemoryMB, freeDiskMB, cachesDirMB.
         AsyncFunction("getMemoryStats") { (promise: Promise) in
@@ -536,6 +544,71 @@ public class ShotDetectorModule: Module {
             return URL(fileURLWithPath: uri)
         }
         return URL(string: uri) ?? URL(fileURLWithPath: uri)
+    }
+
+    // MARK: - MEDIA-002: Backup Exclusion + Data Protection
+
+    /// Excludes `fileUri` from iCloud/iTunes device backups and raises its Data
+    /// Protection class. Called from lib/media.ts once, when
+    /// documentDirectory/clips/ is created.
+    ///
+    /// Backup: documentDirectory is NSDocumentDirectory, which iOS backs up by
+    /// default, so every raw clip we persist there is copied to Apple and
+    /// restored onto whatever device restores that backup — including for a
+    /// golfer who deliberately left Cloud backup OFF and is told on
+    /// profile/storage-settings that their clips are not in the cloud. Setting
+    /// the key on the DIRECTORY excludes the whole subtree, so clips written
+    /// afterwards inherit it and no future write site has to remember.
+    ///
+    /// Protection: the platform default (CompleteUntilFirstUserAuthentication)
+    /// leaves the footage readable to anything with container access from the
+    /// first unlock until power-off. CompleteUnlessOpen seals it whenever the
+    /// phone locks while still letting an already-open handle finish writing —
+    /// which is the class we need and not `.complete`, because the phone sits
+    /// locked on a tripod mid-round and `.complete` would kill an in-flight
+    /// capture or export. On a directory the class is inherited by newly
+    /// created files; existing contents are upgraded in a shallow pass so
+    /// footage recorded before this shipped is covered too.
+    ///
+    /// Never rejects. Losing this control must not stop a user saving their
+    /// round, so failures resolve `excluded: false` with a reason and the JS
+    /// caller logs rather than claiming success on our behalf.
+    private func excludeFromBackupImpl(fileUri: String, promise: Promise) {
+        DispatchQueue.global(qos: .utility).async {
+            var url = self.resolveFileURL(fileUri)
+            let fm = FileManager.default
+
+            var isDir: ObjCBool = false
+            guard fm.fileExists(atPath: url.path, isDirectory: &isDir) else {
+                promise.resolve(["excluded": false, "reason": "not-found"] as [String: Any])
+                return
+            }
+
+            do {
+                var values = URLResourceValues()
+                values.isExcludedFromBackup = true
+                try url.setResourceValues(values)
+            } catch {
+                promise.resolve(["excluded": false, "reason": error.localizedDescription] as [String: Any])
+                return
+            }
+
+            // Best-effort and deliberately not part of the resolved `excluded`
+            // flag: a device with no passcode has no Data Protection to apply,
+            // and that must not be reported as "still in iCloud".
+            let protection = FileProtectionType.completeUnlessOpen
+            try? fm.setAttributes([.protectionKey: protection], ofItemAtPath: url.path)
+            if isDir.boolValue, let contents = try? fm.contentsOfDirectory(atPath: url.path) {
+                for name in contents {
+                    try? fm.setAttributes(
+                        [.protectionKey: protection],
+                        ofItemAtPath: url.appendingPathComponent(name).path
+                    )
+                }
+            }
+
+            promise.resolve(["excluded": true] as [String: Any])
+        }
     }
 
     // MARK: - Pose Frame Extraction (every 6th frame for speed)

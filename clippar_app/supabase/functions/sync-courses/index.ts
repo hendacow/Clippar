@@ -128,12 +128,32 @@ interface HoleData {
 
 const GCAPI_BASE = 'https://api.golfcourseapi.com/v1';
 
+/**
+ * Coerce a caller-supplied region code to an ISO-3166-ish / state-code shape:
+ * 2–3 ASCII letters, uppercased. Anything else falls back to the default.
+ *
+ * `sync_single` is deliberately open to any signed-in user and takes
+ * `body.country` straight from the request. That value used to be interpolated
+ * into the outbound query string UNENCODED, so `"AU&limit=10000"` appended
+ * attacker-chosen parameters — and `"AU#"` truncated ours — on a request that
+ * carries our paid GOLF_COURSE_API_KEY in the Authorization header. Encoding
+ * alone stops the injection; the allowlist shape also stops us wasting quota on
+ * a garbage upstream query. Both, because encoding is one refactor away from
+ * being dropped again.
+ */
+export function safeRegionCode(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') return fallback;
+  const trimmed = value.trim().toUpperCase();
+  return /^[A-Z]{2,3}$/.test(trimmed) ? trimmed : fallback;
+}
+
 async function searchGolfCourseAPI(query: string, countryCode = 'AU'): Promise<any[]> {
   const apiKey = Deno.env.get('GOLF_COURSE_API_KEY');
   if (!apiKey) return [];
 
   try {
-    const url = `${GCAPI_BASE}/search?search_query=${encodeURIComponent(query)}&country_code=${countryCode}`;
+    const url = `${GCAPI_BASE}/search?search_query=${encodeURIComponent(query)}` +
+      `&country_code=${encodeURIComponent(countryCode)}`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -154,7 +174,10 @@ async function fetchGolfCourseAPIDetail(courseId: string): Promise<any | null> {
   if (!apiKey) return null;
 
   try {
-    const res = await fetch(`${GCAPI_BASE}/courses/${courseId}`, {
+    // courseId is upstream-supplied rather than client-supplied, but it is still
+    // interpolated into a path — encode it so a value containing `/`, `?` or `#`
+    // cannot re-point the request at a different endpoint on that host.
+    const res = await fetch(`${GCAPI_BASE}/courses/${encodeURIComponent(courseId)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!res.ok) return null;
@@ -229,7 +252,11 @@ async function searchGolfApiIo(query: string, country = 'AU', state = 'QLD'): Pr
   if (!apiKey) return [];
 
   try {
-    const url = `${GOLFAPIIO_BASE}/clubs?name=${encodeURIComponent(query)}&country=${country}&state=${state}`;
+    // Same parameter-pollution guard as searchGolfCourseAPI: `country`/`state`
+    // trace back to the request body on the sync_region path, and this request
+    // carries our paid GOLF_API_IO_KEY.
+    const url = `${GOLFAPIIO_BASE}/clubs?name=${encodeURIComponent(query)}` +
+      `&country=${encodeURIComponent(country)}&state=${encodeURIComponent(state)}`;
     const res = await fetch(url, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
@@ -246,7 +273,7 @@ async function fetchGolfApiIoCourse(courseId: string): Promise<any | null> {
   if (!apiKey) return null;
 
   try {
-    const res = await fetch(`${GOLFAPIIO_BASE}/courses/${courseId}`, {
+    const res = await fetch(`${GOLFAPIIO_BASE}/courses/${encodeURIComponent(courseId)}`, {
       headers: { Authorization: `Bearer ${apiKey}` },
     });
     if (!res.ok) return null;
@@ -307,14 +334,83 @@ function mapGolfApiIoResponse(raw: any): { course: CourseData; holes: HoleData[]
 // ────────────────────────────────────────────────────────────
 
 /**
- * Escape PostgreSQL LIKE/ILIKE metacharacters (`\` `%` `_`) so a value is
- * matched literally (case-insensitively) rather than as a wildcard pattern.
- * Backslash must be escaped first. Without this, a course name containing `%`
- * or `_` becomes a wildcard that fuzzily matches — and, in the non-insert path,
- * overwrites — an unrelated existing course.
+ * Escape LIKE/ILIKE metacharacters so a value is matched literally rather than
+ * as a wildcard pattern. Backslash must be escaped first.
+ *
+ * `*` is in the set because PostgREST — not Postgres — is the parser here.
+ * supabase-js emits `.ilike(col, pattern)` as the raw filter `col=ilike.<pattern>`
+ * and PostgREST rewrites `*` to `%` before Postgres ever sees the string. So the
+ * original class of `\ % _` left `*` behaving as a full wildcard, which is
+ * exactly what this function's own contract says must not happen: a community
+ * suggestion named `Royal *` matches one real catalog row, and approving it
+ * takes the UPDATE branch of upsertCourse and overwrites that shared course's
+ * location, coordinates, hole count and par with attacker-chosen values.
+ *
+ * Escaping `*` is not perfect — PostgREST rewrites the escaped `\*` to `\%`, so
+ * a name genuinely containing `*` ends up looking for a literal `%` and simply
+ * misses. That is the safe direction: a miss inserts a new row, it does not
+ * overwrite someone else's. isExactNameMatch() below is the real backstop.
  */
-function escapeLikePattern(value: string): string {
-  return value.replace(/[\\%_]/g, (c) => `\\${c}`);
+export function escapeLikePattern(value: string): string {
+  return value.replace(/[\\%_*]/g, (c) => `\\${c}`);
+}
+
+/**
+ * Confirm a row returned by the ILIKE lookup really is the same name, ignoring
+ * case only.
+ *
+ * The escape above depends on knowing every metacharacter PostgREST and Postgres
+ * treat specially, and that list has already been wrong once. This check does
+ * not depend on it: whatever pattern goes over the wire, the row we act on must
+ * still be a case-insensitive exact match, so a wildcard that slips through
+ * selects nothing rather than selecting — and then overwriting — an unrelated
+ * course.
+ */
+export function isExactNameMatch(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
+
+/**
+ * Validate one entry of a community suggestion's `hole_data` blob before it is
+ * written to the shared `holes` table. Returns null for anything that isn't a
+ * plausible golf hole, so the row is dropped rather than stored.
+ *
+ * These came in as unvalidated user JSON: `hole_number` and `par` were read
+ * straight off the object and upserted. A suggestion carrying
+ * `{"holeNumber": 1e9, "par": -4}` corrupts scorecards and score-to-par for
+ * every user who later selects that course, and an admin approving a course
+ * name has no way to see it.
+ */
+export function parseSuggestedHole(h: unknown): HoleData | null {
+  if (!h || typeof h !== 'object') return null;
+  const raw = h as Record<string, unknown>;
+
+  const int = (v: unknown): number | null =>
+    typeof v === 'number' && Number.isInteger(v) ? v : null;
+
+  const holeNumber = int(raw.holeNumber);
+  const par = int(raw.par);
+  // A course can have up to 18 holes here (holes_count is capped at 18 upstream);
+  // par 3 is the shortest real hole and par 6 exists on a handful of courses.
+  if (holeNumber === null || holeNumber < 1 || holeNumber > 18) return null;
+  if (par === null || par < 3 || par > 6) return null;
+
+  const strokeIndex = int(raw.strokeIndex);
+  const lengthMeters = int(raw.lengthMeters);
+
+  return {
+    hole_number: holeNumber,
+    par,
+    stroke_index:
+      strokeIndex !== null && strokeIndex >= 1 && strokeIndex <= 18
+        ? strokeIndex
+        : null,
+    // Longest hole ever played is well under 1000 m; anything past that is junk.
+    length_meters:
+      lengthMeters !== null && lengthMeters > 0 && lengthMeters <= 1000
+        ? lengthMeters
+        : null,
+  };
 }
 
 async function upsertCourse(
@@ -339,11 +435,17 @@ async function upsertCourse(
     // Fallback: match by name (case-insensitive exact, metacharacters escaped)
     const { data: existing } = await supabase
       .from('courses')
-      .select('id')
+      .select('id, name')
       .ilike('name', escapeLikePattern(courseData.name))
       .eq('country', courseData.country)
       .maybeSingle();
-    courseId = existing?.id ?? null;
+    // Re-check the returned name here rather than trusting the pattern. See
+    // isExactNameMatch: this is what makes a leaked wildcard a miss instead of
+    // a catalog overwrite.
+    courseId =
+      existing && isExactNameMatch(existing.name ?? '', courseData.name)
+        ? existing.id
+        : null;
   }
 
   if (courseId) {
@@ -411,7 +513,7 @@ async function upsertCourse(
 // Main handler
 // ────────────────────────────────────────────────────────────
 
-Deno.serve(async (req: Request) => {
+const handler = async (req: Request): Promise<Response> => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
@@ -471,8 +573,10 @@ Deno.serve(async (req: Request) => {
     // ── Action: sync_region ─────────────────────────────────
     // Syncs courses for a region (default: QLD, AU)
     if (action === 'sync_region') {
-      const country = body.country || 'AU';
-      const state = body.state || 'QLD';
+      // Shape-checked, not passed through: these end up in an outbound query
+      // string on a request carrying our paid API keys. See safeRegionCode.
+      const country = safeRegionCode(body.country, 'AU');
+      const state = safeRegionCode(body.state, 'QLD');
       const searchTerms = body.search_terms || [
         'Brisbane', 'Gold Coast', 'Sunshine Coast',
         'Ipswich', 'Toowoomba', 'Redland', 'Logan',
@@ -532,8 +636,11 @@ Deno.serve(async (req: Request) => {
     // ── Action: sync_single ─────────────────────────────────
     // Sync a single course by name
     if (action === 'sync_single') {
-      const name = body.name;
-      if (!name) {
+      // sync_single is the one action any signed-in user can reach, so its DTO
+      // gets checked rather than trusted: a non-string or oversized `name` goes
+      // into an outbound API call and then into the shared catalog.
+      const name = typeof body.name === 'string' ? body.name.trim() : '';
+      if (!name || name.length > 120) {
         return new Response(
           JSON.stringify({ error: 'name is required' }),
           { status: 400, headers: corsHeaders }
@@ -541,7 +648,7 @@ Deno.serve(async (req: Request) => {
       }
 
       // Try GolfCourseAPI
-      const results = await searchGolfCourseAPI(name, body.country || 'AU');
+      const results = await searchGolfCourseAPI(name, safeRegionCode(body.country, 'AU'));
       if (results.length > 0) {
         const detail = await fetchGolfCourseAPIDetail(String(results[0].id));
         const mapped = mapGolfCourseAPIResponse(detail || results[0]);
@@ -617,15 +724,16 @@ Deno.serve(async (req: Request) => {
         source_id: suggestionId,
       };
 
+      // `hole_data` is free-form JSON a community member wrote. It goes straight
+      // into the shared `holes` table, which every user's scorecard and
+      // score-to-par is computed from, so validate the shape here — an admin
+      // approving a suggestion is approving the COURSE, not vouching for the
+      // numeric range of every field in a blob they never see.
       const holesData: HoleData[] = [];
-      if (suggestion.hole_data && Array.isArray(suggestion.hole_data)) {
+      if (Array.isArray(suggestion.hole_data)) {
         for (const h of suggestion.hole_data) {
-          holesData.push({
-            hole_number: h.holeNumber,
-            par: h.par,
-            stroke_index: h.strokeIndex ?? null,
-            length_meters: h.lengthMeters ?? null,
-          });
+          const parsed = parseSuggestedHole(h);
+          if (parsed) holesData.push(parsed);
         }
       }
 
@@ -644,14 +752,24 @@ Deno.serve(async (req: Request) => {
     }
 
     return new Response(
-      JSON.stringify({ error: `Unknown action: ${action}` }),
+      JSON.stringify({ error: 'Unknown action' }),
       { status: 400, headers: corsHeaders }
     );
   } catch (err) {
+    // Log the detail, return a stable public string. `message: String(err)`
+    // relayed whatever Postgres, the Supabase client or a third-party SDK
+    // happened to say — column names, constraint names, request ids, internal
+    // hostnames, dependency versions — which is free reconnaissance (spec 5.3).
     console.error('[sync-courses] error:', err);
     return new Response(
-      JSON.stringify({ error: 'Internal server error', message: String(err) }),
+      JSON.stringify({ error: 'Internal server error' }),
       { status: 500, headers: corsHeaders }
     );
   }
-});
+};
+
+// Guarded so `deno test` can import the pure helpers without binding a port
+// (same pattern as delete-account / revenuecat-webhook).
+if (import.meta.main) {
+  Deno.serve(handler);
+}

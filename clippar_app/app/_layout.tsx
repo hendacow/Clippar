@@ -24,6 +24,8 @@ import { repairScoresParData } from '@/lib/api';
 import { migrateLegacyUris } from '@/lib/uriMigration';
 import { hydrateMissingClipsFromPhotos } from '@/lib/photosRecovery';
 import { initializeUploadQueueProcessor } from '@/lib/uploadQueue';
+import { reclaimTemporaryExports } from '@/modules/shot-detector';
+import { getDatabase } from '@/lib/storage';
 import '@/global.css';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -179,6 +181,47 @@ function RootLayout() {
           }
         })
         .catch((e) => console.log('[Startup] hydrateMissingClipsFromPhotos skipped:', e));
+
+      // MEDIA-003: reclaim aged-out trim_/stitch_/tracer_/clippar_reel_
+      // temporaries from Library/Caches. Each is a full-fidelity copy of the
+      // golfer's footage and nothing ever removed them, so they outlived the
+      // round the user deleted and accumulated for the life of the install.
+      //
+      // The in-use set is read from SQLite FIRST and the sweep only runs if
+      // that read SUCCEEDS — an await that throws here skips
+      // reclaimTemporaryExports entirely, because a failed query read as "no
+      // clips are in use" would delete every trimmed clip and tracer render
+      // the library still points at. Composed reels are reel_<UUID>.mp4 and
+      // are not in the swept prefixes at all, so they can never be caught by
+      // this even though nothing local records their path.
+      (async () => {
+        const database = await getDatabase();
+        const rows = await database.getAllAsync<{
+          file_uri: string | null;
+          trimmed_file_uri: string | null;
+          original_file_uri: string | null;
+          tracer_file_uri: string | null;
+        }>(
+          'SELECT file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips'
+        );
+        return reclaimTemporaryExports({
+          inUseUris: rows.flatMap((r) => [
+            r.file_uri,
+            r.trimmed_file_uri,
+            r.original_file_uri,
+            r.tracer_file_uri,
+          ]),
+        });
+      })()
+        .then(({ deletedCount, skippedInUse, skippedTooRecent }) => {
+          if (deletedCount > 0) {
+            console.log(
+              `[Startup] reclaimTemporaryExports: freed ${deletedCount} ` +
+                `(kept ${skippedInUse} in use, ${skippedTooRecent} recent)`
+            );
+          }
+        })
+        .catch((e) => console.log('[Startup] reclaimTemporaryExports skipped:', e));
 
       // Drain the persistent upload queue + subscribe to NetInfo so queued
       // rounds upload automatically whenever connectivity returns.

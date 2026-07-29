@@ -1,6 +1,16 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
-import { crypto } from 'https://deno.land/std/crypto/mod.ts';
 import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
+
+// NOTE: there is deliberately NO `import { crypto } from 'https://deno.land/std/...'`
+// here. That import was unversioned — the only floating remote specifier left in
+// supabase/functions — and it resolved the getRandomValues that mints the share
+// token, which is the ONLY secret protecting a shared reel (get-shared-reel hands
+// the video to anyone holding a valid token). Whoever controlled what that URL
+// resolved to at deploy time could have substituted a weakened RNG and made every
+// subsequently issued token guessable. Deno's global `crypto` is WebCrypto and
+// gives the same guarantee with no third-party code in the path at all.
+// ci.yml's secret-scan job fails the build if an unpinned deno.land/esm.sh
+// specifier reappears anywhere under supabase/functions.
 
 const supabase = createClient(
   Deno.env.get('SUPABASE_URL')!,

@@ -41,7 +41,6 @@ import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
 import { ScorecardSetupScreen } from '@/components/record/ScorecardSetupScreen';
 import { ClickerTutorial } from '@/components/record/ClickerTutorial';
 import { RecordingSettingsSheet } from '@/components/record/RecordingSettingsSheet';
-import { useBLE } from '@/hooks/useBLE';
 import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
@@ -52,6 +51,7 @@ import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset, upsertCoursePreset } from '@/lib/api';
 import { buildHoleDataFromPars, presetHasScorecard, findPresetToUpdate } from '@/lib/scorecardLogic';
+import { isCaptureArmed } from '@/lib/captureArming';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 import type { CoursePreset } from '@/types/preset';
@@ -66,10 +66,19 @@ const CameraView = isNative
 
 export default function RecordScreen() {
   const insets = useSafeAreaInsets();
-  const ble = useBLE();
-  const shutter = useShutter();
+  // NOTE: there is deliberately no `useBLE()` here. It used to sit on this
+  // line, was never read (the screen uses `shutter.*` throughout), and each
+  // instance allocated a CBCentralManager — which is what raises the iOS
+  // Bluetooth prompt. expo-router eagerly requires every file under app/, so
+  // that dead call ran at cold start, before login, with no context on screen
+  // (spec 5.7 BLE permission overreach). useShutter owns the one BLE handle
+  // this screen needs.
   const round = useRound();
-  const { getCurrentLocation, getCurrentHeading } = useLocation();
+  const {
+    getCurrentLocation,
+    getCurrentHeading,
+    requestPermission: requestLocationPermission,
+  } = useLocation();
   const [courseName, setCourseName] = useState('');
   const [selectedCourseId, setSelectedCourseId] = useState<string | undefined>();
   const [courseHoles, setCourseHoles] = useState<HoleData[] | undefined>();
@@ -218,6 +227,39 @@ export default function RecordScreen() {
   // editor (adjusting preview playback volume) start recordings / advance
   // holes behind the user's back.
   const isFocused = useIsFocused();
+
+  // Is this screen an ARMED capture surface for shutter input right now?
+  // (lib/captureArming — pure, tested in tests/captureArming.test.ts.)
+  //
+  // The clicker is an unauthenticated HID keyboard, so "the UI is blocked" is
+  // never a control: the tutorial intro card's scrim swallows touches, but a
+  // VolumeUp/Enter event from the clicker (or any other paired keyboard in
+  // range) walks straight past it. Under that card `practice` is still false,
+  // so the clip is REAL — and the practice pass that follows ends in
+  // resetToStart, which unlinks the file from disk with no undo entry. Both
+  // shutter subscriptions below gate on this instead of on isActive/isFocused
+  // alone (spec 5.7, control BLE-001).
+  const captureArmed = isCaptureArmed({
+    roundInProgress: isActive,
+    screenFocused: isFocused,
+    tutorialActive,
+    tutorialPhase,
+  });
+
+  // Declared HERE, below captureArmed, rather than at the top of the component
+  // — the `armed` option needs that value and hooks cannot read a binding
+  // declared after them. Nothing between the old position and here touched
+  // `shutter`, so the move is inert.
+  //
+  // Passing `armed` matters: the subscriptions below already gate on
+  // captureArmed, but useShutter ALSO suppresses the iOS volume HUD and pins
+  // system volume to 0.5 so the hardware buttons read as shutter presses. That
+  // is a global, app-wide side effect, and it used to outlive the capture
+  // surface — visit Record once and every volume press for the rest of the
+  // session was swallowed, including while the user was watching their own reel
+  // with music. The option defaults to true, so leaving it unpassed silently
+  // kept the old behaviour: a gate that exists and is never applied.
+  const shutter = useShutter({ armed: captureArmed });
 
   // Camera hook — only active when round is in progress
   const camera = useCamera({
@@ -424,15 +466,16 @@ export default function RecordScreen() {
   // below, and use clearPendingClicks() to prevent the same press from
   // re-triggering a "toggle" 1s later through this onClick path.
   useEffect(() => {
-    if (!isActive || !isFocused) return;
+    if (!captureArmed) return;
 
     const unsubscribe = shutter.onClick(({ count }) => {
       console.log(`[record] onClick count=${count} isRecording=${camera.isRecording} ts=${Date.now() % 100000}`);
-      // NOTE: during the clicker tutorial the real actions DO fire — the
-      // tutorial is a live practice run on the real round (camera is in
+      // During the tutorial's COACHING phase the real actions DO fire — that
+      // phase is a live practice run the user opted into (camera is in
       // practice mode so clips are discarded, and round.resetToStart wipes
-      // everything when the tutorial ends). So we deliberately do NOT gate
-      // on tutorial state here.
+      // everything when it ends). The INTRO card is the opposite: it is a
+      // blocking scrim the user has not answered yet, so captureArmed is
+      // false above and this handler is not even subscribed.
 
       // count===1 while recording would mean the onPress fast-path failed
       // to short-circuit (e.g. clearPendingClicks didn't run). Log so we
@@ -472,8 +515,7 @@ export default function RecordScreen() {
     return unsubscribe;
   }, [
     shutter.onClick,
-    isActive,
-    isFocused,
+    captureArmed,
     camera.toggleRecording,
     camera.simulateRecording,
     camera.isRecording,
@@ -493,11 +535,16 @@ export default function RecordScreen() {
   //    long expired by then (round setup takes >1.5s), so re-arm it here.
   //    Same on refocus from the editor, whose PreviewPlayer flips the
   //    shared audio session and emits the same class of noise.
+  //    Gated on captureArmed (not isActive/isFocused) so that dismissing the
+  //    blocking tutorial intro card also drains any presses that landed while
+  //    it was up — otherwise a press made under the card would flush into the
+  //    handler the instant it subscribes and start a clip the user never asked
+  //    for, which is the same bug one step later.
   useEffect(() => {
-    if (!isActive || !isFocused) return;
+    if (!captureArmed) return;
     shutter.clearPendingClicks();
     shutter.armVolumeGrace();
-  }, [isActive, isFocused, shutter.clearPendingClicks, shutter.armVolumeGrace]);
+  }, [captureArmed, shutter.clearPendingClicks, shutter.armVolumeGrace]);
 
   // Immediate-press handler. Two jobs:
   //   1. ALWAYS: light haptic so the user feels the press registered, even
@@ -508,7 +555,9 @@ export default function RecordScreen() {
   //      doesn't trigger an onClick 1s later that would start a NEW
   //      recording.
   useEffect(() => {
-    if (!isActive || !isFocused) return;
+    // Same arming gate as the onClick path above — a press under the blocking
+    // intro card must not reach the camera at all, in either channel.
+    if (!captureArmed) return;
     return shutter.onPress(() => {
       if (camera.isRecording) {
         console.log('[record] onPress: instant stop (was recording)');
@@ -530,8 +579,7 @@ export default function RecordScreen() {
   }, [
     shutter.onPress,
     shutter.clearPendingClicks,
-    isActive,
-    isFocused,
+    captureArmed,
     camera.isRecording,
     camera.toggleRecording,
     camera.simulateRecording,
@@ -720,6 +768,31 @@ export default function RecordScreen() {
     ? (roundState.courseHoles.find((h) => h.holeNumber === roundState.currentHole)?.par ?? DEFAULT_PAR)
     : DEFAULT_PAR;
 
+  // Ask for the capture permissions HERE — at the moment the user commits to
+  // Live capture — and nowhere earlier.
+  //
+  // useCamera used to fire the camera + microphone prompts from its mount
+  // effect, and RecordScreen calls useCamera unconditionally, above the mode
+  // chooser. So a fresh install got two system dialogs the instant the Record
+  // tab was tapped, before "How are you capturing this round?" was even
+  // readable — including for users who only ever wanted Import (which uses
+  // MediaLibrary, not the camera). Spec 5.6: ask at the moment the user starts
+  // the capture feature. An out-of-context prompt is also a sticky denial: iOS
+  // never asks twice, and a denial parks the user on CameraPermissionScreen.
+  //
+  // Location is requested here too, and deliberately BEFORE the round starts:
+  // useLocation's fix makes getCurrentLocation non-prompting, so this is the
+  // one place a location dialog can appear. Previously the first clip save of
+  // a session raised it — over the live camera, mid-round, triggered by a
+  // clicker press (spec 6.5: a clicker event must not raise a permission
+  // dialog). GPS is optional metadata, so a denial never blocks the round.
+  const requestCapturePermissions = useCallback(async () => {
+    if (!isNative) return;
+    await camera.requestPermission();
+    // Non-blocking: no fix simply means clips carry no coordinates.
+    await requestLocationPermission().catch(() => false);
+  }, [camera.requestPermission, requestLocationPermission]);
+
   // Manual-flow start: user typed/selected a course and (optionally) tweaked
   // the holes / start-hole selectors. Validates and kicks off round.startRound.
   const startRound = async () => {
@@ -727,6 +800,7 @@ export default function RecordScreen() {
       Alert.alert('Course Name', 'Please enter or select a course to start.');
       return;
     }
+    await requestCapturePermissions();
     await round.startRound(
       courseName.trim(),
       selectedCourseId,
@@ -769,6 +843,10 @@ export default function RecordScreen() {
     setHolesPlayed(preset.holes_played);
     setStartHole(effectiveStartHole);
 
+    // Same in-context permission ask as the manual flow — a one-tap preset
+    // start is still the moment the user commits to Live capture.
+    await requestCapturePermissions();
+
     const ok = await round.startRound(
       preset.course_name,
       preset.course_id ?? undefined,
@@ -780,7 +858,7 @@ export default function RecordScreen() {
       // Non-blocking — failed timestamp bump shouldn't tank the round.
       void touchCoursePreset(preset.id);
     }
-  }, [round.startRound]);
+  }, [round.startRound, requestCapturePermissions]);
 
   // Save the per-hole pars the user entered on the "Set the scorecard"
   // screen as a bookmark preset. On success we add the new preset to the
@@ -939,7 +1017,12 @@ export default function RecordScreen() {
               <View style={{ flexDirection: 'row', gap: 8 }}>
                 <Button
                   title="Resume"
-                  onPress={() => {
+                  onPress={async () => {
+                    // Resuming drops the user straight onto the live camera,
+                    // so it is a commit to capture just like Start Round —
+                    // ask here rather than letting the permission screen or a
+                    // mid-round clip save be the first prompt.
+                    await requestCapturePermissions();
                     round.recoverRound(orphanedRound.id);
                     setOrphanedRound(null);
                   }}
@@ -1448,7 +1531,18 @@ export default function RecordScreen() {
   return (
     <View style={styles.fullScreen}>
       {/* Camera fills entire screen */}
-      {/* mute={false} — AUDIO ON, root-cause fixed. The -10868
+      {/* mute — AUDIO ON unless the user denied the microphone. The whole
+          detection pipeline degrades gracefully without an audio track
+          (ShotDetectorModule.swift returns [] for audio transients and falls
+          back to pose alone), so a mic denial must yield SILENT clips, not a
+          dead camera. It used to yield a dead camera: useCamera AND-ed the mic
+          result into hasPermission, so denying the mic parked the user on
+          CameraPermissionScreen forever (spec 5.6, overbroad permissions).
+          Compared against `false` explicitly so the still-hydrating null state
+          keeps audio on and never flips `mute` mid-session (flipping it
+          attaches/detaches the mic input on a live AVCaptureSession).
+
+          AUDIO ON is itself root-cause fixed. The -10868
           (kAudioUnitErr_FormatNotSupported) failure was react-native-volume-
           manager's addVolumeListener forcing the shared AVAudioSession to
           .ambient (a playback-only category) just to attach its volume-clicker
@@ -1493,7 +1587,7 @@ export default function RecordScreen() {
           }}
           mode="video"
           videoQuality="1080p"
-          mute={false}
+          mute={camera.hasMicPermission === false}
           // Phone torch as a "recording in progress" indicator. Cheap BLE
           // shutters don't expose their LED, so we use the rear camera
           // flash instead — visible from wherever the phone is pointed
