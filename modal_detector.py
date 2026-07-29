@@ -64,12 +64,20 @@ detector_image = (
 pipeline_secrets = [
     modal.Secret.from_name(
         "supabase-credentials",
-        required_keys=[
-            "SUPABASE_URL",
-            "SUPABASE_SERVICE_KEY",
-            "CLIPPAR_PIPELINE_SECRET",
-        ],
-    )
+        required_keys=["SUPABASE_URL", "SUPABASE_SERVICE_KEY"],
+    ),
+    # The caller secret lives in its OWN Modal secret rather than being added to
+    # supabase-credentials. Modal secrets are write-only — there is no way to read
+    # an existing value back — so folding a new key into that one would have meant
+    # recreating it from scratch and re-supplying the Supabase URL and service key
+    # from memory. Get either of those subtly wrong and the pipeline keeps
+    # deploying but writes to the wrong project, or stops authenticating, and
+    # nothing says so until a golfer's round fails to process. A second secret
+    # costs nothing and cannot damage the first.
+    modal.Secret.from_name(
+        "clippar-pipeline-auth",
+        required_keys=["CLIPPAR_PIPELINE_SECRET"],
+    ),
 ]
 
 
