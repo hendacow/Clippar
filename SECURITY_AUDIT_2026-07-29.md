@@ -143,47 +143,66 @@ Two bugs in my own gate script, found and fixed:
 
 ---
 
-## NOT DONE — do not treat these as closed
+## Round two — the four groups that were killed
 
-Four of seven implementation groups never ran. Outstanding confirmed findings:
+All four ran and were adversarially reviewed. **22 fixes, 18 upheld, 4 sent back,
+16 correctly scoped out.**
 
-**Edge functions / web / CI** (11 findings, group never started)
-- `sync-courses`: `escapeLikePattern` misses `*`, which PostgREST converts to `%`
-- `sync-courses`: user-supplied `country` interpolated into a third-party URL unencoded
-- `create-payment-intent`: product allowlist is a bare object lookup, so inherited
-  `Object.prototype` keys pass the "unknown product" check
-- `create-share-link`: still imports an **unversioned** `deno.land/std` module
-- `clippar-web/api/submit.py`: public waitlist endpoint, no rate limit — each call
-  opens a Neon connection and creates a Sender.net subscriber with an attacker-chosen email
-- GitHub Actions pinned to mutable tags in workflows holding the EAS release token
-- No secret scanning in CI; `.gitignore` misses some dotenv filenames Expo loads
-- `preview` EAS profile carries the production bundle id and production Supabase
-- `process-round` blocks up to 840s on Modal inside the request
+- **Edge/web/CI** — `search-courses` moves the GolfCourseAPI key server-side;
+  `create-share-link` drops its unversioned `deno.land` import (that import
+  resolved the RNG minting share tokens, the only secret protecting a shared
+  reel); `process-round` stops blocking 840s on Modal — past the platform
+  wall-clock limit, so the AbortController never fired and rounds wedged at
+  `processing` holding a claim the user cannot clear; `sync-courses` encodes
+  `country` (it was appending attacker-chosen params to a URL carrying our paid
+  key); a project-wide 100/hr GPU ceiling; secret scanning wired into CI with the
+  path filter removed.
+- **Capture** — clicker presses under the tutorial scrim no longer start a real
+  recording that then gets silently unlinked; GPS out of the logs; permissions no
+  longer requested on tab mount.
+- **Auth** — `local_rounds` scoped by `user_id`, fail-closed.
+- **Media** — `excludeFromBackup` implemented natively (`isExcludedFromBackup` +
+  `FileProtectionType.completeUnlessOpen`).
 
-**Capture** (partially done — `useShutter` fixed, rest untouched)
-- Clicker starts a **real** recording under the blocking tutorial scrim, and the
-  clip is then silently deleted
-- Precise GPS `console.log`'d per clip → shipped to Sentry via console breadcrumbs
-- Camera/mic permission requested on Record tab mount, before the user chooses capture
-- CoreBluetooth central manager instantiated at module import
+### What I fixed by hand after reading the reviews
 
-**Auth/session** (partially done — Keychain + PKCE fixed)
-- Sign-out leaves the previous user's rounds and video in local SQLite; the local
-  DB has no user column. **Deliberately not fixed**: this app holds the only copy
-  of a golfer's footage, and wiping on sign-out destroys a round that cannot be
-  re-recorded. Needs scoping rows to a user id plus an explicit "remove local
-  media" action, not a wipe bolted onto sign-out.
-- Account deletion has no recent-auth requirement (the comment calling
-  `refreshSession()` a "re-auth gate" is wrong)
-- Account deletion leaves raw video on disk
+The reviewers rejected four fixes. Every rejection was correct — each had done
+real work and left the half that mattered:
 
-**Media**
-- `excludeFromBackup` has **no native Swift implementation**. The TS wrapper
-  reports failure honestly rather than pretending, but MEDIA-002 (backup
-  exclusion + Data Protection class on raw clips) is still open.
-- `reclaimTemporaryExports` is written and tested but has **no call site**.
+1. **A data-loss regression.** `clearLocalDatabase` was still an unqualified
+   `DELETE` across every table plus `deleteFile()` on every clip URI, so on a
+   shared phone user A deleting *their* account destroyed user B's rounds and raw
+   video. Now scoped through `local_rounds.user_id`, fail-closed.
+2. **`useShutter`'s `armed` option had no call site** — the same
+   defined-but-never-called failure as the Modal auth helper. It defaults to
+   `true`, so the gate existed and was never applied.
+3. **Actions pinning covered two of six workflows.** `build.yml` still had a
+   floating `expo/expo-github-action@v8` holding `EXPO_TOKEN` — code execution
+   there buys an OTA push to every App Store install.
+4. **The API key was still in the bundle** despite the proxy, because
+   `constants/config.ts` still read it and Expo inlines those as literals. Also
+   scrubbed from both tracked `.env.*.example` files.
+5. **The proxy had made the DoS cheaper** — the shared upstream budget was spent
+   before validation, so junk requests burned it.
+6. **Backup exclusion covered `clips/` and left the sharper data** — the SQLite
+   DB carries per-shot GPS, and `exports/` holds full-fidelity shared clips.
+7. **Account deletion's recent-auth gate was client-only** — a stolen token still
+   deleted the account by curl. Now enforced server-side on the token's `iat`.
 
----
+## Still open
+
+- **`stripe-webhook` still echoes `err.message`** to the caller (one of five
+  handlers; the other four are fixed). Shop is hidden at v1 and the function is
+  undeployed.
+- **Clip-level local scoping.** Rounds are scoped; individual clip queries reach
+  them through an already-scoped round id, which the reviewer judged sufficient.
+- **`resetToStart` still unlinks real clips with no undo entry** —
+  `hooks/useRound.ts` was outside every group's allowlist.
+- **Sentry breadcrumbs.** GPS no longer reaches the log, but `Sentry.init` still
+  has no `beforeBreadcrumb` and no `maxBreadcrumbs`.
+- **The temp-export sweep in the wipe path is unscoped** — it can delete another
+  account's cached trims. Cache only; source footage is untouched.
+- **No test for the delete-account freshness check** (the handler is not exported).
 
 ## Yours — I can't do these
 
