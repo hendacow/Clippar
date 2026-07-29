@@ -73,10 +73,89 @@ module.exports = () => ({
       // Clippar collects no advertising identifier and does no cross-app
       // tracking, so NSPrivacyTracking stays false and there are no tracking
       // domains (see APPSTORE_READINESS.md → App Privacy / ATT).
+      //
+      // NSPrivacyCollectedDataTypes must mirror what the binary ACTUALLY sends
+      // off-device. It was previously an empty array, which is a false privacy
+      // disclosure shipped inside the app: Apple reconciles the manifest against
+      // observed SDK/network behaviour and pulls builds that under-declare, and
+      // an empty array is the artefact a regulator would hold up against the
+      // App Store privacy answers. Every entry below is backed by a call site —
+      // keep them in sync, and add a type BEFORE adding the code that sends it:
+      //   • EmailAddress / UserID — Supabase Auth sign-in (app/(auth)/*,
+      //     lib/supabase.ts) stores the account email and user id server-side.
+      //   • PreciseLocation — per-shot GPS captured at hooks/useCamera.ts:430,
+      //     persisted to local_clips.gps_latitude/longitude (lib/storage.ts:23)
+      //     and sent to the `shots` table by lib/uploadQueue.ts:232 whenever
+      //     cloud backup is on. Off by default, but "collected" once enabled.
+      //   • PhotosorVideos — clip and reel uploads (lib/r2.ts:34 and :272),
+      //     including each video's original audio track.
+      //   • CrashData / PerformanceData — Sentry, initialised unconditionally at
+      //     app/_layout.tsx:46 with tracesSampleRate 0.1.
+      //   • PurchaseHistory — RevenueCat/StoreKit (lib/iap.ts) and Stripe
+      //     (lib/stripe.ts) receive subscription and mount-kit purchase state.
+      // All of it is linked to the account and none of it is used for tracking
+      // or advertising, hence Linked:true / Tracking:false throughout.
       privacyManifests: {
         NSPrivacyTracking: false,
         NSPrivacyTrackingDomains: [],
-        NSPrivacyCollectedDataTypes: [],
+        NSPrivacyCollectedDataTypes: [
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeEmailAddress',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeUserID',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePreciseLocation',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePhotosorVideos',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePurchaseHistory',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAppFunctionality',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypeCrashData',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAnalytics',
+            ],
+          },
+          {
+            NSPrivacyCollectedDataType: 'NSPrivacyCollectedDataTypePerformanceData',
+            NSPrivacyCollectedDataTypeLinked: true,
+            NSPrivacyCollectedDataTypeTracking: false,
+            NSPrivacyCollectedDataTypePurposes: [
+              'NSPrivacyCollectedDataTypePurposeAnalytics',
+            ],
+          },
+        ],
         NSPrivacyAccessedAPITypes: [
           {
             NSPrivacyAccessedAPIType: 'NSPrivacyAccessedAPICategoryUserDefaults',

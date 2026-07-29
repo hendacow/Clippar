@@ -41,8 +41,8 @@ jobs:
       run:
         working-directory: clippar_app
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
@@ -59,16 +59,24 @@ jobs:
       run:
         working-directory: clippar_app
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-node@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: clippar_app/package-lock.json
       - run: npm ci
-      - uses: expo/expo-github-action@v8
+      # SHA-pinned, not @v8. This step is handed EXPO_TOKEN — an EAS account
+      # access token — so whoever controls what `v8` resolves to gets code
+      # execution in a job holding the credential that can `eas update --branch
+      # production`, i.e. push an OTA to every App Store install. EAS Update code
+      # signing is not enabled, so nothing downstream would catch it. A tag is a
+      # mutable pointer; a commit SHA is not.
+      - uses: expo/expo-github-action@c7b66a9c327a43a8fa7c0158e7f30d6040d2481e # v8
         with:
-          eas-version: latest
+          # Pinned rather than `latest` for the same reason: `latest` is whatever
+          # npm serves at run time.
+          eas-version: 21.4.0
           token: ${{ secrets.EXPO_TOKEN }}
       - name: Build ${{ github.event.inputs.profile }}
         run: eas build --profile ${{ github.event.inputs.profile }} --platform ios --non-interactive --no-wait

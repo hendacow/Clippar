@@ -1,26 +1,49 @@
 name: CI
 
-# Keeps main green: runs the verify gate (typecheck + tests) on every PR into
-# main and on pushes to main. Scoped to clippar_app so changes to the web app
-# or other parts of the monorepo don't trigger the mobile pipeline.
+# Keeps main green: runs the verify gate (typecheck + tests) and the secret scan
+# on every PR into main and on pushes to main.
+#
+# NOTE: deliberately no `paths:` filter. It used to be scoped to
+# `clippar_app/**`, which is fine for a typecheck gate and wrong for a secret
+# scan — a path filter means committing a credential anywhere outside the listed
+# prefix skips the check entirely, and the whole point of the scan is that it
+# cannot be routed around. The extra minutes on web-only changes are cheap.
 on:
   pull_request:
     branches: [main]
-    paths: ['clippar_app/**']
   push:
     branches: [main]
-    paths: ['clippar_app/**']
 
 jobs:
+  secret-scan:
+    name: secret + endpoint scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Actions are pinned to immutable commit SHAs, never to tags. A tag is
+      # movable by whoever publishes the action, so `@v4` is "whatever that
+      # account points it at today" — and the workflows in this repo hand
+      # third-party actions the EAS release token. See eas-update.yml.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history: a key that was committed and then deleted is still a
+          # leaked key, and a shallow clone cannot see it.
+          fetch-depth: 0
+      - name: Scan for secrets and non-production endpoints
+        run: ./scripts/secret-scan.sh
+
   verify:
     name: typecheck + tests
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     defaults:
       run:
         working-directory: clippar_app
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
           cache: npm
@@ -28,3 +51,41 @@ jobs:
       # postinstall runs patch-package (re-applies the RNVM + expo-camera patches)
       - run: npm ci
       - run: npm run verify
+
+  edge-functions:
+    name: edge function typecheck + tests
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # clippar_app/tsconfig.json EXCLUDES supabase/functions (they use https:
+      # imports tsc cannot resolve), so `npm run verify` has never covered the
+      # backend. Without this a broken — or unguarded — edge function ships green.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
+        with:
+          deno-version: v2.x
+      - name: Typecheck edge functions
+        working-directory: clippar_app
+        run: |
+          for f in supabase/functions/*/index.ts supabase/functions/_shared/*.ts; do
+            case "$f" in *.test.ts) continue ;; esac
+            [ -f "$f" ] || continue
+            # --node-modules-dir=none: the Stripe types pulled in by
+            # create-payment-intent and stripe-webhook reference @types/node, and
+            # Deno v2 auto-detects clippar_app/package.json and then insists on a
+            # populated node_modules to resolve it. These functions import only
+            # https: specifiers, so there is nothing for Deno to resolve there.
+            # Without this the job fails on a machine that has not run npm ci —
+            # and passes on one that has, which is exactly how it hid locally.
+            deno check --quiet --node-modules-dir=none "$f"
+          done
+      - name: Test edge functions
+        working-directory: clippar_app
+        # Dummy values: importing a function module constructs its service-role
+        # client at top level and createClient throws on an undefined URL before
+        # any test body runs. They only have to parse.
+        env:
+          SUPABASE_URL: https://test.supabase.co
+          SUPABASE_SERVICE_ROLE_KEY: test-key
+        run: deno test --allow-env --node-modules-dir=none supabase/functions/

@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import * as Location from 'expo-location';
 import { Platform } from 'react-native';
 
@@ -95,8 +95,42 @@ export function useLocation() {
   const [hasPermission, setHasPermission] = useState(false);
   const [lastLocation, setLastLocation] = useState<Coordinates | null>(null);
 
+  // Hydrate the permission state from the OS on mount, WITHOUT prompting.
+  // `hasPermission` used to start false on every mount and nothing ever read
+  // the real value back, so the first getCurrentLocation of each app session
+  // took the "not granted → request" branch even for a user who granted
+  // location months ago.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let cancelled = false;
+    Location.getForegroundPermissionsAsync()
+      .then(({ status }) => {
+        if (!cancelled) setHasPermission(status === 'granted');
+      })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  /**
+   * PROMPTING. The only place in the app that can raise the location dialog,
+   * so it must be called from an explicit, in-context moment — record.tsx does
+   * it from the Live round-setup handlers, before the camera is on screen.
+   *
+   * Checks the current status first so an already-granted (or already-denied,
+   * un-askable) state is a no-op rather than a round-trip.
+   */
   const requestPermission = useCallback(async () => {
     if (Platform.OS === 'web') {
+      setHasPermission(false);
+      return false;
+    }
+
+    const current = await Location.getForegroundPermissionsAsync().catch(() => null);
+    if (current?.status === 'granted') {
+      setHasPermission(true);
+      return true;
+    }
+    if (current && current.canAskAgain === false) {
       setHasPermission(false);
       return false;
     }
@@ -110,10 +144,22 @@ export function useLocation() {
   const getCurrentLocation = useCallback(
     async (opts?: { highAccuracy?: boolean }): Promise<Coordinates | null> => {
       if (Platform.OS === 'web') return null;
-      if (!hasPermission) {
-        const granted = await requestPermission();
-        if (!granted) return null;
-      }
+      // NON-PROMPTING, and deliberately reading the OS rather than the
+      // `hasPermission` state (which can be stale relative to a permission the
+      // user changed in Settings mid-round).
+      //
+      // This used to call the PROMPTING requestForegroundPermissionsAsync. Its
+      // only production caller is useCamera's clip-save block, which runs when
+      // recordAsync resolves — i.e. right after a clicker press stopped a
+      // clip. So an external HID event could put a system permission dialog
+      // over the live camera between shots (spec 5.7 / 6.5: a clicker event
+      // must not be able to raise a permission dialog). getCurrentHeading
+      // already did it this way; this is the same pattern applied to the path
+      // that actually fires on every clip.
+      const { status } = await Location.getForegroundPermissionsAsync().catch(
+        () => ({ status: 'denied' as const })
+      );
+      if (status !== 'granted') return null;
 
       try {
         // Tracer (highAccuracy): demand a fresh fix so an 80m walk actually
@@ -145,7 +191,7 @@ export function useLocation() {
         return null;
       }
     },
-    [hasPermission, requestPermission]
+    []
   );
 
   /**

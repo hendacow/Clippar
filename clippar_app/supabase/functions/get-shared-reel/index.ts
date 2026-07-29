@@ -1,4 +1,5 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
+import { clientIp, enforceRateLimit, RATE_LIMITS } from '../_shared/rateLimit.ts';
 
 /**
  * get-shared-reel — PUBLIC signer for the shared-reel viewer at
@@ -69,6 +70,24 @@ Deno.serve(async (req: Request) => {
     return new Response('ok', { headers: cors });
   }
 
+  // ── Rate limit by client IP ──
+  // This is the only endpoint with no JWT, so there is no user to key on. Share
+  // tokens are 128-bit random and were never enumerable, but nothing stopped one
+  // host pulling this in a loop, and every call costs a database read plus a
+  // signed-URL mint. Keyed on the LAST X-Forwarded-For entry — see clientIp(),
+  // the leftmost entry is caller-controlled and would hand out a fresh bucket per
+  // request.
+  //
+  // Counted before the token is even read, so a flood of malformed requests is
+  // limited too.
+  const limited = await enforceRateLimit(
+    supabase,
+    RATE_LIMITS.getSharedReel,
+    clientIp(req),
+    cors,
+  );
+  if (limited) return limited;
+
   try {
     // ── Extract the share token from GET query or POST body ──
     let shareToken: string | null = null;
@@ -96,7 +115,7 @@ Deno.serve(async (req: Request) => {
     const { data: round, error } = await supabase
       .from('rounds')
       .select(
-        'course_name, total_score, score_to_par, reel_url, created_at, is_published, share_token',
+        'id, course_name, total_score, score_to_par, reel_url, created_at, is_published, share_token',
       )
       .eq('share_token', shareToken.trim())
       .maybeSingle();
@@ -105,12 +124,37 @@ Deno.serve(async (req: Request) => {
 
     // Same rule as the "Shared rounds are publicly viewable" RLS policy.
     if (!round.share_token || round.is_published !== true) return notAvailable();
+    // reel_url is only a "has a reel been composed yet" flag here — its VALUE is
+    // deliberately not used to build the object key. See below.
     if (!round.reel_url) return notAvailable();
 
     // ── Sign the reel in the private `clips` bucket ──
+    //
+    // The key is DERIVED from the round id, never taken from round.reel_url.
+    //
+    // This used to sign round.reel_url directly, and that made this endpoint a
+    // signing oracle for the entire bucket. `reel_url` is in the column UPDATE
+    // grant that migration 013 gives to `authenticated` (013:134), so any user
+    // can write any string into it on a round they own. Reels are stored at the
+    // fully predictable key `reels/<roundId>.mp4` (lib/r2.ts:279,351). So:
+    //
+    //   1. attacker creates a throwaway round of their own
+    //   2. PATCH rounds SET reel_url='reels/<victimRoundId>.mp4', is_published=true
+    //   3. create-share-link for their OWN round — ownership check passes honestly
+    //   4. GET this endpoint with their own token
+    //
+    // and the service role — which bypasses storage RLS entirely — hands back a
+    // playable signed URL to someone else's private reel. The same trick reached
+    // raw per-hole clips at `<roundId>/<file>.mp4`. Nothing in the old checks
+    // bound the object key to the round being shared; a UUID being hard to guess
+    // was the only thing in the way, which is exactly what spec 5.2 says must
+    // never be the control.
+    //
+    // Deriving the key closes it structurally: a caller can still write whatever
+    // they like into reel_url, but it can no longer influence what we sign.
     const { data: signed, error: signErr } = await supabase.storage
       .from('clips')
-      .createSignedUrl(round.reel_url, SIGNED_URL_TTL_SECONDS);
+      .createSignedUrl(`reels/${round.id}.mp4`, SIGNED_URL_TTL_SECONDS);
 
     if (signErr || !signed?.signedUrl) return notAvailable();
 

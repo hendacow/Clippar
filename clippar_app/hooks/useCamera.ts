@@ -133,7 +133,12 @@ export function useCamera({
   const practiceRef = useRef(practice);
   practiceRef.current = practice;
   const [isRecording, setIsRecording] = useState(false);
+  // CAMERA permission only. The mic is tracked separately below: the shot
+  // detector runs pose-only when there is no audio track
+  // (ShotDetectorModule.swift), so a mic denial must not be able to take the
+  // camera down with it (spec 5.6 — overbroad permissions).
   const [hasPermission, setHasPermission] = useState<boolean | null>(null);
+  const [hasMicPermission, setHasMicPermission] = useState<boolean | null>(null);
   const isRecordingRef = useRef(false);
   const recordingStartTime = useRef<number>(0);
   const lastToggleTime = useRef<number>(0);
@@ -163,9 +168,23 @@ export function useCamera({
     paramsRef.current = { roundId, holeNumber, shotNumber };
   }, [roundId, holeNumber, shotNumber]);
 
+  /**
+   * PROMPTING. Only call this when the user has actually committed to the
+   * capture feature — app/(tabs)/record.tsx does it from the Start Round /
+   * preset-start / resume handlers (requestCapturePermissions), never on
+   * mount. Spec 5.6: ask for camera and microphone at the moment the user
+   * starts capture, not when a tab renders.
+   *
+   * Returns the CAMERA verdict. The mic is asked for in the same breath (both
+   * dialogs belong to the same moment) but is optional — it is recorded into
+   * its own state so the caller can mute the CameraView instead of refusing to
+   * record. Denying the mic used to make `granted` false, which parked the
+   * user on CameraPermissionScreen with no way back into the feature.
+   */
   const requestPermission = useCallback(async (): Promise<boolean> => {
     if (!isNative) {
       setHasPermission(false);
+      setHasMicPermission(false);
       return false;
     }
     try {
@@ -174,25 +193,43 @@ export function useCamera({
         Camera.requestCameraPermissionsAsync(),
         Camera.requestMicrophonePermissionsAsync(),
       ]);
-      const granted =
-        camResult.status === 'granted' && micResult.status === 'granted';
+      const granted = camResult.status === 'granted';
       setHasPermission(granted);
+      setHasMicPermission(micResult.status === 'granted');
       return granted;
     } catch {
       setHasPermission(false);
+      setHasMicPermission(false);
       return false;
     }
   }, []);
 
-  // Check permission on mount (native only)
+  // NON-PROMPTING hydration on mount. This only reads the current TCC state so
+  // the screen knows what it has; it can never raise a system dialog. The
+  // prompting variant used to run from here, which meant tapping the Record
+  // tab fired the camera AND microphone dialogs before the user had chosen
+  // between Live capture and Import — see requestPermission above.
   useEffect(() => {
-    if (isNative) {
-      // Unique marker so we can verify which bundle is loaded.
-      // bundle-id: cam-fix-v2
-      console.log('[useCamera] mounted — bundle cam-fix-v2');
-      requestPermission();
-    }
-  }, [requestPermission]);
+    if (!isNative) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { Camera } = require('expo-camera');
+        const [camResult, micResult] = await Promise.all([
+          Camera.getCameraPermissionsAsync(),
+          Camera.getMicrophonePermissionsAsync(),
+        ]);
+        if (cancelled) return;
+        setHasPermission(camResult.status === 'granted');
+        setHasMicPermission(micResult.status === 'granted');
+      } catch {
+        // Leave both null — unknown, not denied. A null hasPermission renders
+        // the camera path rather than the permission wall, and the in-context
+        // request at round start resolves it for real.
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   // Configure iOS audio session for recording BEFORE the camera attempts
   // to attach the mic. The editor's expo-av playback puts the session in
@@ -405,19 +442,32 @@ export function useCamera({
           new Promise<null>((r) => setTimeout(() => r(null), 1500)),
         ]);
 
-        // TEMP tracer-capture diagnostic (remove after field validation):
-        // surfaces exactly what the sensors returned for this clip so we can
-        // confirm heading/pitch/GPS/accuracy land before going to the course.
-        console.log(
-          '[TRACER-CAPTURE]',
-          JSON.stringify({
-            gps: gps ? { lat: gps.latitude, lon: gps.longitude, accM: gps.accuracy ?? null } : null,
-            headingDeg: heading?.headingDeg ?? null,
-            headingTrue: heading?.isTrue ?? null,
-            headingCalibration: heading?.calibration ?? null,
-            pitchDownDeg: pitchDeg ?? null,
-          })
-        );
+        // Tracer-capture diagnostic. NEVER log lat/lon, and never in a
+        // production build.
+        //
+        // This ran on every saved clip with no __DEV__ guard and printed the
+        // exact fix. Sentry's default console breadcrumb integration captures
+        // console output and attaches the last 100 breadcrumbs to every event
+        // it sends (app/_layout.tsx calls Sentry.init with no beforeBreadcrumb
+        // and attachStacktrace:true), so any crash or handled error later in
+        // the round shipped a timestamped trail of the golfer's precise
+        // coordinates to sentry.io — a home course plus a tee time, attributed
+        // to a device. Spec 5.5 names GPS explicitly as must-redact for logs
+        // and crash reports; control PRIV-001. `hasFix` + the accuracy radius
+        // is all the field validation actually needed.
+        if (__DEV__) {
+          console.log(
+            '[TRACER-CAPTURE]',
+            JSON.stringify({
+              hasFix: !!gps,
+              accM: gps?.accuracy ?? null,
+              headingDeg: heading?.headingDeg ?? null,
+              headingTrue: heading?.isTrue ?? null,
+              headingCalibration: heading?.calibration ?? null,
+              pitchDownDeg: pitchDeg ?? null,
+            })
+          );
+        }
 
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
@@ -773,6 +823,7 @@ export function useCamera({
     isRecording,
     isFinalizing,
     hasPermission,
+    hasMicPermission,
     requestPermission,
     startRecording,
     stopRecording,

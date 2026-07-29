@@ -122,6 +122,25 @@ export type ClearTrimCacheResult = {
   deletedCount: number;
 };
 
+/**
+ * Result of `excludeFromBackup`. Deliberately NOT a bare boolean: the caller
+ * has to be able to tell "iOS accepted the exclusion" apart from "this build
+ * cannot do it", because those two mean opposite things for MEDIA-002.
+ */
+export type ExcludeFromBackupResult = {
+  excluded: boolean;
+  /** Why not, when `excluded` is false. */
+  reason?: string;
+};
+
+export type ReclaimTempExportsResult = {
+  deletedCount: number;
+  /** Matched a temp-export name but was still referenced by the app. */
+  skippedInUse: number;
+  /** Matched but younger than maxAgeMs — an export may still be in flight. */
+  skippedTooRecent: number;
+};
+
 export type DeleteFileResult = {
   deleted: boolean;
   error?: string;
@@ -232,6 +251,11 @@ type NativeModuleType = {
   stitchClips(clipUris: string[]): Promise<StitchResult>;
   composeReel(clips: ComposeClipInput[], scorecardJson: string, musicUri: string): Promise<ComposeReelResult>;
   clearTrimCache(): Promise<ClearTrimCacheResult>;
+  /**
+   * Optional: absent on every native build predating the MEDIA-002 work.
+   * Sets NSURLIsExcludedFromBackupKey on the given file/dir URL.
+   */
+  excludeFromBackup?(fileUri: string): Promise<{ excluded: boolean; reason?: string }>;
   deleteFile(fileUri: string): Promise<DeleteFileResult>;
   getMemoryStats(): Promise<MemoryStats>;
   detectBallLaunch(videoUri: string, impactTimeMs: number, optionsJson: string): Promise<BallLaunchResult>;
@@ -248,6 +272,15 @@ try {
   nativeModule = require("./src/ShotDetectorModule").default;
 } catch {
   // Native module not available (Expo Go or missing native build)
+}
+
+// Used by reclaimTemporaryExports to sweep this module's own leftovers out of
+// Library/Caches. Literal require so Metro bundles it; null under node/web.
+let FileSystemLegacy: typeof import("expo-file-system/legacy") | null = null;
+try {
+  FileSystemLegacy = require("expo-file-system/legacy");
+} catch {
+  // expo-file-system not available (plain node test runner)
 }
 
 /**
@@ -479,6 +512,195 @@ export async function clearTrimCache(): Promise<ClearTrimCacheResult> {
   }
 
   return nativeModule.clearTrimCache();
+}
+
+// ─── MEDIA-003: reclaiming temporary exports ───
+//
+// Every trim, compose and "share this hole" drops a full-fidelity copy of the
+// golfer's video into Library/Caches and nothing ever removes it:
+//   trim_<UUID>.(mp4|mov)      — trimVideo / detectAndTrim
+//   stitch_<UUID>.mp4          — stitchClips / composeReel
+//   tracer_<UUID>.mp4          — renderTracerOnClip
+//   clippar_reel_<roundId>.mp4 — lib/sharing.ts getLocalVideoUri
+// `clearTrimCache` above only ever matched `trim_`, and had no call sites at
+// all, so these accumulate for the life of the install. That is unbounded
+// retention of readable footage the user believes they deleted — deleting a
+// round unlinks only the URIs recorded in SQLite, and a temp that was never
+// promoted into a column is not among them — plus the practical cause of
+// storage exhaustion on an 18-hole round. A crash mid-export (realistic: the
+// compose path holds large buffers) also leaves a readable partial video
+// behind permanently, which is what "reconcile orphaned temporary files after
+// crash" in the spec is asking for.
+//
+// This is implemented in TS rather than by widening the native filter for two
+// reasons: it can ship over-the-air (a Swift change needs a new binary), and
+// the two safety rules below are testable in isolation.
+
+const TEMP_EXPORT_PREFIXES = ["trim_", "stitch_", "tracer_", "clippar_reel_"] as const;
+const TEMP_EXPORT_SUFFIXES = [".mp4", ".mov"] as const;
+
+/**
+ * Files younger than this are left alone. An export in flight, or a reel the
+ * user composed moments ago and has not yet saved, must never be pulled out
+ * from under the player.
+ */
+export const TEMP_EXPORT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Map arbitrary URIs to the bare filenames `reclaimTemporaryExports` compares
+ * against. Handles the file:// prefix, percent-encoding and any ?query so a
+ * URI stored in SQLite still matches the file on disk.
+ */
+export function tempExportFilenames(
+  uris: ReadonlyArray<string | null | undefined>
+): Set<string> {
+  const names = new Set<string>();
+  for (const uri of uris) {
+    if (!uri) continue;
+    const withoutQuery = uri.split("?")[0].split("#")[0];
+    let name = withoutQuery.substring(withoutQuery.lastIndexOf("/") + 1);
+    if (!name) continue;
+    try {
+      name = decodeURIComponent(name);
+    } catch {
+      // Malformed escape — compare the raw name rather than dropping it,
+      // since dropping it would make the file look reclaimable.
+    }
+    names.add(name);
+  }
+  return names;
+}
+
+/**
+ * The whole safety decision for one file, kept pure so the "never delete
+ * something in use" and "never delete something recent" guarantees are locked
+ * down by tests rather than by inspection of an async sweep.
+ *
+ * Anything that is not a recognised temporary export is left untouched — this
+ * must never grow into a general cache wipe, because Library/Caches also holds
+ * other subsystems' data (e.g. recovered-clips/).
+ */
+export function isReclaimableTempExport(
+  filename: string,
+  opts: {
+    modifiedAtMs: number;
+    nowMs: number;
+    maxAgeMs: number;
+    inUseFilenames: ReadonlySet<string>;
+  }
+): boolean {
+  const isTempExport =
+    TEMP_EXPORT_PREFIXES.some((p) => filename.startsWith(p)) &&
+    TEMP_EXPORT_SUFFIXES.some((s) => filename.toLowerCase().endsWith(s));
+  if (!isTempExport) return false;
+  if (opts.inUseFilenames.has(filename)) return false;
+  // A missing/zero mtime means we could not establish the file's age; treat it
+  // as brand new rather than guessing, so an unreadable stat can never cause
+  // deletion.
+  if (!opts.modifiedAtMs) return false;
+  return opts.nowMs - opts.modifiedAtMs >= opts.maxAgeMs;
+}
+
+/**
+ * Sweep aged-out temporary exports out of Library/Caches.
+ *
+ * `inUseUris` is REQUIRED and has no default on purpose: the caller is the only
+ * one who can enumerate local_clips.file_uri / trimmed_file_uri and
+ * rounds.reel_url, and a caller who forgets it would delete a reel the player
+ * is holding. Making it mandatory means that mistake is a type error.
+ *
+ * Safe to call at startup — it never touches files younger than `maxAgeMs`.
+ */
+export async function reclaimTemporaryExports(params: {
+  inUseUris: ReadonlyArray<string | null | undefined>;
+  maxAgeMs?: number;
+  nowMs?: number;
+}): Promise<ReclaimTempExportsResult> {
+  const result: ReclaimTempExportsResult = {
+    deletedCount: 0,
+    skippedInUse: 0,
+    skippedTooRecent: 0,
+  };
+
+  const cacheDir = FileSystemLegacy?.cacheDirectory;
+  if (!FileSystemLegacy || !cacheDir) return result;
+
+  const maxAgeMs = params.maxAgeMs ?? TEMP_EXPORT_MAX_AGE_MS;
+  const nowMs = params.nowMs ?? Date.now();
+  const inUseFilenames = tempExportFilenames(params.inUseUris);
+
+  let entries: string[];
+  try {
+    entries = await FileSystemLegacy.readDirectoryAsync(cacheDir);
+  } catch (err) {
+    console.warn("[ShotDetector] reclaimTemporaryExports: cannot read cache dir", err);
+    return result;
+  }
+
+  for (const filename of entries) {
+    const looksTemporary =
+      TEMP_EXPORT_PREFIXES.some((p) => filename.startsWith(p)) &&
+      TEMP_EXPORT_SUFFIXES.some((s) => filename.toLowerCase().endsWith(s));
+    if (!looksTemporary) continue;
+
+    const uri = `${cacheDir}${filename}`;
+    try {
+      // getInfoAsync on a FILE is cheap — the pathological recursive-sizing
+      // case (see lib/media.ts) only applies to directories.
+      const info = await FileSystemLegacy.getInfoAsync(uri);
+      if (!info.exists) continue;
+      const modifiedAtMs = (info as { modificationTime?: number }).modificationTime
+        ? Math.round(((info as { modificationTime: number }).modificationTime) * 1000)
+        : 0;
+
+      if (inUseFilenames.has(filename)) {
+        result.skippedInUse++;
+        continue;
+      }
+      if (
+        !isReclaimableTempExport(filename, { modifiedAtMs, nowMs, maxAgeMs, inUseFilenames })
+      ) {
+        result.skippedTooRecent++;
+        continue;
+      }
+
+      await FileSystemLegacy.deleteAsync(uri, { idempotent: true });
+      result.deletedCount++;
+    } catch (err) {
+      // One unreadable file must not abort the sweep.
+      console.warn("[ShotDetector] reclaimTemporaryExports: skipping", filename, err);
+    }
+  }
+
+  return result;
+}
+
+/**
+ * MEDIA-002: mark a file or directory NSURLIsExcludedFromBackupKey so it is
+ * left out of iCloud/iTunes device backups.
+ *
+ * Why this exists: raw clips live in documentDirectory/clips/, which iOS backs
+ * up to iCloud by default. A user who deliberately leaves Cloud backup OFF —
+ * and is told "Cloud backup off — clips not in the cloud" — still has every
+ * clip, and the GPS-bearing SQLite database, uploaded to Apple on the next
+ * device backup and restored onto any device that restores it.
+ *
+ * expo-file-system exposes no way to set this key, so it needs a native
+ * counterpart. Until `excludeFromBackup` exists in ShotDetectorModule.swift
+ * this resolves `{ excluded: false, reason: 'native-unavailable' }` and the
+ * control is NOT in force — callers must treat a false as "still backed up"
+ * and must not report success on its behalf.
+ */
+export async function excludeFromBackup(fileUri: string): Promise<ExcludeFromBackupResult> {
+  if (!nativeModule || typeof nativeModule.excludeFromBackup !== "function") {
+    return { excluded: false, reason: "native-unavailable" };
+  }
+  try {
+    const result = await nativeModule.excludeFromBackup(fileUri);
+    return { excluded: result?.excluded === true, reason: result?.reason };
+  } catch (err) {
+    return { excluded: false, reason: String(err) };
+  }
 }
 
 /**

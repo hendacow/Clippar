@@ -14,6 +14,36 @@ import { isInvalidRefreshTokenError } from '@/lib/authSessionLogic';
 // session. Must run at module load — putting it inside the hook is too late.
 WebBrowser.maybeCompleteAuthSession();
 
+/**
+ * Detach this device's third-party account state when a session ends.
+ *
+ * Only RevenueCat, deliberately. `iap.reset()` has existed since the IAP work
+ * and is documented "on sign-out / deletion", but nothing ever called it: the
+ * SDK keeps the previously identified appUserID and its cached CustomerInfo
+ * after Supabase signs out, so `isProActive()` can answer from the departed
+ * account's cache in the window before the next `logIn()` finishes its native
+ * round-trip — and that answer gets written into the new account's Pro cache.
+ *
+ * What this deliberately does NOT do is wipe local data. The audit also flagged
+ * that sign-out leaves the previous user's rounds in SQLite, which is true, but
+ * this app stores a golfer's ONLY copy of their footage on the device. Clearing
+ * it here would silently destroy a round that cannot be re-recorded, and a
+ * shared handset is a far rarer situation than someone signing out and back in.
+ * That one needs a considered fix (scope the local rows to a user id, offer an
+ * explicit "remove local media" action) rather than a wipe bolted onto sign-out.
+ *
+ * Never throws: this runs inside the auth state listener, where an exception
+ * would derail every other subscriber to the same event.
+ */
+async function resetLocalAccountState(): Promise<void> {
+  try {
+    await iap.reset();
+  } catch {
+    // A failed reset must not block sign-out. Worst case the SDK keeps a stale
+    // customer until the next successful identify() overwrites it.
+  }
+}
+
 export function useAuth() {
   const [session, setSession] = useState<Session | null>(null);
   const [user, setUser] = useState<User | null>(null);
@@ -74,7 +104,15 @@ export function useAuth() {
       setUser(session?.user ?? null);
       setLoading(false);
       if (event === 'SIGNED_OUT') {
-        // Nothing to alias; RevenueCat keeps its anonymous id until next login.
+        // RevenueCat does NOT fall back to an anonymous id on its own — it
+        // keeps the previously identified user's appUserID and their cached
+        // CustomerInfo. Without logOut(), the next account to sign in on this
+        // handset can read the previous account's entitlement (isProActive
+        // answers from the stale cache before logIn(B) finishes its native
+        // round-trip) and have it written into their own Pro cache. Reset here
+        // as well as in signOut() below, because a session can also end without
+        // going through our button (remote revoke, refresh-token failure).
+        void resetLocalAccountState();
         return;
       }
       if (session?.user) void iap.identify(session.user.id);
@@ -137,16 +175,23 @@ export function useAuth() {
       throw new Error('cancelled');
     }
 
-    const hashIndex = result.url.indexOf('#');
-    if (hashIndex === -1) throw new Error('No tokens in OAuth callback URL');
-    const params = new URLSearchParams(result.url.substring(hashIndex + 1));
-    const access_token = params.get('access_token');
-    const refresh_token = params.get('refresh_token');
-    if (!access_token || !refresh_token) {
-      throw new Error('OAuth callback missing tokens');
-    }
-    const { error: sessionErr } = await supabase.auth.setSession({ access_token, refresh_token });
-    if (sessionErr) throw sessionErr;
+    // PKCE (lib/supabase.ts `flowType`): the callback carries a single-use
+    // `code` in the QUERY string, not tokens in the fragment. We deliberately
+    // do NOT read `#access_token`/`#refresh_token` any more — that shape meant
+    // anything able to receive the redirect (a stale allowlist entry, another
+    // app claiming `clippar://`) walked away with a long-lived refresh token.
+    // exchangeCodeForSession pairs the code with the verifier this device
+    // stored when it built the authorize URL, so an intercepted code is inert.
+    const queryStart = result.url.indexOf('?');
+    const query = queryStart === -1 ? '' : result.url.substring(queryStart + 1);
+    const params = new URLSearchParams(query.split('#')[0]);
+    const oauthError = params.get('error_description') ?? params.get('error');
+    if (oauthError) throw new Error(oauthError);
+    const code = params.get('code');
+    if (!code) throw new Error('OAuth callback missing authorization code');
+
+    const { error: exchangeErr } = await supabase.auth.exchangeCodeForSession(code);
+    if (exchangeErr) throw exchangeErr;
   }, []);
 
   // Native Apple Sign-In on iOS. Apple returns an identity token (JWT) that

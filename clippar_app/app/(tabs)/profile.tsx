@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, Alert, Switch, Linking } from 'react-native';
+import { View, Text, ScrollView, Pressable, Alert, Switch, Linking, Platform } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { router } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
@@ -39,7 +39,11 @@ import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
 import { isConnected } from '@/lib/network';
-import { wipeLocalUserData } from '@/lib/localWipe';
+import {
+  wipeLocalUserData,
+  clearAccountLinkedCaches,
+  removeLocalMediaForCurrentUser,
+} from '@/lib/localWipe';
 import { supabase } from '@/lib/supabase';
 
 interface ProfileRow {
@@ -119,7 +123,7 @@ function Divider() {
 
 export default function ProfileScreen() {
   const insets = useSafeAreaInsets();
-  const { user, signOut } = useAuth();
+  const { user, signOut, signInWithApple, signInWithGoogle } = useAuth();
   const { status: subscriptionStatus } = useSubscription();
   const { replayOnboarding } = useOnboarding();
   const [profile, setProfile] = useState<ProfileRow | null>(null);
@@ -152,23 +156,173 @@ export default function ProfileScreen() {
   const avatarInitial = (displayName[0] ?? 'G').toUpperCase();
   const avatarUrl = profile?.avatar_url || null;
 
-  const handleSignOut = () => {
-    Alert.alert('Sign Out', 'Are you sure you want to sign out?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Sign Out',
-        style: 'destructive',
-        onPress: async () => {
-          await signOut();
-          router.replace('/(auth)/login');
+  // Sign-out residue. Local video is NOT a cache in this app: for a golfer who
+  // hasn't turned cloud backup on, documentDirectory/clips/ holds the only copy
+  // of a round that cannot be re-recorded, so sign-out must never wipe it by
+  // itself. What used to be wrong is that it cleared nothing AND scoped
+  // nothing, so the next account on the handset was offered the previous
+  // golfer's unfinished round and its playable clips. The rows are now scoped
+  // to a user id (lib/localScope.ts); this gives the user the explicit choice
+  // spec 5.5 asks for, for the case where the phone really is being handed on.
+  const finishSignOut = useCallback(async () => {
+    // Before the session goes away: the local store resolves "whose data is
+    // this" from the session, so a clear that runs after signOut() clears
+    // nothing.
+    await clearAccountLinkedCaches().catch(() => {});
+    await signOut();
+    router.replace('/(auth)/login');
+  }, [signOut]);
+
+  const confirmSignOutAndRemoveMedia = useCallback(() => {
+    Alert.alert(
+      'Delete videos from this phone?',
+      'Every Clippar round on this phone is deleted, including any that have not been backed up — those cannot be recovered. Videos you saved to your Photos library stay.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Delete & sign out',
+          style: 'destructive',
+          onPress: async () => {
+            await removeLocalMediaForCurrentUser();
+            await finishSignOut();
+          },
         },
-      },
-    ]);
+      ]
+    );
+  }, [finishSignOut]);
+
+  const handleSignOut = () => {
+    Alert.alert(
+      'Sign Out',
+      'Your rounds and videos stay on this phone, and whoever signs in next will not see them. If you are handing this phone on, you can remove them now.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove my videos too',
+          style: 'destructive',
+          onPress: confirmSignOutAndRemoveMedia,
+        },
+        {
+          text: 'Sign Out',
+          onPress: () => {
+            void finishSignOut();
+          },
+        },
+      ]
+    );
   };
 
   // App Review 5.1.1(v): account deletion must be initiated fully in-app.
   // Two-step confirm — the second alert spells out exactly what is destroyed.
   const [deletingAccount, setDeletingAccount] = useState(false);
+
+  /** iOS secure-text prompt, wrapped as a promise. null = the user cancelled. */
+  const promptForPassword = () =>
+    new Promise<string | null>((resolve) => {
+      Alert.prompt(
+        'Confirm it’s you',
+        'Enter your Clippar password to delete your account. This cannot be undone.',
+        [
+          { text: 'Cancel', style: 'cancel', onPress: () => resolve(null) },
+          {
+            text: 'Confirm',
+            style: 'destructive',
+            onPress: (value?: string) => resolve(value ?? ''),
+          },
+        ],
+        'secure-text'
+      );
+    });
+
+  /**
+   * Recent-authentication gate for deletion.
+   *
+   * What stood here was `supabase.auth.refreshSession()` under a comment
+   * calling itself a "Re-auth gate". It was not one: spending the stored
+   * refresh token proves possession of a token the caller already had and asks
+   * the human for nothing, so an unattended unlocked phone was two taps from
+   * destroying the account, every round and every published reel, with no
+   * undo and no confirmation email. Make the human prove they are the account
+   * holder, now, using whatever provider the account signs in with.
+   *
+   * The identity re-check afterwards matters as much as the credential: a
+   * bystander could otherwise authenticate with their OWN Apple/Google account
+   * and have the session — and therefore the deletion — land somewhere nobody
+   * intended.
+   *
+   * This is the client half only. It closes the unattended-device path. It
+   * cannot close a stolen-token path, because an attacker holding the access
+   * token POSTs delete-account directly and never runs this code; the Edge
+   * Function needs its own freshness check on the verified JWT (tracked
+   * separately — that file is outside this change).
+   */
+  const reauthenticate = useCallback(async (): Promise<boolean> => {
+    const priorUserId = user?.id;
+    // `providers` is the fallback because an account linked to Apple/Google
+    // can arrive with `provider` unset, and defaulting that to 'email' would
+    // demand a password the user has never had — locking them out of the
+    // in-app deletion App Review 5.1.1(v) requires.
+    const linked = (user?.app_metadata?.providers as string[] | undefined) ?? [];
+    const provider =
+      (user?.app_metadata?.provider as string | undefined) ?? linked[0] ?? 'email';
+    try {
+      if (provider === 'apple') {
+        await signInWithApple();
+      } else if (provider === 'google') {
+        await signInWithGoogle();
+      } else if (user?.email && Platform.OS === 'ios' && typeof Alert.prompt === 'function') {
+        const password = await promptForPassword();
+        if (password === null) return false;
+        const { error } = await supabase.auth.signInWithPassword({
+          email: user.email,
+          password,
+        });
+        if (error) {
+          Alert.alert('That didn’t match', 'Your password was not correct, so nothing was deleted.');
+          return false;
+        }
+      } else {
+        // No way to challenge the user on this platform/account shape. Fail
+        // CLOSED — send them through a real sign-in rather than deleting on
+        // the strength of a session that has proven nothing.
+        Alert.alert(
+          'Sign in again first',
+          'For your security we need you to sign in again before deleting your account.',
+          [
+            {
+              text: 'Sign in',
+              onPress: async () => {
+                await signOut().catch(() => {});
+                router.replace('/(auth)/login');
+              },
+            },
+            { text: 'Cancel', style: 'cancel' },
+          ]
+        );
+        return false;
+      }
+    } catch (err) {
+      // Dismissed Apple/Google sheet, cancelled prompt, network failure — none
+      // of them are proof of identity.
+      if (!(err instanceof Error && err.message === 'cancelled')) {
+        Alert.alert(
+          'Couldn’t confirm it’s you',
+          'We couldn’t verify your sign-in, so nothing was deleted. Please try again.'
+        );
+      }
+      return false;
+    }
+
+    const { data, error } = await supabase.auth.getUser();
+    if (error || !data?.user || (priorUserId && data.user.id !== priorUserId)) {
+      Alert.alert(
+        'Different account',
+        'That sign-in was for a different account, so nothing was deleted.'
+      );
+      return false;
+    }
+    return true;
+  }, [user, signInWithApple, signInWithGoogle, signOut]);
 
   const runAccountDeletion = useCallback(async () => {
     if (deletingAccount) return;
@@ -184,27 +338,9 @@ export default function ProfileScreen() {
         return;
       }
 
-      // Re-auth gate: refresh the session so the JWT the Edge Function will
-      // verify is current. If the refresh token is stale/expired we can't
-      // prove who the caller is — make them sign in again before deleting.
-      const { data: refreshed, error: refreshError } =
-        await supabase.auth.refreshSession();
-      if (refreshError || !refreshed?.session) {
-        Alert.alert(
-          'Please sign in again',
-          'Your session has expired. For your security, sign in again and then delete your account.',
-          [
-            {
-              text: 'Sign in',
-              onPress: async () => {
-                await signOut().catch(() => {});
-                router.replace('/(auth)/login');
-              },
-            },
-          ]
-        );
-        return;
-      }
+      // Prove a HUMAN with the account's credential is present, right now.
+      // Everything below this line is irreversible.
+      if (!(await reauthenticate())) return;
 
       await deleteAccount();
       // Detach the RevenueCat customer so the deleted user's purchases don't
@@ -212,8 +348,10 @@ export default function ProfileScreen() {
       // NOTE: this does NOT cancel an Apple subscription — Apple only lets the
       // USER do that in Settings (handled by the warning step before here).
       await iap.reset().catch(() => {});
-      // Erase local SQLite (rounds/clips/scores/queue/settings) + secure-store
-      // so the next sign-in on this device starts clean.
+      // Erase local SQLite (rounds/clips/scores/queue/settings), the video
+      // files those rows point at, our media directories and the secure-store
+      // keys, so the next sign-in on this device starts clean. Runs BEFORE
+      // signOut — the wipe resolves the user's rows from the live session.
       await wipeLocalUserData();
       await signOut();
       router.replace('/(auth)/login');
@@ -225,7 +363,7 @@ export default function ProfileScreen() {
     } finally {
       setDeletingAccount(false);
     }
-  }, [deletingAccount, signOut]);
+  }, [deletingAccount, signOut, reauthenticate]);
 
   const confirmFinalDeletion = useCallback(async () => {
     // If there's a live auto-renewing App Store subscription, deletion can't
@@ -273,7 +411,12 @@ export default function ProfileScreen() {
           onPress: () =>
             Alert.alert(
               'Are you absolutely sure?',
-              'Your videos saved to your Photos library stay on your phone, but everything in your Clippar account is erased forever.',
+              // Say plainly what happens to the on-device video (spec 6.7).
+              // The old copy mentioned only the Photos-library carve-out, which
+              // read as "your local footage is untouched" — while the wipe was
+              // in fact dropping the rows and (until this change) orphaning the
+              // files on disk forever. Both halves are now true and stated.
+              'Everything in your Clippar account is erased forever, and every Clippar video on this phone is deleted with it. Copies you saved to your Photos library stay.',
               [
                 { text: 'Keep my account', style: 'cancel' },
                 {

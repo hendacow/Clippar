@@ -29,7 +29,7 @@
       "distribution": "internal",
       "channel": "preview",
       "environment": "production",
-      "prebuildCommand": "expo prebuild --clean --no-install",
+      "prebuildCommand": "node scripts/verify-build-env.js && expo prebuild --clean --no-install",
       "ios": {
         "simulator": false,
         "buildConfiguration": "Release"
@@ -43,7 +43,7 @@
       "distribution": "internal",
       "channel": "staging",
       "environment": "preview",
-      "prebuildCommand": "expo prebuild --clean --no-install",
+      "prebuildCommand": "node scripts/verify-build-env.js && expo prebuild --clean --no-install",
       "ios": {
         "simulator": false,
         "buildConfiguration": "Release"
@@ -60,7 +60,7 @@
       "distribution": "store",
       "channel": "production",
       "environment": "production",
-      "prebuildCommand": "expo prebuild --clean --no-install",
+      "prebuildCommand": "node scripts/verify-build-env.js && expo prebuild --clean --no-install",
       "ios": { "buildConfiguration": "Release" },
       "android": { "buildType": "app-bundle" },
       "autoIncrement": true

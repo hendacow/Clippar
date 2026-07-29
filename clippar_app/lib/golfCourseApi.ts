@@ -3,19 +3,44 @@
  * Primary: GolfCourseAPI.com (free, ~30K courses worldwide)
  * Docs: https://golfcourseapi.com
  *
- * This module calls the external API directly from the app.
+ * This module goes through the `search-courses` edge function; it does NOT talk
+ * to api.golfcourseapi.com and it holds no credential.
+ *
+ * Why: it used to fetch that API directly with
+ * `Authorization: Key ${process.env.EXPO_PUBLIC_GOLF_COURSE_API_KEY}`. Expo
+ * inlines EXPO_PUBLIC_* into the JS bundle at build time, so the key shipped
+ * inside the IPA and came back out with `strings` on the Hermes bundle. The free
+ * tier is 300 requests/day ACCOUNT-WIDE, so anyone holding the extracted key
+ * could exhaust a whole day of course search in seconds with a curl loop — no
+ * account, no install, repeatable daily — and because no Clippar server sat in
+ * the path, no rate limiter could see it. Rotating the key also meant a new
+ * binary through App Review. The key now lives as a Supabase secret and every
+ * call is metered per caller plus a project-wide daily budget.
+ *
+ * Both entry points still degrade to [] / null on any failure, so an exhausted
+ * or unreachable upstream shows fewer suggestions rather than a broken screen.
  * Results are cached locally via upsertCourseFromLiveApi() in lib/api.ts.
  */
 
-const GOLF_API_BASE = 'https://api.golfcourseapi.com/v1';
-
-function getApiKey(): string {
-  // Read from Expo env (set in .env.local)
-  const key = process.env.EXPO_PUBLIC_GOLF_COURSE_API_KEY ?? '';
-  if (!key) {
-    console.warn('[GolfCourseAPI] No API key configured. Set EXPO_PUBLIC_GOLF_COURSE_API_KEY in .env.local');
+/**
+ * Loaded lazily so this module stays importable in the node:test suite — the
+ * Supabase client pulls in react-native, expo-secure-store and AsyncStorage,
+ * none of which exist under `node --test`, and the pure helpers below are
+ * covered there.
+ */
+async function invokeSearchCourses<T>(body: Record<string, unknown>): Promise<T | null> {
+  try {
+    const { supabase } = await import('./supabase');
+    const { data, error } = await supabase.functions.invoke('search-courses', { body });
+    if (error) {
+      console.warn('[GolfCourseAPI] search-courses error:', error.message ?? error);
+      return null;
+    }
+    return (data ?? null) as T | null;
+  } catch (err) {
+    console.warn('[GolfCourseAPI] search-courses invoke failed:', err);
+    return null;
   }
-  return key;
 }
 
 // ────────────────────────────────────────────────────────────
@@ -132,48 +157,34 @@ export function normalizeAndRankCourses(
 }
 
 /**
- * Search for golf courses by name.
- * Calls GolfCourseAPI.com directly from the app.
- * Returns an empty array when no API key is configured (graceful degradation).
+ * Search for golf courses by name, via the `search-courses` edge function.
+ * Returns an empty array on any failure or when the daily upstream budget is
+ * spent (graceful degradation — callers merge these with local results).
  *
  * GolfCourseAPI's /v1/search does a global full-text match and IGNORES any
  * country filter — passing `country_code` does nothing, so a search for
  * "Royal Melbourne" returns a US course ahead of the real Australian one.
  * Since our audience is Australian golfers, we rank courses in `countryCode`
  * first (stable within each group) so the relevant local course surfaces at
- * the top of the dropdown instead of being buried under US noise.
+ * the top of the dropdown instead of being buried under US noise. That ranking
+ * stays here on the client because it is presentation, not authorization.
  */
 export async function searchGolfCoursesLive(
   query: string,
   countryCode = 'AU',
 ): Promise<GolfCourseSearchResult[]> {
-  const apiKey = getApiKey();
-  if (!apiKey) return [];
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return [];
 
-  try {
-    const url = `${GOLF_API_BASE}/search?search_query=${encodeURIComponent(query)}`;
-    const res = await fetch(url, {
-      headers: {
-        // GolfCourseAPI uses the `Key` scheme, NOT `Bearer`. Passing
-        // `Bearer <key>` returns 401 "API Key is missing or invalid".
-        Authorization: `Key ${apiKey}`,
-        Accept: 'application/json',
-      },
-    });
+  const data = await invokeSearchCourses<{ courses?: any[] }>({
+    action: 'search',
+    query: trimmed,
+    country: countryCode,
+  });
+  if (!data) return [];
 
-    if (!res.ok) {
-      console.warn(`[GolfCourseAPI] Search failed: ${res.status}`);
-      return [];
-    }
-
-    const data = await res.json();
-    // The API returns courses in various shapes -- normalize + rank AU-first.
-    const courses = data.courses ?? data.results ?? [];
-    return normalizeAndRankCourses(courses, countryCode);
-  } catch (err) {
-    console.warn('[GolfCourseAPI] Search error:', err);
-    return [];
-  }
+  // The API returns courses in various shapes -- normalize + rank AU-first.
+  return normalizeAndRankCourses(data.courses ?? [], countryCode);
 }
 
 // ────────────────────────────────────────────────────────────
@@ -181,29 +192,21 @@ export async function searchGolfCoursesLive(
 // ────────────────────────────────────────────────────────────
 
 /**
- * Get full course detail including hole-by-hole data and tee sets.
- * Returns null when no API key is configured or the request fails.
+ * Get full course detail including hole-by-hole data and tee sets, via the
+ * `search-courses` edge function. Returns null when the request fails or the
+ * upstream is unavailable.
  */
 export async function getGolfCourseDetailLive(
   courseId: string,
 ): Promise<GolfCourseDetail | null> {
-  const apiKey = getApiKey();
-  if (!apiKey) return null;
+  const data = await invokeSearchCourses<{ course?: any }>({
+    action: 'detail',
+    course_id: courseId,
+  });
+  const raw = data?.course;
+  if (!raw) return null;
 
   try {
-    const res = await fetch(`${GOLF_API_BASE}/courses/${courseId}`, {
-      headers: {
-        // GolfCourseAPI uses the `Key` scheme, NOT `Bearer`. Passing
-        // `Bearer <key>` returns 401 "API Key is missing or invalid".
-        Authorization: `Key ${apiKey}`,
-        Accept: 'application/json',
-      },
-    });
-
-    if (!res.ok) return null;
-
-    const raw = await res.json();
-
     // Parse tee sets and hole data
     const tees: GolfCourseTeeSet[] = [];
     const rawTees = raw.tees ?? raw.scorecard?.tees ?? [];

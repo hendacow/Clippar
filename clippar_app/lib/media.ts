@@ -90,13 +90,104 @@ function ensureClipsDir(): Promise<string> {
     // and the next call retries.
     clipsDirReady = FileSystemLegacy!
       .makeDirectoryAsync(dir, { intermediates: true })
-      .then(() => dir)
+      .then(async () => {
+        await markClipsDirExcludedFromBackup(dir);
+        return dir;
+      })
       .catch((err) => {
         clipsDirReady = null;
         throw err;
       });
   }
   return clipsDirReady;
+}
+
+/**
+ * MEDIA-002. `documentDirectory` is NSDocumentDirectory, which iOS includes in
+ * iCloud/iTunes backups by default — so every raw clip we persist here is
+ * copied to Apple and restored onto whatever device restores that backup, even
+ * for a user who deliberately left Cloud backup OFF and is told on
+ * profile/storage-settings that their clips are not in the cloud. Marking the
+ * directory NSURLIsExcludedFromBackupKey once, at creation, makes that promise
+ * true for everything written into it afterwards.
+ *
+ * expo-file-system cannot set that key, so it goes through the native
+ * shot-detector module, which also raises the directory's Data Protection class
+ * to CompleteUnlessOpen (see excludeFromBackupImpl in ShotDetectorModule.swift).
+ * Both are directory-level, so every clip written afterwards inherits them and
+ * no future write site has to remember.
+ *
+ * The native function is optional-by-arity, so a JS-only OTA update landing on
+ * an older binary still reports `native-unavailable` rather than pretending —
+ * a false here means the clips ARE still being backed up, and no caller may
+ * report otherwise on its behalf.
+ *
+ * Still uncovered (different owning modules, not reachable from here):
+ * documentDirectory/exports/ written by lib/clipShare.ts, and the clippar.db
+ * SQLite file with its per-shot GPS columns.
+ *
+ * Failure here is never fatal: losing the exclusion must not stop a user from
+ * saving their round.
+ */
+const attemptedPaths = new Set<string>();
+async function markExcludedFromBackup(dir: string, label: string): Promise<void> {
+  if (attemptedPaths.has(dir)) return;
+  attemptedPaths.add(dir);
+  try {
+    const { excludeFromBackup } = await import('@/modules/shot-detector');
+    const result = await excludeFromBackup(dir);
+    if (!result.excluded) {
+      console.warn(
+        `[media] ${label} is NOT excluded from iCloud backup:`,
+        result.reason ?? 'unknown'
+      );
+    }
+  } catch (err) {
+    console.warn(`[media] backup-exclusion attempt failed for ${label}`, err);
+  }
+}
+
+async function markClipsDirExcludedFromBackup(dir: string): Promise<void> {
+  await markExcludedFromBackup(dir, 'clips/');
+}
+
+/**
+ * Exclude EVERY private-media location from iCloud backup, not just clips/.
+ *
+ * Covering only clips/ left the two directories carrying the sharpest data:
+ *
+ *   SQLite/clippar.db — every recorded clip writes gps_latitude / gps_longitude
+ *   (hooks/useCamera.ts), so this one small file maps a named golfer to their
+ *   home course and the times they play it. It is also the item that restores
+ *   most cleanly onto a second device, because it is tiny.
+ *
+ *   exports/ — lib/clipShare.ts copies a full-fidelity clip here every time the
+ *   user saves to Photos or shares a hole. These are precisely the clips the
+ *   user believes are local-only.
+ *
+ * Until this ran, profile/storage-settings' "Cloud backup off — clips not in
+ * the cloud" was false for both of them.
+ *
+ * Called at startup rather than lazily, because unlike clips/ these two exist
+ * without anyone having persisted an asset this session — the database is
+ * opened on first read, and exports/ survives from previous runs.
+ *
+ * Best-effort throughout: a missing directory resolves 'not-found' and is
+ * skipped, and no failure here may block launch.
+ */
+export async function excludePrivateMediaFromBackup(): Promise<void> {
+  if (!FileSystemLegacy) return;
+  const docs = FileSystemLegacy.documentDirectory;
+  if (!docs) return;
+
+  await Promise.all([
+    markExcludedFromBackup(`${docs}clips/`, 'clips/'),
+    // expo-sqlite puts databases in documentDirectory/SQLite/. Excluding the
+    // directory covers the -wal and -shm sidecars too, which hold recently
+    // written rows and would otherwise leak the newest GPS fixes on their own.
+    markExcludedFromBackup(`${docs}SQLite/`, 'SQLite/ (clippar.db + GPS columns)'),
+    markExcludedFromBackup(`${docs}exports/`, 'exports/'),
+  ]);
 }
 
 /**

@@ -21,9 +21,20 @@ export const config = {
   concat: {
     url: process.env.EXPO_PUBLIC_CONCAT_URL || '',
   },
-  golfCourseApi: {
-    key: process.env.EXPO_PUBLIC_GOLF_COURSE_API_KEY || '',
-  },
+  // golfCourseApi.key REMOVED — the course-search key now lives server-side, as
+  // the GOLF_COURSE_API_KEY secret read by the search-courses edge function.
+  //
+  // Reading it here was the whole exposure. Expo's babel plugin inlines every
+  // `process.env.EXPO_PUBLIC_*` reference as a string LITERAL at bundle time, and
+  // this module is imported by ~15 app files, so the key shipped inside the
+  // Hermes bundle of every build: `strings` the IPA and it falls out. That key
+  // is a single 300-requests-per-day ACCOUNT-WIDE quota, so anyone holding it can
+  // exhaust the day's allowance in one curl loop and kill course search for every
+  // Clippar user, for free, daily.
+  //
+  // Nothing read this field — lib/golfCourseApi.ts now calls the proxy — so
+  // deleting it is what actually removes the literal from the bundle. Leaving an
+  // unread field here would have kept the key shipping while looking fixed.
   subscription: {
     websiteUrl: 'https://clippargolf.com',
     monthlyPriceAud: 1999,

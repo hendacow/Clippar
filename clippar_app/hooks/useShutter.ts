@@ -20,6 +20,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 import { useBLE } from '@/hooks/useBLE';
 import { classifyVolumeEvent } from '@/lib/liveRecordingLogic';
+import { admitShutterPress, shouldRescheduleFlush } from '@/lib/shutterGuards';
 
 // Try loading expo-key-event (requires dev build + config plugin)
 let realUseKeyEvent: any = null;
@@ -126,6 +127,28 @@ const DUP_WINDOW_MS = 120;
 // to 1, 2, or 3 clicks and we don't want to encourage four-click chords.
 const MAX_CLICKS = 3;
 
+// --- Rate limiting (control BLE-002) ------------------------------------
+// DUP_WINDOW_MS above is CROSS-source only — by design it never suppresses two
+// events from the SAME source, which left the pipeline with no floor at all.
+// A shutter is a plain HID keyboard: we can't identify it, can't tell it from
+// any other paired keyboard in range, and can't stop it autorepeating. See
+// lib/shutterGuards.ts for the full rationale; the numbers:
+//   - 120ms same-source floor: well under a human double-click (150-400ms),
+//     well above any mechanical bounce.
+//   - 8 events per rolling second across ALL sources: no human gesture gets
+//     close (a triple-click is 3), so anything above it is autorepeat or a
+//     hostile flood and is dropped outright.
+const MIN_SAME_SOURCE_INTERVAL_MS = 120;
+const RATE_WINDOW_MS = 1000;
+const RATE_MAX_EVENTS = 8;
+
+// Minimum spacing between volume re-centers issued for DROPPED events. An
+// accepted press always re-centers immediately; a flood must not buy a
+// VolumeManager.setVolume round-trip per event, but we still have to
+// re-center periodically or the system volume saturates at 1.0 and the
+// shutter stops emitting change events entirely.
+const DROPPED_RESET_THROTTLE_MS = 250;
+
 // Verbose console logging gated to dev builds. Set to false in production
 // to keep the JS bridge quiet during recording.
 const DEBUG = __DEV__;
@@ -137,7 +160,34 @@ const slog = (label: string, data?: Record<string, unknown>) => {
   console.log(`[shutter ${Date.now() % 100000}] ${label}`, data ?? '');
 };
 
-export function useShutter(): ShutterState {
+export interface UseShutterOptions {
+  /**
+   * Is the caller an ARMED capture surface right now (round in progress, this
+   * screen focused, no blocking overlay)? Gates the volume channel, which is
+   * the only part of this hook that mutates GLOBAL device state.
+   *
+   * Why this exists: the volume effect calls showNativeVolumeUI({enabled:
+   * false}) and pins the system volume to 0.5 on every event, and its cleanup
+   * (which restores the HUD) only ran on unmount of the record screen. Bottom
+   * tabs stay mounted after first focus and the editor is pushed ON TOP of the
+   * record screen, so after one visit to Record the user could no longer
+   * adjust or mute the volume ANYWHERE in the app — including while previewing
+   * their own reel with music. The action gating was correct; the global side
+   * effect simply outlived the capture surface (spec 6.5: the capture state
+   * machine must be explicit and bounded).
+   *
+   * Defaults to true so an omitted option is the historical behaviour rather
+   * than a silently dead clicker.
+   */
+  armed?: boolean;
+}
+
+export function useShutter({ armed = true }: UseShutterOptions = {}): ShutterState {
+  // Non-activating: useBLE no longer constructs a CBCentralManager until an
+  // explicit scan/connect, so this call cannot raise the iOS Bluetooth prompt.
+  // The BLE GATT path can't drive off-the-shelf HID shutters anyway (see the
+  // file header) — it exists only for custom peripherals paired from
+  // app/profile/bluetooth.tsx.
   const ble = useBLE();
   // Immediate-press listeners: fire on every physical press, no debounce.
   const listenersRef = useRef<Set<() => void>>(new Set());
@@ -155,8 +205,17 @@ export function useShutter(): ShutterState {
   // randomly advance the hole. The fix is a time-windowed cross-source
   // suppression — see emitPress.
   const lastEmitBySourceRef = useRef<Partial<Record<ShutterSource, number>>>({});
+  // Rolling window of every event SEEN (accepted or flood-dropped) in the last
+  // RATE_WINDOW_MS, for the rate limiter. A ref, not state — see the note on
+  // the removed lastPressTime state below.
+  const recentEventsRef = useRef<number[]>([]);
 
-  const [lastPressTime, setLastPressTime] = useState(0);
+  // NOTE: there used to be a `lastPressTime` state here, written on every
+  // single press and read by nobody. Each write re-rendered RecordScreen — a
+  // ~1900-line component hosting a live CameraView — on the JS thread while
+  // recordAsync was running, once per event, with no rate limit upstream.
+  // activeSource below IS read (it drives the "Clicker connected" badge), so it
+  // stays state, but it is only written when the value actually changes.
   const [activeSource, setActiveSource] = useState<ShutterSource>('none');
   const activeSourceRef = useRef<ShutterSource>('none');
   const timeoutRef = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -164,44 +223,83 @@ export function useShutter(): ShutterState {
   // --- Helper: emit press to all listeners ---
   // Every physical press from every source (key-event, volume, ble,
   // simulated) flows through here. It does four things:
-  //   1. Cross-source dedup — if a press from any OTHER source fired within
-  //      DUP_WINDOW_MS, treat this as the same physical press and skip.
+  //   1. Admission control (lib/shutterGuards.admitShutterPress) — rate limit,
+  //      same-source bounce floor, cross-source dedup. A shutter is an
+  //      unauthenticated HID keyboard; this is the only place its event rate
+  //      is bounded.
   //   2. Bumps the source / activity timestamp.
-  //   3. Fires immediate `onPress` listeners with no delay.
-  //   4. Feeds the click counter; the counter flushes to `onClick`
+  //   3. Feeds the click counter; the counter flushes to `onClick`
   //      listeners CLICK_WINDOW_MS after the last press in a gesture.
-  const emitPress = useCallback((source: ShutterSource) => {
+  //   4. Fires immediate `onPress` listeners with no delay.
+  //
+  // Returns true when the event was accepted as a press, so the volume caller
+  // can decide whether to pay a setVolume round-trip for it.
+  const emitPress = useCallback((source: ShutterSource): boolean => {
     const now = Date.now();
 
-    // (1) Cross-source dedup. Find the most recent emit time across all
-    //     other sources and check if it's within the dedup window.
-    let mostRecentOtherSource: ShutterSource | null = null;
-    let mostRecentOtherTs = 0;
-    for (const [src, ts] of Object.entries(lastEmitBySourceRef.current)) {
-      if (src === source || ts === undefined) continue;
-      if (ts > mostRecentOtherTs) {
-        mostRecentOtherTs = ts;
-        mostRecentOtherSource = src as ShutterSource;
+    const verdict = admitShutterPress({
+      source,
+      nowMs: now,
+      lastEmitBySource: lastEmitBySourceRef.current,
+      recentEventsMs: recentEventsRef.current,
+      minSameSourceIntervalMs: MIN_SAME_SOURCE_INTERVAL_MS,
+      dupWindowMs: DUP_WINDOW_MS,
+      rateWindowMs: RATE_WINDOW_MS,
+      rateMaxEvents: RATE_MAX_EVENTS,
+    });
+    recentEventsRef.current = verdict.recentEventsMs;
+
+    if (verdict.admission === 'drop-flood') {
+      // Fail CLOSED. A flood means we cannot tell which events (if any) are
+      // the golfer's, so we drop them AND cancel whatever gesture is already
+      // accumulating. Otherwise the tail of a flood resolves into a 3-click
+      // "water hazard" penalty — a real stroke written to SQLite and pushed to
+      // the server — and the pending timer starves the user's own press.
+      // No action at all is the only safe answer to untrusted input we can't
+      // attribute (spec 5.7 replay/button flood, control BLE-002).
+      if (clickFlushTimerRef.current) {
+        clearTimeout(clickFlushTimerRef.current);
+        clickFlushTimerRef.current = undefined;
       }
+      clickCountRef.current = 0;
+      slog('emit DROPPED (rate limit — input flood)', {
+        source,
+        eventsInWindow: verdict.recentEventsMs.length,
+        windowMs: RATE_WINDOW_MS,
+      });
+      return false;
     }
-    const dupAge = now - mostRecentOtherTs;
-    if (mostRecentOtherSource && dupAge < DUP_WINDOW_MS) {
+
+    if (verdict.admission === 'drop-bounce') {
+      // Same source repeating faster than a human can press. Deliberately do
+      // NOT stamp lastEmitBySource here: if bounce-dropped events pushed the
+      // floor forward, a sustained autorepeat would lock this source out
+      // permanently, including the golfer's own presses.
+      slog('emit SUPPRESSED (same-source bounce)', {
+        source,
+        minIntervalMs: MIN_SAME_SOURCE_INTERVAL_MS,
+      });
+      return false;
+    }
+
+    if (verdict.admission === 'drop-dup') {
       slog('emit SUPPRESSED (cross-source dup)', {
         source,
-        suppressedBy: mostRecentOtherSource,
-        ageMs: dupAge,
+        suppressedBy: verdict.suppressedBy,
         dupWindowMs: DUP_WINDOW_MS,
       });
       // Still record this source's timestamp so subsequent dedup decisions
       // see it — otherwise the SECOND of three duplicates would slip
       // through if it's far from the first but close to nothing.
       lastEmitBySourceRef.current[source] = now;
-      return;
+      return false;
     }
+
     lastEmitBySourceRef.current[source] = now;
 
-    setLastPressTime(now);
-    setActiveSource(source);
+    // Only write state when the value actually changes — this used to fire on
+    // every event and re-render the live-camera screen with it.
+    if (activeSourceRef.current !== source) setActiveSource(source);
     activeSourceRef.current = source;
 
     // Reset "connected" after 60s of inactivity
@@ -215,6 +313,15 @@ export function useShutter(): ShutterState {
     // listeners so a listener can call clearPendingClicks() to cancel the
     // flush in-flight (e.g. "stop recording now, don't trigger another
     // onClick 1s later that would start a new recording").
+    //
+    // The reschedule is conditional: once the count is capped at MAX_CLICKS
+    // the gesture can't say anything new, so re-arming on every further press
+    // would let a burst postpone resolution indefinitely.
+    const reschedule = shouldRescheduleFlush({
+      clickCountBefore: clickCountRef.current,
+      hasPendingTimer: clickFlushTimerRef.current !== undefined,
+      maxClicks: MAX_CLICKS,
+    });
     clickCountRef.current = Math.min(clickCountRef.current + 1, MAX_CLICKS);
     slog('emit ACCEPTED', {
       source,
@@ -222,22 +329,25 @@ export function useShutter(): ShutterState {
       immediateListeners: listenersRef.current.size,
       clickListeners: clickListenersRef.current.size,
     });
-    if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
-    clickFlushTimerRef.current = setTimeout(() => {
-      const count = clickCountRef.current as 1 | 2 | 3;
-      slog('click FLUSH', {
-        count,
-        listenerCount: clickListenersRef.current.size,
-      });
-      clickCountRef.current = 0;
-      clickFlushTimerRef.current = undefined;
-      clickListenersRef.current.forEach((cb) => cb({ count }));
-    }, CLICK_WINDOW_MS);
+    if (reschedule) {
+      if (clickFlushTimerRef.current) clearTimeout(clickFlushTimerRef.current);
+      clickFlushTimerRef.current = setTimeout(() => {
+        const count = clickCountRef.current as 1 | 2 | 3;
+        slog('click FLUSH', {
+          count,
+          listenerCount: clickListenersRef.current.size,
+        });
+        clickCountRef.current = 0;
+        clickFlushTimerRef.current = undefined;
+        clickListenersRef.current.forEach((cb) => cb({ count }));
+      }, CLICK_WINDOW_MS);
+    }
 
     // (4) immediate listeners. Fire AFTER (3) so listeners that want to
     // short-circuit the gesture (via clearPendingClicks) can actually
     // cancel the flush we just scheduled.
     listenersRef.current.forEach((cb) => cb());
+    return true;
   }, []);
 
   // --- Route BLE presses through the unified emit pipeline ---
@@ -314,6 +424,28 @@ export function useShutter(): ShutterState {
       slog('volume manager unavailable — HUD will show, no volume capture');
       return;
     }
+    // ARMED-ONLY. Everything below mutates GLOBAL device state (it hides the
+    // system volume HUD and pins the volume to 0.5), so it must exist only
+    // while the caller is a live capture surface and be torn down the instant
+    // it isn't. Previously the teardown was tied to unmount of the record
+    // screen, which — bottom tabs never unmounting, and the editor being
+    // pushed on TOP of the record screen — meant "the rest of the session".
+    if (!armed) {
+      slog('volume channel idle — screen not armed for capture');
+      return;
+    }
+
+    // The user's volume before we start hijacking it, so we can hand it back
+    // on disarm instead of leaving the phone pinned at our 0.5 working point.
+    let userVolume: number | null = null;
+    try {
+      Promise.resolve(VolumeManager.getVolume?.())
+        .then((v: any) => {
+          const n = typeof v === 'number' ? v : v?.volume;
+          if (typeof n === 'number') userVolume = n;
+        })
+        .catch(() => {});
+    } catch {}
 
     // Suppress native volume HUD. If this throws or no-ops, the iOS volume
     // slider will appear on every press — log so we know.

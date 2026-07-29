@@ -1,9 +1,11 @@
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 import {
+  decodeJwtPayload,
   generateAppleClientSecret,
   getAppleConfig,
   revokeAppleToken,
 } from '../_shared/apple.ts';
+import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
 
 /**
  * delete-account — App Review 5.1.1(v) in-app account deletion.
@@ -242,6 +244,56 @@ export async function handler(req: Request): Promise<Response> {
       data: { user },
     } = await supabase.auth.getUser(token);
     if (!user) return json({ error: 'Unauthorized' }, 401);
+
+    // RECENT AUTHENTICATION, enforced on the SERVER.
+    //
+    // The client re-challenges the user (password / Sign in with Apple / Google)
+    // immediately before calling this — but a client-side gate protects only the
+    // person holding the phone. The attack this closes is the other one: someone
+    // holding a stolen access token POSTs this endpoint directly with curl and
+    // destroys the account and every reel the user has published. No app, no
+    // device, no UI, and not one line of that client challenge executes.
+    //
+    // Supabase access tokens live an hour by default, so without a freshness
+    // check any token lifted in that window is a working delete-account button.
+    // Requiring a recently-minted token means an attacker must have completed
+    // the credential challenge themselves, which is the whole point of asking.
+    //
+    // Safe for the legitimate path: reauthenticate() signs in afresh, which
+    // mints a NEW session, so the token arriving here is seconds old — three
+    // orders of magnitude inside the window. The signature is already verified
+    // by getUser above; this only reads a claim out of it.
+    const MAX_TOKEN_AGE_SECONDS = 600; // 10 minutes
+    try {
+      const claims = decodeJwtPayload(token);
+      const iat = typeof claims.iat === 'number' ? claims.iat : null;
+      if (iat === null) {
+        return json({ error: 'Please sign in again to delete your account.', code: 'reauth_required' }, 401);
+      }
+      const ageSeconds = Math.floor(Date.now() / 1000) - iat;
+      if (ageSeconds > MAX_TOKEN_AGE_SECONDS) {
+        // 401 with a distinguishable code so the app can re-challenge and retry
+        // rather than showing a dead end. Deliberately does NOT say how old the
+        // token was or what the window is.
+        return json({ error: 'Please sign in again to delete your account.', code: 'reauth_required' }, 401);
+      }
+    } catch {
+      // A token whose claims will not decode is not one we act on for an
+      // irreversible operation. Fail closed.
+      return json({ error: 'Please sign in again to delete your account.', code: 'reauth_required' }, 401);
+    }
+
+    // Self-scoped and idempotent, so this is not an abuse target in the usual
+    // sense — but each call fans out across auth, several tables and an outbound
+    // token revocation to Apple on our developer credentials. A loop here is a
+    // loop against Apple. Five a day is far past any legitimate use.
+    const limited = await enforceRateLimits(
+      supabase,
+      RATE_LIMITS.deleteAccount,
+      user.id,
+      corsHeaders,
+    );
+    if (limited) return limited;
 
     await purgeAndDeleteUser(supabase as unknown as DeleteClient, user.id);
 
