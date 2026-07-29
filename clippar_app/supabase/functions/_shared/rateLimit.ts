@@ -124,12 +124,42 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * the caller choose.
  */
 export function clientIp(req: Request): string {
+  // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
+  // which sets this to a SINGLE address it observed itself. A caller cannot
+  // forge it — anything they send under that name is replaced at the edge — so
+  // it is the most trustworthy value available and needs no parsing.
+  const cf = req.headers.get('cf-connecting-ip')?.trim();
+  if (cf) return cf;
+
+  // Fallback: the FIRST X-Forwarded-For entry.
+  //
+  // This is the opposite of the usual advice, and the usual advice is right in
+  // the usual case: where a proxy APPENDS to a caller-supplied header, entry [0]
+  // is whatever the attacker typed, and keying a rate limit on it means they get
+  // a fresh bucket per request. That is what this function used to guard against
+  // by taking the LAST entry.
+  //
+  // It is wrong here, and only a deployment showed it. Measured against the dev
+  // project: X-Forwarded-For arrives with three entries, the caller is at index
+  // 0, and a request sent with `X-Forwarded-For: 198.51.100.77` produced the
+  // same three entries with the caller still at index 0 — the spoof was
+  // DISCARDED, not prepended. Supabase's gateway overwrites the header rather
+  // than appending to it, so entry [0] is gateway-asserted and entries [1..] are
+  // its own internal hops.
+  //
+  // Taking the last entry therefore keyed every limit on SUPABASE'S OWN
+  // load-balancer address. The observed effect on dev: 133 requests from one
+  // machine fragmented across 14 buckets (3.2.60.x, 13.248.109.x) and the real
+  // client address never appeared once — so a 120/hour cap was really about
+  // 120 x 14, and worse, unrelated visitors sharing a balancer shared a counter
+  // and could throttle each other.
   const xff = req.headers.get('x-forwarded-for');
   if (xff) {
     const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 0) return parts[parts.length - 1];
+    if (parts.length > 0) return parts[0];
   }
-  return req.headers.get('cf-connecting-ip') ?? req.headers.get('x-real-ip') ?? 'unknown';
+
+  return req.headers.get('x-real-ip')?.trim() ?? 'unknown';
 }
 
 export interface RateLimitDecision {
