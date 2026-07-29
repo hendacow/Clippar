@@ -67,9 +67,20 @@ const PER_CALLER = { bucket: 'search-courses', limit: 200, windowSeconds: 3_600 
  * PROJECT-WIDE daily budget for calls that actually reach GolfCourseAPI.
  *
  * The per-caller cap above bounds one identity; this bounds all of them
- * together, which is the limit that matters because the vendor's free tier is
- * 300/day for the whole account and IPs are cheap. Set below 300 so
- * sync-courses (which shares GOLF_COURSE_API_KEY) keeps headroom.
+ * together, which is the limit that matters because the vendor's quota is
+ * per-ACCOUNT and IPs are cheap.
+ *
+ * THE FREE TIER IS 50 REQUESTS PER DAY, not 300. Read off golfcourseapi.com's
+ * own pricing page on 2026-07-29: "Free — $0 — Up to 50 requests per day"
+ * (Pro $9.99 = 10,000/day, Enterprise $24.99 = 100,000/day). This budget was
+ * set to 250 against the older 300 figure, which made it useless: it could
+ * never fire before the vendor's own limit did, so instead of degrading
+ * gracefully to the local catalog, course search would start returning upstream
+ * 429s mid-round.
+ *
+ * 40 leaves 10/day of headroom for sync-courses, which shares
+ * GOLF_COURSE_API_KEY. If Clippar moves to the Pro tier, raise this to a few
+ * thousand — the mechanism is right, only the ceiling was wrong.
  *
  * Fails CLOSED — see the call site: when this is exhausted we return an empty
  * result rather than an error, so search degrades to the local `courses` table
@@ -78,7 +89,7 @@ const PER_CALLER = { bucket: 'search-courses', limit: 200, windowSeconds: 3_600 
  */
 const UPSTREAM_BUDGET = {
   bucket: 'golfcourseapi-upstream',
-  limit: 250,
+  limit: 40,
   windowSeconds: 86_400,
   onError: 'closed' as const,
 };

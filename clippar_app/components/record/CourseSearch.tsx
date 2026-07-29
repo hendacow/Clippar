@@ -142,12 +142,30 @@ export function CourseSearch({
           const tee =
             detail.tees.find((t) => /blue|white|men|regular/i.test(t.name)) ||
             detail.tees[0];
-          holes = tee.holes.map((h) => ({
-            holeNumber: h.number,
-            par: h.par,
-            strokeIndex: h.handicap,
-            lengthMeters: h.metres,
-          }));
+          // Keep ONLY holes the API actually described a par for.
+          //
+          // `par` is optional upstream, and the temptation is `h.par ?? 4` right
+          // here. That is what produced the reported bug: a hole with no par
+          // silently became a par 4, the scorecard showed it as a par 4, and the
+          // exported reel burned that in permanently. Dropping the hole instead
+          // means the round falls back to the course preset / manual pars, which
+          // the golfer can see and correct — a visible gap beats a confident
+          // wrong number on a video they send to their mates.
+          holes = tee.holes
+            .filter((h): h is typeof h & { par: number } => typeof h.par === 'number')
+            .map((h) => ({
+              holeNumber: h.number,
+              par: h.par,
+              strokeIndex: h.handicap,
+              lengthMeters: h.metres,
+            }));
+
+          if (holes.length !== tee.holes.length) {
+            console.warn(
+              `[CourseSearch] ${tee.holes.length - holes.length} of ${tee.holes.length} ` +
+                `holes had no par from the API — falling back for those`,
+            );
+          }
         }
 
         parTotal = holes.reduce((sum, h) => sum + h.par, 0) || parTotal;

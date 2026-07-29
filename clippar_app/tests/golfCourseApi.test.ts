@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeCountryCode,
   normalizeAndRankCourses,
+  parseTeeSets,
 } from '../lib/golfCourseApi';
 
 // Regression tests for the golf-course search bug: GolfCourseAPI's /v1/search
@@ -73,4 +74,79 @@ test('normalizeAndRankCourses: stable within a country group (preserves API rele
 test('normalizeAndRankCourses: empty input → empty array', () => {
   assert.deepEqual(normalizeAndRankCourses([], 'AU'), []);
   assert.deepEqual(normalizeAndRankCourses(undefined as any, 'AU'), []);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// parseTeeSets — the bug that made every par read as 4
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Fixtures below are the ACTUAL shape returned by GolfCourseAPI /v1/search for
+// Royal Queensland Golf Club, captured 2026-07-29. Verified live:
+//   tees is an OBJECT keyed by gender, not an array
+//   holes carry only {par, yardage} — there is no hole_number field at all
+//   handicap (stroke index) is null for all 18 holes on this course
+
+test('parseTeeSets reads the gender-keyed tees OBJECT', () => {
+  // The original code did `for (const t of raw.tees)`. On an object that throws
+  // "not iterable", the caller's catch swallowed it, and getGolfCourseDetailLive
+  // returned null EVERY time — so the app never once saw real hole data and
+  // every hole fell through to the par-4 default downstream.
+  const tees = parseTeeSets({
+    tees: {
+      male: [{ tee_name: 'Blue', total_meters: 6000, holes: [{ par: 5, yardage: 500 }] }],
+      female: [{ tee_name: 'Red', total_meters: 5200, holes: [{ par: 4, yardage: 400 }] }],
+    },
+  });
+  assert.equal(tees.length, 2);
+  assert.deepEqual(tees.map((t) => t.name).sort(), ['Blue', 'Red']);
+  assert.equal(tees.find((t) => t.name === 'Blue')!.gender, 'male');
+});
+
+test('parseTeeSets numbers holes positionally', () => {
+  // No hole_number in the payload — it must come from the index. Leaving it
+  // undefined meant the "which hole am I on" lookup never matched.
+  const [tee] = parseTeeSets({
+    tees: { male: [{ tee_name: 'Blue', holes: [{ par: 4 }, { par: 3 }, { par: 5 }] }] },
+  });
+  assert.deepEqual(tee.holes.map((h) => h.number), [1, 2, 3]);
+  assert.deepEqual(tee.holes.map((h) => h.par), [4, 3, 5]);
+});
+
+test('parseTeeSets does NOT invent a par when the API omits it', () => {
+  // The whole point. `par ?? 4` here is what put a wrong number on a scorecard
+  // and then burned it into an exported video.
+  const [tee] = parseTeeSets({
+    tees: { male: [{ tee_name: 'Blue', holes: [{ par: 5 }, { yardage: 150 }] }] },
+  });
+  assert.equal(tee.holes[0].par, 5);
+  assert.equal(tee.holes[1].par, undefined);
+});
+
+test('parseTeeSets keeps a missing stroke index missing', () => {
+  // Royal Queensland returns handicap: null for all 18. Inventing one would
+  // silently reorder shot allocation.
+  const [tee] = parseTeeSets({
+    tees: { male: [{ tee_name: 'Blue', holes: [{ par: 4, handicap: null }] }] },
+  });
+  assert.equal(tee.holes[0].handicap, undefined);
+});
+
+test('parseTeeSets converts yardage to metres for an AU scorecard', () => {
+  const [tee] = parseTeeSets({
+    tees: { male: [{ tee_name: 'Blue', holes: [{ par: 4, yardage: 400 }] }] },
+  });
+  assert.equal(tee.holes[0].metres, 366); // 400 * 0.9144
+});
+
+test('parseTeeSets still accepts the array shape if the vendor reverts', () => {
+  const tees = parseTeeSets({ tees: [{ tee_name: 'Blue', holes: [{ par: 4 }] }] });
+  assert.equal(tees.length, 1);
+  assert.equal(tees[0].holes[0].number, 1);
+});
+
+test('parseTeeSets survives junk without throwing', () => {
+  // It used to throw on the real payload, so this is not hypothetical.
+  assert.deepEqual(parseTeeSets({}), []);
+  assert.deepEqual(parseTeeSets({ tees: null }), []);
+  assert.deepEqual(parseTeeSets({ tees: { male: 'nope' } }), []);
 });

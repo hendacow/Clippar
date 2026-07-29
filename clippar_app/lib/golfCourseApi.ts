@@ -60,7 +60,14 @@ export interface GolfCourseSearchResult {
 
 export interface GolfCourseHoleData {
   number: number;
-  par: number;
+  /**
+   * Optional on purpose. The upstream payload can omit par, and the old
+   * `par: number` shape invited `?? 4` at the parser — which silently asserted
+   * par 4 for every hole the API did not describe. On a par-72 course that is
+   * wrong for roughly eight holes, and the wrong number is burned into the
+   * exported reel. Callers must decide what to show when it is absent.
+   */
+  par?: number;
   yardage?: number;
   metres?: number;
   handicap?: number; // stroke index
@@ -192,6 +199,74 @@ export async function searchGolfCoursesLive(
 // ────────────────────────────────────────────────────────────
 
 /**
+ * Turn the raw /v1/courses/{id} payload into our tee/hole shape.
+ *
+ * Exported and pure so the parsing can be tested against the REAL response
+ * shape without a network call — the shape is exactly what got this wrong
+ * before, and a unit test is the only thing that would have caught it.
+ */
+export function parseTeeSets(raw: any): GolfCourseTeeSet[] {
+// Parse tee sets and hole data.
+//
+// `tees` is an OBJECT keyed by gender — {male: [...], female: [...]} —
+// not an array. Verified against the live API for Royal Queensland:
+//   tees keys      : ['female', 'male']
+//   tee keys       : [course_rating, holes, number_of_holes, par_total,
+//                     slope_rating, tee_name, total_meters, total_yards]
+//   hole[0] keys   : ['par', 'yardage']        <- positional, NO hole_number
+//
+// Iterating it with `for...of` threw "not iterable" on the first call, the
+// catch below swallowed it, and this function returned null EVERY TIME. So
+// the app has never once displayed real hole data — which is why pars looked
+// wrong: every hole fell through to the par-4 default downstream.
+const tees: GolfCourseTeeSet[] = [];
+const rawTeeGroups = raw.tees ?? raw.scorecard?.tees ?? {};
+const teeList: any[] = Array.isArray(rawTeeGroups)
+  ? rawTeeGroups // tolerate the array shape in case the vendor changes back
+  : Object.entries(rawTeeGroups).flatMap(([gender, list]) =>
+      (Array.isArray(list) ? list : []).map((t: any) => ({ ...t, gender })),
+    );
+
+for (const t of teeList) {
+  const rawHoles: any[] = Array.isArray(t.holes) ? t.holes : [];
+
+  const holes: GolfCourseHoleData[] = rawHoles.map((h: any, i: number) => ({
+    // Holes are POSITIONAL — the payload has no hole_number field at all, so
+    // it must come from the index. Reading a non-existent field left every
+    // number undefined, and the lookup that matches a hole to the current
+    // hole then never matched.
+    number: h.hole_number ?? h.number ?? i + 1,
+    // No `?? 4`. A missing par must stay missing so the caller can say "par
+    // unknown" instead of silently asserting 4 — on a par-72 course that
+    // default is wrong for roughly eight holes, and the wrong number gets
+    // burned into the exported reel where nobody can correct it.
+    par: typeof h.par === 'number' ? h.par : undefined,
+    yardage: h.yards ?? h.yardage ?? undefined,
+    metres:
+      h.meters ?? h.metres ??
+      (typeof (h.yards ?? h.yardage) === 'number'
+        ? Math.round((h.yards ?? h.yardage) * 0.9144)
+        : undefined),
+    // Often absent — Royal Queensland returns null for all 18. Left
+    // undefined rather than invented.
+    handicap: h.handicap ?? h.stroke_index ?? undefined,
+  }));
+
+  tees.push({
+    name: t.tee_name ?? t.name ?? 'Default',
+    gender: t.gender ?? undefined,
+    totalYardage: t.total_yards ?? t.total_yardage ?? undefined,
+    totalMetres: t.total_meters ?? t.total_metres ?? undefined,
+    slope: t.slope ?? t.slope_rating ?? undefined,
+    rating: t.course_rating ?? t.rating ?? undefined,
+    holes: holes.sort((a, b) => a.number - b.number),
+  });
+}
+
+  return tees;
+}
+
+/**
  * Get full course detail including hole-by-hole data and tee sets, via the
  * `search-courses` edge function. Returns null when the request fails or the
  * upstream is unavailable.
@@ -207,34 +282,7 @@ export async function getGolfCourseDetailLive(
   if (!raw) return null;
 
   try {
-    // Parse tee sets and hole data
-    const tees: GolfCourseTeeSet[] = [];
-    const rawTees = raw.tees ?? raw.scorecard?.tees ?? [];
-
-    for (const t of rawTees) {
-      const holes: GolfCourseHoleData[] = [];
-      const rawHoles = t.holes ?? [];
-
-      for (const h of rawHoles) {
-        holes.push({
-          number: h.hole_number ?? h.number,
-          par: h.par ?? 4,
-          yardage: h.yards ?? h.yardage ?? undefined,
-          metres: h.meters ?? h.metres ?? (h.yards ? Math.round(h.yards * 0.9144) : undefined),
-          handicap: h.handicap ?? h.stroke_index ?? undefined,
-        });
-      }
-
-      tees.push({
-        name: t.tee_name ?? t.name ?? 'Default',
-        gender: t.gender ?? undefined,
-        totalYardage: t.total_yards ?? t.total_yardage ?? undefined,
-        totalMetres: t.total_meters ?? t.total_metres ?? undefined,
-        slope: t.slope ?? t.slope_rating ?? undefined,
-        rating: t.course_rating ?? t.rating ?? undefined,
-        holes: holes.sort((a, b) => a.number - b.number),
-      });
-    }
+    const tees = parseTeeSets(raw);
 
     return {
       id: String(raw.id),
