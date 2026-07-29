@@ -4,7 +4,8 @@ Branch `security/hardening-2026-07-29`, cut from `origin/main` @ 57c865d.
 Worked against the *Clippar Mobile App Security, Performance and Scalability
 Engineering Specification* v1.0.
 
-**Status: partial. Read the "Not done" section before treating anything as closed.**
+**Status: all seven fix groups run and reviewed. Read "Still open" and "Yours" before
+treating anything as closed — several items need a deploy or a rotation to take effect.**
 
 ---
 
@@ -14,7 +15,8 @@ Engineering Specification* v1.0.
 |---|---|---|
 | Red team | 8 hunters + 8 adversarial verifiers | 65 filed → **54 confirmed**, 11 refuted, 75 items ruled not-applicable |
 | Refactor scout | 5 scouts + 5 behaviour gates | 75 suggestions → **39 cleared** (~7,470 lines), 36 blocked |
-| Implementation | 7 file-disjoint implementers + 7 reviewers | **all 7 killed by a session usage limit mid-run**; partial edits recovered and finished by hand |
+| Implementation, round 1 | 7 implementers + 7 reviewers | **all 7 killed by a session usage limit mid-run**; partial edits recovered and finished by hand |
+| Implementation, round 2 | 4 implementers + 4 reviewers | 22 fixes, **18 upheld, 4 sent back**, 16 scoped out |
 
 The implementation fan-out died before any reviewer ran. Everything that survived
 was reviewed manually instead, and two fixes that had been left in a
@@ -126,8 +128,8 @@ fix; error-message leakage in two functions.
 
 | Gate | Before | After |
 |---|---|---|
-| App tests | 151 | **192** |
-| Edge-function tests | **0 running** | **55** |
+| App tests | 151 | **237** |
+| Edge-function tests | **0 running** | **74** |
 | Typecheck | clean | clean |
 | Release simulator build | — | **builds, launches, renders** |
 
