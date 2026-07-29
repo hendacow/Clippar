@@ -44,44 +44,54 @@ function stubClient(handler: (fn: string, args: unknown) => unknown): AnyClient 
 // clientIp — the header-trust question
 // ─────────────────────────────────────────────────────────────────────────────
 
-Deno.test('clientIp takes the LAST X-Forwarded-For entry, not the first', () => {
-  // This is the whole point. A caller can send any X-Forwarded-For it likes; the
-  // proxy APPENDS the address it actually observed. So the leftmost entry is
-  // attacker-chosen and the rightmost is the only one we did not let them pick.
-  // Reading [0] — the obvious choice, and what most examples do — would hand an
-  // attacker a brand new counter bucket per request simply by varying a header,
-  // which is the same as having no rate limit at all.
-  const req = reqWith({ 'x-forwarded-for': '1.2.3.4, 203.0.113.9' });
+Deno.test('clientIp prefers cf-connecting-ip, which the gateway sets and a caller cannot forge', () => {
+  // Supabase fronts Edge Functions with Cloudflare. Anything a caller sends
+  // under this name is replaced at the edge, so it needs no parsing and is the
+  // most trustworthy value on offer.
+  const req = reqWith({
+    'cf-connecting-ip': '203.0.113.9',
+    'x-forwarded-for': 'attacker-supplied, 10.0.0.1',
+  });
   assertEquals(clientIp(req), '203.0.113.9');
 });
 
-Deno.test('clientIp handles a single entry', () => {
+Deno.test('clientIp falls back to the FIRST X-Forwarded-For entry', () => {
+  // Deliberately the opposite of the usual advice, and the usual advice is right
+  // in the usual case: where a proxy APPENDS to a caller-supplied header, entry
+  // [0] is whatever the attacker typed. This function used to take the LAST
+  // entry for exactly that reason.
+  //
+  // Measured against the live dev project, that was wrong here. Supabase's
+  // gateway OVERWRITES X-Forwarded-For rather than appending: a request sent
+  // with `X-Forwarded-For: 198.51.100.77` arrived with the same three entries as
+  // one sent without it, caller still at index 0 — the spoof was discarded. So
+  // [0] is gateway-asserted and [1..] are Supabase's own internal hops.
+  //
+  // Taking the last entry keyed every limit on Supabase's own load balancer:
+  // 133 requests from one machine fragmented across 14 buckets and the real
+  // client address never appeared once.
+  assertEquals(clientIp(reqWith({ 'x-forwarded-for': '203.0.113.9, 10.0.0.1, 10.0.0.2' })), '203.0.113.9');
+});
+
+Deno.test('clientIp handles a single entry and padding', () => {
   assertEquals(clientIp(reqWith({ 'x-forwarded-for': '203.0.113.9' })), '203.0.113.9');
+  assertEquals(clientIp(reqWith({ 'x-forwarded-for': '  203.0.113.9 ,, 10.0.0.1  ' })), '203.0.113.9');
 });
 
-Deno.test('clientIp tolerates padding and empty segments', () => {
-  assertEquals(
-    clientIp(reqWith({ 'x-forwarded-for': '  1.2.3.4 ,, 203.0.113.9  ' })),
-    '203.0.113.9',
-  );
-});
-
-Deno.test('clientIp is not fooled by a spoofed value appended by the caller', () => {
-  // A caller trying to look like a different client on every request still lands
-  // on the same bucket, because their own entries are all to the LEFT of the one
-  // the proxy added.
-  const a = clientIp(reqWith({ 'x-forwarded-for': 'fake-1, 203.0.113.9' }));
-  const b = clientIp(reqWith({ 'x-forwarded-for': 'fake-2, 203.0.113.9' }));
-  const c = clientIp(reqWith({ 'x-forwarded-for': '9.9.9.9, 8.8.8.8, 203.0.113.9' }));
+Deno.test('two requests from one client land on ONE bucket', () => {
+  // The property that actually matters, and the one the old implementation
+  // broke: the same caller crossing different internal hops must still be
+  // counted together, or the cap is silently multiplied by the size of the
+  // proxy fleet.
+  const a = clientIp(reqWith({ 'x-forwarded-for': '203.0.113.9, 10.0.0.1' }));
+  const b = clientIp(reqWith({ 'x-forwarded-for': '203.0.113.9, 10.0.0.99' }));
   assertEquals(a, b);
-  assertEquals(b, c);
 });
 
-Deno.test('clientIp falls back through known proxy headers, then to a constant', () => {
-  assertEquals(clientIp(reqWith({ 'cf-connecting-ip': '198.51.100.7' })), '198.51.100.7');
+Deno.test('clientIp falls back through x-real-ip, then to a constant', () => {
   assertEquals(clientIp(reqWith({ 'x-real-ip': '198.51.100.8' })), '198.51.100.8');
-  // Everyone unidentifiable shares one bucket. That is intentional: it is a
-  // stricter outcome than letting an unidentifiable caller through unmetered.
+  // Everyone unidentifiable shares one bucket. Stricter than letting an
+  // unidentifiable caller through unmetered.
   assertEquals(clientIp(reqWith({})), 'unknown');
 });
 
