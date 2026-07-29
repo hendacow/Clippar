@@ -26,9 +26,22 @@ const PROD_REF = 'xdefwnqyjffgclzqmvax';
  * no human gate.
  */
 
-test('no non-store build profile reads the production EAS environment', () => {
+// `preview` is EXEMPT from both rules below, deliberately.
+//
+// It is the owner's own internal install of the real app: production bundle id,
+// production Supabase, internal distribution. That is how he dogfoods the
+// shipping app on his own phone without waiting on App Store review, and it is
+// the intended topology rather than an accident. An earlier pass read it as a
+// misconfiguration and retargeted it to com.clippar.app.staging on the dev
+// project — which would have silently stopped updating the install he actually
+// uses and stood up a second, empty app next to it. `staging` already exists for
+// the non-production case.
+const OWNER_INTERNAL_PROFILE = 'preview';
+
+test('no TEST profile reads the production EAS environment', () => {
   for (const [name, profile] of Object.entries(eas.build)) {
     if (profile.distribution === 'store') continue;
+    if (name === OWNER_INTERNAL_PROFILE) continue;
     assert.notEqual(
       profile.environment,
       'production',
@@ -38,16 +51,46 @@ test('no non-store build profile reads the production EAS environment', () => {
   }
 });
 
-test('every non-development profile carries a distinct APP_VARIANT', () => {
+test('every TEST profile carries a distinct APP_VARIANT', () => {
   // A missing APP_VARIANT means app.config.js falls through to the production
-  // identity (com.clippar.app / scheme "clippar"). Only the store profile is
-  // allowed to claim it.
+  // identity (com.clippar.app / scheme "clippar"). Only the store profile and the
+  // owner's internal install are allowed to claim it.
   for (const [name, profile] of Object.entries(eas.build)) {
     if (profile.distribution === 'store') continue;
+    if (name === OWNER_INTERNAL_PROFILE) continue;
     assert.ok(
       profile.env?.APP_VARIANT,
       `profile "${name}" declares no APP_VARIANT, so it inherits the App Store ` +
         'bundle id and URL scheme',
+    );
+  }
+});
+
+test('the profile→app mapping is exactly what the owner expects', () => {
+  // Locks the topology down so no future pass can quietly move a build onto a
+  // different app. Bundle ids come from app.config.js's APP_VARIANT switch.
+  const bundleFor = (v?: string) =>
+    v === 'development'
+      ? 'com.clippar.app.dev'
+      : v === 'staging'
+        ? 'com.clippar.app.staging'
+        : 'com.clippar.app';
+
+  const expected: Record<string, string> = {
+    development: 'com.clippar.app.dev',
+    'development-simulator': 'com.clippar.app.dev',
+    preview: 'com.clippar.app',
+    staging: 'com.clippar.app.staging',
+    production: 'com.clippar.app',
+  };
+
+  for (const [name, want] of Object.entries(expected)) {
+    const profile = eas.build[name];
+    assert.ok(profile, `eas.json lost the "${name}" profile`);
+    assert.equal(
+      bundleFor(profile.env?.APP_VARIANT),
+      want,
+      `profile "${name}" would build ${bundleFor(profile.env?.APP_VARIANT)}, not ${want}`,
     );
   }
 });
@@ -93,13 +136,25 @@ test('the guard refuses a production build pointed at the dev project', () => {
   assert.match(out, /not the production project/);
 });
 
-test('the guard refuses a non-store build pointed at the production project', () => {
+test('the guard refuses a TEST build pointed at the production project', () => {
   const { code, out } = runGuard({
-    EAS_BUILD_PROFILE: 'preview',
+    EAS_BUILD_PROFILE: 'staging',
     EXPO_PUBLIC_SUPABASE_URL: `https://${PROD_REF}.supabase.co`,
   });
   assert.equal(code, 1, out);
   assert.match(out, /PRODUCTION project/);
+});
+
+test('the guard ALLOWS the owner internal build on the production project', () => {
+  // The counterpart to the test above, and the reason it is worth asserting: the
+  // obvious rule ("no internal build may touch production") would break the one
+  // install the owner uses every day. Encoding the exemption here means a future
+  // tightening has to argue with a test rather than silently break his phone.
+  const { code, out } = runGuard({
+    EAS_BUILD_PROFILE: 'preview',
+    EXPO_PUBLIC_SUPABASE_URL: `https://${PROD_REF}.supabase.co`,
+  });
+  assert.equal(code, 0, out);
 });
 
 test('the guard refuses any build pointed at a tunnel or localhost', () => {

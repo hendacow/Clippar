@@ -11,18 +11,24 @@
 #                                              `preview` profile)
 #
 # NOTE ON THE `preview` PROFILE — eas.json is JSON and cannot carry the comment,
-# so it lives here, next to the trigger that makes it matter. `preview` used to
-# declare `"environment": "production"` and no APP_VARIANT, which meant this
-# workflow pushed an unreviewed JS bundle, on every merge to main, with no
-# approval gate, to an internal build that carried the App Store bundle id
-# (com.clippar.app), the `clippar://` URL scheme, and the PRODUCTION Supabase
-# project. Test rounds and orphaned Storage objects landed in the production
-# dataset and deep-link routing was undefined on any device with both installed.
-# It now builds as the staging variant against the non-production project, so
-# what this job auto-publishes can no longer touch production data. Do not put
-# `"environment": "production"` back on a non-store profile —
-# scripts/verify-build-env.js (wired into every prebuildCommand) fails the build
-# if you do.
+# so it lives here, next to the trigger that makes it matter.
+#
+# `preview` builds the REAL app: `"environment": "production"`, no APP_VARIANT,
+# so com.clippar.app / scheme `clippar` / the production Supabase project, on
+# internal distribution. That is deliberate — it is the owner's own install of
+# the shipping app, used to dogfood on a real phone without waiting on App Store
+# review. `staging` exists for the non-production case.
+#
+# What that means for THIS job: a merge to main auto-publishes a JS bundle into a
+# build carrying the App Store identity and talking to the production database,
+# with no approval gate. That is accepted, not overlooked — the audience is the
+# owner's own registered devices, not App Store users (those only ever get
+# `branch=production`, which is workflow_dispatch-only and deliberate).
+#
+# The real control is elsewhere: scripts/verify-build-env.js is wired into every
+# prebuildCommand and fails the build if `staging` or `development` is pointed at
+# the production project, or if `production` is pointed at anything else. Change
+# the profile→app mapping and tests/buildEnvGuards.test.ts fails.
 #   workflow_dispatch with branch=development → updates "Clippar Dev" build
 #                                              (your dev client install)
 #   workflow_dispatch with branch=staging → updates "Clippar Staging" build

@@ -28,7 +28,7 @@
     "preview": {
       "distribution": "internal",
       "channel": "preview",
-      "environment": "preview",
+      "environment": "production",
       "prebuildCommand": "node scripts/verify-build-env.js && expo prebuild --clean --no-install",
       "ios": {
         "simulator": false,
@@ -37,10 +37,7 @@
       "android": {
         "buildType": "app-bundle"
       },
-      "autoIncrement": true,
-      "env": {
-        "APP_VARIANT": "staging"
-      }
+      "autoIncrement": true
     },
     "staging": {
       "distribution": "internal",

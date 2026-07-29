@@ -66,11 +66,20 @@ if (profile === 'production') {
   }
 }
 
-// Conversely, a non-store profile must NOT be wired to production. This is the
-// `preview` regression: distribution:internal, environment:production, no
-// APP_VARIANT — an unreviewed build with the store app's identity writing into
-// the production dataset and receiving an automatic OTA on every push to main.
-if (profile === 'preview' || profile === 'staging' || profile.startsWith('development')) {
+// Conversely, a TEST profile must not be wired to production.
+//
+// `preview` is deliberately NOT in this list. It is the owner's own internal
+// install of the real app — production bundle id, production Supabase, internal
+// distribution — and that is the intended topology, not a regression: it is how
+// he dogfoods the shipping app on his own phone without going through App Store
+// review. An earlier pass read it as an accident and retargeted it to
+// com.clippar.app.staging on the dev project, which would have quietly stopped
+// updating the install he actually uses and stood up a second, empty app beside
+// it. `staging` already exists for the non-production case.
+//
+// What remains guarded is the genuine confusion: a `staging` or `development`
+// build silently writing into the production dataset.
+if (profile === 'staging' || profile.startsWith('development')) {
   const supabaseUrl = (process.env.EXPO_PUBLIC_SUPABASE_URL || '').trim();
   if (supabaseUrl.includes(PROD_SUPABASE_REF)) {
     errors.push(
