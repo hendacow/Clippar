@@ -51,7 +51,7 @@ if command -v deno >/dev/null 2>&1; then
   for f in "$APP"/supabase/functions/*/index.ts "$APP"/supabase/functions/_shared/*.ts; do
     case "$f" in *.test.ts) continue ;; esac
     [ -f "$f" ] || continue
-    if ! deno check --quiet "$f" 2>&1; then
+    if ! deno check --quiet --node-modules-dir=none "$f" 2>&1; then
       echo "FAIL  deno check ${f#$APP/}"
       fail=1
     fi

@@ -71,7 +71,14 @@ jobs:
           for f in supabase/functions/*/index.ts supabase/functions/_shared/*.ts; do
             case "$f" in *.test.ts) continue ;; esac
             [ -f "$f" ] || continue
-            deno check --quiet "$f"
+            # --node-modules-dir=none: the Stripe types pulled in by
+            # create-payment-intent and stripe-webhook reference @types/node, and
+            # Deno v2 auto-detects clippar_app/package.json and then insists on a
+            # populated node_modules to resolve it. These functions import only
+            # https: specifiers, so there is nothing for Deno to resolve there.
+            # Without this the job fails on a machine that has not run npm ci —
+            # and passes on one that has, which is exactly how it hid locally.
+            deno check --quiet --node-modules-dir=none "$f"
           done
       - name: Test edge functions
         working-directory: clippar_app
@@ -81,4 +88,4 @@ jobs:
         env:
           SUPABASE_URL: https://test.supabase.co
           SUPABASE_SERVICE_ROLE_KEY: test-key
-        run: deno test --allow-env supabase/functions/
+        run: deno test --allow-env --node-modules-dir=none supabase/functions/
