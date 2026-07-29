@@ -153,22 +153,36 @@ const handler = async (req: Request): Promise<Response> => {
       return json(action === 'detail' ? { course: null } : { courses: [] });
     }
 
-    // Spend from the project-wide upstream budget. Every path below this line
-    // costs a real request against the 300/day account quota.
+    // VALIDATE FIRST, THEN SPEND.
+    //
+    // The project-wide budget used to be consumed here, above the DTO checks, so
+    // a request with a junk body still burned one of the day's 250 upstream
+    // units. That made the proxy a CHEAPER denial of service than the exposed
+    // key it replaced: two IPs sending 250 malformed POSTs — no key, no account,
+    // no install — exhausted the whole day's budget in under an hour, after
+    // which every real user got an empty course list until UTC midnight.
+    //
+    // A request that cannot reach upstream must not cost upstream quota. The
+    // per-caller limiter above already charged for the attempt, so junk traffic
+    // is still bounded; it just no longer spends the shared resource.
+    const detail = action === 'detail';
+    const courseId = detail ? parseCourseId((body as Record<string, unknown>).course_id) : null;
+    const query = detail ? null : parseQuery((body as Record<string, unknown>).query);
+    if (detail && !courseId) return json({ error: 'Invalid course id' }, 400);
+    if (!detail && !query) return json({ error: 'Invalid query' }, 400);
+
+    // Only now is an upstream call certain.
     const budget = await consumeRateLimit(supabase, UPSTREAM_BUDGET, 'global');
     if (!budget.allowed) {
       console.warn('[search-courses] daily GolfCourseAPI budget exhausted');
       // Degrade, do not fail: the callers merge these results with the local
       // `courses` table, so an empty list means "fewer suggestions", not a
       // broken screen.
-      return json(action === 'detail' ? { course: null } : { courses: [] });
+      return json(detail ? { course: null } : { courses: [] });
     }
 
-    if (action === 'detail') {
-      const courseId = parseCourseId((body as Record<string, unknown>).course_id);
-      if (!courseId) return json({ error: 'Invalid course id' }, 400);
-
-      const res = await fetch(`${GCAPI_BASE}/courses/${encodeURIComponent(courseId)}`, {
+    if (detail) {
+      const res = await fetch(`${GCAPI_BASE}/courses/${encodeURIComponent(courseId!)}`, {
         headers: { Authorization: `Key ${apiKey}`, Accept: 'application/json' },
         signal: AbortSignal.timeout(10_000),
       });
@@ -179,11 +193,9 @@ const handler = async (req: Request): Promise<Response> => {
       return json({ course: await res.json() });
     }
 
-    const query = parseQuery((body as Record<string, unknown>).query);
-    if (!query) return json({ error: 'Invalid query' }, 400);
     const country = safeRegionCode((body as Record<string, unknown>).country, 'AU');
 
-    const url = `${GCAPI_BASE}/search?search_query=${encodeURIComponent(query)}` +
+    const url = `${GCAPI_BASE}/search?search_query=${encodeURIComponent(query!)}` +
       `&country_code=${encodeURIComponent(country)}`;
     const res = await fetch(url, {
       headers: {

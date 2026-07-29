@@ -25,6 +25,7 @@ import { migrateLegacyUris } from '@/lib/uriMigration';
 import { hydrateMissingClipsFromPhotos } from '@/lib/photosRecovery';
 import { initializeUploadQueueProcessor } from '@/lib/uploadQueue';
 import { reclaimTemporaryExports } from '@/modules/shot-detector';
+import { excludePrivateMediaFromBackup } from '@/lib/media';
 import { getDatabase } from '@/lib/storage';
 import '@/global.css';
 
@@ -194,6 +195,17 @@ function RootLayout() {
       // the library still points at. Composed reels are reel_<UUID>.mp4 and
       // are not in the swept prefixes at all, so they can never be caught by
       // this even though nothing local records their path.
+      // Mark every private-media location NSURLIsExcludedFromBackupKey. Runs at
+      // startup rather than lazily because the SQLite database and exports/
+      // exist without anyone persisting a clip this session — the DB is opened
+      // on first read and exports/ survives from previous runs — so hanging this
+      // off the clips/ creation path (as it originally was) left the two
+      // directories carrying GPS coordinates and full-fidelity shared clips
+      // still going to iCloud.
+      excludePrivateMediaFromBackup().catch((e) =>
+        console.log('[Startup] excludePrivateMediaFromBackup skipped:', e)
+      );
+
       (async () => {
         const database = await getDatabase();
         const rows = await database.getAllAsync<{

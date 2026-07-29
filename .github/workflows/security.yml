@@ -27,13 +27,18 @@ jobs:
       id-token: write
     steps:
       - name: Check out repo
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 2
 
       - name: Run Claude security review
-        uses: anthropics/claude-code-action@v1
+        # SHA-pinned, not a tag. These jobs run with repository write access and
+        # a Claude OAuth token; a moved tag on a third-party action is arbitrary
+        # code execution inside them. Tags are mutable pointers, commit SHAs are
+        # not. Resolved via the GitHub API, dereferencing the annotated tag
+        # object to its commit.
+        uses: anthropics/claude-code-action@be7b93b1907a4abad570368f3c74b6fe3807510b # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Surface Claude's actual error output in CI logs — without this the
