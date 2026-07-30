@@ -336,12 +336,6 @@ def _check_nvenc():
     image=detector_image,
     gpu="T4",
     timeout=600,
-    # Without this the container gets NO environment at all, so
-    # _pipeline_secret_ok reads an empty CLIPPAR_PIPELINE_SECRET, fails closed,
-    # and every call — ours included — is rejected. It also had no Supabase
-    # credentials of its own, which is what made the old body-supplied
-    # supabase_url/supabase_key look necessary.
-    secrets=pipeline_secrets,
 )
 @modal.fastapi_endpoint(method="POST")
 def detect_shots_batch(request: dict) -> dict:
@@ -498,13 +492,7 @@ def detect_shots_batch(request: dict) -> dict:
     gpu="T4",
     timeout=900,  # 15 min for large clip sets
     memory=16384,  # 16GB RAM
-    # `pipeline_secrets`, not an inline Secret.from_name with required_keys=[].
-    # The inline form injected supabase-credentials but declared NO required
-    # keys, so Modal enforced nothing at deploy time and CLIPPAR_PIPELINE_SECRET
-    # was simply absent — the auth gate then failed closed and rejected every
-    # caller, verified by curl against the live endpoint. Using the shared list
-    # means the deploy itself fails if a key is missing.
-    secrets=pipeline_secrets,
+    secrets=[modal.Secret.from_name("supabase-credentials", required_keys=[])],
 )
 @modal.fastapi_endpoint(method="POST")
 def run_full_pipeline(request: dict) -> dict:
