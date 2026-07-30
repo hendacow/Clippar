@@ -238,3 +238,51 @@ seven never-imported UI components (750), `StatsHero.tsx` (494), the legacy
 The gate **blocked** 36, including deleting the Shop tab and the detection-strategy
 variants — reachable by file path or config rather than by import, which a grep
 alone would have called dead.
+
+---
+
+## DEPLOYED — 29 July 2026
+
+Everything below was applied and then verified against the live system, not
+assumed.
+
+**Production Supabase** (`xdefwnqyjffgclzqmvax`)
+- Migrations **016 + 017 applied**. Dev got them first and was verified there.
+- Edge functions deployed: get-shared-reel, create-share-link,
+  create-payment-intent, delete-account, apple-link, sync-courses,
+  revenuecat-webhook, search-courses.
+- Secrets set on dev AND prod: `GOLF_COURSE_API_KEY` (new key, confirmed
+  different from the leaked one), `CLIPPAR_PIPELINE_SECRET`.
+- **Rate limiter verified on production**: 1 sanity call + 130 probes against the
+  120/hour cap gave 119 × 404 then **11 × 429** — exactly the configured ceiling.
+
+**Modal** (`clippar-shot-detector`)
+- `clippar-pipeline-auth` secret created; `pipeline_secrets` now actually
+  attached to both endpoints (it was defined and never referenced).
+- Verified live: no secret → `unauthorized`, wrong secret → `unauthorized`,
+  correct secret → passes auth. Both endpoints.
+- Gotcha worth keeping: a **warm container served the previous build through two
+  ordinary `modal deploy` runs**. It took `modal app stop` + deploy to actually
+  replace it. Don't trust a deploy alone when verifying a security change here.
+
+**One thing that only surfaced by testing** — the authenticated Modal call fails
+resolving `bcxgoloehditjgcvfsho.supabase.co`. That is neither prod nor dev: the
+Modal `supabase-credentials` secret points at a Supabase project that no longer
+exists, so this pipeline could not have worked even when called. Consistent with
+`lib/pipeline.ts` having no call sites in the shipping app.
+
+### Not a security finding, but the biggest user-visible bug found
+`getGolfCourseDetailLive` returned **null on every call** because `tees` is an
+object keyed by gender and the code iterated it as an array — the TypeError was
+swallowed by a catch. So the app never once read live hole data, and every hole
+fell through to a par-4 default. On a par-72 course that is wrong for roughly
+eight holes, and the wrong number is burned into the exported reel.
+
+Verified against the live API, fixed, and covered by 7 tests built from the
+captured real payload. Also: `UPSTREAM_BUDGET` was 250/day against a free tier
+that is actually **50/day** (their pricing page), so the guard could never have
+fired before the vendor's own limit.
+
+### Resend
+Zero references in the repo — the only matches were Sentry's `beforeSend`. It was
+never wired in; the waitlist uses Sender.net. Nothing to remove in code.
