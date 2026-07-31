@@ -50,6 +50,13 @@ export interface ScorecardSetupScreenProps {
    * changes the CTA copy — the save itself is the same call either way.
    */
   isUpdate?: boolean;
+  /**
+   * Extra space to leave under the pinned Save CTA. The Live flow renders this
+   * screen inside the tabs navigator, whose tab bar is a floating pill drawn
+   * OVER the screen — without the clearance the CTA sits behind it. Defaults
+   * to 0 for callers with no bar of their own to clear.
+   */
+  bottomClearance?: number;
   onBack: () => void;
   /** Positional par array, length = holesPlayed, element i = i-th hole played. */
   onSave: (holePars: number[]) => void;
@@ -61,6 +68,7 @@ export function ScorecardSetupScreen({
   startHole,
   saving = false,
   isUpdate = false,
+  bottomClearance = 0,
   onBack,
   onSave,
 }: ScorecardSetupScreenProps) {
@@ -320,7 +328,7 @@ export function ScorecardSetupScreen({
         <View
           style={{
             padding: 16,
-            paddingBottom: Math.max(insets.bottom, 16),
+            paddingBottom: Math.max(insets.bottom, 16) + bottomClearance,
             borderTopWidth: 1,
             borderTopColor: theme.colors.surfaceBorder,
           }}

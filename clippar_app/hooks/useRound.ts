@@ -351,48 +351,72 @@ export function useRound() {
 
       const par = getParForHole(prev.courseHoles, prev.currentHole);
       const holeClips = prev.clips.filter((c) => c.holeNumber === prev.currentHole);
-      // Strokes = number of clips recorded for this hole (each clip = one shot)
-      // plus any penalty strokes (already reflected in currentShot increments)
-      const strokes = Math.max(1, prev.currentShot - 1);
 
-      const score: HoleScore = {
-        holeNumber: prev.currentHole,
-        par,
-        strokes,
-        putts: 0,
-        penaltyStrokes: Math.max(0, strokes - holeClips.length),
-        isPickup: false,
-        scoreToPar: strokes - par,
-      };
+      // A hole the golfer walked past is NOT a hole they played.
+      //
+      // This used to be `Math.max(1, prev.currentShot - 1)`. On an untouched
+      // hole currentShot is 1, so the floor produced a score of ONE — not a
+      // harmless empty row, a hole-in-one. Tap Next Hole through 11 and 12 on
+      // the way to 13 and the exported reel's scorecard claims two aces on
+      // par 4s, and the round total is wrong by however many holes were skipped.
+      // That is the "skipped holes are rendering" report: the scorecard was
+      // right to show them, because the app really had written scores for them.
+      //
+      // previousHole already had this exactly right and its comment says so in
+      // as many words — "otherwise we'd write a phantom 1-stroke score for a
+      // hole merely passed through". The two functions are siblings and only
+      // one of them guarded. Now both use the same helper, which returns null
+      // when the hole saw no activity.
+      const strokes = departingHoleStrokes(prev.currentShot);
+
+      // Only the SCORE is skipped. The hole pointer still advances below, so
+      // Next Hole behaves identically — the golfer moves on, we just do not
+      // invent a number for a hole they never hit a shot on.
+      const scoredNow: HoleScore | null =
+        strokes === null
+          ? null
+          : {
+              holeNumber: prev.currentHole,
+              par,
+              strokes,
+              putts: 0,
+              penaltyStrokes: Math.max(0, strokes - holeClips.length),
+              isPickup: false,
+              scoreToPar: strokes - par,
+            };
 
       // Replace-or-append: Previous Hole can reopen an already-scored hole, so
       // re-ending it must overwrite that hole's entry rather than duplicate it
       // (a duplicate would double-count totalScore / totalPar).
-      const newScores = upsertHoleScore(prev.scores, score);
+      const newScores = scoredNow ? upsertHoleScore(prev.scores, scoredNow) : prev.scores;
       const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
       const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
       const nextHole = prev.currentHole + 1;
 
-      // Persist
-      saveLocalScore({
-        round_id: prev.roundId,
-        hole_number: prev.currentHole,
-        strokes,
-        putts: 0,
-        penalty_strokes: Math.max(0, strokes - holeClips.length),
-        is_pickup: false,
-        par,
-      });
+      // Persist — only when there is something real to persist. Writing a row
+      // here is what made the skipped hole survive a reinstall and reappear on
+      // the scorecard, so the guard has to cover the writes, not just state.
+      if (strokes !== null) {
+        saveLocalScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - holeClips.length),
+          is_pickup: false,
+          par,
+        });
 
-      upsertScore({
-        round_id: prev.roundId,
-        hole_number: prev.currentHole,
-        strokes,
-        putts: 0,
-        penalty_strokes: Math.max(0, strokes - holeClips.length),
-        is_pickup: false,
-        par,
-      }).catch(() => {});
+        upsertScore({
+          round_id: prev.roundId,
+          hole_number: prev.currentHole,
+          strokes,
+          putts: 0,
+          penalty_strokes: Math.max(0, strokes - holeClips.length),
+          is_pickup: false,
+          par,
+        }).catch(() => {});
+      }
 
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 

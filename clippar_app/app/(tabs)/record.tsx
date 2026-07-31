@@ -36,8 +36,7 @@ import { ScoreOverlay } from '@/components/record/ScoreOverlay';
 import { PenaltySheet } from '@/components/record/PenaltySheet';
 import { CameraPermissionScreen } from '@/components/record/CameraPermissionScreen';
 import { CourseSearch } from '@/components/record/CourseSearch';
-import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
-import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
+import { RecentScorecards } from '@/components/record/RecentScorecards';
 import { ScorecardSetupScreen } from '@/components/record/ScorecardSetupScreen';
 import { ClickerTutorial } from '@/components/record/ClickerTutorial';
 import { RecordingSettingsSheet } from '@/components/record/RecordingSettingsSheet';
@@ -50,7 +49,16 @@ import { getMountCardDismissed, dismissMountCard } from '@/lib/mountOffer';
 import { getOnboardingProfile } from '@/lib/onboardingProfile';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { listCoursePresets, touchCoursePreset, upsertCoursePreset } from '@/lib/api';
-import { buildHoleDataFromPars, presetHasScorecard, findPresetToUpdate } from '@/lib/scorecardLogic';
+import { findPresetToUpdate } from '@/lib/scorecardLogic';
+import {
+  startHoleOptions,
+  normalizeStartHole,
+  startRoundGate,
+  isCourseKnownForAnyStart,
+  findSavedScorecard,
+  resolveRoundHoles,
+  recentSetups,
+} from '@/lib/roundSetup';
 import { isCaptureArmed } from '@/lib/captureArming';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
@@ -58,6 +66,16 @@ import type { CoursePreset } from '@/types/preset';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 const DEFAULT_PAR = 4;
+
+// The tab bar is a floating pill absolutely positioned over the screen
+// (app/(tabs)/_layout.tsx: PILL_HEIGHT 68 sitting on max(insets.bottom, 8)),
+// so every setup screen underneath has to reserve that space itself. It
+// didn't: Start Round and the holes selector sat behind the pill on device.
+// TAB_BAR_CLEARANCE is what the pill takes ABOVE the safe-area inset, for
+// callers that already pad for the inset themselves.
+const TAB_BAR_CLEARANCE = 68 + 16;
+const tabBarClearance = (bottomInset: number) =>
+  TAB_BAR_CLEARANCE + Math.max(bottomInset, 8);
 
 // Conditionally import CameraView for native
 const CameraView = isNative
@@ -99,26 +117,25 @@ export default function RecordScreen() {
   // this to 'import' (no need — that flow lives on a different route).
   const [mode, setMode] = useState<null | 'live'>(null);
 
-  // Wave 3 Phase D-redo: when the user enters Live mode AND has saved
-  // presets, we now show a Preset Picker first as an intermediate step,
-  // before the manual setup screen. `livePhase` distinguishes the two:
-  //   - 'preset-picker' = list of saved rounds + "Set up new" CTA
-  //   - 'setup'         = the existing course-search / holes / start-hole
-  //                       manual setup screen
-  //   - 'scorecard'     = the per-hole par entry screen ("Set the
-  //                       scorecard"), reached from 'setup'. Saving there
-  //                       creates a bookmark preset carrying hole_pars.
-  // Users without presets jump straight to 'setup' since there's nothing
-  // to pick from.
-  const [livePhase, setLivePhase] = useState<'preset-picker' | 'setup' | 'scorecard'>('setup');
+  // The Live setup is a three-step flow:
+  //   - 'setup'      = recent courses + course search + 9/18. The hub.
+  //   - 'start-hole' = "which hole are you starting on", reached BOTH from
+  //                    the 9/18 selector and from tapping a recent course,
+  //                    so the tee-off hole is always confirmed before a
+  //                    round begins (golfers shotgun-start off 10).
+  //   - 'scorecard'  = the per-hole par entry screen ("Set the scorecard"),
+  //                    reached from either of the above. Saving there
+  //                    creates a bookmark preset carrying hole_pars.
+  //
+  // A full-screen preset picker used to sit in front of 'setup'. It was
+  // effectively unreachable — the presets fetch below starts when Live opens,
+  // so the `presets.length > 0` test that chose it always ran against an
+  // empty list on first entry — and the golfer never saw the scorecards they'd
+  // saved. The recents row on 'setup' replaces it. (PresetPickerScreen itself
+  // is still the Import flow's picker.)
+  const [livePhase, setLivePhase] = useState<'setup' | 'start-hole' | 'scorecard'>('setup');
   // True while a "Save course scorecard" write is in flight (disables the CTA).
   const [savingScorecard, setSavingScorecard] = useState(false);
-
-  // Wave 3 Phase D-redo: when a preset is tapped on the picker we open
-  // a bottom-sheet confirmation that lets the user override the start
-  // hole before kicking off the round. Holds the preset whose sheet is
-  // currently open; null = sheet closed.
-  const [confirmingPreset, setConfirmingPreset] = useState<CoursePreset | null>(null);
 
   // Wave 3 Phase C: round setup. Defaults match the legacy hard-coded
   // behaviour (full 18 from hole 1). When a preset is tapped these get
@@ -793,77 +810,77 @@ export default function RecordScreen() {
     await requestLocationPermission().catch(() => false);
   }, [camera.requestPermission, requestLocationPermission]);
 
-  // Manual-flow start: user typed/selected a course and (optionally) tweaked
-  // the holes / start-hole selectors. Validates and kicks off round.startRound.
+  // One description of the round being set up. The Start Round gate, the
+  // start-hole step and the round start itself all read it, so they can't
+  // disagree about which course/holes we're talking about.
+  const setup = useMemo(
+    () => ({
+      courseName,
+      courseId: selectedCourseId,
+      courseHoles,
+      presets,
+      holesPlayed,
+      startHole,
+    }),
+    [courseName, selectedCourseId, courseHoles, presets, holesPlayed, startHole],
+  );
+  const gate = startRoundGate(setup);
+
+  // Start the round from whatever the setup state currently says. Both paths
+  // into 'start-hole' (9/18 selector, recent course) end here.
+  //
+  // The gate is the point: on a course we have no pars for, every hole would
+  // be stamped DEFAULT_PAR and that invented scorecard gets burned into the
+  // exported reel, which the golfer can't re-record. A course we already hold
+  // hole data for is NOT gated — see lib/roundSetup.
   const startRound = async () => {
-    if (!courseName.trim()) {
-      Alert.alert('Course Name', 'Please enter or select a course to start.');
+    if (!gate.allowed) {
+      Alert.alert(
+        gate.reason === 'no-course' ? 'Course name' : 'Set the scorecard first',
+        gate.reason === 'no-course'
+          ? 'Please enter or select a course to start.'
+          : "We don't have this course's pars, so the scorecard on your reel would be guesswork. Set the scorecard first — it only takes a moment and it's saved for next time.",
+      );
       return;
     }
+    // A scorecard the golfer saved themselves overrides the API's pars.
+    const holes = resolveRoundHoles(setup);
+    const saved = findSavedScorecard(setup);
     await requestCapturePermissions();
-    await round.startRound(
+    const ok = await round.startRound(
       courseName.trim(),
       selectedCourseId,
-      courseHoles,
+      holes,
       holesPlayed,
       startHole,
     );
+    // Non-blocking — a failed timestamp bump shouldn't tank the round. Keeps
+    // the recents row ordered by what the golfer actually plays.
+    if (ok && saved) void touchCoursePreset(saved.id);
   };
 
-  // Preset-flow start: user tapped one of their saved presets and
-  // (optionally) overrode some setup values in the Confirm Sheet. Pre-fills
-  // the setup state and kicks off the round directly — the whole point
-  // of presets is one-tap-and-go for repeat visits. Best-effort touches
-  // last_used_at so the preset sorts to the top of the picker next time.
-  //
-  // Phase D-redo: the `overrides` arg carries any values the user changed
-  // on the Confirm Sheet (currently just startHole). It's optional so
-  // callers can still hand-off a "use the preset as-is" start when there's
-  // no confirmation step (e.g. future programmatic shortcuts).
-  const startFromPreset = useCallback(async (
-    preset: CoursePreset,
-    overrides?: { startHole?: 1 | 10 }
-  ) => {
-    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-    const effectiveStartHole = overrides?.startHole ?? preset.start_hole;
-    // Custom-scorecard presets carry a per-hole par override. Build the
-    // authoritative HoleData[] from it so getParForHole / the persisted
-    // scores.par / the overlay all use the user's pars instead of the API's.
-    // Legacy presets (no hole_pars) keep the old behaviour: undefined →
-    // DEFAULT_PAR fallback. buildHoleDataFromPars honours the (possibly
-    // overridden) start hole so a back-nine preset maps to holes 10..18.
-    const presetHoles = presetHasScorecard(preset)
-      ? buildHoleDataFromPars(preset.hole_pars as number[], effectiveStartHole)
-      : undefined;
-    // Mirror state into the form fields so a back-out keeps the values
-    // visible in case the round fails to start.
+  // A recent course was tapped: adopt its setup and go straight to the
+  // "which hole are you starting on" step — the same step the 9/18 selector
+  // leads to. Nothing commits here; the golfer confirms on that step.
+  const handleSelectRecent = useCallback((preset: CoursePreset) => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setCourseName(preset.course_name);
     setSelectedCourseId(preset.course_id ?? undefined);
-    setCourseHoles(presetHoles);
+    // Clear any hole data fetched for a DIFFERENT course — resolveRoundHoles
+    // rebuilds it from this preset's saved pars when the round starts.
+    setCourseHoles(undefined);
     setHolesPlayed(preset.holes_played);
-    setStartHole(effectiveStartHole);
-
-    // Same in-context permission ask as the manual flow — a one-tap preset
-    // start is still the moment the user commits to Live capture.
-    await requestCapturePermissions();
-
-    const ok = await round.startRound(
-      preset.course_name,
-      preset.course_id ?? undefined,
-      presetHoles,
-      preset.holes_played,
-      effectiveStartHole,
-    );
-    if (ok) {
-      // Non-blocking — failed timestamp bump shouldn't tank the round.
-      void touchCoursePreset(preset.id);
-    }
-  }, [round.startRound, requestCapturePermissions]);
+    // normalize: a legacy 18-hole preset saved with start_hole 10 would
+    // otherwise land on the step with nothing selected.
+    setStartHole(normalizeStartHole(preset.holes_played, preset.start_hole));
+    setLivePhase('start-hole');
+  }, []);
 
   // Save the per-hole pars the user entered on the "Set the scorecard"
   // screen as a bookmark preset. On success we add the new preset to the
-  // list and drop the user back on the picker so they see (and can one-tap
-  // start) their new saved scorecard. `holePars` is positional, length =
+  // list and drop the user back on the setup screen — the course and holes
+  // they were setting up are still in state, and the round is no longer
+  // gated because we now hold its pars. `holePars` is positional, length =
   // holesPlayed. Errors are surfaced but non-destructive — the entered pars
   // stay on screen so the user can retry (e.g. after renaming a duplicate).
   const handleSaveScorecard = useCallback(async (holePars: number[]) => {
@@ -886,7 +903,7 @@ export default function RecordScreen() {
       // server's last_used_at ordering) so the corrected scorecard is what the
       // picker shows — and loads — next time.
       setPresets((prev) => [saved, ...prev.filter((p) => p.id !== saved.id)]);
-      setLivePhase('preset-picker');
+      setLivePhase('setup');
     } catch (err: any) {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       Alert.alert(
@@ -995,7 +1012,16 @@ export default function RecordScreen() {
       // button under the live-recording UI like before.
       return (
       <GradientBackground>
-        <View style={{ flex: 1, paddingTop: insets.top, padding: 24 }}>
+        {/* paddingBottom clears the floating tab pill — on a small screen the
+            mount card at the end of this column otherwise sits under it. */}
+        <View
+          style={{
+            flex: 1,
+            paddingTop: insets.top,
+            padding: 24,
+            paddingBottom: tabBarClearance(insets.bottom),
+          }}
+        >
           <Text style={{ ...theme.typography.h1, color: theme.colors.textPrimary, marginBottom: 8 }}>
             Record
           </Text>
@@ -1046,13 +1072,7 @@ export default function RecordScreen() {
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
               setMode('live');
-              // Phase D-redo: if the user already has saved presets, land
-              // on the picker so they can one-tap into a repeat round.
-              // Otherwise skip straight to manual setup — no point in an
-              // empty picker. The picker's useEffect handles fetching;
-              // we make the call locally on the snapshot we have right now
-              // so the decision is synchronous.
-              setLivePhase(presets.length > 0 ? 'preset-picker' : 'setup');
+              setLivePhase('setup');
             }}
             style={({ pressed }) => ({
               borderRadius: theme.radius.lg,
@@ -1199,51 +1219,92 @@ export default function RecordScreen() {
     );
   }
 
-    // ---- IDLE STATE: Live recording — Preset Picker (Phase D-redo) ----
-    // Reached when the user picked 'Live' AND has at least one saved
-    // preset. The picker lists their saved rounds with a "Set up new
-    // round" CTA. Tapping a preset opens the PresetConfirmSheet (bottom
-    // sheet) so the user can override the start hole before kicking off.
-    // The ConfirmSheet is rendered as a sibling so it can portal-overlay
-    // on top of the picker.
-    if (livePhase === 'preset-picker') {
+    // ---- IDLE STATE: Live recording — "which hole are you starting on" ----
+    // The last step before a round begins, reached from BOTH the 9/18
+    // selector and a tapped recent course. Shotgun starts are routine, so
+    // the tee-off hole is asked explicitly rather than assumed to be 1.
+    if (livePhase === 'start-hole') {
+      const holeOptions = startHoleOptions(holesPlayed);
       return (
-        <>
-          <PresetPickerScreen
-            presets={presets}
-            loading={presetsLoading}
-            title="Start a round"
-            subtitle="Tap a saved round for one-tap setup, or start fresh."
-            onSelectPreset={(preset) => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setConfirmingPreset(preset);
+        <GradientBackground>
+          <ScrollView
+            contentContainerStyle={{
+              paddingTop: insets.top,
+              padding: 24,
+              paddingBottom: tabBarClearance(insets.bottom),
             }}
-            onSetUpNew={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setLivePhase('setup');
-            }}
-            onBack={() => {
-              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              setMode(null);
-              setLivePhase('setup'); // reset for next entry
-            }}
-          />
-          <PresetConfirmSheet
-            preset={confirmingPreset}
-            ctaLabel="Start round"
-            onCancel={() => setConfirmingPreset(null)}
-            onConfirm={({ startHole: chosenStartHole }) => {
-              const target = confirmingPreset;
-              setConfirmingPreset(null);
-              if (target) {
-                // Fire and forget — round.startRound has its own error
-                // surface (alerts on failure). Don't await here so the
-                // sheet animation can complete cleanly.
-                void startFromPreset(target, { startHole: chosenStartHole });
-              }
-            }}
-          />
-        </>
+            keyboardShouldPersistTaps="handled"
+          >
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                setLivePhase('setup');
+              }}
+              hitSlop={12}
+              style={{ marginBottom: 12, alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6 }}
+            >
+              <ArrowLeft size={20} color={theme.colors.textSecondary} />
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 14 }}>Back</Text>
+            </Pressable>
+
+            <Text style={{ ...theme.typography.h1, color: theme.colors.textPrimary, marginBottom: 8 }}>
+              Which hole are you starting on?
+            </Text>
+            <Text style={{ ...theme.typography.body, color: theme.colors.textSecondary, marginBottom: 24 }}>
+              {courseName.trim()} · {holesPlayed} holes
+            </Text>
+
+            <Segmented
+              value={String(startHole)}
+              options={holeOptions.map((o) => ({ value: String(o.value), label: o.label }))}
+              onChange={(v) => setStartHole(v === '10' ? 10 : 1)}
+            />
+
+            {/* A full 18 has exactly one valid answer: the round model plays
+                holesPlayed consecutive holes from the start hole, so 18 from
+                10 would score holes 19..27. Say so rather than offering a
+                choice that can't work. */}
+            {holesPlayed === 18 && (
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 13, marginTop: 10 }}>
+                A full 18 always tees off on hole 1. Shotgun start? Go back and pick 9 holes,
+                then tee off on 10.
+              </Text>
+            )}
+
+            {/* Same gate as the setup screen, re-checked for the hole they
+                actually chose — a saved back-nine scorecard doesn't cover a
+                front-nine round. "Set the scorecard" is offered right here so
+                a blocked golfer is never stuck. */}
+            {!gate.allowed && gate.reason === 'unknown-course' && (
+              <Text style={{ color: theme.colors.bogey, fontSize: 13, marginTop: 20 }}>
+                We don't have this course's pars for these holes yet. Set the scorecard so your
+                reel shows real numbers.
+              </Text>
+            )}
+
+            <Button
+              title="Start Round"
+              onPress={startRound}
+              disabled={!gate.allowed}
+              style={{
+                marginTop: 24,
+                ...(gate.allowed ? theme.shadows.glow : {}),
+              }}
+            />
+
+            {!gate.allowed && (
+              <Button
+                title="Set the scorecard"
+                variant="secondary"
+                onPress={() => {
+                  Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                  setLivePhase('scorecard');
+                }}
+                style={{ marginTop: 12 }}
+              />
+            )}
+          </ScrollView>
+        </GradientBackground>
       );
     }
 
@@ -1261,6 +1322,11 @@ export default function RecordScreen() {
           // Re-saving a course you've already bookmarked overwrites it, so
           // label the CTA "Update…" instead of "Save…" in that case.
           isUpdate={!!findPresetToUpdate(presets, courseName.trim())}
+          // This screen renders inside the tabs navigator, so its pinned Save
+          // CTA has to clear the floating tab pill like every other setup
+          // step. It pads for the safe-area inset itself, hence the bare pill
+          // clearance rather than tabBarClearance().
+          bottomClearance={TAB_BAR_CLEARANCE}
           onBack={() => {
             Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
             setLivePhase('setup');
@@ -1270,27 +1336,38 @@ export default function RecordScreen() {
       );
     }
 
-    // ---- IDLE STATE: Live recording — manual setup screen ----
-    // Reached when the user picked 'Live' AND either has no presets OR
-    // tapped "Set up new round" on the picker. Course search + 9/18 +
-    // start-hole selectors for explicit setup.
+    // ---- IDLE STATE: Live recording — setup screen ----
+    // The hub of the Live flow: recent courses, course search and 9/18.
+    // Continue leads to the start-hole step, which is where a round is
+    // actually started.
+    //
+    // The golfer hasn't chosen a nine yet, so the gate here asks "do we know
+    // this course for ANY start hole it could tee off on" — someone whose only
+    // saved scorecard is the back nine must still reach the step where they'd
+    // say so. startRoundGate then checks the hole they actually pick.
+    // While the presets fetch is still in flight we may not know yet that the
+    // golfer HAS a scorecard for this course, so don't block (or accuse them
+    // of a new course) on incomplete knowledge — startRoundGate on the next
+    // step is the guarantee.
+    const courseReady = courseName.trim().length > 0;
+    const courseKnown = presetsLoading || isCourseKnownForAnyStart(setup);
+    const canContinue = courseReady && courseKnown;
     return (
       <GradientBackground>
         <ScrollView
-          contentContainerStyle={{ paddingTop: insets.top, padding: 24, paddingBottom: 48 }}
+          contentContainerStyle={{
+            paddingTop: insets.top,
+            padding: 24,
+            // Clear the floating tab pill. At the old flat 48 the Start Round
+            // button and the holes selector sat underneath it on device.
+            paddingBottom: tabBarClearance(insets.bottom),
+          }}
           keyboardShouldPersistTaps="handled"
         >
           <Pressable
             onPress={() => {
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-              // Back-navigation: if the user has presets, return to the
-              // picker so they can switch their mind. Otherwise drop all
-              // the way back to the chooser (no picker exists to return to).
-              if (presets.length > 0) {
-                setLivePhase('preset-picker');
-              } else {
-                setMode(null);
-              }
+              setMode(null);
               setCourseName('');
               setSelectedCourseId(undefined);
               setCourseHoles(undefined);
@@ -1338,9 +1415,13 @@ export default function RecordScreen() {
             </Card>
           </Pressable>
 
-          {/* Saved-rounds list previously lived here. Moved to the
-              PresetPickerScreen (Phase D-redo) which shows BEFORE this
-              setup screen for users with presets. */}
+          {/* Recently used courses / saved scorecards — the fast path. Sits
+              above the search because for a repeat round it IS the setup. */}
+          <RecentScorecards
+            presets={recentSetups(presets)}
+            loading={presetsLoading}
+            onSelect={handleSelectRecent}
+          />
 
           {/* Course search */}
           <CourseSearch
@@ -1361,43 +1442,40 @@ export default function RecordScreen() {
                 value={String(holesPlayed)}
                 options={[{ value: '9', label: '9' }, { value: '18', label: '18' }]}
                 onChange={(v) => {
-                  setHolesPlayed(v === '9' ? 9 : 18);
-                  // 18-hole rounds can't start on hole 10 (would only play 9).
-                  // Reset to 1 if the user toggles back to 18.
-                  if (v === '18') setStartHole(1);
+                  const next = v === '9' ? 9 : 18;
+                  setHolesPlayed(next);
+                  // 18-hole rounds can't start on hole 10 (would score holes
+                  // 19..27), so drop a back-nine choice on the way through.
+                  setStartHole((cur) => normalizeStartHole(next, cur));
                 }}
               />
-
-              {holesPlayed === 9 && (
-                <>
-                  <Text style={{
-                    ...theme.typography.bodySmall,
-                    color: theme.colors.textSecondary,
-                    fontWeight: '600',
-                    marginTop: 16,
-                    marginBottom: 8,
-                  }}>
-                    Which hole do you tee off?
-                  </Text>
-                  <Segmented
-                    value={String(startHole)}
-                    options={[
-                      { value: '1', label: 'Hole 1 (Front 9)' },
-                      { value: '10', label: 'Hole 10 (Back 9)' },
-                    ]}
-                    onChange={(v) => setStartHole(v === '10' ? 10 : 1)}
-                  />
-                </>
-              )}
+              {/* The start hole is NOT asked here any more — it's the next
+                  step, so both this path and a tapped recent course confirm
+                  it the same way. */}
             </View>
           )}
 
+          {/* A course we hold no pars for would put an invented scorecard on
+              a reel that can never be re-recorded, so Continue waits until
+              the scorecard is set. A course we already know is never gated. */}
+          {courseReady && !canContinue && (
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 20 }}>
+              New course — we don't have its pars yet. Set the scorecard once and it's saved
+              for every round you play here.
+            </Text>
+          )}
+
           <Button
-            title="Start Round"
-            onPress={startRound}
+            title="Continue"
+            onPress={() => {
+              // Land the step on a hole this round can actually start from.
+              setStartHole((cur) => normalizeStartHole(holesPlayed, cur));
+              setLivePhase('start-hole');
+            }}
+            disabled={!canContinue}
             style={{
-              marginTop: 24,
-              ...(courseName.trim() ? theme.shadows.glow : {}),
+              marginTop: courseReady ? 20 : 24,
+              ...(canContinue ? theme.shadows.glow : {}),
             }}
           />
 
@@ -1405,7 +1483,7 @@ export default function RecordScreen() {
               par data isn't trustworthy, so this lets the user set each hole's
               par once and reuse it (the saved pars override the API on future
               rounds). Only offered once a course is in the field. */}
-          {courseName.trim().length > 0 && (
+          {courseReady && (
             <Button
               title="Set the scorecard"
               variant="secondary"

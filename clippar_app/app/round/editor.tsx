@@ -13,7 +13,7 @@ import {
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { getProStatus } from '@/lib/subscription';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Plus, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle } from 'lucide-react-native';
+import { X, ArrowLeft, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -543,35 +543,14 @@ function HoleSection({
   );
 }
 
-// ---- Intro/Outro placeholder ----
-function SlotCard({ label }: { label: string }) {
-  return (
-    <View
-      style={{
-        width: 100,
-        height: 130,
-        borderRadius: theme.radius.md,
-        borderWidth: 1,
-        borderColor: theme.colors.surfaceBorder,
-        borderStyle: 'dashed',
-        justifyContent: 'center',
-        alignItems: 'center',
-        gap: 6,
-      }}
-    >
-      <Plus size={20} color={theme.colors.textTertiary} />
-      <Text
-        style={{
-          color: theme.colors.textTertiary,
-          fontSize: 12,
-          fontWeight: '600',
-        }}
-      >
-        {label}
-      </Text>
-    </View>
-  );
-}
+// The "+ Intro" / "+ Outro" slot cards used to render here. There is no
+// intro/outro feature: nothing picks or records such a clip, nothing
+// persists one (no column, no storage path), and useEditorState.setIntro /
+// setOutro have zero call sites — state.intro and state.outro are null for
+// the entire life of the screen. The cards were a dashed, plus-iconed,
+// tappable-looking View with no onPress, so tapping them did nothing. A dead
+// affordance on a paid product reads as a broken app, so they are gone until
+// the feature actually exists.
 
 // ============================================================
 // MAIN EDITOR SCREEN
@@ -665,6 +644,22 @@ export default function EditorScreen() {
       router.back();
     } else {
       router.replace('/(tabs)');
+    }
+  }, []);
+
+  // Review mode only: pop straight back to the LIVE round. record.tsx opens
+  // the editor with router.push precisely so the record screen stays mounted
+  // underneath — router.back() therefore resumes the same in-memory round
+  // (hole/shot pointers, camera, clicker) with nothing reset. Any other
+  // navigation call would remount record.tsx and restart the round setup, so
+  // don't "simplify" this to a replace. The fallback only fires if the stack
+  // is somehow empty, and lands on the record tab rather than the library so
+  // the golfer is at least back where the round lives.
+  const backToRound = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(tabs)/record');
     }
   }, []);
 
@@ -1639,8 +1634,9 @@ export default function EditorScreen() {
         contentContainerStyle={{
           paddingTop: 16,
           // Extra bottom room in select mode so the action bar doesn't
-          // cover the last hole.
-          paddingBottom: insets.bottom + (selectMode ? 120 : 80),
+          // cover the last hole; likewise for the review-mode "Back to
+          // round" bar, which is pinned over the same space.
+          paddingBottom: insets.bottom + (selectMode ? 120 : isReview ? 100 : 80),
         }}
       >
         {/* Music selection row */}
@@ -1687,19 +1683,6 @@ export default function EditorScreen() {
             </Pressable>
           )}
         </Pressable>
-
-        {/* Intro / Outro slots */}
-        <View
-          style={{
-            flexDirection: 'row',
-            gap: 12,
-            paddingHorizontal: 16,
-            marginBottom: 24,
-          }}
-        >
-          <SlotCard label="Intro" />
-          <SlotCard label="Outro" />
-        </View>
 
         {/* Hole sections */}
         {state.holes.map((hole) => (
@@ -1819,6 +1802,52 @@ export default function EditorScreen() {
           >
             <Share2 size={16} color="#000" />
             <Text style={{ color: '#000', fontSize: 14, fontWeight: '800' }}>Share</Text>
+          </Pressable>
+        </View>
+      )}
+
+      {/* ---- BACK TO ROUND (review mode) ---- */}
+      {/* The golfer is standing on a tee, one-handed, in sunlight: the way
+          back to the live round has to be pinned in the thumb arc, not a
+          14px X in the top-left corner. Hidden in select mode so it can't
+          sit under that bar. Deliberately no "Leave Editor?" confirm —
+          going back to your own round in progress isn't leaving anything,
+          and edits are already saved as a draft. */}
+      {isReview && !selectMode && (
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            paddingHorizontal: 16,
+            paddingTop: 12,
+            paddingBottom: insets.bottom + 12,
+            backgroundColor: theme.colors.surface,
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.surfaceBorder,
+          }}
+        >
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+              backToRound();
+            }}
+            style={{
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+              // 56pt tall — a gloved/sweaty thumb target, not a 44pt minimum.
+              height: 56,
+              borderRadius: 14,
+              backgroundColor: theme.colors.primary,
+            }}
+          >
+            <ArrowLeft size={20} color="#000" />
+            <Text style={{ color: '#000', fontSize: 17, fontWeight: '800' }}>
+              Back to round
+            </Text>
           </Pressable>
         </View>
       )}

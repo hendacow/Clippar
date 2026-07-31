@@ -1,5 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import {
   clampRecoveredPointer,
   insertClipInOrder,
@@ -293,5 +296,54 @@ test('restore after delete puts the clip back on its own hole, in order', () => 
   assert.deepEqual(
     restored.map((c) => `${c.holeNumber}.${c.shotNumber}`),
     ['1.1', '1.2', '2.1']
+  );
+});
+
+// ── Both hole-departure paths must use the same guard ────────────────────────
+//
+// useRound has two functions that leave a hole: endHole ("Next Hole") and
+// previousHole. Only previousHole guarded, and its own comment explained why —
+// "otherwise we'd write a phantom 1-stroke score for a hole merely passed
+// through". endHole floored at 1 instead: `Math.max(1, currentShot - 1)`.
+//
+// On an untouched hole currentShot is 1, so that produced a score of ONE. Not
+// an empty row — a hole-in-one. Tapping Next Hole through 11 and 12 en route to
+// 13 wrote two aces on par 4s into the scorecard that gets burned into the
+// exported reel, and threw the round total out by however many holes were
+// skipped. That is what the "skipped holes are rendering" report actually was:
+// the scorecard was right to show them, because scores really had been written.
+//
+// A source-level assertion, because the bug was never in the helper — it was
+// one caller not using it. A unit test of departingHoleStrokes alone passed
+// happily throughout.
+test('endHole and previousHole both route through departingHoleStrokes', () => {
+  const src = readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks', 'useRound.ts'),
+    'utf8',
+  );
+
+  const calls = src.match(/departingHoleStrokes\(/g) ?? [];
+  assert.equal(
+    calls.length,
+    2,
+    'expected exactly two callers (endHole + previousHole); a third departure ' +
+      'path, or a removed one, needs this invariant re-checked',
+  );
+
+  // The THIRD score-writing path. endRoundEarly also floors with
+  // Math.max(1, currentShot - 1), but that is correct there because it sits
+  // inside `if (hasCurrentHoleShots)` — and in the one case the floor actually
+  // bites (a clip recorded without the shot counter moving) one clip really is
+  // one stroke. Assert the guard, not the arithmetic: an unguarded write is the
+  // bug, the floor is not.
+  //
+  // Worth saying how this line got here — the first version of this test just
+  // banned the Math.max pattern outright, and it failed on endRoundEarly. That
+  // sent me to read the third path properly instead of assuming two.
+  assert.match(
+    src,
+    /const hasCurrentHoleShots\s*=\s*prev\.currentShot > 1 \|\| holeClips\.length > 0;/,
+    'endRoundEarly lost its hasCurrentHoleShots guard — it would then commit a ' +
+      'score for a hole the golfer never played',
   );
 });
