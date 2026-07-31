@@ -118,9 +118,24 @@ export async function handler(req: Request): Promise<Response> {
   try {
     event = stripe.webhooks.constructEvent(body, sig, endpointSecret);
   } catch (err) {
-    return new Response(`Webhook Error: ${(err as Error).message}`, {
-      status: 400,
-    });
+    // Log the detail, return a fixed string.
+    //
+    // constructEvent's message distinguishes the failure modes — "No signatures
+    // found matching the expected signature", "Timestamp outside the tolerance
+    // zone", a malformed header — which tells anyone POSTing this endpoint
+    // exactly how close they are to forging a valid webhook, and whether the
+    // signing secret they are guessing against is even the right one. Stripe
+    // errors can also carry account ids and API versions. The signature check is
+    // the only thing standing between an unauthenticated caller and a forged
+    // "payment succeeded", so it must not narrate its own failures (spec 5.3).
+    //
+    // Stripe itself does not read this body — it retries on any non-2xx — so
+    // nothing is lost operationally, and the detail is still in the function log.
+    console.error(
+      '[stripe-webhook] signature verification failed:',
+      err instanceof Error ? err.message : err,
+    );
+    return new Response('Webhook Error', { status: 400 });
   }
 
   if (event.type === 'payment_intent.succeeded') {
