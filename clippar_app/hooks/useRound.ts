@@ -788,9 +788,29 @@ export function useRound() {
 
     try {
       const { fileUris } = await resetRoundData(current.roundId);
-      for (const uri of fileUris) {
-        deleteFile(uri).catch(() => {});
+
+      // The rows go, the FILES STAY. Deliberately.
+      //
+      // This path discards a practice pass, and the camera discards practice
+      // clips before they are ever persisted — so `fileUris` should be empty
+      // every time. If it is not, something we did not predict recorded real
+      // footage during practice (a clicker press that slipped past the armed
+      // check, a state race), and that is exactly the moment to stop deleting.
+      //
+      // It used to unlink every uri here, with no undo entry and no
+      // confirmation. A round is recorded once, on a course, and cannot be
+      // re-recorded; an orphaned file costs disk, a wrong `deleteFile` costs the
+      // shot. The round row is still cleared, so the user gets the clean slate
+      // they asked for — the footage just remains on disk, reachable from
+      // Profile → Storage, instead of being destroyed on a guess.
+      if (fileUris.length > 0) {
+        console.warn(
+          `[useRound] resetToStart: ${fileUris.length} practice clip file(s) had been ` +
+            'persisted — rows cleared, files intentionally left on disk. Practice ' +
+            'clips are not supposed to reach disk, so this is worth investigating.',
+        );
       }
+
       await updateLocalRound(current.roundId, {
         current_hole: current.startHole,
         current_shot: 1,
