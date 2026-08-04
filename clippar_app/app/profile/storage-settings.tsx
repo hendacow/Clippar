@@ -105,7 +105,11 @@ export default function StorageSettingsScreen() {
         'Cloud backup keeps your raw clips safe in the cloud so they survive an app reinstall. Available on Clippar Pro.',
         [
           { text: 'Not now', style: 'cancel' },
-          { text: 'Upgrade', onPress: () => router.push('/profile') },
+          // Was router.push('/profile') — the tab this alert is already on top
+          // of, so Upgrade dismissed the dialog and appeared to do nothing.
+          // A button labelled Upgrade that never reaches a purchase reads as a
+          // broken control to a reviewer and as a dead end to a customer.
+          { text: 'Upgrade', onPress: () => router.push('/paywall') },
         ]
       );
       return;

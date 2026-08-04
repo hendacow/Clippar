@@ -138,7 +138,8 @@ export default function ProfileScreen() {
   const { status: subscriptionStatus } = useSubscription();
   const { replayOnboarding } = useOnboarding();
   const [profile, setProfile] = useState<ProfileRow | null>(null);
-  const [useMeters, setUseMeters] = useState(true);
+  // useMeters/setUseMeters REMOVED with the Units toggle — see the note where
+  // that card used to be. Nothing else read it.
   const [roundsCount, setRoundsCount] = useState(0);
   const [draftCount, setDraftCount] = useState(0);
 
@@ -760,13 +761,13 @@ export default function ProfileScreen() {
                 </View>
               }
             />
-            <Divider />
-            <SettingsRow
-              icon={<Bluetooth size={18} color={theme.colors.accentBlue} />}
-              title="Bluetooth Clicker"
-              subtitle="Manage clicker connection"
-              onPress={() => router.push('/profile/bluetooth')}
-            />
+            {/* Bluetooth Clicker HIDDEN for v1. The screen genuinely pairs and
+                connects — and then nothing reads the connection, so a paired
+                clicker cannot start or stop a recording. A control that
+                completes a real-looking flow and still does nothing is worse
+                than an absent one, and it is on the path a reviewer walks.
+                The screen is left in place; restore this row once the clicker
+                actually drives capture. */}
             <Divider />
             <SettingsRow
               icon={<Settings size={18} color={theme.colors.textSecondary} />}
@@ -803,71 +804,26 @@ export default function ProfileScreen() {
             )}
           </Card>
 
-          {/* ---- UNITS ---- */}
-          <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
-            <SettingsRow
-              icon={<Ruler size={18} color={theme.colors.textSecondary} />}
-              title="Units"
-              trailing={
-                <View
-                  style={{
-                    flexDirection: 'row',
-                    borderRadius: 8,
-                    overflow: 'hidden',
-                    borderWidth: 1,
-                    borderColor: theme.colors.surfaceBorder,
-                  }}
-                >
-                  <Pressable
-                    onPress={() => setUseMeters(false)}
-                    style={{
-                      paddingHorizontal: 16,
-                      paddingVertical: 8,
-                      backgroundColor: !useMeters ? theme.colors.surfaceElevated : 'transparent',
-                    }}
-                  >
-                    <Text
-                      style={{
-                        color: !useMeters ? theme.colors.textPrimary : theme.colors.textTertiary,
-                        fontSize: 13,
-                        fontWeight: '600',
-                      }}
-                    >
-                      Yards
-                    </Text>
-                  </Pressable>
-                  <Pressable
-                    onPress={() => setUseMeters(true)}
-                    style={{
-                      paddingHorizontal: 16,
-                      paddingVertical: 8,
-                      backgroundColor: useMeters ? theme.colors.surfaceElevated : 'transparent',
-                    }}
-                  >
-                    <Text
-                      style={{
-                        color: useMeters ? theme.colors.textPrimary : theme.colors.textTertiary,
-                        fontSize: 13,
-                        fontWeight: '600',
-                      }}
-                    >
-                      Meters
-                    </Text>
-                  </Pressable>
-                </View>
-              }
-            />
-          </Card>
-
+          {/* UNITS TOGGLE REMOVED for v1. Yards/Meters was backed by plain
+              component state and read only to colour its own highlight: it did
+              not persist across a restart and nothing consumed it. It could not
+              have — the app renders no distance to a user anywhere (hole
+              `length_meters` is carried through CourseSearch's data mapping and
+              never reaches JSX). A units preference with no units on screen is
+              a control that cannot work, so it is gone rather than wired to
+              nothing. Bring it back with the first screen that shows a
+              distance. */}
           {/* ---- SECONDARY SETTINGS ---- */}
           <Card style={{ marginBottom: 16, paddingVertical: 4, paddingHorizontal: 0 }}>
-            <SettingsRow
-              icon={<Bell size={18} color={theme.colors.processing} />}
-              title="Notifications"
-              subtitle="Reel ready, shipping updates"
-              onPress={() => router.push('/profile/notifications')}
-            />
-            <Divider />
+            {/* Notifications HIDDEN for v1 — the screen is dead twice over.
+                Its three switches write to AsyncStorage and are read only to
+                restore their own positions on mount, and the app has no
+                notification machinery at all: expo-notifications appears
+                nowhere in app/profile/notifications.tsx, no push token is ever
+                requested, and nothing is ever sent. Promising "Reel ready,
+                shipping updates" and delivering neither is a 2.3.1 problem as
+                well as a dead control. Restore the row when notifications are
+                actually wired. */}
             <SettingsRow
               icon={<CreditCard size={18} color={theme.colors.primary} />}
               title="Orders"

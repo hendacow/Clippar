@@ -120,7 +120,15 @@ test('the retired bespoke redemption client is actually gone', () => {
 test('the retired server side is marked so nobody applies or deploys it', () => {
   // Both are on disk for their design notes. Neither has ever touched a
   // database, and applying 018 re-introduces the guideline exposure.
-  const migration = read('supabase/migrations/018_redemption_codes.sql');
+  // supabase/retired/, NOT supabase/migrations/ — living in the migrations
+  // directory meant `supabase db push` applied it despite the header, which is
+  // exactly the exposure the header warns about. The path is the enforcement;
+  // the header is only the explanation.
+  assert.ok(
+    !existsSync(path('supabase/migrations/018_redemption_codes.sql')),
+    '018 must not sit in the push path — a DO-NOT-APPLY header does not stop db push'
+  );
+  const migration = read('supabase/retired/018_redemption_codes.sql');
   const fn = read('supabase/functions/redeem-code/index.ts');
   assert.match(migration, /SUPERSEDED\s*—\s*DO NOT APPLY/i);
   assert.match(fn, /SUPERSEDED\s*—\s*DO NOT DEPLOY/i);
