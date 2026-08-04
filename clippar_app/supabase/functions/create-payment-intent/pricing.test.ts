@@ -13,18 +13,37 @@
  * on to `stripe.paymentIntents.create({ amount })`.
  */
 import { assertEquals } from 'https://deno.land/std@0.224.0/assert/mod.ts';
-import { resolvePriceCents, resolveProductType } from './pricing.ts';
+import { PRICE_CURRENCY, resolvePriceCents, resolveProductType } from './pricing.ts';
+import { config } from '../../../constants/config.ts';
 
 Deno.test('catalog products resolve to their server-side price', () => {
-  assertEquals(resolvePriceCents('standard'), 5900);
-  assertEquals(resolvePriceCents('premium'), 6900);
+  assertEquals(resolvePriceCents('standard'), 9900);
+  assertEquals(resolvePriceCents('premium'), 10900);
 });
 
 Deno.test('a missing product_type defaults to standard, not to a bypass', () => {
-  assertEquals(resolvePriceCents(undefined), 5900);
-  assertEquals(resolvePriceCents(null), 5900);
-  assertEquals(resolvePriceCents(42), 5900);
+  assertEquals(resolvePriceCents(undefined), 9900);
+  assertEquals(resolvePriceCents(null), 9900);
+  assertEquals(resolvePriceCents(42), 9900);
   assertEquals(resolveProductType(undefined), 'standard');
+});
+
+// The table here is what the customer is CHARGED; constants/config.ts is what
+// the app DISPLAYS. They are separate files by necessity (Deno vs the RN
+// bundle), so nothing but this test stops one being raised without the other —
+// which is exactly how a "$99" kit could go on billing $59.
+Deno.test('charged price matches the price the app displays', () => {
+  assertEquals(
+    resolvePriceCents('standard'),
+    config.hardware.standardPriceCents,
+    'standard kit: pricing.ts and constants/config.ts disagree',
+  );
+  assertEquals(
+    resolvePriceCents('premium'),
+    config.hardware.premiumPriceCents,
+    'premium kit: pricing.ts and constants/config.ts disagree',
+  );
+  assertEquals(PRICE_CURRENCY, config.hardware.currency);
 });
 
 // THE REGRESSION. Every one of these returned a non-undefined value under the

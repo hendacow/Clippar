@@ -86,8 +86,8 @@ export const config = {
     entitlementId: 'Clippar Pro',
   },
   hardware: {
-    standardPriceCents: 5900,
-    premiumPriceCents: 6900,
+    standardPriceCents: 9900,
+    premiumPriceCents: 10900,
     currency: 'aud',
   },
   shop: {

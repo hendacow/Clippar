@@ -7,7 +7,8 @@
  * fixed catalog, NEVER from the client body — a client-supplied amount let any
  * authenticated user pay 1 cent for a physical kit. Prices (in cents) mirror
  * constants/config.ts (standardPriceCents / premiumPriceCents) and the currency
- * is fixed. Update both together when pricing changes.
+ * is fixed. Update both together when pricing changes — "charged price matches
+ * the price the app displays" in pricing.test.ts fails if you update only one.
  *
  * Declared with a null prototype so the table has NO inherited keys. As a plain
  * object literal it inherited Object.prototype, and the caller's allowlist test
@@ -19,8 +20,8 @@
 const PRICE_TABLE_AUD_CENTS: Record<string, number> = Object.assign(
   Object.create(null) as Record<string, number>,
   {
-    standard: 5900,
-    premium: 6900,
+    standard: 9900,
+    premium: 10900,
   },
 );
 
