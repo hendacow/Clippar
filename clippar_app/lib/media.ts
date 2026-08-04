@@ -18,10 +18,15 @@
  *
  * Called from:
  *   - `app/round/import.tsx` (before saveLocalClip)
+ *   - `hooks/useCamera.ts` (before saveLocalClip — expo-camera writes the
+ *     recording into Library/Caches/…/Camera, which is just as purgeable as
+ *     the picker's copy; see lib/clipPaths)
+ *   - `lib/uriMigration.ts` (rescuing rows written before either path did)
  *   - `lib/r2.ts` (before the ExpoFS.File existence check)
  */
 
 import { Platform } from 'react-native';
+import { isPurgeableAppPath } from '@/lib/clipPaths';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -208,17 +213,22 @@ export async function persistAsset(uri: string, filename: string): Promise<strin
     // unique by construction, and every getInfoAsync is a trip through the
     // serialized native queue we just got burned by.
     const dest = `${dir}${filename}`;
-    // When the source is the picker's own cache copy (Library/Caches/ImagePicker
-    // or /tmp) it lives on the SAME sandbox volume as documentDirectory, and we
-    // were going to delete it right after copying anyway — so MOVE (an O(1)
-    // rename) instead of copying every byte of the video. For a 12-clip import
-    // this turns hundreds of MB of file copying into a handful of renames, which
-    // is the dominant cost of import. Sources outside our sandbox (e.g. a Photos
-    // localUri we don't own, which moveAsync also can't cross volumes to) are
-    // copied as before.
-    const inAppCache =
-      resolved.includes('/Library/Caches/ImagePicker/') ||
-      resolved.includes('/tmp/');
+    // When the source is one of our own cache copies — the picker's
+    // (Library/Caches/ImagePicker), a tmp file, or expo-camera's recording in
+    // Library/Caches/…/Camera — it lives on the SAME sandbox volume as
+    // documentDirectory, and we were going to delete it right after copying
+    // anyway — so MOVE (an O(1) rename) instead of copying every byte of the
+    // video. For a 12-clip import this turns hundreds of MB of file copying
+    // into a handful of renames, which is the dominant cost of import; on the
+    // record path it is what lets useCamera persist a ~150MB clip without
+    // adding a beat to the gap between shots. Sources outside our sandbox
+    // (e.g. a Photos localUri we don't own, which moveAsync also can't cross
+    // volumes to) are copied as before.
+    //
+    // The list of "our own cache" shapes is lib/clipPaths' to keep — the
+    // camera directory was missing from the hand-written version here, from
+    // uriMigration's copy of it, and from the SQL that feeds uriMigration.
+    const inAppCache = isPurgeableAppPath(resolved);
     if (inAppCache) {
       try {
         await FileSystemLegacy.moveAsync({ from: resolved, to: dest });

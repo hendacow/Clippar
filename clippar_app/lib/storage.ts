@@ -4,6 +4,8 @@ import {
   isRowVisible,
   shouldClaimLegacyRows,
 } from './localScope';
+import { evictableUriSql, isPurgeableAppPath, videoExtension } from './clipPaths';
+import { persistAsset } from './media';
 
 let db: SQLite.SQLiteDatabase | null = null;
 
@@ -648,6 +650,42 @@ export async function getUnprocessedClips(roundId: string) {
   );
 }
 
+/**
+ * Promote a trim result onto the clip row.
+ *
+ * THE FILE IS PERSISTED BEFORE THE ROW POINTS AT IT. modules/shot-detector
+ * exports its trim to `Library/Caches/trim_<uuid>` (ShotDetectorModule.swift),
+ * and this function used to write that cache path straight into file_uri. From
+ * that moment the trimmed clip — the one the editor plays, the compose reads
+ * and the upload queue sends — was a file iOS could reclaim at any time, with
+ * nothing to regenerate it: auto_trimmed=1 and needs_trim=0 mean the editor's
+ * processAllUntrimmed pass will never look at that clip again. Every call site
+ * that produces a trim (hooks/useCamera.ts, both batches in
+ * hooks/useEditorState.ts) funnels through here, so this is the one place the
+ * guarantee can be made for all of them.
+ *
+ * Calls that pass an already-durable original — putts and no-detection, which
+ * keep the full clip — are unaffected: isPurgeableAppPath is false for a
+ * documentDirectory path, so persistTrimOutput hands the uri straight back and
+ * no file is touched.
+ */
+async function persistTrimOutput(clipId: number, uri: string): Promise<string> {
+  if (!isPurgeableAppPath(uri)) return uri;
+  try {
+    // Same rename-not-copy path as the record and import sides: the cache and
+    // documentDirectory share the app container's volume.
+    return await persistAsset(
+      uri,
+      `trimmed_${clipId}_${Date.now()}.${videoExtension(uri)}`
+    );
+  } catch {
+    // persistAsset already swallows its own failures; this is for the import
+    // itself failing on a web/test build. Storing the cache path is what we
+    // did before, and migrateLegacyUris will rescue the row at next launch.
+    return uri;
+  }
+}
+
 export async function markClipTrimmed(
   clipId: number,
   trimmedFileUri: string,
@@ -657,6 +695,24 @@ export async function markClipTrimmed(
   autoTrimEndMs: number | null = null,
 ) {
   const database = await getDatabase();
+  // Read before writing: the outgoing trimmed_file_uri has to be unlinked (see
+  // below) and the original tells us which files we must never touch.
+  const before = await database.getFirstAsync<{
+    trimmed_file_uri: string | null;
+    original_file_uri: string | null;
+  }>(
+    'SELECT trimmed_file_uri, original_file_uri FROM local_clips WHERE id = ?',
+    clipId
+  );
+  // The row is gone — "Delete last shot" landed while detection was running.
+  // Returning before the persist matters: moving the trim into
+  // documentDirectory/clips/ for a clip that no longer exists would strand it
+  // there permanently, where nothing sweeps. Left in the cache, it is exactly
+  // what reclaimTemporaryExports exists to age out.
+  if (!before) return;
+
+  const durableUri = await persistTrimOutput(clipId, trimmedFileUri);
+
   // Compute the trimmed file's duration so the editor's badge + compose
   // logic uses the right value. Without this update, duration_seconds
   // stays at the original (pre-trim) length and downstream code thinks
@@ -677,8 +733,8 @@ export async function markClipTrimmed(
       auto_trim_end_ms = ?,
       duration_seconds = COALESCE(?, duration_seconds)
     WHERE id = ?`,
-    trimmedFileUri,
-    trimmedFileUri,
+    durableUri,
+    durableUri,
     impactTimeMs ?? null,
     trimConfidence ?? null,
     autoTrimStartMs ?? null,
@@ -686,6 +742,31 @@ export async function markClipTrimmed(
     durationSeconds,
     clipId
   );
+
+  // Unlink the trim this one supersedes. While trims lived in Library/Caches
+  // this was free — reclaimTemporaryExports ages out any trim_ file no row
+  // points at. Now that they are persisted into documentDirectory/clips/,
+  // nothing sweeps them, so a clip re-trimmed three times would strand three
+  // full-fidelity copies of the golfer's swing for the life of the install.
+  //
+  // Never the original: it is the only source a re-trim can work from, and
+  // putts/no-detection rows legitimately have trimmed_file_uri === it. Same
+  // fire-and-forget, lazily-required shape as staleClipTracer above, for the
+  // same import-cycle reason.
+  const superseded = before?.trimmed_file_uri;
+  if (
+    superseded &&
+    superseded !== durableUri &&
+    superseded !== before?.original_file_uri
+  ) {
+    try {
+      const shotDetector =
+        require('../modules/shot-detector') as typeof import('../modules/shot-detector');
+      shotDetector.deleteFile(superseded).catch(() => {});
+    } catch {
+      // shot-detector unavailable (e.g. web build) — the row is already correct.
+    }
+  }
 }
 
 export async function getClipsForRound(roundId: string) {
@@ -1396,43 +1477,54 @@ export async function getClipsWithLegacyUris() {
     round_id: string;
     file_uri: string;
     original_file_uri: string | null;
+    trimmed_file_uri: string | null;
   }>(
-    // `Library/Caches/ImagePicker/…` is the default expo-image-picker
-    // output path — iOS purges that dir on memory pressure, so treat it
-    // as legacy/evictable and migrate into documentDirectory.
-    `SELECT id, round_id, file_uri, original_file_uri
+    // The WHERE clause is GENERATED from lib/clipPaths, which is also what
+    // lib/uriMigration.ts asks about each row it gets back. It used to be a
+    // hand-written list of the same four patterns, and it fell one behind:
+    // the app's own footage — recordings in `Library/Caches/…/Camera/` and
+    // trims in `Library/Caches/trim_…` — was never selected, so the migration
+    // could not rescue the clips with no second copy anywhere. Extending the
+    // predicate without extending the query would have left the fix
+    // unreachable — hence the shared source.
+    //
+    // trimmed_file_uri is selected but NOT matched on: it is a duplicate of
+    // file_uri (markClipTrimmed writes both), so a row that needs it rescued
+    // is always already selected by file_uri. It comes along so the migration
+    // can keep the two columns in step instead of leaving one pointing into a
+    // directory it just emptied.
+    `SELECT id, round_id, file_uri, original_file_uri, trimmed_file_uri
      FROM local_clips
-     WHERE file_uri LIKE 'ph://%'
-        OR file_uri LIKE 'assets-library://%'
-        OR file_uri LIKE '%/tmp/%'
-        OR file_uri LIKE '%/Library/Caches/ImagePicker/%'
-        OR original_file_uri LIKE 'ph://%'
-        OR original_file_uri LIKE 'assets-library://%'
-        OR original_file_uri LIKE '%/tmp/%'
-        OR original_file_uri LIKE '%/Library/Caches/ImagePicker/%'`
+     WHERE ${evictableUriSql('file_uri')}
+        OR ${evictableUriSql('original_file_uri')}`
   );
 }
 
 export async function updateClipFileUris(
   clipId: number,
   fileUri: string,
-  originalFileUri?: string | null
+  originalFileUri?: string | null,
+  trimmedFileUri?: string | null
 ) {
   const database = await getDatabase();
+  // Built from whichever columns the caller actually resolved. The previous
+  // two-branch version could not express "file_uri and trimmed_file_uri but
+  // not original_file_uri", which is the shape a trimmed clip needs.
+  const sets: string[] = ['file_uri = ?'];
+  const params: (string | null)[] = [fileUri];
   if (originalFileUri !== undefined) {
-    await database.runAsync(
-      'UPDATE local_clips SET file_uri = ?, original_file_uri = ? WHERE id = ?',
-      fileUri,
-      originalFileUri,
-      clipId
-    );
-  } else {
-    await database.runAsync(
-      'UPDATE local_clips SET file_uri = ? WHERE id = ?',
-      fileUri,
-      clipId
-    );
+    sets.push('original_file_uri = ?');
+    params.push(originalFileUri);
   }
+  if (trimmedFileUri !== undefined) {
+    sets.push('trimmed_file_uri = ?');
+    params.push(trimmedFileUri);
+  }
+  await database.runAsync(
+    `UPDATE local_clips SET ${sets.join(', ')} WHERE id = ?`,
+    ...params,
+    clipId
+  );
 }
 
 // (Generic key/value settings live earlier in this file against the
