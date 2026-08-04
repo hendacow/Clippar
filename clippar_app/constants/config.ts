@@ -120,6 +120,31 @@ export const config = {
     // Re-enabling post-launch is this one line, once those functions are live.
     inAppShopEnabled: false as boolean,
   },
+  sharing: {
+    // Master switch for PUBLIC SHARE LINKS — the "Create Share Link" action in
+    // the share sheet, which uploads the stitched reel to Supabase Storage and
+    // mints a permanent share_token that clippargolf.com/r/<token> resolves.
+    //
+    // OFF for v1, Henry's call (2026-08-04): a share link is only as permanent
+    // as the storage bill behind it. Every link minted is a reel Clippar has to
+    // hold forever, for a free user, with no way to reclaim the space without
+    // breaking a link someone may have posted. Revisit as a Pro-only feature
+    // where the storage is paid for.
+    //
+    // Nothing else in the share sheet touches the network: Save to Camera Roll,
+    // Share Video and Instagram Stories all read the reel off local disk. With
+    // this off, sharing is entirely device-local and `rounds.share_token` is
+    // never written.
+    //
+    // It was already inert end-to-end and nobody had noticed: create-share-link
+    // mints a token but never sets `is_published`, and get-shared-reel
+    // (index.ts:126) refuses any round where `is_published !== true`. So every
+    // link ever minted returned "not available" — this flag makes the UI honest
+    // rather than changing what a user can actually do. DO NOT "fix" that by
+    // restoring the storage RLS policy 013 dropped; migrations/019 documents
+    // why that exposes every user's raw clips to any signed-in stranger.
+    reelLinksEnabled: false as boolean,
+  },
   processing: {
     maxJobsPerDay: 2,
     maxClipSizeMb: 10240,
@@ -129,14 +154,50 @@ export const config = {
     chunkSizeMb: 5,
   },
   trim: {
-    defaultPreRollMs: 3000,
-    defaultPostRollMs: 2000,
-    autoTrimEnabled: true,
+    // defaultPreRollMs / defaultPostRollMs (3000/2000) and autoTrimEnabled
+    // REMOVED — all three were read only by the Trim Settings screen, and none
+    // of them reached anything that trims.
+    //
+    // The "defaults" were a lie by naming. The window every trim actually
+    // resolves to is `windows.fullSwing` below (see resolveSavedTrimWindow),
+    // but the settings screen seeded its pickers from defaultPre/PostRollMs and
+    // so showed the user a 5.0s clip length this app has never produced. Two
+    // names for "the default" is exactly how they drifted apart, so there is
+    // now one: windows.fullSwing.
+    //
+    // autoTrimEnabled backed the "Auto-trim" switch. Nothing read it, and it
+    // is gone rather than wired up because "off" is not a mode this pipeline
+    // has: the single detectAndTrim call that trims a clip is also what marks
+    // it processed (an unprocessed clip is filtered OUT of the reel — see
+    // needsTrim in app/round/editor.tsx), what classifies putt-vs-swing for
+    // hole auto-advance, and what supplies the impact time the manual trimmer
+    // and the tracer anchor on. A switch labelled "auto-trim" that silently
+    // costs a golfer their reel is worse than no switch. The pre/post pickers
+    // below are the honest version of the same intent — up to 4s before and 5s
+    // after impact keeps nearly the whole recording.
     durationPresets: [4000, 5000, 6000] as readonly number[], // 4s, 5s, 6s total
+    // The values the two pickers in app/profile/trim-settings.tsx offer, in
+    // ascending order. They live here so splitDurationPreset() can guarantee a
+    // duration preset always lands on a chip the screen can highlight.
+    preRollOptionsMs: [1000, 1500, 2000, 2500, 3000, 3500, 4000] as readonly number[],
+    postRollOptionsMs: [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000] as readonly number[],
     // Per-context trim windows. `baseline` reproduces the historical 3000/2000
-    // behavior; `fullSwing` is the tighter ~4s window (2500 pre + 1500 post).
-    // NOTE (fix #9): putts are floored to a minimum 4000ms total trim natively
+    // behavior; `fullSwing` is the tighter ~4s window (2500 pre + 1500 post)
+    // and is the default every reader falls back to.
+    // NOTE (fix #9): putts are floored to a minimum 4000ms TOTAL trim natively
     // — that floor lives in Swift, not here. Do not encode a fake 6000 value.
+    //
+    // That sentence was true of the intent and false of the code until now.
+    // ShotDetectorModule.swift read `max(postRollMs, 4000)`, a floor on the
+    // POST-ROLL, so a putt's clip was preRoll + 4000 rather than 4000 total: a
+    // user-set 1000/1000 window ("2.0s" on the settings screen) produced a 5.0s
+    // clip, and the default 2500/1500 window produced 6.5s. It now floors the
+    // total, and reads the threshold from `detection.options.puttPostRollMs`
+    // below so it is tunable — or removable with 0 — over the air.
+    //
+    // This matters well beyond actual putts: when pose detection finds no
+    // confident swing, native's fallbackClassify labels ANY recording longer
+    // than 12 seconds a putt at confidence 0.25, on duration alone.
     windows: {
       fullSwing: { preRollMs: 2500, postRollMs: 1500 }, // ~4s total
       baseline: { preRollMs: 3000, postRollMs: 2000 },
@@ -222,3 +283,165 @@ export const config = {
     frameRateOptions: [30, 60] as const,
   },
 } as const;
+
+// ── Trim window resolution ───────────────────────────────────────────────────
+//
+// ONE implementation, because two readers must never disagree.
+// hooks/useCamera.loadTrimSettings resolves the window for live capture and
+// hooks/useEditorState.getTrimSettings resolves it for import re-trims. Those
+// two used to be hand-mirrored copies with comments asking the next person to
+// keep them in step. If they ever answer differently for the same stored value,
+// a clip re-trimmed in the editor silently differs from the one that was
+// recorded — and nobody finds out until the round is over and unrepeatable.
+//
+// WHY THE MARKER EXISTS. FIX #8 moved the default window from 3000/2000 to the
+// tighter fullSwing 2500/1500. Overrides saved before that change carry the old
+// numbers, and honouring them would have kept day-zero users pinned to the old
+// length forever, so both readers began accepting a stored override ONLY when
+// it carried `window: 'fullSwing'`.
+//
+// WHY THAT MADE THINGS WORSE. The Trim Settings screen was never taught to
+// write the marker. So a guard meant to ignore STALE overrides ignored EVERY
+// override, including the one the user set thirty seconds ago: both pickers and
+// all three duration presets wrote to storage, reported success, and changed
+// nothing. Every clip trimmed to 2500/1500 regardless of what was on screen.
+//
+// THE CONTRACT, therefore: app/profile/trim-settings.tsx must stamp
+// TRIM_WINDOW_MARKER on every save, and must read its initial values back
+// through resolveSavedTrimWindow so the numbers it shows are the numbers the
+// pipeline will trim to. Drop either half and the controls go dead again, just
+// as quietly as last time.
+
+/**
+ * Schema marker stamped on every trim override written by the settings UI.
+ *
+ * It reads like a description of the chosen length but it is not one — a user
+ * who picks 6s still gets `window: 'fullSwing'`. What it actually means is
+ * "this blob was written by a build that knows fullSwing is the baseline", and
+ * that is the only thing the readers need to distinguish a deliberate choice
+ * from a pre-FIX-#8 leftover. The literal is unchanged from the original guard
+ * so no stored value changes meaning.
+ */
+export const TRIM_WINDOW_MARKER = 'fullSwing';
+
+/** Smallest roll either picker in app/profile/trim-settings.tsx can write. */
+export const MIN_TRIM_ROLL_MS = 1000;
+/** Generous ceiling above the largest picker option (5000). */
+export const MAX_TRIM_ROLL_MS = 10_000;
+
+export interface TrimWindow {
+  preRollMs: number;
+  postRollMs: number;
+}
+
+/**
+ * Coerce one stored roll value into something safe to hand to the native
+ * trimmer.
+ *
+ * A round is recorded once, on a course, and cannot be re-recorded, so every
+ * branch here leans toward KEEPING footage:
+ *  - anything that is not a finite number (missing, null, "2500", NaN) falls
+ *    back to the config window, never to 0 — native reads 0 as "keep nothing
+ *    on that side of impact", which is the one outcome that destroys a swing;
+ *  - anything below the smallest value the UI can produce is treated as
+ *    corruption rather than intent, because honouring it would trim MORE than
+ *    the user ever asked for;
+ *  - anything absurdly large is clamped rather than discarded, since clamping
+ *    keeps more of the clip than reverting to the default would.
+ */
+function sanitizeRollMs(value: unknown, fallbackMs: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallbackMs;
+  const ms = Math.round(value);
+  if (ms < MIN_TRIM_ROLL_MS) return fallbackMs;
+  return Math.min(ms, MAX_TRIM_ROLL_MS);
+}
+
+/**
+ * The window the USER chose: config.trim.windows.fullSwing, replaced by a
+ * stored override only when that override carries TRIM_WINDOW_MARKER.
+ *
+ * This is what the settings screen displays and edits. It deliberately does NOT
+ * include the tracer's extra post-roll — see resolveEffectiveTrimWindow.
+ *
+ * @param saved raw `trim_settings` value straight out of local_settings.
+ */
+export function resolveSavedTrimWindow(saved: string | null | undefined): TrimWindow {
+  const base = config.trim.windows.fullSwing;
+  if (!saved) return { preRollMs: base.preRollMs, postRollMs: base.postRollMs };
+  try {
+    const parsed: unknown = JSON.parse(saved);
+    // Untagged blob → written before FIX #8 (or by something else entirely).
+    // Ignored on purpose: it would otherwise shadow the tighter default.
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      (parsed as { window?: unknown }).window !== TRIM_WINDOW_MARKER
+    ) {
+      return { preRollMs: base.preRollMs, postRollMs: base.postRollMs };
+    }
+    const o = parsed as { preRollMs?: unknown; postRollMs?: unknown };
+    return {
+      preRollMs: sanitizeRollMs(o.preRollMs, base.preRollMs),
+      postRollMs: sanitizeRollMs(o.postRollMs, base.postRollMs),
+    };
+  } catch {
+    // Truncated / non-JSON value. Keep the default window rather than guessing.
+    return { preRollMs: base.preRollMs, postRollMs: base.postRollMs };
+  }
+}
+
+/**
+ * The window the PIPELINE trims to: the user's window plus the tracer's extra
+ * post-roll when the tracer is on.
+ *
+ * Both readers (live capture and import re-trim) call exactly this, so they
+ * cannot drift. The tracer bonus is added here and not in
+ * resolveSavedTrimWindow so the settings screen never round-trips it back into
+ * storage — doing that would add it a second time on the next read, growing the
+ * post-roll on every save.
+ */
+export function resolveEffectiveTrimWindow(saved: string | null | undefined): TrimWindow {
+  const { preRollMs, postRollMs } = resolveSavedTrimWindow(saved);
+  // No-op at the default 0: a longer post-impact window keeps more ball flight
+  // in the trimmed clip for the arc draw-on. Gated on config.tracer.enabled so
+  // day-zero behavior is byte-identical.
+  if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
+    return { preRollMs, postRollMs: postRollMs + config.tracer.extraPostRollMs };
+  }
+  return { preRollMs, postRollMs };
+}
+
+/**
+ * Split a duration preset (4s / 5s / 6s) across the two pickers.
+ *
+ * Two rules, both about the screen telling the truth:
+ *  1. The result must be a value the pickers can SHOW. The old split (40% pre /
+ *     60% post) produced 1600/2400 for the 4s preset — numbers no chip offers —
+ *     so tapping a preset left both rows with nothing highlighted.
+ *  2. When a preset cannot be hit exactly on the chip grid, round UP. A clip
+ *     that kept 200ms more than the label promised is a non-event; one that
+ *     kept 200ms less has thrown away footage from a round that happens once.
+ *
+ * The 62/38 lean matches config.trim.windows.fullSwing (2500/1500) — more
+ * before impact than after — so the 4s preset reproduces the app's own default
+ * instead of quietly re-splitting it into a different 4 seconds.
+ */
+export function splitDurationPreset(totalMs: number): TrimWindow {
+  const pre = config.trim.preRollOptionsMs;
+  const post = config.trim.postRollOptionsMs;
+  const preRollMs = nearestOption(pre, Math.round(totalMs * 0.62));
+  const postRollMs = atLeastOption(post, totalMs - preRollMs);
+  return { preRollMs, postRollMs };
+}
+
+/** Closest option to `targetMs`; ties go to the smaller one. */
+function nearestOption(options: readonly number[], targetMs: number): number {
+  return options.reduce((best, o) =>
+    Math.abs(o - targetMs) < Math.abs(best - targetMs) ? o : best
+  );
+}
+
+/** Smallest option >= `targetMs` (options ascending), else the largest. */
+function atLeastOption(options: readonly number[], targetMs: number): number {
+  return options.find((o) => o >= targetMs) ?? options[options.length - 1];
+}

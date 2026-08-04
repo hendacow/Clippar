@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Terms of Service — Clippar</title>
-<meta name="description" content="The terms that govern your use of Clippar — accounts, subscriptions, purchases, your video content, acceptable use, disclaimers, and liability.">
+<meta name="description" content="The terms that govern your use of Clippar — accounts, Clippar Pro subscriptions, your footage, filming other people, and your rights under Australian Consumer Law.">
 <meta name="theme-color" content="#07100a">
 <link rel="canonical" href="https://clippargolf.com/terms">
 <meta name="robots" content="index, follow">
@@ -51,7 +51,7 @@
   header .logo { display: flex; align-items: center; gap: 10px; }
   header .logo img { height: 24px; width: auto; display: block; flex-shrink: 0; }
   header .logo .logo-mark { height: 30px; width: 30px; }
-  header nav a { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
+  header nav a { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.08em; margin-left: 18px; }
 
   main { max-width: 760px; margin: 0 auto; padding: 56px 28px 96px; }
 
@@ -67,6 +67,7 @@
     font-size: 20px; font-weight: 500;
     margin: 40px 0 12px; letter-spacing: 0.01em;
   }
+  h3 { color: var(--white); font-size: 16px; font-weight: 500; margin: 22px 0 8px; }
   p { margin-bottom: 14px; color: #d6e0d2; }
   ul { margin: 0 0 14px 22px; color: #d6e0d2; }
   li { margin-bottom: 8px; }
@@ -76,6 +77,12 @@
   .toc h2 { margin: 0 0 10px; font-size: 13px; font-family: var(--font-mono); letter-spacing: 0.08em; text-transform: uppercase; color: var(--green-dim); }
   .toc ol { margin: 0 0 0 18px; color: #d6e0d2; columns: 2; column-gap: 28px; font-size: 14px; }
   .toc li { margin-bottom: 5px; }
+
+  .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--green); border-radius: 12px; padding: 18px 22px; margin: 18px 0 22px; }
+  .notice p:last-child { margin-bottom: 0; }
+  .notice h3 { margin-top: 0; }
+
+  .todo { color: #ffd24a; font-family: var(--font-mono); font-size: 13px; }
 
   footer {
     border-top: 1px solid var(--border);
@@ -98,96 +105,177 @@
 <body>
 <header>
   <a class="logo" href="/"><img class="logo-mark" src="/landing_assets/clippar-icon-white.png" alt="" width="272" height="272"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
-  <nav><a href="/privacy">Privacy Policy</a></nav>
+  <nav><a href="/privacy">Privacy Policy</a><a href="/hardware-terms">Mount Kit Terms</a></nav>
 </header>
 
 <main>
   <h1>Terms of Service</h1>
   <p class="updated">Effective date: 26 June 2026 &nbsp;·&nbsp; Last updated: 4 August 2026</p>
 
-  <p>These Terms of Service (“Terms”) are a binding agreement between you and Clippar (“Clippar”, “we”, “us”), an independent developer based in Australia, and govern your access to and use of the Clippar iOS app and the website at clippargolf.com (the “Service”). By creating an account or using the Service, you agree to these Terms and to our <a href="/privacy">Privacy Policy</a>. If you do not agree, do not use the Service.</p>
+  <p>These Terms are the agreement between you and <span class="todo">[DECISION NEEDED: legal entity name and ABN — e.g. “Clippar Pty Ltd ACN 000 000 000” or “Henry Coward trading as Clippar, ABN 00 000 000 000”]</span> (“Clippar”, “we”, “us”), based in Brisbane, Queensland, Australia. They cover the Clippar iOS app and the website at clippargolf.com (together, the “Service”).</p>
+
+  <p>By creating an account or using the Service you agree to these Terms and to our <a href="/privacy">Privacy Policy</a>. If you don't agree, don't use the Service.</p>
+
+  <div class="notice">
+    <h3>Buying the Clippar Mount Kit?</h3>
+    <p>These Terms cover the app and the website. The physical Mount Kit — the mount, the Bluetooth clicker and the portable charger — is a separate purchase with its own terms, because goods work differently under the law from a software subscription. See the <a href="/hardware-terms">Mount Kit Terms of Sale</a>.</p>
+  </div>
 
   <div class="toc">
     <h2>Contents</h2>
     <ol>
-      <li><a href="#eligibility">Eligibility &amp; accounts</a></li>
-      <li><a href="#service">The Service</a></li>
-      <li><a href="#content">Your content &amp; licence</a></li>
-      <li><a href="#acceptable">Acceptable use</a></li>
-      <li><a href="#subscriptions">Subscriptions &amp; billing</a></li>
-      <li><a href="#merch">Physical products</a></li>
-      <li><a href="#third-parties">Third-party services</a></li>
-      <li><a href="#ip">Intellectual property</a></li>
-      <li><a href="#disclaimers">Disclaimers</a></li>
-      <li><a href="#liability">Limitation of liability</a></li>
-      <li><a href="#indemnity">Indemnity</a></li>
-      <li><a href="#termination">Termination</a></li>
+      <li><a href="#accounts">Your account</a></li>
+      <li><a href="#service">What Clippar does</a></li>
+      <li><a href="#content">Your footage</a></li>
+      <li><a href="#filming">Filming other people</a></li>
+      <li><a href="#acceptable">Fair use</a></li>
+      <li><a href="#pro">Clippar Pro</a></li>
+      <li><a href="#codes">Lifetime codes</a></li>
+      <li><a href="#sharing">Sharing reels</a></li>
+      <li><a href="#hardware">The Mount Kit</a></li>
+      <li><a href="#third-parties">Services we rely on</a></li>
+      <li><a href="#ip">Our stuff, and the music</a></li>
+      <li><a href="#acl">Your rights under Australian law</a></li>
+      <li><a href="#disclaimers">What we don't promise</a></li>
+      <li><a href="#liability">Limits on our liability</a></li>
+      <li><a href="#indemnity">If you cause a claim</a></li>
+      <li><a href="#termination">Ending things</a></li>
       <li><a href="#changes">Changes to these Terms</a></li>
       <li><a href="#law">Governing law</a></li>
       <li><a href="#contact">Contact</a></li>
     </ol>
   </div>
 
-  <h2 id="eligibility">1. Eligibility &amp; accounts</h2>
-  <p>You must be at least 13 years old (or the minimum age required in your country) to use Clippar. You are responsible for keeping your account credentials secure and for all activity under your account, and you agree to provide accurate information and keep it up to date. You may sign in with email and password, “Sign in with Google”, or “Sign in with Apple”. Notify us at <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> if you suspect unauthorised use of your account.</p>
+  <h2 id="accounts">1. Your account</h2>
+  <p>You must be at least 13 years old to use Clippar. You can sign up with an email address and password, with <strong>Sign in with Apple</strong>, or with <strong>Sign in with Google</strong>.</p>
+  <p>Keep your login details to yourself. You're responsible for what happens under your account. Give us accurate details and keep them current. If you think someone else has got into your account, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> straight away.</p>
+  <p>You can delete your account at any time from <strong>Profile → Delete Account</strong> in the app. We'll ask you to sign in again first, because deletion is permanent and we'd rather be sure it's you.</p>
 
-  <h2 id="service">2. The Service</h2>
-  <p>Clippar records your golf shots and uses automated processing to detect, trim, and assemble them into highlight reels. Features rely on device permissions you grant — including camera, microphone, and precise location — and on third-party providers described in our Privacy Policy. Automated detection, trimming, and reel assembly are provided on a best-effort basis and may not be perfectly accurate. We may add, change, suspend, or remove features over time.</p>
+  <h2 id="service">2. What Clippar does</h2>
+  <p>Clippar records your golf shots, works out where the swing is in each clip, trims the clip down to it, and stitches the good bits into a highlight reel with music.</p>
+  <p><strong>All of that happens on your iPhone.</strong> The swing detection, the trimming and the reel assembly run in the app itself, using your phone's own processing. Your footage is not sent to us or to anyone else to be edited. If you turn on cloud backup (a Clippar Pro feature, off unless you switch it on), copies of your clips are stored in our cloud storage so they survive reinstalling the app — but the editing still happens on your phone.</p>
+  <p>Some features need permissions you grant on your phone: the camera and microphone to record, location while you're recording a round to match shots to holes, and Bluetooth if you use a clicker. You can refuse or withdraw any of these in your iPhone settings. The app still works without the microphone or location — it just does less.</p>
+  <p><strong>The automatic detection is good, not perfect.</strong> It will sometimes miss a swing, trim in the wrong place, or pick up a practice swing. You can always adjust a trim by hand in the editor. We add, change and remove features over time.</p>
 
-  <h2 id="content">3. Your content &amp; licence</h2>
-  <p>You retain ownership of the videos, audio, photos, and other content you create or upload (“Your Content”). You grant Clippar a non-exclusive, worldwide, royalty-free licence to host, store, copy, process, transcode, and display Your Content solely to operate and provide the Service to you — for example, to upload and store your clips, generate your highlight reels, and play them back. This licence is limited to running the Service and ends when you delete the content or your account, except for copies retained transiently in backups or where retention is required by law.</p>
-  <p>You are responsible for Your Content and confirm that you have the rights to record, upload, and share it, including any necessary rights or permissions of other people who appear in it. If you create a public share link, you are choosing to make that reel viewable by anyone who has the link until you remove it.</p>
+  <h2 id="content">3. Your footage</h2>
+  <p>The videos you record are yours. You own them and you keep owning them.</p>
+  <p>So that the Service can work, you give us permission to store, copy and play back your content — but only where you've actually asked us to hold it. In practice that means: if cloud backup is off, your clips stay on your phone and we never receive them. If you turn cloud backup on, or you create a share link, we store the copies needed to do that job and nothing more. This permission exists to run the Service for you, it isn't exclusive, and it ends when you delete the content or your account, apart from copies sitting in routine backups until those roll over.</p>
+  <p>We don't use your golf footage to train AI models, we don't sell it, and we don't show it to anyone you haven't shared it with.</p>
+  <p><strong>Keep your own copies of anything you'd hate to lose.</strong> Phones break, apps get deleted, and cloud backup is off by default.</p>
 
-  <h2 id="acceptable">4. Acceptable use</h2>
-  <p>You agree not to:</p>
+  <h2 id="filming">4. Filming other people</h2>
+  <p>This section matters more than it looks. Please read it.</p>
+  <p>A phone clipped to your bag on a golf course records more than your swing. It records the group behind you, the people on the next tee, and — if the microphone is on — what they're saying. Australian law treats those two things very differently, and the audio is the part that gets people into trouble.</p>
+
+  <h3>Recording conversations</h3>
+  <p>In every Australian state it is a criminal offence to record a <strong>private conversation</strong> you're not part of, without consent. In Queensland that's the Invasion of Privacy Act 1971 (up to 2 years' imprisonment). In New South Wales and Victoria the equivalent laws carry heavier penalties again. A conversation isn't “private” if the people having it should reasonably expect to be overheard — ordinary chat across a fairway usually falls on the safe side — but a quiet conversation you've picked up from twenty metres away with a directional phone mic may not.</p>
+  <p><strong>Sharing a recording can be a separate, more serious offence than making it.</strong> In Queensland, publishing someone's private conversation is an offence <em>even if you recorded it perfectly lawfully</em>. Posting the reel is a fresh decision with its own legal consequences.</p>
+  <p>If this is a concern for how you play, record with the microphone permission switched off in your iPhone settings. Clippar still detects and trims your swings without it.</p>
+
+  <h3>Recording people on video</h3>
+  <p>Filming people who are simply visible outdoors on a golf course is, in most Australian states, not itself an offence — Queensland has no general video surveillance law at all, New South Wales' optical surveillance offence only applies if you trespassed to get the shot, and Victoria's excludes anything happening outside a building. That is not the same as it being fine.</p>
+  <p>Since <strong>10 June 2025</strong> there has been a national right to sue for a serious invasion of privacy. It applies to intentional or reckless conduct, it doesn't require the person to prove they lost money, and — unlike most of the Privacy Act — <strong>there is no exemption for doing it personally rather than commercially</strong>. Deliberately filming an identifiable stranger, capturing an embarrassing moment, or lingering on someone who has asked you not to, and then putting it online, is the kind of thing it exists for.</p>
+
+  <h3>What we ask of you</h3>
   <ul>
-    <li>record or upload content you do not have the right to capture or share, or that infringes or violates the privacy, publicity, or intellectual-property rights of others;</li>
-    <li>upload unlawful, harmful, harassing, defamatory, or abusive content;</li>
-    <li>attempt to disrupt, overload, reverse-engineer, decompile, or gain unauthorised access to the Service or its systems;</li>
-    <li>use automated means to access the Service in a way that harms it, or resell or commercially exploit the Service without our permission;</li>
-    <li>use the Service to break any applicable law, or any course or club rules.</li>
+    <li>Point the camera at your own shot, not at other people.</li>
+    <li>If someone will clearly be in your footage, ask them. Most golfers say yes.</li>
+    <li>If someone asks you to stop filming or to take a reel down, do it.</li>
+    <li>Follow your club's rules on filming. Many courses have them, and some clubhouses prohibit it outright.</li>
+    <li>Think before you share. A clip on your phone and a clip on the internet are different things.</li>
   </ul>
-  <p>We may remove content or suspend access that we reasonably believe breaches these Terms.</p>
+  <p>Clippar gives you a tool. What you point it at is your decision, and the legal responsibility for what you record and share is yours, not ours. We can't get consent on your behalf and we don't review your footage.</p>
 
-  <h2 id="subscriptions">5. Subscriptions &amp; billing</h2>
-  <p>Clippar offers a “Clippar Pro” subscription. Subscriptions purchased in the iOS app are processed through <strong>Apple's In-App Purchase</strong> system and managed via our subscriptions provider, RevenueCat. Payment is charged to your Apple ID account when you confirm the purchase. Subscriptions <strong>auto-renew</strong> unless cancelled at least 24 hours before the end of the current period, and your Apple ID is charged for the renewal at the then-current price. You can manage or cancel your subscription, and turn off auto-renewal, in your iPhone's <em>Settings → [your name] → Subscriptions</em>.</p>
-  <p>Prices and what's included are shown in the app before you purchase and may change with notice for future periods. Any free trial converts to a paid subscription unless cancelled before it ends. <strong>Deleting your Clippar account does not cancel an Apple subscription</strong> — you must cancel it in your Apple settings. Except where required by law, subscription fees are non-refundable; refunds for App Store purchases are handled by Apple under its terms.</p>
+  <h2 id="acceptable">5. Fair use</h2>
+  <p>Don't:</p>
+  <ul>
+    <li>record or share content you don't have the right to capture or publish, including other people's private conversations;</li>
+    <li>upload anything unlawful, harassing, defamatory or abusive;</li>
+    <li>break into, overload, reverse-engineer or decompile the Service;</li>
+    <li>hammer our servers with automated requests, or resell the Service without our permission;</li>
+    <li>use Clippar to break any law, or any rule of the course you're playing.</li>
+  </ul>
+  <p>If we reasonably believe you've broken these rules, we may remove content or suspend your access. Where it's practical and appropriate, we'll tell you why first.</p>
 
-  <h2 id="merch">6. Physical products</h2>
-  <p>We may sell physical kit and merchandise, with payments processed by <strong>Stripe</strong>. By placing an order you authorise the charge and agree to provide accurate shipping and contact details. Availability, pricing, shipping times, and returns for physical goods are described at the point of sale and are subject to applicable consumer law, including the Australian Consumer Law. Card details are entered into Stripe and are not stored by us.</p>
+  <h2 id="pro">6. Clippar Pro</h2>
+  <p>Clippar Pro is an auto-renewing subscription bought through <strong>Apple's In-App Purchase</strong>. Our subscription provider RevenueCat manages what your account is entitled to.</p>
+  <ul>
+    <li><strong>Price:</strong> A$14.99 per month or A$99.99 per year. The current price and what's included are always shown in the app before you buy. Apple shows the price in your own store's currency.</li>
+    <li><strong>Free trial:</strong> new subscribers get a free trial (currently 14 days — the exact length and your eligibility are confirmed by Apple on the purchase screen). <span class="todo">[DECISION NEEDED: confirm the trial length configured in App Store Connect for both products and update this figure if it differs.]</span></li>
+    <li><strong>Auto-renewal:</strong> the subscription renews automatically until you turn it off. Apple charges your Apple ID no more than 24 hours before each new period starts.</li>
+    <li><strong>Cancelling:</strong> turn off auto-renewal at least <strong>24 hours before</strong> the current period ends, in <em>Settings → [your name] → Subscriptions</em> on your iPhone. If you're on a free trial, cancel at least 24 hours before it ends or it becomes a paid subscription.</li>
+    <li><strong>You keep what you've paid for.</strong> Cancelling stops the next charge; your Pro features run to the end of the period you've already paid for.</li>
+    <li><strong>Price changes</strong> only affect future periods, and Apple will notify you — and where required, ask your consent — before a higher price applies.</li>
+    <li><strong>Refunds for App Store purchases are handled by Apple, not by us.</strong> We can't process them, because we never receive your payment details. Request one at <a href="https://reportaproblem.apple.com">reportaproblem.apple.com</a>. This doesn't affect your rights under Australian Consumer Law — see section 12.</li>
+    <li><strong>Deleting your Clippar account does not cancel your Apple subscription.</strong> They're separate. Cancel in your iPhone settings, or you'll keep being charged.</li>
+  </ul>
+  <p>Creating and exporting a highlight reel requires an active Clippar Pro subscription. Recording, trimming, editing and watching your clips do not.</p>
 
-  <h2 id="third-parties">7. Third-party services</h2>
-  <p>The Service relies on third parties, including Supabase (backend and storage), Apple and Google (sign-in), Apple and RevenueCat (subscriptions), Stripe (merchandise payments), Sentry (crash diagnostics), and GolfCourseAPI (course search). Your use of features powered by these providers may also be subject to their terms, and what they receive is described in our <a href="/privacy">Privacy Policy</a>. We are not responsible for third-party services we do not control.</p>
+  <h2 id="codes">7. Lifetime codes</h2>
+  <p>We sometimes issue redemption codes that unlock Clippar Pro without a subscription. If you have one, you can redeem it in the app.</p>
+  <ul>
+    <li>A code is usually single-use, and may have an expiry date printed on it or set by us.</li>
+    <li>Once redeemed, the code is spent. It can't be redeemed again, moved to another account, resold or exchanged for cash.</li>
+    <li>“Lifetime” means for as long as Clippar operates the Service and your account remains in good standing. It doesn't mean forever, because nothing does, and it doesn't oblige us to run the Service indefinitely.</li>
+    <li><strong>We can revoke a code or the access it granted</strong> if it was obtained fraudulently, resold, issued in error, or used in breach of these Terms. We won't revoke access from someone who redeemed a genuine code honestly.</li>
+    <li>If we discontinue the Service entirely, a lifetime grant ends with it. Section 12 sets out your rights if that leaves you out of pocket.</li>
+  </ul>
 
-  <h2 id="ip">8. Intellectual property</h2>
-  <p>The Service, including its software, design, branding, and the Clippar name and logo, is owned by Clippar and protected by intellectual-property laws. These Terms do not grant you any right to our trademarks, or to copy, modify, distribute, or resell the Service, except as expressly permitted here.</p>
+  <h2 id="sharing">8. Sharing reels</h2>
+  <p>The usual way to share a reel is straight from the app using your iPhone's share sheet — that sends the video file to whoever you choose, and once it's left the app it's out of our hands. We can't recall a video you've sent to someone.</p>
+  <p>Clippar can also create a web link to a reel. A link is a long random string that isn't guessable, but <strong>anyone who has the link can view the reel</strong> — treat it like handing out a key. Don't post a link somewhere public unless you're happy for it to be public. If you want a shared reel taken down, email us and we'll remove it.</p>
+  <p>Web share links are still being finished, so a link may not work yet. Use the share sheet in the meantime.</p>
 
-  <h2 id="disclaimers">9. Disclaimers</h2>
-  <p>The Service is provided “as is” and “as available”, without warranties of any kind to the maximum extent permitted by law. We do not warrant that the Service will be uninterrupted, error-free, or secure, that footage will always upload or process successfully, or that automated shot detection or reel assembly will be accurate. <strong>You are responsible for keeping your own copies of important footage.</strong> Nothing in these Terms excludes, restricts, or modifies any consumer guarantee, right, or remedy that cannot be excluded under applicable law, including the Australian Consumer Law; where our liability for failing to meet such a guarantee cannot be excluded, it is limited (at our option) to re-supplying the service or paying the cost of re-supply, to the extent permitted.</p>
+  <h2 id="hardware">9. The Mount Kit</h2>
+  <p>The Clippar Mount Kit is a physical product sold separately through our website, with payment handled by Stripe. It is <strong>not</strong> covered by these Terms — see the <a href="/hardware-terms">Mount Kit Terms of Sale</a>, which set out delivery, returns, safety information for the battery, and your consumer guarantees for goods.</p>
+  <p>The Mount Kit is currently not on sale. When it goes on sale, the Terms of Sale will apply to your order.</p>
 
-  <h2 id="liability">10. Limitation of liability</h2>
-  <p>To the maximum extent permitted by law, Clippar will not be liable for any indirect, incidental, special, consequential, or punitive damages, or for any loss of data, content, profits, or goodwill, arising from or related to your use of (or inability to use) the Service. To the extent our liability cannot be excluded but can be limited, our total aggregate liability is limited to the greater of (a) the amount you paid us for the Service in the 12 months before the event giving rise to the claim, or (b) AUD $50.</p>
+  <h2 id="third-parties">10. Services we rely on</h2>
+  <p>Clippar runs on services from other companies: Supabase (our database and file storage), Apple and Google (sign-in), Apple and RevenueCat (subscriptions), Stripe (payments for physical products), Sentry (crash reports), GolfCourseAPI (course search), and Expo (app updates). Our <a href="/privacy">Privacy Policy</a> explains exactly what each one receives.</p>
+  <p>Using features powered by these companies may also make you subject to their terms. We don't control them and aren't responsible for their services — but where a provider handles your personal information on our behalf, we remain accountable to you for it.</p>
 
-  <h2 id="indemnity">11. Indemnity</h2>
-  <p>You agree to indemnify and hold Clippar harmless from claims, damages, and reasonable expenses arising from Your Content, your breach of these Terms, or your misuse of the Service, except to the extent caused by us.</p>
+  <h2 id="ip">11. Our stuff, and the music</h2>
+  <p>The Clippar app, website, design, name and logo belong to us and are protected by intellectual-property law. These Terms don't give you the right to copy, modify, distribute or resell the Service, or to use our branding.</p>
+  <p>The music tracks built into the app are licensed for you to use in reels you make with Clippar. You may post those reels wherever you like. You may not extract the audio files and use them separately. Note that social platforms run automated copyright matching, and while our tracks are licensed for this use, we can't guarantee a platform's system won't flag one — that's between you and the platform.</p>
 
-  <h2 id="termination">12. Termination</h2>
-  <p>You can stop using the Service and delete your account at any time from <strong>Profile → Delete Account</strong> in the app. We may suspend or terminate your access if you breach these Terms, if required to protect the Service or other users, or to comply with the law. Provisions that by their nature should survive termination — including content licences for transient backup copies, intellectual-property terms, disclaimers, limitation of liability, and indemnity — survive.</p>
+  <h2 id="acl">12. Your rights under Australian law</h2>
+  <div class="notice">
+    <p><strong>Our services come with guarantees that cannot be excluded under the Australian Consumer Law.</strong> For major failures with the service, you are entitled: to cancel your service contract with us; and to a refund for the unused portion, or to compensation for its reduced value. You are also entitled to be compensated for any other reasonably foreseeable loss or damage. If the failure does not amount to a major failure you are entitled to have problems with the service rectified in a reasonable time and, if this is not done, to cancel your contract and obtain a refund for the unused portion of the contract.</p>
+  </div>
+  <p>Nothing in these Terms excludes, restricts or modifies those guarantees, or any other right you have under the Australian Consumer Law or any other law that can't be contracted out of. Where anything in these Terms conflicts with those rights, those rights win. If you bought the Mount Kit, the guarantees for <em>goods</em> apply as well — they're set out in the <a href="/hardware-terms">Mount Kit Terms of Sale</a>.</p>
 
-  <h2 id="changes">13. Changes to these Terms</h2>
-  <p>We may update these Terms from time to time. When we make material changes we will update the “Last updated” date above and, where appropriate, notify you in the app or on this page. Your continued use of the Service after changes take effect means you accept the updated Terms.</p>
+  <h2 id="disclaimers">13. What we don't promise</h2>
+  <p>Subject to section 12, and to the extent the law allows, the Service is provided as it is. We don't promise that it will be uninterrupted or error-free, that every upload or export will succeed, or that shot detection and reel assembly will be accurate. Golf is unpredictable and so is automatic video editing.</p>
+  <p>We especially don't promise that a recording will happen. If your phone runs out of battery, overheats, gets knocked off the mount, or the clicker loses its Bluetooth connection, the shot isn't recorded. <strong>Back up anything that matters to you.</strong></p>
 
-  <h2 id="law">14. Governing law</h2>
-  <p>These Terms are governed by the laws of Australia, without regard to conflict-of-law rules, and you submit to the non-exclusive jurisdiction of the courts of Australia. Nothing in this section deprives you of the protection of mandatory consumer laws in your place of residence.</p>
+  <h2 id="liability">14. Limits on our liability</h2>
+  <p>Section 12 comes first: nothing here limits the consumer guarantees or any other right you have that can't be excluded.</p>
+  <p>Beyond that, and only to the extent the law allows: we're not liable for indirect or consequential loss, or for lost data, lost content, lost profits or lost opportunities, arising from your use of or inability to use the Service. Where our liability can be limited but not excluded, it's limited to re-supplying the service or paying the cost of having it re-supplied.</p>
+  <p>We're not liable for what you record, what you share, or the consequences of either — see section 4.</p>
 
-  <h2 id="contact">15. Contact</h2>
-  <p>Questions about these Terms? Email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
+  <h2 id="indemnity">15. If you cause a claim</h2>
+  <p>If someone brings a claim against us because of something you recorded or shared, because you broke these Terms, or because you misused the Service, you agree to cover our reasonable costs in dealing with it. This doesn't apply to the extent the problem was our fault, and it doesn't apply to anything you couldn't reasonably have avoided.</p>
+
+  <h2 id="termination">16. Ending things</h2>
+  <p>You can stop using Clippar whenever you like, and delete your account from <strong>Profile → Delete Account</strong>. That deletes your rounds, clips, reels, scores and profile for good. Remember to cancel your Apple subscription separately.</p>
+  <p>We may suspend or end your access if you seriously or repeatedly breach these Terms, if we have to in order to protect the Service or other users, or if the law requires it. If we do, and you've paid for a period you can no longer use, section 12 applies.</p>
+  <p>Sections that should outlast the account — intellectual property, the limits in sections 13 to 15, and your obligations under section 4 for footage you've already shared — continue after termination.</p>
+
+  <h2 id="changes">17. Changes to these Terms</h2>
+  <p>We may update these Terms. When we make a change that actually affects you, we'll update the “Last updated” date at the top and tell you in the app or on this page before it takes effect. Carrying on using Clippar after that means you accept the new version. If you don't, you can delete your account.</p>
+
+  <h2 id="law">18. Governing law</h2>
+  <p>These Terms are governed by the laws of <strong>Queensland, Australia</strong>, and you and we submit to the non-exclusive jurisdiction of the courts of Queensland. If you live somewhere else, this doesn't take away the protection of the consumer laws where you live.</p>
+
+  <h2 id="contact">19. Contact</h2>
+  <p>Questions about these Terms? Email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> and a human will answer.</p>
+  <p><span class="todo">[DECISION NEEDED: add the registered business name, ABN and a postal address here once the trading entity is settled.]</span></p>
 </main>
 
 <footer>
   <div class="logo"><img src="/landing_assets/clippar-stacked-white.png" alt="Clippar Golf" width="360" height="234"></div>
   <p>&copy; 2026 Clippar &middot; clippargolf@gmail.com</p>
-  <nav><a href="/">Home</a><a href="/privacy">Privacy</a></nav>
+  <nav><a href="/">Home</a><a href="/privacy">Privacy</a><a href="/hardware-terms">Mount Kit Terms</a></nav>
 </footer>
 </body>
 </html>

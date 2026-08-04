@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Switch, Pressable, Alert, Platform } from 'react-native';
+import { View, Text, ScrollView, Switch, Pressable, Alert, Platform, Linking } from 'react-native';
 import { Stack, useRouter } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Camera, Cloud, Trash2, Info, Lock } from 'lucide-react-native';
@@ -9,7 +9,14 @@ import {
   setMirrorClipsToPhotos,
   getCloudBackupEnabled,
   setCloudBackupEnabled,
+  getClipMirrorStats,
 } from '@/lib/storage';
+import {
+  getPhotosMirrorPermission,
+  requestPhotosMirrorPermission,
+  type PhotosMirrorPermission,
+} from '@/lib/photosMirror';
+import { describeRawClipStatus } from '@/lib/photosMirrorPolicy';
 import { useSubscription } from '@/hooks/useSubscription';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -21,19 +28,75 @@ export default function StorageSettingsScreen() {
   const [mirrorClips, setMirrorClips] = useState(false);
   const [cloudBackup, setCloudBackup] = useState(false);
   const [clearing, setClearing] = useState(false);
+  // What is TRUE about this device, as opposed to what the switches are set
+  // to. The recovery card below is read by people deciding whether it is safe
+  // to wipe their phone, so it reports these, not the toggle positions.
+  const [photosPermission, setPhotosPermission] =
+    useState<PhotosMirrorPermission>('unavailable');
+  const [mirrorStats, setMirrorStats] = useState<{ total: number; mirrored: number } | null>(null);
+
+  const refreshEvidence = useCallback(async () => {
+    // Non-prompting: reading permission must never raise a dialog just
+    // because someone opened a settings screen.
+    setPhotosPermission(await getPhotosMirrorPermission());
+    try {
+      setMirrorStats(await getClipMirrorStats());
+    } catch {
+      // Leave null — the card falls back to describing the setting rather
+      // than inventing a count.
+    }
+  }, []);
 
   useEffect(() => {
     (async () => {
       setMirrorClips(await getMirrorClipsToPhotos());
       setCloudBackup(await getCloudBackupEnabled());
+      await refreshEvidence();
     })();
-  }, []);
+  }, [refreshEvidence]);
 
+  // Turning this on is the moment the user commits to Photos mirroring, so it
+  // is the moment to ask for Photos access — and the ONLY one. The capture
+  // paths deliberately never prompt (lib/photosMirror, rule 2: a clicker press
+  // must not raise a permission dialog over a live camera). That means a
+  // switch left on without permission is a switch that silently does nothing,
+  // which is the failure this whole change exists to remove — so if the user
+  // refuses, the setting does not go on.
   const onToggleMirror = useCallback(async (val: boolean) => {
+    if (val && isNative) {
+      const granted = await requestPhotosMirrorPermission();
+      if (!granted) {
+        setPhotosPermission(await getPhotosMirrorPermission());
+        Alert.alert(
+          'Photos access needed',
+          'Clippar can only copy your raw clips to the camera roll with access to Photos. Turn it on in Settings, then switch this back on.',
+          [
+            { text: 'Not now', style: 'cancel' },
+            { text: 'Open Settings', onPress: () => { void Linking.openSettings(); } },
+          ]
+        );
+        return;
+      }
+    }
     Haptics.selectionAsync();
     setMirrorClips(val);
     await setMirrorClipsToPhotos(val);
-  }, []);
+    await refreshEvidence();
+  }, [refreshEvidence]);
+
+  // Shown when the setting is on but Photos access is not — the exact state
+  // the old green tick hid.
+  const onFixPhotosAccess = useCallback(async () => {
+    if (photosPermission === 'undetermined') {
+      const granted = await requestPhotosMirrorPermission();
+      if (granted) {
+        await refreshEvidence();
+        return;
+      }
+    }
+    void Linking.openSettings();
+    await refreshEvidence();
+  }, [photosPermission, refreshEvidence]);
 
   const onToggleCloudBackup = useCallback(async (val: boolean) => {
     if (val && !isSubscribed) {
@@ -98,7 +161,7 @@ export default function StorageSettingsScreen() {
           icon={<Camera size={18} color={theme.colors.primary} />}
           tint={theme.colors.primary}
           title="Save raw clips to Photos"
-          subtitle="Mirror every imported & recorded clip to your iPhone's camera roll. Off by default to save space."
+          subtitle="Copy every clip you record or import to your iPhone's camera roll, from the moment you turn this on. Clips already on your phone stay as they are. Off by default to save space."
         >
           <Switch
             value={mirrorClips}
@@ -156,14 +219,39 @@ export default function StorageSettingsScreen() {
             ok
             text="Highlight reels — always saved to your camera roll, survive uninstall."
           />
-          <ExplainerLine
-            ok={mirrorClips}
-            text={
-              mirrorClips
-                ? 'Raw clips — mirrored to Photos, will re-import on reinstall.'
-                : 'Raw clips — not mirrored to Photos. Will be lost unless cloud backup is on.'
-            }
-          />
+          {(() => {
+            const status = describeRawClipStatus({
+              mirrorOn: mirrorClips,
+              permission: isNative ? photosPermission : 'unavailable',
+              stats: mirrorStats,
+            });
+            return <ExplainerLine ok={status.ok} text={status.text} />;
+          })()}
+          {mirrorClips && isNative && photosPermission !== 'granted' && (
+            <>
+              <ExplainerLine
+                ok={false}
+                text={
+                  photosPermission === 'undetermined'
+                    ? "Photos access hasn't been granted, so nothing is being copied."
+                    : 'Photos access is off, so nothing is being copied.'
+                }
+              />
+              <Pressable onPress={onFixPhotosAccess} hitSlop={8}>
+                <Text
+                  style={{
+                    color: theme.colors.primary,
+                    fontSize: 13,
+                    fontWeight: '600',
+                    marginTop: 4,
+                    marginLeft: 20,
+                  }}
+                >
+                  {photosPermission === 'undetermined' ? 'Allow Photos access' : 'Open Settings'}
+                </Text>
+              </Pressable>
+            </>
+          )}
           <ExplainerLine
             ok={cloudBackup && isSubscribed}
             text={

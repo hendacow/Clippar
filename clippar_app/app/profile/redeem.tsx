@@ -1,258 +1,216 @@
 import { useCallback, useRef, useState } from 'react';
-import {
-  View,
-  Text,
-  TextInput,
-  ScrollView,
-  Keyboard,
-  KeyboardAvoidingView,
-  Platform,
-} from 'react-native';
+import { View, Text, ScrollView } from 'react-native';
 import { Stack, router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { Ticket, Check, AlertCircle } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
-import { emitSubscriptionChanged } from '@/lib/subscriptionEvents';
-import {
-  CODE_BODY_LENGTH,
-  CODE_PREFIX,
-  describeRedeemResult,
-  formatCodeForDisplay,
-  isCompleteCode,
-  normalizeCodeInput,
-  redeemCode,
-  type RedeemResult,
-} from '@/lib/redeemCode';
+import { iap, type CodeRedemptionOutcome } from '@/lib/iap';
+import { SUPPORT_EMAIL } from '@/constants/support';
 
 /**
- * Redeem a printed lifetime code (ambassadors / early supporters).
+ * Redeem an App Store Offer Code for Clippar Pro.
  *
- * Reached from the Profile tab and from a deliberately quiet link on the
- * paywall — App Review 3.1.1 wants StoreKit to be the prominent way to buy, so
- * this path must never look like an alternative purchase route.
+ * WHY THIS SCREEN NO LONGER HAS A TEXT FIELD.
  *
- * The result is rendered INLINE rather than in an Alert: the whole job of this
- * screen is the verdict, and an ambassador who hit the rate limit needs to be
- * able to sit and read exactly how long to wait, not dismiss a modal.
+ * It used to take a printed CLIP-xxxx code, HMAC it with a server-side pepper
+ * and grant a lifetime entitlement from our own `redemption_codes` table.
+ * Guideline 3.1.1 prohibits unlocking features with a developer's own license
+ * keys, and a code box that turns a string into paid functionality is the
+ * exact shape of the thing the rule names. Whether a reviewer would have
+ * called it is not worth finding out on a first submission — Henry's call,
+ * 2026-08-04.
+ *
+ * Apple's Offer Codes do the same job through StoreKit: Henry generates
+ * one-time-use codes in App Store Connect, hands them out, and the customer
+ * redeems in the sheet below. Apple validates, RevenueCat observes the
+ * transaction, the entitlement listener flips the app to Pro. No code of ours
+ * is in the trust path, so there is nothing here to brute-force and no secret
+ * to keep.
+ *
+ * The old server side (supabase/migrations/018_redemption_codes.sql and
+ * supabase/functions/redeem-code) is superseded and carries a DO-NOT-APPLY
+ * header. It was never applied to any database, so there is nothing to migrate.
  */
 export default function RedeemCodeScreen() {
-  const [code, setCode] = useState('');
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<RedeemResult | null>(null);
+  const [outcome, setOutcome] = useState<CodeRedemptionOutcome | null>(null);
 
-  // The double-submit guard is a REF, not the `busy` state. A code works
-  // exactly once, and two taps landing in the same React batch both read the
-  // stale `busy === false` from their closure — a ref flips synchronously on
-  // the first tap, so the second one has nothing to send.
+  // Ref, not state: two taps landing in the same React batch both read the
+  // stale `busy === false` from their closure, and presenting Apple's sheet
+  // twice stacks two modals.
   const inFlight = useRef(false);
 
-  const bodyLength = normalizeCodeInput(code).length;
-  const complete = isCompleteCode(code);
-
-  const handleChange = useCallback((next: string) => {
-    // Typing invalidates the previous verdict — leaving "that code did not
-    // work" on screen while someone edits the code reads as a live answer.
-    setResult(null);
-    setCode(formatCodeForDisplay(next));
-  }, []);
-
   const handleRedeem = useCallback(async () => {
-    if (inFlight.current || !isCompleteCode(code)) return;
+    if (inFlight.current) return;
     inFlight.current = true;
     setBusy(true);
-    setResult(null);
-    Keyboard.dismiss();
+    setOutcome(null);
     try {
-      const outcome = await redeemCode(code);
-      setResult(outcome);
-      if (outcome.status === 'redeemed') {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-        // Exactly what app/paywall.tsx does after a purchase: every mounted
-        // useSubscription() re-runs getProStatus(), so the gates open now
-        // instead of at the next natural refetch. The grant itself is already
-        // durable server-side — this is only the optimistic client refresh.
-        emitSubscriptionChanged();
-      } else {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-      }
+      const result = await iap.presentCodeRedemption();
+      setOutcome(result);
+      Haptics.notificationAsync(
+        result.status === 'activated'
+          ? Haptics.NotificationFeedbackType.Success
+          : Haptics.NotificationFeedbackType.Warning
+      );
     } catch {
-      // redeemCode() is total, so this is unreachable today. It exists so a
-      // future throw cannot strand the button mid-flight.
-      setResult({ status: 'server' });
+      // presentCodeRedemption is total — it converts its own failures into an
+      // 'unavailable' outcome. This exists so a future throw cannot strand the
+      // button mid-flight.
+      setOutcome({
+        status: 'unavailable',
+        reason: 'Something went wrong opening the App Store. Try again in a moment.',
+      });
     } finally {
       inFlight.current = false;
       setBusy(false);
     }
-  }, [code]);
+  }, []);
 
-  const message = result ? describeRedeemResult(result) : null;
-  const redeemed = result?.status === 'redeemed';
+  const message = outcome ? describeOutcome(outcome) : null;
+  const activated = outcome?.status === 'activated';
 
   return (
     <>
       <Stack.Screen options={{ title: 'Redeem a Code' }} />
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      <ScrollView
+        contentContainerStyle={{ padding: 16, gap: 16 }}
+        showsVerticalScrollIndicator={false}
       >
-        <ScrollView
-          contentContainerStyle={{ padding: 16, gap: 16 }}
-          keyboardShouldPersistTaps="handled"
-          showsVerticalScrollIndicator={false}
-        >
-          {/* Hero */}
-          <View style={{ alignItems: 'center', marginTop: 8 }}>
-            <View
-              style={{
-                width: 56,
-                height: 56,
-                borderRadius: 28,
-                backgroundColor: theme.colors.primaryMuted,
-                alignItems: 'center',
-                justifyContent: 'center',
-                marginBottom: 12,
-              }}
-            >
-              <Ticket size={26} color={theme.colors.primary} />
-            </View>
-            <Text
-              style={{ color: theme.colors.textPrimary, fontSize: 20, fontWeight: '800' }}
-            >
-              Clippar Pro, for life
-            </Text>
-            <Text
-              style={{
-                color: theme.colors.textSecondary,
-                fontSize: 14,
-                marginTop: 6,
-                textAlign: 'center',
-              }}
-            >
-              Enter the code from your card. One code, one account, no expiry.
-            </Text>
-          </View>
-
-          {/* Code field */}
-          <View>
-            <Text
-              style={{
-                color: theme.colors.textSecondary,
-                fontSize: 13,
-                fontWeight: '600',
-                textTransform: 'uppercase',
-                letterSpacing: 0.5,
-                marginBottom: 8,
-              }}
-            >
-              Your code
-            </Text>
-            <TextInput
-              value={code}
-              onChangeText={handleChange}
-              onSubmitEditing={handleRedeem}
-              editable={!busy}
-              placeholder={`${CODE_PREFIX}-XXXX-XXXX-XXXX-XXXX`}
-              placeholderTextColor={theme.colors.textTertiary}
-              // A printed code is upper-case Crockford base32 with no words in
-              // it: every one of these stops iOS "helping" by autocapitalising
-              // a sentence, autocorrecting a group into a dictionary word, or
-              // offering a saved password.
-              autoCapitalize="characters"
-              autoCorrect={false}
-              autoComplete="off"
-              textContentType="none"
-              spellCheck={false}
-              keyboardType="default"
-              returnKeyType="done"
-              maxLength={CODE_PREFIX.length + 1 + CODE_BODY_LENGTH + 3}
-              style={{
-                backgroundColor: theme.colors.surfaceElevated,
-                borderRadius: theme.radius.md,
-                borderWidth: 1,
-                borderColor: complete ? theme.colors.primary : theme.colors.surfaceBorder,
-                paddingHorizontal: 14,
-                paddingVertical: 14,
-                color: theme.colors.textPrimary,
-                fontSize: 18,
-                letterSpacing: 1.5,
-                opacity: busy ? 0.6 : 1,
-              }}
-            />
-            <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 6 }}>
-              {`${bodyLength}/${CODE_BODY_LENGTH} characters. We add the ${CODE_PREFIX}- and the dashes for you.`}
-            </Text>
-          </View>
-
-          {/* Disabled while in flight AND until the code is the right length,
-              so a double tap cannot spend a one-shot code twice. */}
-          <Button
-            title={busy ? 'Redeeming…' : 'Redeem'}
-            onPress={handleRedeem}
-            loading={busy}
-            disabled={busy || !complete}
-          />
-
-          {message ? (
-            <Card
-              style={{
-                borderColor:
-                  message.tone === 'success' ? theme.colors.primary : theme.colors.surfaceBorder,
-                flexDirection: 'row',
-                gap: 12,
-                alignItems: 'flex-start',
-              }}
-            >
-              {message.tone === 'success' ? (
-                <Check size={20} color={theme.colors.primary} />
-              ) : (
-                <AlertCircle size={20} color={theme.colors.accentRed} />
-              )}
-              <View style={{ flex: 1 }}>
-                <Text
-                  style={{
-                    color:
-                      message.tone === 'success'
-                        ? theme.colors.primary
-                        : theme.colors.textPrimary,
-                    fontSize: 15,
-                    fontWeight: '700',
-                  }}
-                >
-                  {message.headline}
-                </Text>
-                <Text
-                  style={{
-                    color: theme.colors.textSecondary,
-                    fontSize: 13,
-                    lineHeight: 19,
-                    marginTop: 4,
-                  }}
-                >
-                  {message.detail}
-                </Text>
-              </View>
-            </Card>
-          ) : null}
-
-          {redeemed ? (
-            <Button title="Done" variant="secondary" onPress={() => router.back()} />
-          ) : null}
-
-          <Text
+        {/* Hero */}
+        <View style={{ alignItems: 'center', marginTop: 8 }}>
+          <View
             style={{
-              color: theme.colors.textTertiary,
-              fontSize: 12,
-              lineHeight: 18,
-              textAlign: 'center',
+              width: 56,
+              height: 56,
+              borderRadius: 28,
+              backgroundColor: theme.colors.primaryMuted,
+              alignItems: 'center',
+              justifyContent: 'center',
+              marginBottom: 12,
             }}
           >
-            Codes are issued by Clippar and are not for sale. If yours will not redeem, email
-            support@clippar.com and we will sort it out.
+            <Ticket size={26} color={theme.colors.primary} />
+          </View>
+          <Text style={{ color: theme.colors.textPrimary, fontSize: 20, fontWeight: '800' }}>
+            Redeem your code
           </Text>
-        </ScrollView>
-      </KeyboardAvoidingView>
+          <Text
+            style={{
+              color: theme.colors.textSecondary,
+              fontSize: 14,
+              marginTop: 6,
+              textAlign: 'center',
+              lineHeight: 20,
+            }}
+          >
+            Tap below and enter your code in the App Store sheet. Your Pro access unlocks as
+            soon as Apple confirms it.
+          </Text>
+        </View>
+
+        <Button
+          title={busy ? 'Opening App Store…' : 'Enter code'}
+          onPress={handleRedeem}
+          loading={busy}
+          disabled={busy}
+        />
+
+        {message ? (
+          <Card
+            style={{
+              borderColor:
+                message.tone === 'success' ? theme.colors.primary : theme.colors.surfaceBorder,
+              flexDirection: 'row',
+              gap: 12,
+              alignItems: 'flex-start',
+            }}
+          >
+            {message.tone === 'success' ? (
+              <Check size={20} color={theme.colors.primary} />
+            ) : (
+              <AlertCircle size={20} color={theme.colors.accentRed} />
+            )}
+            <View style={{ flex: 1 }}>
+              <Text
+                style={{
+                  color:
+                    message.tone === 'success' ? theme.colors.primary : theme.colors.textPrimary,
+                  fontSize: 15,
+                  fontWeight: '700',
+                }}
+              >
+                {message.headline}
+              </Text>
+              <Text
+                style={{
+                  color: theme.colors.textSecondary,
+                  fontSize: 13,
+                  lineHeight: 19,
+                  marginTop: 4,
+                }}
+              >
+                {message.detail}
+              </Text>
+            </View>
+          </Card>
+        ) : null}
+
+        {activated ? (
+          <Button title="Done" variant="secondary" onPress={() => router.back()} />
+        ) : null}
+
+        <Text
+          style={{
+            color: theme.colors.textTertiary,
+            fontSize: 12,
+            lineHeight: 18,
+            textAlign: 'center',
+          }}
+        >
+          {`Codes are issued by Clippar and are not for sale. If yours will not redeem, email ${SUPPORT_EMAIL} and we will sort it out.`}
+        </Text>
+      </ScrollView>
     </>
   );
+}
+
+interface OutcomeMessage {
+  tone: 'success' | 'neutral';
+  headline: string;
+  detail: string;
+}
+
+/**
+ * 'dismissed' is NOT reported as failure. StoreKit tells us nothing about what
+ * the user typed, and Apple's receipt can land after we stop polling — so the
+ * only truthful thing to say is "we haven't seen it yet", with the reason it
+ * might still turn up. Telling someone their valid code failed, when it is
+ * about to work, is worse than telling them to wait.
+ */
+export function describeOutcome(outcome: CodeRedemptionOutcome): OutcomeMessage {
+  switch (outcome.status) {
+    case 'activated':
+      return {
+        tone: 'success',
+        headline: 'Clippar Pro is active',
+        detail: 'Everything is unlocked. Go make a reel.',
+      };
+    case 'dismissed':
+      return {
+        tone: 'neutral',
+        headline: 'No code redeemed yet',
+        detail:
+          'If you did enter one, it can take a moment to come through — Pro will switch on by ' +
+          'itself. Pull down to refresh your profile if it has not appeared in a minute.',
+      };
+    case 'unavailable':
+      return {
+        tone: 'neutral',
+        headline: 'Cannot redeem right now',
+        detail: outcome.reason,
+      };
+  }
 }

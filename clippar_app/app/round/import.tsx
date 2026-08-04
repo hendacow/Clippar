@@ -52,11 +52,11 @@ import {
   saveLocalClip,
   saveLocalRound,
   saveLocalScore,
-  setClipPhotosAssetId,
   getMirrorClipsToPhotos,
   getCloudBackupEnabled,
 } from '@/lib/storage';
 import { resolveAssetUri, persistAsset } from '@/lib/media';
+import { mirrorClipToPhotos } from '@/lib/photosMirror';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { supabase } from '@/lib/supabase';
 import type { HoleData } from '@/types/round';
@@ -73,9 +73,9 @@ const VideoThumbnails = Platform.OS !== 'web'
   ? (require('expo-video-thumbnails') as typeof import('expo-video-thumbnails'))
   : null;
 
-const MediaLibrary = isNative
-  ? (require('expo-media-library') as typeof import('expo-media-library'))
-  : null;
+// No MediaLibrary handle here on purpose. Photos writes go through
+// lib/photosMirror so this screen and the record path cannot disagree about
+// when a clip is mirrored — the disagreement was the bug.
 
 // Safe wrapper around expo-image-picker's launchImageLibraryAsync. When the
 // user picks a video that lives in iCloud Photos (not yet downloaded to the
@@ -675,22 +675,24 @@ export default function ImportRoundScreen() {
             const persistMs = Date.now() - tPersist;
 
             // Photos mirroring: clip.assetId is set iff the user picked the
-            // video from Photos (so it's already there — free recovery hint).
-            // If the toggle is on AND we don't already have an assetId (e.g.
-            // an in-app recording, or some Android paths), save a fresh copy
-            // to the library and capture the new asset id.
-            let photosAssetId: string | undefined = clip.assetId;
-            if (mirrorToPhotos && !photosAssetId && MediaLibrary && isNative) {
-              try {
-                const perm = await MediaLibrary.requestPermissionsAsync();
-                if (perm.status === 'granted') {
-                  const asset = await MediaLibrary.createAssetAsync(durableUri);
-                  photosAssetId = asset.id;
-                }
-              } catch (err) {
-                console.warn('[Import] Mirror to Photos failed:', err);
-              }
-            }
+            // video from Photos (so it's already there — free recovery hint,
+            // kept regardless of the toggle). Anything else goes through
+            // lib/photosMirror, the SAME helper hooks/useCamera.ts records
+            // through. This block used to talk to MediaLibrary directly and
+            // was the setting's only reader anywhere in the app — recorded
+            // clips silently got nothing. No call site re-implements it now.
+            const photosAssetId = await mirrorClipToPhotos({
+              fileUri: durableUri,
+              existingAssetId: clip.assetId,
+              // Read once for the whole batch above, not once per clip.
+              mirrorEnabled: mirrorToPhotos,
+              // Import is foreground and user-initiated, so a dialog here is
+              // in context — and users who switched the toggle on before it
+              // asked for permission still depend on this prompt. The record
+              // path passes false; it can run under a live camera.
+              promptForPermission: true,
+              label: 'import',
+            });
 
             const tSave = Date.now();
             const clipId = await saveLocalClip({
@@ -706,15 +708,13 @@ export default function ImportRoundScreen() {
               impact_time_ms: undefined,
               trim_start_ms: 0,
               trim_end_ms: -1,
-              photos_asset_id: photosAssetId ?? null,
+              photos_asset_id: photosAssetId,
             });
-            // (saveLocalClip persists photos_asset_id directly; the helper
-            //  call below is a no-op when the column is already set, but kept
-            //  for symmetry with the record/in-app save flow which mirrors
-            //  AFTER the clip row is inserted.)
-            if (photosAssetId) {
-              void setClipPhotosAssetId(clipId, photosAssetId);
-            }
+            // No setClipPhotosAssetId call here: import knows the asset id
+            // before the row exists, so saveLocalClip persists it inline. The
+            // record path is the mirror image — its row exists first and the
+            // id arrives later — which is why lib/photosMirror keeps that
+            // UPDATE. Same column, same helper, different ordering, on purpose.
 
             const saveMs = Date.now() - tSave;
 

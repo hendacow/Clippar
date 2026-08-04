@@ -69,7 +69,39 @@ export interface IapProvider {
    * billing, which only the user can do in iOS Settings. False on stub.
    */
   hasActiveStoreSubscription(): Promise<boolean>;
+  /**
+   * Present Apple's own code-redemption sheet (StoreKit) so a customer can
+   * enter an App Store Offer Code.
+   *
+   * This replaced a bespoke CLIP-xxxx scheme redeemed against our own
+   * database. Guideline 3.1.1 prohibits unlocking features with a developer's
+   * own license keys, and a hand-rolled code box is exactly the shape the
+   * rule describes — the entitlement has to come from StoreKit. It is also
+   * simply less to own: Apple validates the code, RevenueCat observes the
+   * resulting transaction, and the existing customerInfo listener flips the
+   * app to Pro with no server of ours in the path.
+   *
+   * iOS 14+ only, and it needs a real StoreKit environment — the sheet does
+   * nothing on the simulator, so test redemption on a device.
+   */
+  presentCodeRedemption(): Promise<CodeRedemptionOutcome>;
 }
+
+/**
+ * What happened after the redemption sheet closed.
+ *
+ * StoreKit tells us nothing: presentCodeRedemptionSheet() resolves once the
+ * sheet is ON SCREEN, not when it is dismissed, and never reports which code
+ * was entered or whether it worked. The only honest signal is the entitlement
+ * itself, so 'activated' means we polled and watched Pro turn on. 'dismissed'
+ * is deliberately not phrased as failure anywhere in the UI — Apple's receipt
+ * can land after we stop looking, and the customerInfo listener will pick it
+ * up whenever it does.
+ */
+export type CodeRedemptionOutcome =
+  | { status: 'activated' }
+  | { status: 'dismissed' }
+  | { status: 'unavailable'; reason: string };
 
 const aud = (cents: number) => `A$${(cents / 100).toFixed(2).replace(/\.00$/, '')}`;
 
@@ -108,6 +140,14 @@ const StubProvider: IapProvider = {
   async reset() {},
   async hasActiveStoreSubscription() {
     return false;
+  },
+  async presentCodeRedemption(): Promise<CodeRedemptionOutcome> {
+    return {
+      status: 'unavailable',
+      reason: isDevVariant()
+        ? 'Code redemption needs the App Store, which the dev build has no connection to. Use "Dev: unlock Pro" in Profile to test Pro features.'
+        : 'Code redemption is not available in this build yet — it arrives with the App Store release.',
+    };
   },
 };
 
@@ -382,6 +422,57 @@ const RevenueCatProvider: IapProvider = {
       return false;
     }
   },
+
+  async presentCodeRedemption(): Promise<CodeRedemptionOutcome> {
+    const Purchases = getConfiguredPurchases();
+    if (!Purchases) {
+      return StubProvider.presentCodeRedemption();
+    }
+
+    // Snapshot BEFORE presenting. Someone who already holds Pro and opens the
+    // sheet out of curiosity must not be told a code activated something.
+    const alreadyPro = await this.isProActive();
+
+    try {
+      await Purchases.presentCodeRedemptionSheet();
+    } catch (err) {
+      return {
+        status: 'unavailable',
+        reason:
+          err instanceof Error && err.message
+            ? err.message
+            : 'The App Store could not open the redemption sheet. Try again in a moment.',
+      };
+    }
+
+    if (alreadyPro) return { status: 'dismissed' };
+
+    // The promise above resolves when the sheet is PRESENTED, so this poll is
+    // racing the user typing a code. Apple's own receipt refresh is the slow
+    // part; ~15s covers a redemption comfortably without pinning the UI on a
+    // user who opened the sheet and backed straight out.
+    //
+    // invalidateCustomerInfoCache() each pass is not optional: getCustomerInfo
+    // serves a cached CustomerInfo for several minutes, so without it this
+    // loop re-reads the same pre-redemption snapshot 10 times and always
+    // concludes 'dismissed'.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      try {
+        await Purchases.invalidateCustomerInfoCache();
+        const info = await Purchases.getCustomerInfo();
+        if (info.entitlements.active[config.subscription.entitlementId]) {
+          emitSubscriptionChanged();
+          return { status: 'activated' };
+        }
+      } catch {
+        // Offline or a transient StoreKit error — keep polling. The listener
+        // registered in getConfiguredPurchases() is the long-tail backstop.
+      }
+    }
+
+    return { status: 'dismissed' };
+  },
 };
 
 /**
@@ -415,4 +506,8 @@ export const iap: IapProvider = {
     RevenueCatProvider.isAvailable()
       ? RevenueCatProvider.hasActiveStoreSubscription()
       : StubProvider.hasActiveStoreSubscription(),
+  presentCodeRedemption: () =>
+    RevenueCatProvider.isAvailable()
+      ? RevenueCatProvider.presentCodeRedemption()
+      : StubProvider.presentCodeRedemption(),
 };

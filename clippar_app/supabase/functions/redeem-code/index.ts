@@ -1,3 +1,18 @@
+/**
+ * ############################################################################
+ * ## SUPERSEDED — DO NOT DEPLOY. Replaced by App Store Offer Codes.         ##
+ * ############################################################################
+ *
+ * Henry's call, 2026-08-04. Guideline 3.1.1 prohibits unlocking features with
+ * a developer's own license keys; redemption now runs through StoreKit's code
+ * sheet (app/profile/redeem.tsx → lib/iap presentCodeRedemption) against
+ * one-time-use Offer Codes generated in App Store Connect.
+ *
+ * This function has never been deployed, and the table it reads
+ * (migrations/018_redemption_codes.sql) has never been applied. Deploying it
+ * would 500 on every call for want of `redemption_codes`. Kept for the rate
+ * limiting and constant-time comparison patterns, which are reusable.
+ */
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 import type { SupabaseClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
 import { clientIp } from '../_shared/rateLimit.ts';

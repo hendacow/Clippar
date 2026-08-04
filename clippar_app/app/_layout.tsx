@@ -102,7 +102,11 @@ function RootLayout() {
     // trials are Apple-ID scoped — no account needed). Don't bounce a
     // signed-out user off it; the paywall itself routes forward to signup
     // when opened from onboarding (?from=onboarding).
-    const onPaywall = segments[0] === 'paywall';
+    // BOTH layers: /paywall is the paid offer, /paywall-trial the
+    // second-chance trial it hands off to. Miss the second one here and a
+    // signed-out golfer tapping "Continue to free" is bounced straight to
+    // login — the layer would be unreachable in the only funnel it exists for.
+    const onPaywall = segments[0] === 'paywall' || segments[0] === 'paywall-trial';
     // Dev builds only: (dev) harness screens (tracer-sim, detection-ab) are
     // reachable without sign-in so simulator automation can deep-link to them.
     const inDevGroup = __DEV__ && segments[0] === '(dev)';
@@ -272,6 +276,14 @@ function RootLayout() {
             <Stack.Screen
               name="paywall"
               options={{ presentation: 'modal', animation: 'slide_from_bottom' }}
+            />
+            {/* Layer 2. Same modal presentation as layer 1 because it
+                REPLACES it — a card animation would slide a "new" screen in
+                over a modal that is already up. Fade reads as the same sheet
+                changing its mind. */}
+            <Stack.Screen
+              name="paywall-trial"
+              options={{ presentation: 'modal', animation: 'fade' }}
             />
             <Stack.Screen name="mount-offer" options={{ animation: 'fade' }} />
           </Stack>

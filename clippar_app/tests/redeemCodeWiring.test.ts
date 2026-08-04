@@ -4,13 +4,19 @@ import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-// redeemCode.test.ts pins the logic. These pin the parts the logic cannot
-// check about itself: that the screen is REACHABLE, that redeeming actually
-// refreshes Pro state, that no user id rides in the request body, and that the
-// entitlement gate the whole feature depends on has not drifted.
+// Redemption runs through Apple's Offer Codes, not a code table of ours.
 //
-// A redeem screen nobody can open, or a grant the UI never notices, reads as
-// done and is not.
+// The bespoke CLIP-xxxx scheme (migration 018 + the redeem-code function) was
+// retired on 2026-08-04: App Review 3.1.1 prohibits unlocking features with a
+// developer's own license keys, and a text box that turns a string into paid
+// functionality is the shape the rule names. Henry's call — not worth finding
+// out on a first submission.
+//
+// These pin the parts the implementation cannot check about itself: that the
+// screen is REACHABLE, that it hands off to StoreKit rather than to us, that
+// the poll can actually observe a grant, and that the retired server side
+// stays retired. The 3.1.1 regression is the one that matters — it is a single
+// <TextInput> away from coming back, and it would come back looking helpful.
 //
 // These assert on source text because app/ and lib/ import react-native, which
 // the node test runner cannot transform — same approach as
@@ -23,7 +29,6 @@ const read = (rel: string) => readFileSync(path(rel), 'utf8');
 const REDEEM_ROUTE = '/profile/redeem';
 
 const screen = read('app/profile/redeem.tsx');
-const lib = read('lib/redeemCode.ts');
 const paywall = read('app/paywall.tsx');
 const profileTab = read('app/(tabs)/profile.tsx');
 const subscription = read('lib/subscription.ts');
@@ -73,55 +78,134 @@ test('the paywall offers a code path without competing with the purchase CTA', (
 });
 
 test('the paywall hides the code link in the pre-signup funnel', () => {
-  // ?from=onboarding opens the paywall before the account exists. A code
-  // attaches to an account, so the link could only lead to "Sign in first".
+  // ?from=onboarding opens the paywall before the account exists. An offer
+  // code attaches to an Apple ID and the resulting entitlement is aliased to
+  // the Supabase user, so redeeming before signup strands the grant.
   assert.match(paywall, /\{!fromOnboarding \? \(/);
 });
 
-// ─── The screen does the two things that make a grant visible ───
+// ─── 3.1.1: the entitlement must come from StoreKit, not from us ───
 
-test('the screen calls redeemCode and refreshes Pro state on success', () => {
-  assert.match(screen, /await redeemCode\(code\)/, 'the screen must actually call redeemCode');
+test('the screen hands off to StoreKit and has no code field of its own', () => {
   assert.match(
     screen,
-    /emitSubscriptionChanged\(\)/,
-    'a successful redemption must emit on the subscription bus, as app/paywall.tsx does after a purchase'
+    /await iap\.presentCodeRedemption\(\)/,
+    'the screen must present Apple’s redemption sheet'
   );
-  // The emit must be INSIDE the success branch — emitting unconditionally
-  // would fire a pointless refresh on every failed attempt.
-  const successAt = screen.indexOf("outcome.status === 'redeemed'");
-  const emitAt = screen.indexOf('emitSubscriptionChanged()');
-  assert.notEqual(successAt, -1, 'expected a success branch in app/profile/redeem.tsx');
-  assert.ok(successAt < emitAt, 'emitSubscriptionChanged must run inside the success branch');
+  // The regression guard. Any of these coming back means someone rebuilt the
+  // 3.1.1 exposure — a field that accepts a developer-issued key.
+  assert.doesNotMatch(screen, /<TextInput/, 'no code entry field may return to this screen');
+  assert.doesNotMatch(screen, /autoCapitalize/, 'a code field would need this — there must be none');
+  assert.doesNotMatch(
+    screen,
+    /functions\.invoke/,
+    'redemption must not call any endpoint of ours; Apple validates the code'
+  );
+  assert.doesNotMatch(
+    screen,
+    /from '@\/lib\/redeemCode'/,
+    'the bespoke redemption client is retired and must not be re-imported'
+  );
 });
 
-test('the bus the screen emits on is the one useSubscription listens to', () => {
-  const events = read('lib/subscriptionEvents.ts');
-  assert.match(events, /export function emitSubscriptionChanged/);
+test('the retired bespoke redemption client is actually gone', () => {
+  // Leaving it importable is how it comes back: the module still compiles, so
+  // the shortest fix for any redemption complaint is to wire it up again.
+  assert.ok(
+    !existsSync(path('lib/redeemCode.ts')),
+    'lib/redeemCode.ts must be deleted, not merely unreferenced'
+  );
+});
+
+test('the retired server side is marked so nobody applies or deploys it', () => {
+  // Both are on disk for their design notes. Neither has ever touched a
+  // database, and applying 018 re-introduces the guideline exposure.
+  const migration = read('supabase/migrations/018_redemption_codes.sql');
+  const fn = read('supabase/functions/redeem-code/index.ts');
+  assert.match(migration, /SUPERSEDED\s*—\s*DO NOT APPLY/i);
+  assert.match(fn, /SUPERSEDED\s*—\s*DO NOT DEPLOY/i);
+});
+
+// ─── The handoff has to be able to observe a grant ───
+
+// Both providers implement presentCodeRedemption and the stub is declared
+// first, so anchoring on the method name alone slices from the WRONG one — and
+// the ordering assertions below would then read Purchases calls belonging to
+// isProActive() and hasActiveStoreSubscription().
+const rcRedemption = (() => {
+  const providerAt = iap.indexOf('const RevenueCatProvider');
+  assert.notEqual(providerAt, -1, 'expected a RevenueCatProvider in lib/iap.ts');
+  const methodAt = iap.indexOf('async presentCodeRedemption', providerAt);
+  assert.notEqual(methodAt, -1, 'RevenueCatProvider must implement presentCodeRedemption');
+  return iap.slice(methodAt);
+})();
+
+test('the poll invalidates the cached CustomerInfo before each read', () => {
+  // getCustomerInfo serves a cache for minutes. Without invalidation the loop
+  // re-reads the same pre-redemption snapshot ten times and always concludes
+  // 'dismissed' — the feature would look broken for every valid code.
+  const invalidateAt = rcRedemption.indexOf('invalidateCustomerInfoCache()');
+  const readAt = rcRedemption.indexOf('Purchases.getCustomerInfo()');
+  assert.notEqual(invalidateAt, -1, 'the poll must invalidate the CustomerInfo cache');
+  assert.ok(invalidateAt < readAt, 'invalidation must precede the read, not follow it');
+});
+
+test('the sheet is presented through the SDK, not reimplemented', () => {
+  assert.match(iap, /Purchases\.presentCodeRedemptionSheet\(\)/);
+});
+
+test('an existing subscriber is never told a code activated something', () => {
+  // presentCodeRedemptionSheet resolves when the sheet is SHOWN, so a user who
+  // already holds Pro and backs straight out would otherwise poll, see Pro on,
+  // and be congratulated for redeeming nothing.
+  const snapshotAt = rcRedemption.indexOf('const alreadyPro');
+  const presentAt = rcRedemption.indexOf('presentCodeRedemptionSheet()');
+  assert.notEqual(snapshotAt, -1, 'the pre-redemption Pro snapshot must exist');
+  assert.ok(snapshotAt < presentAt, 'the snapshot must be taken BEFORE the sheet is presented');
+  assert.match(rcRedemption, /if \(alreadyPro\) return \{ status: 'dismissed' \};/);
+});
+
+test('a successful redemption refreshes Pro state across the app', () => {
+  const emitAt = rcRedemption.indexOf('emitSubscriptionChanged()');
+  const activatedAt = rcRedemption.indexOf("return { status: 'activated' }");
+  assert.notEqual(emitAt, -1, 'activation must emit on the subscription bus');
+  assert.ok(emitAt < activatedAt, 'the emit must run in the activated branch, before returning');
+});
+
+test('the bus it emits on is the one useSubscription listens to', () => {
+  assert.match(read('lib/subscriptionEvents.ts'), /export function emitSubscriptionChanged/);
   assert.match(read('hooks/useSubscription.ts'), /onSubscriptionChanged\(refresh\)/);
 });
 
-test('a double tap cannot spend a one-shot code twice', () => {
+test('a double tap cannot stack two redemption sheets', () => {
   // The guard has to be synchronous. Two taps in the same React batch both
   // read the stale `busy === false` out of their closure, so `busy` alone is
   // not a lock — a ref flips on the first tap.
   assert.match(screen, /inFlight = useRef\(false\)/);
-  assert.match(screen, /if \(inFlight\.current[\s\S]{0,80}?\) return;/);
-  assert.match(screen, /inFlight\.current = true;/);
-  // ...and the flag must be set before the first await, or two taps can both
-  // get past the guard while the first one is still resolving.
+  assert.match(screen, /if \(inFlight\.current\) return;/);
   const guardAt = screen.indexOf('inFlight.current = true;');
-  const awaitAt = screen.indexOf('await redeemCode(code)');
-  assert.ok(guardAt !== -1 && awaitAt > guardAt, 'the guard must close before the request starts');
-  assert.match(screen, /disabled=\{busy \|\| !complete\}/);
+  const awaitAt = screen.indexOf('await iap.presentCodeRedemption()');
+  assert.ok(guardAt !== -1 && awaitAt > guardAt, 'the guard must close before the sheet opens');
+  assert.match(screen, /disabled=\{busy\}/);
 });
 
-test('the field is set up for a printed code, not for prose', () => {
-  assert.match(screen, /autoCapitalize="characters"/);
-  assert.match(screen, /autoCorrect=\{false\}/);
-  assert.match(screen, /autoComplete="off"/);
-  assert.match(screen, /keyboardType="default"/);
-  assert.match(screen, /editable=\{!busy\}/);
+test('a dismissed sheet is never reported as a failed code', () => {
+  // StoreKit reports nothing about what was typed, and Apple's receipt can
+  // land after the poll gives up. Telling someone their valid code failed,
+  // seconds before it works, is the one outcome worth engineering against.
+  assert.match(screen, /case 'dismissed':/);
+  const start = screen.indexOf("case 'dismissed':");
+  const block = screen.slice(start, screen.indexOf("case 'unavailable':"));
+  assert.doesNotMatch(block, /invalid|not valid|failed|incorrect|wrong/i);
+});
+
+test('the stub build says why rather than claiming a grant', () => {
+  const stubStart = iap.indexOf('const StubProvider');
+  const stubEnd = iap.indexOf('const RevenueCatProvider');
+  const stub = iap.slice(stubStart, stubEnd);
+  assert.match(stub, /presentCodeRedemption/);
+  assert.match(stub, /status: 'unavailable'/);
+  assert.doesNotMatch(stub, /status: 'activated'/, 'the stub must never report an activation');
 });
 
 test('the screen claims no free trial', () => {
@@ -130,40 +214,16 @@ test('the screen claims no free trial', () => {
   // immediately (App Review 3.1.2 + real money). Nothing here may reintroduce
   // the claim.
   assert.doesNotMatch(screen, /free trial|days free/i);
-  assert.doesNotMatch(lib, /free trial|days free/i);
-});
-
-// ─── The request ───
-
-test('the request body carries the code and nothing else', () => {
-  // The granted user comes from the VERIFIED JWT. A user id in the body is a
-  // caller-supplied claim about who to make Pro — a free lifetime entitlement
-  // for anyone who can edit a request.
-  const start = lib.indexOf("functions.invoke('redeem-code'");
-  assert.notEqual(start, -1, 'lib/redeemCode.ts must invoke the redeem-code function');
-  const call = lib.slice(start, lib.indexOf('});', start));
-  assert.match(call, /body: \{ code:/, 'the body must send the code');
-  assert.doesNotMatch(
-    call,
-    /user|uid|sub|email/i,
-    'nothing identifying the user may ride in the request body'
-  );
-});
-
-test('the client still says out loud that its normalisation is not a control', () => {
-  // The comment is the artefact that stops a future reader deleting the
-  // server-side re-validation as "redundant".
-  assert.match(lib, /NEVER A CONTROL/i);
-  assert.match(lib, /server normalises/i);
 });
 
 // ─── The entitlement gate this feature rides on ───
 
 test('an active status with no expiry still reads as lifetime', () => {
-  // The redemption writes exactly profiles.subscription_status = 'active' with
-  // subscription_expires_at = NULL, and nothing else opens the gate. If this
-  // branch ever moves below the date comparison, `new Date(null) > new Date()`
-  // is false and every redeemed golfer silently loses Pro.
+  // Offer codes are the ordinary path now, but a manually comped account is
+  // still exactly profiles.subscription_status = 'active' with a NULL expiry —
+  // including the demo account handed to App Review. If this branch ever moves
+  // below the date comparison, `new Date(null) > new Date()` is false and the
+  // reviewer's account silently loses Pro.
   assert.match(
     subscription,
     /if \(!profile\.subscription_expires_at\) return true;/,
@@ -175,10 +235,10 @@ test('an active status with no expiry still reads as lifetime', () => {
   assert.ok(nullCheckAt < dateCompareAt, 'the null-expiry branch must come first');
 });
 
-test('a false RevenueCat entitlement does not shadow a redeemed lifetime grant', () => {
-  // A redeemed user has no StoreKit purchase, so isProActive() is false for
+test('a false RevenueCat entitlement does not shadow a server-side grant', () => {
+  // A comped user has no StoreKit purchase, so isProActive() is false for
   // them. Only a TRUE may short-circuit; a false has to fall through to the
-  // Supabase profile read or redemption never unlocks anything.
+  // Supabase profile read or the comp never unlocks anything.
   assert.match(subscription, /if \(await iap\.isProActive\(\)\) return true;/);
   const storeAt = subscription.indexOf('iap.isProActive()');
   const profileAt = subscription.indexOf(".from('profiles')");

@@ -1,4 +1,31 @@
 -- 018_redemption_codes.sql
+--
+-- ############################################################################
+-- ## SUPERSEDED — DO NOT APPLY. Replaced by App Store Offer Codes.          ##
+-- ############################################################################
+--
+-- Henry's call, 2026-08-04. App Review guideline 3.1.1 prohibits unlocking
+-- features with a developer's own license keys, and a code box that turns a
+-- string into paid functionality is the shape the rule names. Rather than find
+-- out whether a reviewer would call it on a first submission, redemption now
+-- goes through Apple: one-time-use Offer Codes generated in App Store Connect,
+-- redeemed in StoreKit's own sheet (app/profile/redeem.tsx), observed by
+-- RevenueCat. Nothing of ours is in the trust path.
+--
+-- This file has NEVER been applied to any database — not prod, not dev — so
+-- there is no table to drop and no data to migrate. It is kept for the design
+-- notes below (offline-brute-force resistance, atomic single-use consumption)
+-- in case a non-App-Store surface ever needs its own codes. If you apply it,
+-- you are re-introducing the 3.1.1 exposure, and app/profile/redeem.tsx no
+-- longer calls the function it defines.
+--
+-- Also superseded: supabase/functions/redeem-code (never deployed) and the
+-- REDEMPTION_CODE_PEPPER secret, which is now unused.
+--
+-- ---------------------------------------------------------------------------
+-- ORIGINAL HEADER FOLLOWS
+-- ---------------------------------------------------------------------------
+--
 -- Lifetime redemption codes: Henry prints a code, hands it to an ambassador,
 -- they paste it once and hold Clippar Pro forever.
 --

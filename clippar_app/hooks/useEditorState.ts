@@ -6,7 +6,12 @@ import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTrac
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
 import { isTrimInFlight } from '@/lib/trimInFlight';
-import { config } from '@/constants/config';
+import {
+  describeTrimWindowSource,
+  logTrimRequest,
+  logTrimResult,
+} from '@/lib/trimDiagnostics';
+import { config, resolveEffectiveTrimWindow, type TrimWindow } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 
 const DEFAULT_PAR = 4;
@@ -514,42 +519,36 @@ export function useEditorState(roundId: string | undefined) {
   /**
    * Resolve the active trim window (pre/post roll) for the import pipeline.
    *
-   * FIX #8 — full-swing window must win over a stale saved override.
-   * The DEFAULT is now config.trim.windows.fullSwing (2500/1500, ~4s total),
-   * NOT the legacy defaultPreRollMs/defaultPostRollMs (3000/2000). A saved
-   * 'trim_settings' override is only honored when the user EXPLICITLY opted into
-   * the new window (parsed.window === 'fullSwing'). Overrides written before this
-   * change carry no `window` marker (or carry the old 3000/2000 numbers), so they
-   * are intentionally ignored here — otherwise they would silently shadow the new
-   * fullSwing window. Kept identical to useCamera.loadTrimSettings so import and
-   * live record trim to the same length.
+   * This used to be a hand-copy of useCamera.loadTrimSettings, with a comment on
+   * each asking the next person to keep the two in step. They are now the same
+   * call — resolveEffectiveTrimWindow in constants/config — because a divergence
+   * here means an imported re-trim differs from the clip that was recorded, on
+   * footage that cannot be shot again. That file also carries the FIX #8
+   * history: why a stored override needs the fullSwing marker to count, and how
+   * the marker's absence in the settings UI made every user-set trim length a
+   * no-op.
+   *
+   * The RAW stored string comes back alongside the resolved window purely so
+   * the [trim-diag] block can print it (lib/trimDiagnostics). Without it the
+   * console can show what the pipeline trimmed to but not what the user
+   * actually saved, and those two being indistinguishable is the whole reason
+   * "my trim setting does nothing" was unanswerable. Diagnostic only —
+   * nothing branches on `raw`.
    */
   const getTrimSettings = useCallback(async (): Promise<{
-    preRollMs: number;
-    postRollMs: number;
+    raw: string | null;
+    effective: TrimWindow;
   }> => {
-    let { preRollMs, postRollMs } = config.trim.windows.fullSwing;
+    let saved: string | null = null;
     if (storage) {
       try {
-        const saved = await storage.getSetting('trim_settings');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          // Only an explicit fullSwing-tagged override may replace the config window.
-          if (parsed.window === 'fullSwing') {
-            if (parsed.preRollMs) preRollMs = parsed.preRollMs;
-            if (parsed.postRollMs) postRollMs = parsed.postRollMs;
-          }
-        }
-      } catch {}
+        saved = await storage.getSetting('trim_settings');
+      } catch {
+        // Storage read failed — fall through with null so the batch trims to
+        // the config window rather than skipping the trim entirely.
+      }
     }
-    // Tracer hook (no-op at the default 0): a longer post-impact window keeps
-    // more ball flight in the trimmed clip for the arc draw-on. Gated on
-    // config.tracer.enabled so day-zero behavior is byte-identical. Mirrored
-    // in useCamera.loadTrimSettings so live record matches import re-trims.
-    if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
-      postRollMs += config.tracer.extraPostRollMs;
-    }
-    return { preRollMs, postRollMs };
+    return { raw: saved, effective: resolveEffectiveTrimWindow(saved) };
   }, []);
 
   /**
@@ -605,10 +604,19 @@ export function useEditorState(roundId: string | undefined) {
       if (!clip.needsTrim) return clip;
 
       const originalSourceUri = clip.sourceUri;
-      const { preRollMs, postRollMs } = await getTrimSettings();
+      const { raw: rawTrimSetting, effective } = await getTrimSettings();
+      const { preRollMs, postRollMs } = effective;
       const { strategy, optionsJson } = resolveDetection();
 
       try {
+        // [trim-diag] steps 1-4, before the native call — see lib/trimDiagnostics.
+        logTrimRequest({
+          path: 'import-retrim',
+          clipId,
+          where: `hole ${clip.holeNumber}, shot ${clip.shotNumber}`,
+          source: describeTrimWindowSource(rawTrimSetting),
+          requested: { preRollMs, postRollMs },
+        });
         const result = await detectAndTrim(
           originalSourceUri,
           preRollMs,
@@ -617,6 +625,15 @@ export function useEditorState(roundId: string | undefined) {
           strategy,
           optionsJson
         );
+        // [trim-diag] steps 5-7: returned window, derived window, MISMATCH.
+        logTrimResult({
+          path: 'import-retrim',
+          clipId,
+          where: `hole ${clip.holeNumber}, shot ${clip.shotNumber}`,
+          requested: { preRollMs, postRollMs },
+          outcome: result,
+          sourceDurationMs: clip.durationMs > 0 ? clip.durationMs : null,
+        });
         // A/B harness (additive, non-fatal): record a structured row.
         void logDetection(clipId, result).catch(() => {});
 
@@ -663,20 +680,33 @@ export function useEditorState(roundId: string | undefined) {
                 shot_type: result.shotType,
               })
               .catch(() => {});
-          } else if (result.found && !result.trimmedUri && result.shotType === 'putt') {
-            // Putt — no trim file created (full clip kept), but persist classification
+          } else if (result.found && !result.trimmedUri) {
+            // DETECTED, BUT THE TRIM EXPORT FAILED — putt OR swing. The
+            // `!result.trimmedUri` is the real condition; it is not a
+            // putt-specific native behaviour. ShotDetectorModule.swift
+            // detectAndTrimVideo trims putts exactly like swings, so a null
+            // trimmedUri means AVAssetExportSession could not be created or the
+            // export errored.
+            //
+            // The `&& result.shotType === 'putt'` that used to be on this line
+            // sent a swing with a failed export to the final else, which wrote
+            // `markClipTrimmed(numId, originalSourceUri, null, null)` and threw
+            // away the impact time the manual trimmer anchors on. A failed
+            // export says nothing about whether a shot was found, so the
+            // detection survives it. Same correction as hooks/useCamera.ts.
             await storage
               .updateClipEditorState(numId, {
                 trim_start_ms: 0,
                 trim_end_ms: -1,
-                shot_type: 'putt',
+                shot_type: result.shotType,
               })
               .catch(() => {});
             await storage
               .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
               .catch(() => {});
           } else {
-            // No swing found — mark as processed anyway so we don't retry
+            // NOTHING DETECTED — now the only thing this branch means. Mark
+            // processed anyway so the retry pass leaves it alone.
             await storage
               .updateClipEditorState(numId, {
                 trim_start_ms: 0,
@@ -708,7 +738,11 @@ export function useEditorState(roundId: string | undefined) {
     // Reset cancellation flag in case the hook is re-used
     trimCancelledRef.current = false;
 
-    const { preRollMs, postRollMs } = await getTrimSettings();
+    const { raw: rawTrimSetting, effective } = await getTrimSettings();
+    const { preRollMs, postRollMs } = effective;
+    // Resolved ONCE for the whole batch, so [trim-diag] describes it once here
+    // and then repeats only the per-clip request/result lines below.
+    const trimSource = describeTrimWindowSource(rawTrimSetting);
     // Configured strategy + options for the whole batch (fix #4: velocityPeak
     // dense pass via options.refine is enabled on this import path inside
     // resolveDetection).
@@ -778,6 +812,14 @@ export function useEditorState(roundId: string | undefined) {
         } catch {}
 
         const recentForHole = recentByHole.get(clip.holeNumber) ?? [];
+        // [trim-diag] steps 1-4, before the native call — see lib/trimDiagnostics.
+        logTrimRequest({
+          path: 'import-batch',
+          clipId: clip.id,
+          where: `hole ${clip.holeNumber}, shot ${clip.shotNumber}`,
+          source: trimSource,
+          requested: { preRollMs, postRollMs },
+        });
         const result = await detectAndTrim(
           clip.sourceUri!,
           preRollMs,
@@ -786,6 +828,15 @@ export function useEditorState(roundId: string | undefined) {
           strategy,
           optionsJson
         );
+        // [trim-diag] steps 5-7: returned window, derived window, MISMATCH.
+        logTrimResult({
+          path: 'import-batch',
+          clipId: clip.id,
+          where: `hole ${clip.holeNumber}, shot ${clip.shotNumber}`,
+          requested: { preRollMs, postRollMs },
+          outcome: result,
+          sourceDurationMs: clip.durationMs > 0 ? clip.durationMs : null,
+        });
         // A/B harness (additive, non-fatal): record a structured row.
         void logDetection(clip.id, result).catch(() => {});
 
@@ -843,8 +894,13 @@ export function useEditorState(roundId: string | undefined) {
                 shot_type: result.shotType,
               })
               .catch(() => {});
-          } else if (result.found && !result.trimmedUri && result.shotType === 'putt') {
-            // Putt — no trim file created (full clip kept), but persist classification
+          } else if (result.found && !result.trimmedUri) {
+            // DETECTED, BUT THE TRIM EXPORT FAILED — putt OR swing. Same
+            // correction as the trimClip path above: native trims putts like
+            // swings, so a null trimmedUri means the export failed, not that
+            // putts are left untrimmed by design — and a swing that lands here
+            // must keep its impact time and classification rather than falling
+            // into the "nothing detected" branch below.
             await storage
               .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
               .catch(() => {});
@@ -852,10 +908,11 @@ export function useEditorState(roundId: string | undefined) {
               .updateClipEditorState(numId, {
                 trim_start_ms: 0,
                 trim_end_ms: -1,
-                shot_type: 'putt',
+                shot_type: result.shotType,
               })
               .catch(() => {});
           } else {
+            // NOTHING DETECTED — now the only thing this branch means.
             await storage
               .markClipTrimmed(numId, originalSourceUri, null, null)
               .catch(() => {});

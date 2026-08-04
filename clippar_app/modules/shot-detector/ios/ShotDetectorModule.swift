@@ -366,8 +366,55 @@ public class ShotDetectorModule: Module {
                 // rolling toward the cup, but use the same trim flow as
                 // swings so the file_uri is the trimmed clip and downstream
                 // duration / playback work correctly.
+                // THE PUTT FLOOR IS A FLOOR ON THE TOTAL WINDOW, NOT ON THE
+                // POST-ROLL. It was written `max(postRollMs, 4000.0)`, which
+                // does not bound a putt's clip at 4000ms — it pins 4000ms
+                // AFTER impact on top of whatever pre-roll the caller asked
+                // for, so the clip is always preRoll + 4000.
+                //
+                // What that cost, in the field: a golfer who set Trim Settings
+                // to 1.0s before + 1.0s after — a screen that says "Total clip
+                // length after trimming. Currently: 2.0s" — recorded a shot and
+                // got a 5.0s clip (1000 + 4000). His pre-roll was honoured
+                // exactly; only the post-roll was overridden, which is why the
+                // settings looked like they were being ignored wholesale. On
+                // the app's own default window (2500/1500, "4.0s" on screen) a
+                // putt came out at 6.5s for the same reason.
+                //
+                // And it fires far more often than the word "putt" suggests.
+                // When the pose state machine finds no confident swing, the
+                // detector falls back to fallbackClassify (see ~line 1414),
+                // which labels ANY recording longer than 12 seconds a putt at
+                // confidence 0.25 on duration alone — nothing about the stroke.
+                // So "recorded a long clip" silently became "post-roll setting
+                // discarded".
+                //
+                // constants/config.ts has always DOCUMENTED this as a total
+                // floor ("putts are floored to a minimum 4000ms total trim
+                // natively"). This makes the code do what the docs say: extend
+                // the post-roll only as far as needed to reach the floor, and
+                // never past it. A putt still gets its long look at the ball
+                // rolling to the cup; a caller who already asked for >= the
+                // floor is left completely alone.
+                //
+                // The threshold now comes from `options.puttPostRollMs`, which
+                // has been parsed out of optionsJson since the A/B harness
+                // landed (~line 3425) but was never read by anything. Default
+                // is 4000.0, so behaviour is unchanged unless JS says
+                // otherwise — and it can now be tuned (or disabled with 0)
+                // over-the-air from config.detection.options, without another
+                // native build. NOTE: this supersedes the "baseline trim math
+                // is forbidden to edit" note further down this file, which was
+                // an A/B-harness guardrail, not a correctness one.
                 let effectivePreRoll = preRollMs
-                let effectivePostRoll = result.shotType == .putt ? max(postRollMs, 4000.0) : postRollMs
+                let puttFloorTotalMs = options.puttPostRollMs
+                let requestedTotalMs = preRollMs + postRollMs
+                let effectivePostRoll = (result.shotType == .putt && requestedTotalMs < puttFloorTotalMs)
+                    ? postRollMs + (puttFloorTotalMs - requestedTotalMs)
+                    : postRollMs
+                if effectivePostRoll != postRollMs {
+                    print("[Clippar.Trim] putt total-window floor applied — requested \(Int(requestedTotalMs))ms total, raised post-roll \(Int(postRollMs))ms -> \(Int(effectivePostRoll))ms to reach \(Int(puttFloorTotalMs))ms")
+                }
 
                 // Step 2: Calculate trim window with configurable pre/post roll
                 let trimStart = max(0.0, result.impactTimeMs - effectivePreRoll)
@@ -3386,13 +3433,20 @@ public class ShotDetectorModule: Module {
         // tolerance (critique #5) so a coincident clap/cart-door cannot win.
         var audioPoseAgreeMs: Double = 50.0
 
-        // --- Putt post-roll (read ONLY here, never edits baseline line ~306) ---
-        // NOTE: under the baseline strategy the untouchable native line
-        // `max(postRollMs, 4000)` pins putts at >=4000ms regardless of this.
-        // This value is read only inside the new variants if ever needed; we
-        // keep it for documentation parity and do not apply it (baseline trim
-        // math is forbidden to edit). Putts staying long is satisfied by the
-        // existing 4000 floor.
+        // --- Putt minimum TOTAL window (now live — see detectAndTrimVideo) ---
+        // This used to be declared, parsed, and never read: the note here said
+        // the "untouchable" line `max(postRollMs, 4000)` pinned putts at
+        // >=4000ms of POST-ROLL regardless. That line was the bug — it added
+        // 4000ms after impact on top of the caller's pre-roll instead of
+        // bounding the clip, so a user-chosen 2.0s window came out at 5.0s.
+        //
+        // detectAndTrimVideo now reads this value as a floor on the TOTAL
+        // window (pre + post), which is what constants/config.ts always
+        // claimed. The default is unchanged, so day-zero behaviour for a putt
+        // that already asked for >= 4000ms total is byte-identical. Set it via
+        // config.detection.options.puttPostRollMs to tune the floor — or to 0
+        // to disable it and let the user's Trim Settings stand unmodified —
+        // over-the-air, with no native rebuild.
         var puttPostRollMs: Double = 4000.0
 
         init(json: String) {
