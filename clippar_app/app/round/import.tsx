@@ -40,7 +40,12 @@ import {
   touchCoursePreset,
 } from '@/lib/api';
 import type { CoursePreset } from '@/types/preset';
-import { buildHoleDataFromPars, presetHasScorecard } from '@/lib/scorecardLogic';
+import {
+  buildHoleDataFromPars,
+  presetHasScorecard,
+  holeWasPlayed,
+  playedHoles,
+} from '@/lib/scorecardLogic';
 import { PresetPickerScreen } from '@/components/record/PresetPickerScreen';
 import { PresetConfirmSheet } from '@/components/record/PresetConfirmSheet';
 import {
@@ -569,6 +574,18 @@ export default function ImportRoundScreen() {
 
   const totalClips = holes.reduce((sum, h) => sum + h.clips.length, 0);
 
+  // Evidence that a hole was actually played, in the shape holeWasPlayed()
+  // wants. Quick import has a typed scorecard, so a score alone proves the hole
+  // was played even with nothing filmed. Manual import has no scorecard at all,
+  // so a clip is the only evidence there is.
+  const playEvidenceFor = useCallback(
+    (hole: HoleImport, usesScorecard: boolean) => ({
+      strokes: usesScorecard ? scores[hole.holeNumber] : hole.clips.length,
+      clipCount: hole.clips.length,
+    }),
+    [scores],
+  );
+
   const handleImport = async () => {
     if (totalClips === 0) {
       Alert.alert('No Clips', 'Add at least one video clip to import.');
@@ -737,7 +754,10 @@ export default function ImportRoundScreen() {
             ? pars[hole.holeNumber]
             : hole.par;
 
-        if (holeStrokes > 0 || hole.clips.length > 0) {
+        // Never write a score row for a hole with no score and no clips — that
+        // row is what makes an unplayed hole reappear as an empty column on the
+        // scorecard burned into the reel (the editor unions clips + scores).
+        if (holeWasPlayed(playEvidenceFor(hole, usesScorecard))) {
           try {
             await saveLocalScore({
               round_id: roundId,
@@ -761,10 +781,8 @@ export default function ImportRoundScreen() {
         }
       }));
 
-      const holesWithData = holes.filter(
-        (h) =>
-          h.clips.length > 0 ||
-          (usesScorecard && scores[h.holeNumber] && scores[h.holeNumber] > 0)
+      const holesWithData = playedHoles(
+        holes.map((h) => ({ ...h, ...playEvidenceFor(h, usesScorecard) })),
       );
       const computedTotalStrokes = usesScorecard
         ? Object.values(scores).reduce((sum, s) => sum + (s || 0), 0)
@@ -2128,6 +2146,15 @@ export default function ImportRoundScreen() {
   }
 
   // ---- STEP 5: Import clips per hole (manual or review after quick) ----
+  // Quick import comes straight off the typed scorecard, so we know which holes
+  // were played: hide the ones with no score AND no clips instead of listing
+  // dead rows for a hole the golfer walked past. Manual import has no scorecard
+  // to judge by — every hole starts empty there, so it must list them all or
+  // there would be nothing to attach clips to.
+  const reviewHoles =
+    importMode === 'quick'
+      ? playedHoles(holes.map((h) => ({ ...h, ...playEvidenceFor(h, true) })))
+      : holes;
   return (
     <GradientBackground>
       <View style={{ flex: 1, paddingTop: insets.top }}>
@@ -2194,7 +2221,21 @@ export default function ImportRoundScreen() {
               </Text>
             </View>
           )}
-          {holes.map((hole) => (
+          {reviewHoles.length === 0 && (
+            <Text
+              style={{
+                color: theme.colors.textTertiary,
+                fontSize: 14,
+                textAlign: 'center',
+                marginTop: 24,
+                lineHeight: 20,
+              }}
+            >
+              No holes scored yet. Go back and enter a score for the holes you
+              played.
+            </Text>
+          )}
+          {reviewHoles.map((hole) => (
             <View
               key={hole.holeNumber}
               onLayout={(e) => {

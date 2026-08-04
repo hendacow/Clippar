@@ -7,6 +7,8 @@ import {
   liveHoleNumbers,
   buildHoleDataFromPars,
   presetHasScorecard,
+  holeWasPlayed,
+  playedHoles,
   nextUnfilledIndex,
   isScorecardComplete,
   sanitizeHolePars,
@@ -83,6 +85,120 @@ test('presetHasScorecard: false on length mismatch (stale/partial row)', () => {
     presetHasScorecard({ hole_pars: [4, 4, 4], holes_played: 9 }),
     false,
   );
+});
+
+// ── holeWasPlayed / playedHoles (skipped holes) ────────────
+
+test('holeWasPlayed: scored but never filmed → PLAYED (must still render)', () => {
+  assert.equal(holeWasPlayed({ strokes: 5, clipCount: 0 }), true);
+});
+
+test('holeWasPlayed: filmed but never scored → played', () => {
+  assert.equal(holeWasPlayed({ strokes: 0, clipCount: 2 }), true);
+});
+
+test('holeWasPlayed: no score and no clips → never played', () => {
+  assert.equal(holeWasPlayed({ strokes: 0, clipCount: 0 }), false);
+});
+
+test('holeWasPlayed: an unscored hole is undefined/null, not 0', () => {
+  assert.equal(holeWasPlayed({}), false);
+  assert.equal(holeWasPlayed({ strokes: null, clipCount: null }), false);
+  assert.equal(holeWasPlayed({ strokes: undefined, clipCount: 3 }), true);
+  assert.equal(holeWasPlayed({ strokes: 4 }), true);
+});
+
+// Fixture helper: a round's holes with (strokes, clipCount) per hole number.
+const holesOf = (
+  entries: [holeNumber: number, strokes: number, clipCount: number][],
+) => entries.map(([holeNumber, strokes, clipCount]) => ({
+  holeNumber,
+  strokes,
+  clipCount,
+}));
+
+const numbersOf = (holes: { holeNumber: number }[]) =>
+  holes.map((h) => h.holeNumber);
+
+test('playedHoles: a gap in the middle drops only the unplayed holes', () => {
+  // The owner's exact case: played 10, skipped 11 + 12, played 13.
+  const holes = holesOf([
+    [10, 4, 2],
+    [11, 0, 0],
+    [12, 0, 0],
+    [13, 5, 1],
+  ]);
+  assert.deepEqual(numbersOf(playedHoles(holes)), [10, 13]);
+});
+
+test('playedHoles: a scored-but-unfilmed hole inside the gap survives', () => {
+  const holes = holesOf([
+    [10, 4, 2],
+    [11, 0, 0],
+    [12, 6, 0], // walked it, filmed nothing — still a real hole
+    [13, 5, 1],
+  ]);
+  assert.deepEqual(numbersOf(playedHoles(holes)), [10, 12, 13]);
+});
+
+test('playedHoles: first hole skipped', () => {
+  const holes = holesOf([
+    [1, 0, 0],
+    [2, 4, 1],
+    [3, 5, 0],
+  ]);
+  assert.deepEqual(numbersOf(playedHoles(holes)), [2, 3]);
+});
+
+test('playedHoles: last hole skipped', () => {
+  const holes = holesOf([
+    [1, 4, 1],
+    [2, 4, 0],
+    [3, 0, 0],
+  ]);
+  assert.deepEqual(numbersOf(playedHoles(holes)), [1, 2]);
+});
+
+test('playedHoles: every hole skipped → empty, not a phantom round', () => {
+  const holes = holesOf([
+    [1, 0, 0],
+    [2, 0, 0],
+    [3, 0, 0],
+  ]);
+  assert.deepEqual(playedHoles(holes), []);
+});
+
+test('playedHoles: every hole played → nothing dropped', () => {
+  const holes = holesOf(
+    liveHoleNumbers(18, 1).map((n) => [n, 4, 1] as [number, number, number]),
+  );
+  assert.equal(playedHoles(holes).length, 18);
+});
+
+test('playedHoles: nine-hole round keeps its real hole numbers', () => {
+  const holes = holesOf(
+    liveHoleNumbers(9, 10).map(
+      (n) => [n, n === 12 || n === 13 ? 0 : 4, 0] as [number, number, number],
+    ),
+  );
+  assert.deepEqual(numbersOf(playedHoles(holes)), [10, 11, 14, 15, 16, 17, 18]);
+});
+
+test('playedHoles: a round starting on 10 and wrapping keeps play order', () => {
+  // Shotgun start on 10, all 18 holes, skipped 18 and 1 (rain).
+  const wrapped = Array.from({ length: 18 }, (_, i) => ((9 + i) % 18) + 1);
+  const holes = holesOf(
+    wrapped.map(
+      (n) => [n, n === 18 || n === 1 ? 0 : 4, 0] as [number, number, number],
+    ),
+  );
+  const kept = numbersOf(playedHoles(holes));
+  // Play order preserved (10..17 then 2..9) — NOT re-sorted to 2..17.
+  assert.deepEqual(kept, [10, 11, 12, 13, 14, 15, 16, 17, 2, 3, 4, 5, 6, 7, 8, 9]);
+});
+
+test('playedHoles: empty list → empty list', () => {
+  assert.deepEqual(playedHoles([]), []);
 });
 
 // ── nextUnfilledIndex (auto-advance) ───────────────────────

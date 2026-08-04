@@ -32,6 +32,41 @@ export function liveHoleNumbers(holesPlayed: 9 | 18, startHole: 1 | 10): number[
 }
 
 /**
+ * What we know about whether a hole was actually played. `strokes` is the
+ * golfer's score (undefined/null when they never scored it), `clipCount` how
+ * many clips were filmed on it.
+ */
+export interface HolePlayEvidence {
+  strokes?: number | null;
+  clipCount?: number | null;
+}
+
+/**
+ * True when there is any evidence the golfer played this hole.
+ *
+ * The asymmetry here is deliberate and load-bearing: a hole with a score but
+ * NO clips is a real played hole (you don't film every hole) and must survive
+ * to the scorecard; a hole with clips but no score is likewise real. Only a
+ * hole with neither — the ones you walk past on a shotgun start, or skip when
+ * the group behind is pushing — was never played and must not render. The
+ * scorecard is burned into the exported reel, so a hole dropped here is a hole
+ * the golfer loses from their round for good.
+ */
+export function holeWasPlayed(hole: HolePlayEvidence): boolean {
+  return (hole.strokes ?? 0) > 0 || (hole.clipCount ?? 0) > 0;
+}
+
+/**
+ * The played subset of a hole list, in the order given (so a round that starts
+ * on 10 and wraps to 1..9 keeps its play order, not numeric order).
+ */
+export function playedHoles<T extends HolePlayEvidence>(
+  holes: readonly T[],
+): T[] {
+  return holes.filter(holeWasPlayed);
+}
+
+/**
  * Build the authoritative HoleData[] from a positional per-hole par array.
  * Element i maps to holeNumber = startHole + i, so the resolved par lines up
  * with the hole numbers the round actually scores (getParForHole looks up by
