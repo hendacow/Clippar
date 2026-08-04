@@ -20,6 +20,21 @@ code. Component/hook tests aren't scaffolded yet; verify UI via Expo Web instead
 
 ## How to verify work — tiered, cheapest first
 
+> **In a fresh worktree, run `npm install` in `clippar_app/` first and make
+> sure `.env.local` exists** (symlink it from the main checkout). `git
+> worktree add` copies tracked files only, so a new worktree has neither, and
+> Metro cannot run without them. `scripts/cc-feature.sh` now does both
+> automatically; worktrees created any other way (including the Claude Code
+> harness's own under `.claude/worktrees/`) need it done by hand.
+>
+> Skipping it does NOT look like a setup problem — with no local
+> node_modules, Node finds the MAIN checkout's, whose `file:` symlink for
+> `shot-detector` points outside this worktree's Metro root. You get "Unable
+> to resolve module shot-detector" (which reads as an app bug), or a bundle
+> URL of `/../../../../node_modules/...` that escapes the dev-server root and
+> renders a blank page with an empty console. Missing env gives
+> "supabaseUrl is required". Install first and none of these appear.
+
 1. **I verify alone (seconds):** `npm run verify`; for UI, run Expo Web
    (`npm run web`) and drive it with the browser preview tools; for logic
    (GPS, scoring, trim, geometry) write a headless sim like
