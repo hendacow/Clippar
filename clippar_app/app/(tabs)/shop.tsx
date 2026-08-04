@@ -25,10 +25,16 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
 type KitType = 'standard' | 'premium';
 
+// Display price is DERIVED from the same cents value we charge, never typed out
+// again. These used to be separate literals, so raising the price meant editing
+// two places and the card could advertise a number Stripe never charged.
+const formatAud = (cents: number) =>
+  cents % 100 === 0 ? String(cents / 100) : (cents / 100).toFixed(2);
+
 const KITS = {
   standard: {
     name: 'Standard Kit',
-    price: 59,
+    price: formatAud(config.hardware.standardPriceCents),
     tagline: 'Everything you need to get started',
     items: [
       {
@@ -45,7 +51,7 @@ const KITS = {
   },
   premium: {
     name: 'Premium Kit',
-    price: 69,
+    price: formatAud(config.hardware.premiumPriceCents),
     tagline: 'Standard Kit + wireless charging convenience',
     items: [
       {
