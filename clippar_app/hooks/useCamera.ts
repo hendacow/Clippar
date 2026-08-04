@@ -14,6 +14,8 @@ import {
 import { detectAndTrim, deleteFile, getDevicePitchDeg, getMemoryStats } from 'shot-detector';
 import { config } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
+import { persistAsset } from '@/lib/media';
+import { videoExtension } from '@/lib/clipPaths';
 import { logDetection } from '@/lib/detectionLog';
 import { canStartRecording, resolveStopRequest } from '@/lib/liveRecordingLogic';
 import { markTrimInFlight, clearTrimInFlight } from '@/lib/trimInFlight';
@@ -404,7 +406,40 @@ export function useCamera({
 
       // Recording stopped — process the clip
       if (video?.uri) {
-        const finalUri = video.uri;
+        // GET THE FOOTAGE OFF THE SYSTEM CACHE BEFORE THE ROW REMEMBERS IT.
+        //
+        // expo-camera writes every recording to Library/Caches/…/Camera/
+        // <uuid>.mov (generatePathInCache, CameraVideoRecording.swift) and this
+        // hook stored that path into local_clips verbatim, as both file_uri and
+        // original_file_uri. iOS may reclaim that directory whenever the phone
+        // is short of space, so a golfer's round could be deleted by the OS
+        // before they ever opened the editor — and unlike an import, there is
+        // no Photos copy to fall back on unless they turned mirroring on. The
+        // import path has persisted its clips for exactly this reason since the
+        // picker-cache fix (app/round/import.tsx); recording never did.
+        //
+        // Fired HERE but awaited at the save block below, so the move overlaps
+        // the GPS/compass waits that were already happening instead of adding
+        // to them. Source and destination share the app container, so
+        // persistAsset takes its moveAsync branch — an O(1) rename, not a copy
+        // of ~150MB (isPurgeableAppPath, lib/clipPaths). Nothing reads the file
+        // between these two points.
+        //
+        // Deliberately NOT bounded by a Promise.race timeout like the GPS and
+        // heading waits below. Those are unbounded by nature; a rename inside
+        // one volume is not, and a timeout that fired while the move went on to
+        // succeed would write the OLD path onto the row — turning a slow save
+        // into the exact data loss this is here to prevent.
+        //
+        // Failure cannot cost the clip either: persistAsset swallows its own
+        // errors and returns the source uri, so the worst case is today's
+        // behaviour (the cache path is stored) and migrateLegacyUris now
+        // rescues that row on the next launch.
+        const durableUriPromise = persistAsset(
+          video.uri,
+          `recorded_${rid}_h${hole}_s${shot}_${Date.now()}.${videoExtension(video.uri, 'mov')}`
+        ).catch(() => video.uri);
+
         const durationSeconds = (Date.now() - recordingStartTime.current) / 1000;
 
         // Get GPS if available
@@ -468,6 +503,12 @@ export function useCamera({
             })
           );
         }
+
+        // The durable path, or the cache path if the move failed. Everything
+        // downstream — the row, detectAndTrim, the Photos mirror, the
+        // ClipMetadata handed to the caller — uses this one value, so there is
+        // no second place that can still be holding the pre-move path.
+        const finalUri = await durableUriPromise;
 
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
