@@ -1,10 +1,10 @@
 /**
  * Data for the cold-start golfer sales funnel (feat/onboarding-flow).
  *
- * Everything content-y lives here so copy, assets, testimonials and trial
- * framing can be tuned without touching screen code. Asset URLs hot-link the
- * live marketing site for now — bundle/CDN-host copies before production so
- * app releases don't depend on site changes (verified live 2026-06-14).
+ * Everything content-y lives here so copy, assets and trial framing can be
+ * tuned without touching screen code. Asset URLs hot-link the live marketing
+ * site for now — bundle/CDN-host copies before production so app releases
+ * don't depend on site changes (verified live 2026-06-14).
  */
 
 const SITE = 'https://clippargolf.com/landing_assets';
@@ -46,41 +46,35 @@ export const goalRecap: Record<GolferGoal, string> = {
   relive: 'Your best rounds, kept forever',
 };
 
-export interface Testimonial {
-  name: string;
-  handle: string;
-  stars: number;
-  quote: string;
-}
-
 /**
- * PLACEHOLDER reviews — believable Aussie amateurs, swap for real ones
- * before launch. (Marked clearly so they're never mistaken for verified.)
+ * DELETED 2026-08-05: `Testimonial`, `testimonials` and `proofStats`.
  *
- * No quote may describe a feature the shipping build doesn't have. Two of
- * these sold the shot tracer while config.tracer.enabled is false, which is
- * the same App Review 3.1.2 misrepresentation as listing it on the paywall —
- * they're reworded onto capabilities that actually ship (auto-trim, the
- * scorecard overlay, sharing). If the tracer flag is ever flipped on, tracer
- * quotes can come back; until then, keep them out.
+ * They held eight invented golfer reviews (fake names, @handles, star
+ * ratings) and invented volume stats — `rating: 4.8`, `ratingCount: '2,140+'`
+ * (attributed to the App Store), `golfers: '9,200+'`, `roundsCaptured:
+ * '38,000+'`. Nothing ever imported them: the 8-screen funnel they were
+ * written for (feat/onboarding-flow, proof-wall at screen 8) was superseded
+ * by the live 12-screen flow, whose content module says outright "No
+ * fabricated social proof — no user counts, no ratings, no testimonials until
+ * real ones exist" (constants/onboardingV2.ts). So none of this ever shipped.
+ *
+ * Deleted rather than left sitting here, because the old comment invited
+ * exactly the wrong move ("swap for real ones before launch") while
+ * ONBOARDING_SALES_FLOW_SPEC.md still describes a proof-wall screen to build
+ * — anyone working from that spec would have wired these straight in. Two
+ * reasons that must not happen:
+ *
+ *  1. The rating is attributed to the App Store. Clippar has not shipped, so
+ *     it cannot have 2,140+ ratings; presenting an invented App Store score
+ *     in-app is an App Review problem on its own.
+ *  2. The audience is Australian. Fabricated testimonials and unsubstantiated
+ *     volume claims are misleading conduct under ACL s18 / s29(1)(e).
+ *
+ * Real social proof is welcome here once it exists and is substantiable —
+ * quotes with consent, counts you can evidence. Recover the old shapes from
+ * git history if useful, but never the values. tests/socialProof.test.ts
+ * guards this.
  */
-export const testimonials: Testimonial[] = [
-  { name: 'Dave M.', handle: '@dave_plays_off_18', stars: 5, quote: "Sent my mates a reel of the only par I made all day. The group chat hasn't recovered." },
-  { name: 'Steph K.', handle: '@steph.swings', stars: 5, quote: 'Showed my dad the reel from Sunday and he didn’t believe it was the same course I always whinge about.' },
-  { name: 'Jase T.', handle: '@weekend_hacker_jase', stars: 4, quote: "Clip on the buggy mount, hit go, forget about it. Reel's ready by the time I'm at the 19th." },
-  { name: 'Priya R.', handle: '@priya.golfs', stars: 5, quote: 'Was sceptical about the AI trimming but it nails the swing every single time. Cut my chunked wedges out for me too.' },
-  { name: 'Macca B.', handle: '@macca_2under_dreaming', stars: 5, quote: 'Pennant comp, signature hole, 6 iron to a foot. Having that on a reel forever is worth more than the green fee.' },
-  { name: 'Tara N.', handle: '@tara.tee.time', stars: 4, quote: 'My handicap hasn’t budged but my Instagram has never looked better. Sunday foursome are all on it now.' },
-  { name: 'Robbo', handle: '@robbo_golf_gc', stars: 5, quote: 'Did a 36-hole day at Barnbougle and got two clean reels off one battery. The scorecard overlay sells it.' },
-  { name: 'Liam H.', handle: '@liamh.golf', stars: 5, quote: 'The clicker means I never touch the phone mid-round. Set and forget.' },
-];
-
-export const proofStats = {
-  rating: 4.8,
-  ratingCount: '2,140+',
-  golfers: '9,200+',
-  roundsCaptured: '38,000+',
-} as const;
 
 /**
  * Trial framing. Presentation only — the real intro offer is configured in
