@@ -243,6 +243,39 @@ test('a superseded trim is unlinked, and the original never is', () => {
   assert.match(storage, /shotDetector\.deleteFile\(superseded\)/);
 });
 
+test('the trim is COPIED, so a mounted editor keeps a valid path', () => {
+  // hooks/useEditorState.ts assigns result.trimmedUri to updatedClip.sourceUri
+  // and pushes it into React state BEFORE markClipTrimmed runs. Renaming that
+  // file away would leave the open editor pointing at nothing — preview and
+  // export fail until the screen is rebuilt from SQLite. The record path is
+  // the opposite case and must keep its move: nothing reads video.uri after
+  // it, and it is ~150MB.
+  assert.match(storage, /\{ keepSource: true \}/);
+  assert.match(media, /keepSource\?: boolean;/);
+  assert.match(media, /isPurgeableAppPath\(resolved\) && !opts\?\.keepSource/);
+  assert.ok(
+    !/keepSource/.test(useCamera),
+    'the record path must still MOVE — a copy there costs a beat between shots'
+  );
+
+  // The editor really does stage the cache path in React state before the
+  // write; if that ever stops being true this test should be revisited rather
+  // than silently passing.
+  const editor = read('hooks/useEditorState.ts');
+  assert.match(editor, /updatedClip\.sourceUri = result\.trimmedUri;/);
+});
+
+test('a row deleted DURING the copy does not strand the durable file', () => {
+  // The precheck cannot see a delete that lands while the copy is in flight.
+  // The UPDATE's own row count can.
+  assert.match(storage, /const written = await database\.runAsync\(/);
+  assert.match(storage, /if \(written\.changes === 0\)/);
+  assert.match(storage, /shotDetector\.deleteFile\(durableUri\)/);
+  // Never delete a path we did not create — an unpersisted uri is the
+  // caller's file, not ours.
+  assert.match(storage, /if \(durableUri !== trimmedFileUri\)/);
+});
+
 test('a clip deleted mid-detection is not left a stranded trim', () => {
   // "Delete last shot" during detection: moving the trim into clips/ for a row
   // that no longer exists would leave it there forever. Left in the cache, the

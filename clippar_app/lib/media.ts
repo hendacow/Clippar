@@ -201,7 +201,30 @@ export async function excludePrivateMediaFromBackup(): Promise<void> {
  * Use this if you need the strongest durability guarantee; resolveAssetUri
  * is enough for most cases.
  */
-export async function persistAsset(uri: string, filename: string): Promise<string> {
+export async function persistAsset(
+  uri: string,
+  filename: string,
+  opts?: {
+    /**
+     * Leave the source file where it is instead of renaming it away.
+     *
+     * Needed when a CALLER ALREADY HOLDS the source path and cannot be told
+     * about the new one. hooks/useEditorState.ts puts `result.trimmedUri`
+     * into React state (`updatedClip.sourceUri`) before markClipTrimmed is
+     * ever called, so moving that file would leave the mounted editor
+     * pointing at something that no longer exists — preview and export fail
+     * until the screen is rebuilt from SQLite. Copying keeps the in-memory
+     * path valid for the rest of the session; the row takes the durable copy,
+     * and the cache original is left to reclaimTemporaryExports, which now
+     * sees it as unreferenced and ages it out.
+     *
+     * The record path deliberately does NOT set this: nothing reads
+     * `video.uri` after the move there, and it is a ~150MB file where the
+     * O(1) rename is the difference between a beat and a stall between shots.
+     */
+    keepSource?: boolean;
+  }
+): Promise<string> {
   if (!FileSystemLegacy) return uri;
 
   const t0 = Date.now();
@@ -228,7 +251,7 @@ export async function persistAsset(uri: string, filename: string): Promise<strin
     // The list of "our own cache" shapes is lib/clipPaths' to keep — the
     // camera directory was missing from the hand-written version here, from
     // uriMigration's copy of it, and from the SQL that feeds uriMigration.
-    const inAppCache = isPurgeableAppPath(resolved);
+    const inAppCache = isPurgeableAppPath(resolved) && !opts?.keepSource;
     if (inAppCache) {
       try {
         await FileSystemLegacy.moveAsync({ from: resolved, to: dest });

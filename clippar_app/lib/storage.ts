@@ -668,15 +668,24 @@ export async function getUnprocessedClips(roundId: string) {
  * keep the full clip — are unaffected: isPurgeableAppPath is false for a
  * documentDirectory path, so persistTrimOutput hands the uri straight back and
  * no file is touched.
+ *
+ * COPY, NOT MOVE — unlike the record path. hooks/useEditorState.ts assigns
+ * `result.trimmedUri` to `updatedClip.sourceUri` and pushes it into React
+ * state BEFORE calling this, so renaming that file away would leave the
+ * mounted editor holding a path that no longer exists: preview and export
+ * break until the screen is rebuilt from SQLite. Keeping the source means the
+ * in-memory path stays valid for the rest of the session while the row gets
+ * the durable copy, and no caller has to learn the new path. The cache
+ * original is then unreferenced, so reclaimTemporaryExports ages it out on a
+ * later launch — which is exactly what that sweep is for.
  */
 async function persistTrimOutput(clipId: number, uri: string): Promise<string> {
   if (!isPurgeableAppPath(uri)) return uri;
   try {
-    // Same rename-not-copy path as the record and import sides: the cache and
-    // documentDirectory share the app container's volume.
     return await persistAsset(
       uri,
-      `trimmed_${clipId}_${Date.now()}.${videoExtension(uri)}`
+      `trimmed_${clipId}_${Date.now()}.${videoExtension(uri)}`,
+      { keepSource: true }
     );
   } catch {
     // persistAsset already swallows its own failures; this is for the import
@@ -721,7 +730,7 @@ export async function markClipTrimmed(
     autoTrimStartMs !== null && autoTrimEndMs !== null
       ? Math.max(0, (autoTrimEndMs - autoTrimStartMs) / 1000)
       : null;
-  await database.runAsync(
+  const written = await database.runAsync(
     `UPDATE local_clips SET
       file_uri = ?,
       trimmed_file_uri = ?,
@@ -742,6 +751,22 @@ export async function markClipTrimmed(
     durationSeconds,
     clipId
   );
+
+  // The precheck above is not enough on its own: the delete can also land
+  // WHILE the copy is in flight, and then this UPDATE matches no row. The
+  // durable copy would sit in documentDirectory/clips/ forever — outside the
+  // cache sweeper's reach, belonging to a clip that no longer exists. Ask the
+  // write itself, which is the only answer that accounts for the whole window.
+  if (written.changes === 0) {
+    if (durableUri !== trimmedFileUri) {
+      try {
+        const shotDetector =
+          require('../modules/shot-detector') as typeof import('../modules/shot-detector');
+        shotDetector.deleteFile(durableUri).catch(() => {});
+      } catch {}
+    }
+    return;
+  }
 
   // Unlink the trim this one supersedes. While trims lived in Library/Caches
   // this was free — reclaimTemporaryExports ages out any trim_ file no row
