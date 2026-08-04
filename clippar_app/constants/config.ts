@@ -210,7 +210,24 @@ export const config = {
     strategy: 'baseline' as 'baseline' | 'aboveShoulderGate' | 'velocityPeak' | 'audioFused',
     // Strategy tuning knobs forwarded to native as optionsJson. See
     // DetectionOptions in modules/shot-detector/index.ts for recognized keys.
-    options: {} as Record<string, unknown>,
+    options: {
+      // Putt trim floor, OFF. Henry's call 2026-08-05: a detected shot should
+      // be the length the golfer asked for, full stop.
+      //
+      // Native floors a putt's trim window to this many ms. That would be
+      // defensible if the classifier were reliable, but fallbackClassify
+      // labels ANY recording longer than 12 seconds a putt on duration alone
+      // (ShotDetectorModule.swift, `durationLong`) — so a driver filmed in a
+      // 20-second recording comes back `putt` at confidence 0.25 and gets the
+      // floor applied to it. The result was a 2.0s setting producing a 5.0s
+      // clip, which is what made trim settings look broken for weeks.
+      //
+      // 0 disables the floor entirely: the requested window is always
+      // honoured. Undetected shots are untouched either way — they keep the
+      // full recording, which is the intended behaviour and lives on a
+      // different branch (`!result.found`) that this does not affect.
+      puttPostRollMs: 0,
+    } as Record<string, unknown>,
   },
   tracer: {
     // Master kill switch. Every tracer code path (capture, detect, geometry,
