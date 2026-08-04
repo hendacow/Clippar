@@ -242,28 +242,47 @@
     // Course name
     if (data.courseName) $('course').textContent = data.courseName;
 
-    // Stat chips
+    // Stat chips.
+    //
+    // Built with textContent, never innerHTML. This page is PUBLIC and renders
+    // whatever the share endpoint hands back, so the only safe assumption is
+    // that every field is attacker-controlled. Concatenating into innerHTML was
+    // safe here only by accident: total_score / score_to_par are INTEGER columns
+    // (001:112-114) so PostgREST returns JSON numbers, and fmtDate() launders its
+    // input through Date + toLocaleDateString. Both defences live in a different
+    // repo layer than the sink. Widen a column to TEXT, or paste this chip
+    // pattern for a field that isn't numeric, and it becomes stored XSS on a page
+    // any golfer can send to anyone. The DOM API costs two lines and removes the
+    // dependency on that reasoning holding.
+    function chip(parent, label, value, className) {
+      var el = document.createElement('div');
+      el.className = className || 'chip';
+      if (label) {
+        var k = document.createElement('span');
+        k.className = 'k';
+        k.textContent = label;
+        el.appendChild(k);
+      }
+      var v = document.createElement('span');
+      v.className = 'v';
+      v.textContent = String(value);
+      el.appendChild(v);
+      parent.appendChild(el);
+    }
+
     var stats = $('stats');
-    stats.innerHTML = '';
+    stats.textContent = '';
     if (data.totalScore !== null && data.totalScore !== undefined) {
-      var c1 = document.createElement('div');
-      c1.className = 'chip';
-      c1.innerHTML = '<span class="k">Score</span><span class="v">' + data.totalScore + '</span>';
-      stats.appendChild(c1);
+      chip(stats, 'Score', data.totalScore);
     }
     var toPar = fmtToPar(data.scoreToPar);
     if (toPar !== null) {
-      var c2 = document.createElement('div');
-      c2.className = 'chip ' + (data.scoreToPar < 0 ? 'par-under' : data.scoreToPar > 0 ? 'par-over' : '');
-      c2.innerHTML = '<span class="k">To par</span><span class="v">' + toPar + '</span>';
-      stats.appendChild(c2);
+      chip(stats, 'To par', toPar,
+        'chip ' + (data.scoreToPar < 0 ? 'par-under' : data.scoreToPar > 0 ? 'par-over' : ''));
     }
     var when = fmtDate(data.playedAt);
     if (when) {
-      var c3 = document.createElement('div');
-      c3.className = 'chip';
-      c3.innerHTML = '<span class="v">' + when + '</span>';
-      stats.appendChild(c3);
+      chip(stats, null, when);
     }
     $('meta').classList.remove('hidden');
   }
