@@ -28,6 +28,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Bluetooth, Check, Share2, Smartphone, Sparkles } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { FlowButton, TapChip } from '../sales/primitives';
 import { FlowScreen, Rise, H1, Sub, SkipLink } from './FlowKit';
 import { MockReel } from './MockReel';
@@ -455,7 +456,15 @@ export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
   const shots = answers.memorableShot ? shotEcho[answers.memorableShot] : 'your best shots';
   const intent = answers.intent ? intentEcho[answers.intent] : 'reliving your best shots';
 
-  const lines = [`Tuning for ${course}`, `Prioritising ${shots}`, 'Tracer on…'];
+  // Third beat is tracer-derived: with config.tracer.enabled off (v1 prod) the
+  // funnel must not promise an arc the build never draws — see PRO_FEATURES in
+  // app/paywall.tsx. Swapped rather than removed so the loader keeps its
+  // three-beat rhythm (the haptics + 550/620ms timings below assume 3 lines).
+  const lines = [
+    `Tuning for ${course}`,
+    `Prioritising ${shots}`,
+    config.tracer.enabled ? 'Tracer on…' : 'Cutting to the swing…',
+  ];
 
   useEffect(() => {
     if (!reduceMotion) {
@@ -521,7 +530,9 @@ export function BuildRevealScreen({ answers, onNext }: FlowScreenProps) {
     <Animated.View entering={FadeIn.duration(reduceMotion ? 150 : 350)} style={{ flex: 1 }}>
       <FlowScreen
         title="Alright — this is your Clippar."
-        sub={`Reels from ${course}, tuned for ${intent}, tracer on, ready to share.`}
+        sub={`Reels from ${course}, tuned for ${intent},${
+          config.tracer.enabled ? ' tracer on,' : ''
+        } ready to share.`}
         center
         footer={<FlowButton label="Show me the good part" onPress={onNext} />}
       >

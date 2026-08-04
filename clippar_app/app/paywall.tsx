@@ -5,6 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Crown, Check } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { Button } from '@/components/ui/Button';
 import { iap, type ProOffering, type ProPlan } from '@/lib/iap';
 import { emitSubscriptionChanged } from '@/lib/subscriptionEvents';
@@ -29,11 +30,34 @@ import { getOnboardingProfile, intentEcho } from '@/lib/onboardingProfile';
  * — close, purchase, restore — continues forward to signup instead of
  * router.back(), so the funnel never dead-ends.
  */
+/**
+ * What Pro unlocks IN THIS BINARY — never what's on the roadmap.
+ *
+ * App Review 3.1.2 (and plain consumer law) treats a purchase screen listing
+ * a feature the build does not deliver as misrepresentation, so every line
+ * here must be true of the shipping app at the moment it renders:
+ *
+ *  • Unlimited reels / exports — real: config.subscription.enforceExportGate
+ *    is ON, so "Create Highlight Reel" routes free users to this paywall
+ *    (app/round/editor.tsx).
+ *  • Cloud backup — real: gated on isSubscribed in
+ *    app/profile/storage-settings.tsx.
+ *  • Shot tracer — DERIVED from config.tracer.enabled, never hardcoded. The
+ *    flag is OFF for v1 prod (it hasn't passed a real-round field test), so
+ *    the line is absent from the shipping build and comes back on its own the
+ *    day the flag flips. Do NOT re-add it as a string literal, and do not
+ *    sell it as "coming soon" — Apple does not allow charging for
+ *    unreleased functionality either.
+ *
+ * Dropped deliberately: "All detection & trim settings". Trim Settings is an
+ * ungated row in Profile (app/(tabs)/profile.tsx) — free users already have
+ * it, so billing it as a Pro benefit was the same misrepresentation.
+ */
 const PRO_FEATURES = [
   'Unlimited highlight reels',
   'Unlimited exports & shares',
-  'Shot tracer on every full swing',
-  'All detection & trim settings',
+  ...(config.tracer.enabled ? ['Shot tracer on every full swing'] : []),
+  'Cloud backup for every clip',
 ];
 
 // Trial length comes from the STORE (ProOffering.trialDays, derived from the

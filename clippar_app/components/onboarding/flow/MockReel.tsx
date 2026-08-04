@@ -10,10 +10,11 @@
  *     (p) => { p.loop = true; p.muted = true; p.play(); });
  *   return <VideoView player={player} style={...} contentFit="cover" />;
  *
- * Until then: three cross-fading "scenes" (tracer drive → putt drop → end
- * card) built from styled Views + the existing TracerArc. Honest framing —
- * this is presented as *a* reel, never "yours". Respects Reduce Motion by
- * holding on the end card.
+ * Until then: cross-fading "scenes" (tracer drive → putt drop → end card)
+ * built from styled Views + the existing TracerArc. Honest framing — this is
+ * presented as *a* reel, never "yours", and it only shows what the build can
+ * actually produce (see SCENES below). Respects Reduce Motion by holding on
+ * the end card.
  */
 import { useEffect, useState } from 'react';
 import { View, Text, Image, StyleSheet } from 'react-native';
@@ -32,9 +33,27 @@ import Animated, {
 } from 'react-native-reanimated';
 import { Play } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { TracerArc } from '../sales/TracerArc';
 
 const SCENE_MS = 2600;
+
+type Scene = 'drive' | 'putt' | 'end';
+
+/**
+ * Which scenes the hero reel is allowed to play.
+ *
+ * The drive scene IS the tracer — TracerArc draws the entire thing, there is
+ * no separate fairway/ball art underneath it — so with config.tracer.enabled
+ * off (v1 prod, pending a real-round field test) it is dropped rather than
+ * rendered as an empty frame. Showing a traced drive in the funnel is the
+ * same App Review 3.1.2 misrepresentation as listing the tracer on the
+ * purchase screen; see PRO_FEATURES in app/paywall.tsx, which derives from
+ * this same flag. Flip the flag and the drive scene returns on its own.
+ */
+const SCENES: Scene[] = config.tracer.enabled
+  ? ['drive', 'putt', 'end']
+  : ['putt', 'end'];
 
 export function MockReel({
   width,
@@ -49,17 +68,19 @@ export function MockReel({
   playing?: boolean;
 }) {
   const reduceMotion = useReducedMotion();
-  const [scene, setScene] = useState(0);
+  const [sceneIdx, setSceneIdx] = useState(0);
   const [replayKey, setReplayKey] = useState(0);
+  const scene = SCENES[sceneIdx];
 
   useEffect(() => {
     if (reduceMotion || !playing) {
-      setScene(2); // hold on the end card — no auto-cycling motion
+      // hold on the end card (always last) — no auto-cycling motion
+      setSceneIdx(SCENES.length - 1);
       return;
     }
     const t = setInterval(() => {
-      setScene((s) => {
-        const next = (s + 1) % 3;
+      setSceneIdx((s) => {
+        const next = (s + 1) % SCENES.length;
         if (next === 0) setReplayKey((k) => k + 1);
         return next;
       });
@@ -76,7 +97,7 @@ export function MockReel({
         style={StyleSheet.absoluteFill}
       />
 
-      {scene === 0 ? (
+      {scene === 'drive' ? (
         <Animated.View
           key={`drive-${replayKey}`}
           entering={FadeIn.duration(300)}
@@ -87,9 +108,9 @@ export function MockReel({
         </Animated.View>
       ) : null}
 
-      {scene === 1 ? (
+      {scene === 'putt' ? (
         <Animated.View
-          key="putt"
+          key={`putt-${replayKey}`}
           entering={FadeIn.duration(300)}
           exiting={FadeOut.duration(300)}
           style={StyleSheet.absoluteFill}
@@ -98,7 +119,7 @@ export function MockReel({
         </Animated.View>
       ) : null}
 
-      {scene === 2 ? (
+      {scene === 'end' ? (
         <Animated.View
           key="end"
           entering={FadeIn.duration(300)}
@@ -253,7 +274,9 @@ function EndCard({ courseName }: { courseName?: string | null }) {
         accessibilityLabel="Clippar Golf"
       />
       <Text style={styles.endSub}>{courseName ? courseName : 'Your round, cut to music'}</Text>
-      <Text style={styles.endMeta}>18 HOLES · 6 CLIPS · TRACER ON</Text>
+      <Text style={styles.endMeta}>
+        {config.tracer.enabled ? '18 HOLES · 6 CLIPS · TRACER ON' : '18 HOLES · 6 CLIPS · AUTO-CUT'}
+      </Text>
     </View>
   );
 }
