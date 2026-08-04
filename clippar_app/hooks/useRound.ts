@@ -4,7 +4,8 @@ import * as Haptics from 'expo-haptics';
 import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from '@/types/round';
 import { PENALTY_STROKES } from '@/types/round';
 import type { ShotTypeClassification } from 'shot-detector';
-import { createRound, updateRound, upsertScore } from '@/lib/api';
+import { createRound, updateRound, upsertScore, deleteRound } from '@/lib/api';
+import { runDiscardRound, type DiscardOutcome } from '@/lib/roundDiscardLogic';
 import { deleteFile } from 'shot-detector';
 import {
   lastHoleOf,
@@ -675,14 +676,50 @@ export function useRound() {
     }
   }, []);
 
-  const discardRound = useCallback(async (roundId: string) => {
-    try {
-      purgeDeletedClips();
-      await deleteLocalRound(roundId);
-      setState(null);
-    } catch (error) {
-      console.error('[useRound] Failed to discard round:', error);
+  /**
+   * Discard a round: remove it everywhere, or report that it could not be.
+   *
+   * This used to be `deleteLocalRound(roundId)` alone, which deleted the local
+   * SQLite rows but never the Supabase `rounds` row Home actually lists from —
+   * so a "discarded" round reappeared after a relaunch, with 0 clips, its
+   * footage destroyed. The `catch` only logged, so the user was told it worked.
+   *
+   * It now goes through the same remote-first path as the round-detail screen's
+   * "Delete round" (see lib/roundDiscardLogic for the full ordering rationale)
+   * and RETURNS the outcome. Callers must handle it: 'failed' means nothing was
+   * deleted and the UI must not dismiss.
+   */
+  const discardRound = useCallback(async (roundId: string): Promise<DiscardOutcome> => {
+    const outcome = await runDiscardRound({
+      deleteRemote: async () => {
+        try {
+          await deleteRound(roundId);
+        } catch (err) {
+          // Detail here; the caller turns the outcome into a message.
+          console.error('[useRound] discardRound: remote delete failed for', roundId, err);
+          throw err;
+        }
+      },
+      deleteLocal: async () => {
+        try {
+          await deleteLocalRound(roundId);
+        } catch (err) {
+          console.error('[useRound] discardRound: local cleanup failed for', roundId, err);
+          throw err;
+        }
+      },
+      purgeUndoStack: purgeDeletedClips,
+      clearState: () => setState(null),
+    });
+
+    if (outcome === 'failed') {
+      // Covers the timeout case, which throws nothing to log above.
+      console.error(
+        '[useRound] discardRound: round NOT discarded (remote delete failed or timed out):',
+        roundId
+      );
     }
+    return outcome;
   }, [purgeDeletedClips]);
 
   const endRoundEarly = useCallback(async () => {

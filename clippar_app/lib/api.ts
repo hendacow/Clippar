@@ -5,6 +5,11 @@ import {
   type CoursePresetInput,
   defaultPresetName,
 } from '@/types/preset';
+import {
+  CLIPS_BUCKET,
+  reelStoragePath,
+  roundClipsFolder,
+} from '@/lib/storagePaths';
 
 // Resolve the signed-in user from the locally-stored session.
 //
@@ -147,39 +152,80 @@ export async function updateRound(id: string, updates: Partial<Round>) {
   return data;
 }
 
+/**
+ * Remove every object directly inside `folder` of `bucket`.
+ *
+ * Paginated, and always from offset 0: Storage's list() returns 100 objects by
+ * default and silently truncates, and a 36-hole round can hold more clips than
+ * that. Re-listing from the start each pass (rather than advancing an offset)
+ * is deliberate — the previous page has just been deleted, so an advancing
+ * offset would skip past the objects that shifted down into it. The page bound
+ * is what stops the loop if a remove is refused and the same page keeps
+ * coming back.
+ *
+ * Best-effort: a storage failure must never abort the delete the user asked
+ * for, so this logs and returns rather than throwing.
+ */
+async function removeStorageFolder(bucket: string, folder: string): Promise<void> {
+  const PAGE = 100;
+  const MAX_PAGES = 100; // 10k objects — far past any real round
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const { data: files } = await supabase.storage
+        .from(bucket)
+        .list(folder, { limit: PAGE });
+      if (!files || files.length === 0) return;
+      await supabase.storage
+        .from(bucket)
+        .remove(files.map((f) => `${folder}/${f.name}`));
+      if (files.length < PAGE) return;
+    }
+    console.log(`[API] ${bucket}/${folder}: stopped paging, objects may remain`);
+  } catch (err) {
+    console.log(`[API] failed to clear ${bucket}/${folder} from storage`, err);
+  }
+}
+
 export async function deleteRound(id: string) {
-  // 1. Delete clips from storage (list then remove)
+  // 1. Storage first — objects do NOT cascade with the rounds row, and once
+  //    that row is gone the storage policies (which authorise by round
+  //    ownership) can no longer match the keys, leaving anything missed here
+  //    both unreachable and undeletable.
+  //
+  //    One bucket, two DIFFERENT key shapes:
+  //      • per-hole clips at `clips/<roundId>/<file>`      — a folder, list it
+  //      • the composed reel at `clips/reels/<roundId>.mp4` — one exact key
+  //
+  //    This is where it went wrong before: the reel half listed the folder
+  //    `<roundId>` in a bucket literally named `reels`. Neither thing exists.
+  //    The reel is a SIBLING of the clips folder, not a child of it, and no
+  //    migration creates a `reels` bucket — so every round delete since reels
+  //    shipped left the reel in storage while reporting success. Both keys now
+  //    come from lib/storagePaths, the same helper lib/r2.ts uploads with, so
+  //    they cannot drift apart again.
+  //
+  //    The reel is removed by exact key rather than by listing `reels/`:
+  //    that prefix holds EVERY user's reels, and listing it here would be one
+  //    refactor away from deleting them.
+  await removeStorageFolder(CLIPS_BUCKET, roundClipsFolder(id));
   try {
-    const { data: clipFiles } = await supabase.storage
-      .from('clips')
-      .list(id);
-    if (clipFiles && clipFiles.length > 0) {
-      const clipPaths = clipFiles.map((f) => `${id}/${f.name}`);
-      await supabase.storage.from('clips').remove(clipPaths);
-    }
+    // Note: this needs a storage DELETE policy that understands the
+    // `reels/<roundId>.mp4` shape. The policy in force today (migration 011)
+    // only matches `<roundId>/<file>`, so until migration 019 lands this
+    // .remove() is a permitted no-op rather than a deletion — see 019 §4b.
+    // Account deletion is unaffected: that runs as the service role and
+    // bypasses storage RLS entirely.
+    await supabase.storage.from(CLIPS_BUCKET).remove([reelStoragePath(id)]);
   } catch (err) {
-    console.log('[API] deleteRound: failed to delete clips from storage', err);
+    console.log('[API] deleteRound: failed to delete reel from storage', err);
   }
 
-  // 2. Delete reel from storage
-  try {
-    const { data: reelFiles } = await supabase.storage
-      .from('reels')
-      .list(id);
-    if (reelFiles && reelFiles.length > 0) {
-      const reelPaths = reelFiles.map((f) => `${id}/${f.name}`);
-      await supabase.storage.from('reels').remove(reelPaths);
-    }
-  } catch (err) {
-    console.log('[API] deleteRound: failed to delete reels from storage', err);
-  }
-
-  // 3. Delete related database rows (scores, shots, processing_jobs)
+  // 2. Delete related database rows (scores, shots, processing_jobs)
   await supabase.from('scores').delete().eq('round_id', id);
   await supabase.from('shots').delete().eq('round_id', id);
   await supabase.from('processing_jobs').delete().eq('round_id', id);
 
-  // 4. Delete the round itself
+  // 3. Delete the round itself
   const { error } = await supabase.from('rounds').delete().eq('id', id);
   if (error) throw error;
 }

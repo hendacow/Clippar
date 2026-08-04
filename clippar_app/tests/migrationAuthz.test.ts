@@ -284,8 +284,20 @@ test('attack: unbounded object volume in the clips bucket is capped', () => {
   // Per-object ceiling: the last word on storage.buckets must not restore a
   // 500 MB limit. A high ceiling only helps whoever wants to fill the bucket
   // in as few requests as possible.
-  const sized = state.bucketStatements.filter((s) => /file_size_limit/i.test(s));
-  assert.ok(sized.length > 0);
+  //
+  // Only statements that WRITE the column count. Filtering on the column name
+  // alone swept in migration 019's deploy-time `SELECT id, public,
+  // file_size_limit FROM storage.buckets` diagnostic — a read, with no literal
+  // in it — which became "the last word" and silently disarmed the assertion
+  // below by leaving it nothing to measure. A guard that fails loudly when a
+  // read is added is annoying; one that passes vacuously is dangerous, and this
+  // was one regex away from the second.
+  const sized = state.bucketStatements.filter(
+    (s) =>
+      /file_size_limit/i.test(s) &&
+      (/INSERT\s+INTO\s+storage\.buckets/i.test(s) || /UPDATE\s+storage\.buckets/i.test(s)),
+  );
+  assert.ok(sized.length > 0, 'no migration writes storage.buckets.file_size_limit');
   const last = sized[sized.length - 1];
   const limits = (last.match(/\b\d{7,}\b/g) ?? []).map(Number);
   assert.ok(limits.length > 0, 'expected a byte limit literal');

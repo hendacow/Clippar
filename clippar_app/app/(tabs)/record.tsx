@@ -595,6 +595,54 @@ export default function RecordScreen() {
     });
   }, [roundState]);
 
+  // ---- Discard (shared by the end-of-round button and the orphan card) ----
+  //
+  // Discarding destroys footage that can never be re-recorded, so the UI may
+  // only claim it happened when it did. `discardRound` deletes the REMOTE round
+  // first — that's the copy Home lists from, and the copy the old local-only
+  // delete missed — then the local one, and reports what it managed to do.
+  // Here that outcome becomes the user-facing message. The boolean is "the
+  // round is gone from the account, you may dismiss": on a failure nothing was
+  // deleted anywhere, so the caller must leave its UI up for a retry.
+  // The ref is the guard (it flips synchronously, so a gloved double-tap can't
+  // slip through before a re-render); the state is what the buttons read, so
+  // the other actions on screen — End Round, Resume — can't run against a round
+  // that is halfway out the door.
+  const discardingRef = useRef(false);
+  const [discarding, setDiscarding] = useState(false);
+  const handleDiscardRound = useCallback(
+    async (roundId: string): Promise<boolean> => {
+      // The cloud delete is bounded at 8s. Without this a second tap inside
+      // that window fires a duplicate delete for the same round.
+      if (discardingRef.current) return false;
+      discardingRef.current = true;
+      setDiscarding(true);
+      try {
+        const outcome = await round.discardRound(roundId);
+        if (outcome === 'failed') {
+          Alert.alert(
+            "Couldn't discard the round",
+            'Your round is still here — nothing was deleted. Check your connection and try again.'
+          );
+          return false;
+        }
+        if (outcome === 'partial') {
+          // Remote row gone, so it can't come back on Home — but leftovers on
+          // this phone may still surface it as an unfinished round to resume.
+          Alert.alert(
+            'Round discarded',
+            "It's gone from your account, but some of its files couldn't be removed from this phone."
+          );
+        }
+        return true;
+      } finally {
+        discardingRef.current = false;
+        setDiscarding(false);
+      }
+    },
+    [round.discardRound]
+  );
+
   // Load the "don't show clicker tutorial again" flag once on mount.
   useEffect(() => {
     getSetting('clicker_tutorial_dismissed')
@@ -1026,14 +1074,23 @@ export default function RecordScreen() {
                     round.recoverRound(orphanedRound.id);
                     setOrphanedRound(null);
                   }}
+                  // A discard is in flight for this same round — resuming it
+                  // would put the user back on the camera recording into a
+                  // round whose remote row is being deleted underneath them.
+                  disabled={discarding}
                   style={{ flex: 1 }}
                 />
                 <Button
                   title="Discard"
-                  onPress={() => {
-                    round.discardRound(orphanedRound.id);
-                    setOrphanedRound(null);
+                  onPress={async () => {
+                    // Only clear the card once the round is really gone —
+                    // hiding it on a failed discard would leave an unfinished
+                    // round on the phone with no way back to it.
+                    if (await handleDiscardRound(orphanedRound.id)) {
+                      setOrphanedRound(null);
+                    }
                   }}
+                  loading={discarding}
                   variant="ghost"
                   style={{ flex: 1 }}
                 />
@@ -1494,6 +1551,9 @@ export default function RecordScreen() {
               setMode(null);
               router.replace(`/round/editor?roundId=${roundId}`);
             }}
+            // Locked out while a discard is in flight — this same round is
+            // being deleted, and the editor would open onto a corpse.
+            disabled={discarding}
             style={{ marginTop: 32, width: '100%' }}
           />
           <Button
@@ -1504,14 +1564,19 @@ export default function RecordScreen() {
                 {
                   text: 'Discard',
                   style: 'destructive',
-                  onPress: () => {
-                    round.discardRound(roundState.roundId);
+                  onPress: async () => {
+                    // Tear the round summary down only on a real discard. A
+                    // failed one leaves the round fully intact, and sending the
+                    // user back to the chooser would hide a round that is still
+                    // there — the lie this screen was shipping before.
+                    if (!(await handleDiscardRound(roundState.roundId))) return;
                     setCourseName('');
                     setMode(null);
                   },
                 },
               ]);
             }}
+            loading={discarding}
             variant="ghost"
             style={{ marginTop: 12, width: '100%' }}
           />

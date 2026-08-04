@@ -12,6 +12,7 @@ import Animated, {
 import { useEffect } from 'react';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import { RecordingProvider, useRecordingContext } from '@/contexts/RecordingContext';
 
@@ -22,8 +23,13 @@ const PILL_HEIGHT = 68;
 // launch: its Stripe backend (create-payment-intent + stripe-webhook) isn't
 // deployed yet, so a live Shop tab would be a dead end in review. To bring it
 // back post-launch: deploy those functions, confirm the live Stripe key, then
-// flip this to true.
-const SHOP_ENABLED = false;
+// flip config.shop.inAppShopEnabled to true.
+//
+// The literal moved to constants/config.ts so the other entry points into the
+// Shop can test the SAME flag — this file cannot hide the route on their
+// behalf (see the note on `href: null` below). Kept as a local alias only
+// because it reads better at the four use sites.
+const SHOP_ENABLED = config.shop.inAppShopEnabled;
 
 function RecordCTAButton({
   focused,
@@ -240,8 +246,12 @@ export default function TabLayout() {
       >
         <Tabs.Screen name="index" options={{ title: 'Home' }} />
         <Tabs.Screen name="record" options={{ title: 'Record' }} />
-        {/* href: null removes Shop from the navigator when disabled, so it's
-            not reachable via deep link either (belt-and-braces for v1). */}
+        {/* href: null removes the Shop TAB BUTTON only. This used to claim it
+            removed the route "so it's not reachable via deep link either" —
+            it does not. The screen stays registered, and both
+            router.push('/(tabs)/shop') and a deep link still land on it. Every
+            route into the Shop must therefore gate itself on
+            config.shop.inAppShopEnabled; this line only hides the tab. */}
         <Tabs.Screen
           name="shop"
           options={{ title: 'Shop', href: SHOP_ENABLED ? undefined : null }}

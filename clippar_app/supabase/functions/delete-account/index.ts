@@ -6,6 +6,19 @@ import {
   revokeAppleToken,
 } from '../_shared/apple.ts';
 import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
+// Reaches OUT of supabase/functions/ on purpose: this is the same module the
+// app's uploader (lib/r2.ts) builds its keys from, and sharing it is the only
+// thing that keeps the deleter pointed at the object the uploader wrote. It is
+// a dependency-free leaf module precisely so Deno can load it. Metro blocks
+// `supabase/**` from the app bundle (metro.config.js blockList), so the shared
+// file cannot live under _shared/ — the app would never be able to import it.
+import {
+  AVATARS_BUCKET,
+  avatarFolder,
+  CLIPS_BUCKET,
+  reelStoragePath,
+  roundClipsFolder,
+} from '../../../lib/storagePaths.ts';
 
 /**
  * delete-account — App Review 5.1.1(v) in-app account deletion.
@@ -26,8 +39,10 @@ import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
  * no-op the second time around).
  *
  * Order (children before parents):
- *   1. Storage objects (clips/<roundId>/*, reels/<roundId>/*) — these do NOT
- *      cascade and would orphan billable storage.
+ *   1. Storage objects — per-hole clips (clips/<roundId>/*), the composed reel
+ *      (clips/reels/<roundId>.mp4) and the profile photo (avatars/<userId>/*).
+ *      None of these cascade: what is missed here stays billable, and the reel
+ *      and the avatar stay FETCHABLE by anyone holding their URL.
  *   2. shots, processing_jobs, scores (by round), then rounds — clears the
  *      round subtree explicitly.
  *   3. course_presets, daily_usage, hardware_orders, admin_users — other
@@ -68,7 +83,10 @@ export interface DeleteClient {
   };
   storage: {
     from: (bucket: string) => {
-      list: (path: string) => Promise<{ data: { name: string }[] | null }>;
+      list: (
+        path: string,
+        options?: { limit?: number; offset?: number }
+      ) => Promise<{ data: { name: string }[] | null }>;
       remove: (paths: string[]) => Promise<unknown>;
     };
   };
@@ -138,6 +156,57 @@ export async function revokeAppleForUser(
 }
 
 /**
+ * Remove every object directly inside `folder` of `bucket`.
+ *
+ * Paginated, and always re-listed from offset 0: Storage's list() returns 100
+ * objects per call and silently truncates past that, and a 36-hole round can
+ * hold more clips than that. Advancing an offset instead would skip the
+ * objects that shift down into the page just deleted; the page bound is what
+ * stops the loop if a remove is refused and the same page keeps coming back.
+ *
+ * Best-effort by contract. Every failure is logged and swallowed: cleanup can
+ * never be allowed to block the account deletion the user asked for, and a
+ * leftover object is a smaller problem than an account that will not die.
+ */
+async function removeStorageFolder(
+  client: DeleteClient,
+  bucket: string,
+  folder: string
+): Promise<void> {
+  const PAGE = 100;
+  const MAX_PAGES = 100; // 10k objects — far past anything a real round holds
+  try {
+    for (let page = 0; page < MAX_PAGES; page++) {
+      const { data: files } = await client.storage
+        .from(bucket)
+        .list(folder, { limit: PAGE });
+      if (!files || files.length === 0) return;
+      await client.storage
+        .from(bucket)
+        .remove(files.map((f) => `${folder}/${f.name}`));
+      if (files.length < PAGE) return;
+    }
+    console.error(`storage cleanup ${bucket}/${folder}: stopped paging, objects may remain`);
+  } catch (err) {
+    console.error(`storage cleanup ${bucket}/${folder} failed`, err);
+  }
+}
+
+/** Remove exact object keys. Same best-effort contract as removeStorageFolder. */
+async function removeStorageObjects(
+  client: DeleteClient,
+  bucket: string,
+  keys: string[]
+): Promise<void> {
+  if (keys.length === 0) return;
+  try {
+    await client.storage.from(bucket).remove(keys);
+  } catch (err) {
+    console.error(`storage cleanup ${bucket} [${keys.join(', ')}] failed`, err);
+  }
+}
+
+/**
  * Erase every trace of `userId` and delete the auth user. Pure with respect to
  * its `client` arg (no module globals beyond the RevenueCat/Apple env reads),
  * so it's unit-testable. Returns nothing on success; throws only on a hard
@@ -147,27 +216,48 @@ export async function purgeAndDeleteUser(
   client: DeleteClient,
   userId: string
 ): Promise<void> {
-  // 1. Storage cleanup, keyed by the user's round ids. Storage objects do not
-  //    cascade with the auth/profile delete, so an orphan here is billable.
+  // 1. Storage cleanup. Storage objects do not cascade with the auth/profile
+  //    delete, so anything missed here survives the account — billable at best,
+  //    and still publicly fetchable at worst.
+  //
+  //    WHY THE OLD LOOP MISSED THE REEL, so nobody rebuilds it: it listed the
+  //    FOLDER named `<roundId>` in each of two buckets, `clips` and `reels`.
+  //    Neither ever contained the reel.
+  //      • `clips/<roundId>/` holds the per-hole clips. The composed reel is
+  //        uploaded to `clips/reels/<roundId>.mp4` (lib/r2.ts) — a SIBLING of
+  //        that folder, so no listing of `<roundId>` could ever match it. The
+  //        assumption baked in was "everything for a round lives in the round's
+  //        folder", and that has never been true of the reel.
+  //      • There is no bucket named `reels`. No migration creates one and no
+  //        upload path writes to one, so that half of the loop 404'd against
+  //        nothing every single run — which is worse than useless, because a
+  //        log full of expected errors hides the unexpected one.
+  //    Net effect: a deleted account kept its highlight reels, which the
+  //    privacy policy (§9) says are deleted. Hence the derived keys below.
+  //
+  //    Everything removed here is derived from a user id or a round id THIS
+  //    user owns. Nothing is read out of a client-writable column —
+  //    rounds.reel_url in particular is user-writable, so feeding it to a
+  //    service-role .remove() would let anyone aim this at a stranger's reel by
+  //    editing their own row before deleting their account.
   const { data: rounds } = await client
     .from('rounds')
     .select('id')
     .eq('user_id', userId);
   for (const round of rounds ?? []) {
-    for (const bucket of ['clips', 'reels']) {
-      try {
-        const { data: files } = await client.storage.from(bucket).list(round.id);
-        if (files && files.length > 0) {
-          await client.storage
-            .from(bucket)
-            .remove(files.map((f) => `${round.id}/${f.name}`));
-        }
-      } catch (err) {
-        // Never let storage cleanup block the deletion the user asked for.
-        console.error(`storage cleanup ${bucket}/${round.id} failed`, err);
-      }
-    }
+    // Per-hole clips: a folder of unknown contents, so list it.
+    await removeStorageFolder(client, CLIPS_BUCKET, roundClipsFolder(round.id));
+    // The reel: one exact key. Deliberately NOT a list of the `reels/` prefix —
+    // that prefix holds every user's reels and must never be enumerated here.
+    await removeStorageObjects(client, CLIPS_BUCKET, [reelStoragePath(round.id)]);
   }
+
+  // Profile photo. `avatars` is a PUBLIC bucket keyed `<userId>/avatar.<ext>`
+  // (app/profile/edit.tsx), so until now a deleted user's face stayed live on a
+  // URL derivable from nothing but their user id. The extension follows
+  // whatever the image picker returned, so list the user's own folder rather
+  // than guessing `avatar.jpg` — and list only that folder, never the bucket.
+  await removeStorageFolder(client, AVATARS_BUCKET, avatarFolder(userId));
 
   // 2. Round subtree. Delete the leaf rows that hang off profiles without a
   //    cascade first, then the rounds (cascades scores + anything left).

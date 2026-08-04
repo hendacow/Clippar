@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
-import { View, Text, FlatList, ActivityIndicator, Linking } from 'react-native';
+import { View, Text, FlatList, ActivityIndicator, Linking, Alert } from 'react-native';
 import { Stack, router } from 'expo-router';
 import { Package, Truck, CheckCircle, Clock } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { getHardwareOrders } from '@/lib/api';
@@ -21,7 +22,14 @@ export default function OrdersScreen() {
   useEffect(() => {
     getHardwareOrders()
       .then((data) => setOrders(data ?? []))
-      .catch(() => setOrders([]))
+      // A failed fetch renders as "No orders yet", which is a lie to anyone who
+      // has ordered. Keep the empty list — an error screen for a v1 where the
+      // Shop is off would be noise — but log the cause rather than dropping it,
+      // so a support report has something behind it.
+      .catch((err) => {
+        console.error('[Orders] failed to load hardware orders:', err);
+        setOrders([]);
+      })
       .finally(() => setLoading(false));
   }, []);
 
@@ -44,10 +52,19 @@ export default function OrdersScreen() {
           <View style={{ flex: 1, justifyContent: 'center', alignItems: 'center', gap: 16 }}>
             <Package size={48} color={theme.colors.textTertiary} />
             <Text style={{ color: theme.colors.textSecondary, fontSize: 16 }}>No orders yet</Text>
-            <Button
-              title="Shop Clippar Kit"
-              onPress={() => router.push('/(tabs)/shop')}
-            />
+            {/* The ONLY remaining route into the Shop, so it carries the same
+                switch the tab bar does. app/(tabs)/_layout.tsx cannot hide it
+                for us: `href: null` drops the tab button but leaves the route
+                registered, so this push reached a live storefront whose Buy Now
+                fails while create-payment-intent is undeployed. Gated on the
+                shared flag, not a copy of the literal, so turning the Shop back
+                on stays one edit in constants/config.ts. */}
+            {config.shop.inAppShopEnabled && (
+              <Button
+                title="Shop Clippar Kit"
+                onPress={() => router.push('/(tabs)/shop')}
+              />
+            )}
           </View>
         ) : (
           <FlatList
@@ -99,7 +116,20 @@ export default function OrdersScreen() {
                       title={`Track: ${item.tracking_number}`}
                       variant="ghost"
                       onPress={() => {
-                        Linking.openURL(`https://auspost.com.au/mypost/track/#/details/${item.tracking_number}`);
+                        // openURL REJECTS when nothing can handle the link.
+                        // Unhandled, the tap just does nothing and the row
+                        // reads as broken — same guard as the mailto in
+                        // app/(tabs)/profile.tsx. The tracking number is the
+                        // useful part, so hand it over in the fallback.
+                        Linking.openURL(
+                          `https://auspost.com.au/mypost/track/#/details/${item.tracking_number}`
+                        ).catch((err) => {
+                          console.error('[Orders] failed to open tracking link:', err);
+                          Alert.alert(
+                            'Could not open tracking',
+                            `Track this parcel at auspost.com.au with tracking number ${item.tracking_number}.`
+                          );
+                        });
                       }}
                     />
                   )}
