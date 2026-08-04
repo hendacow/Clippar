@@ -227,6 +227,24 @@ export async function persistAsset(
 ): Promise<string> {
   if (!FileSystemLegacy) return uri;
 
+  // `filename` is concatenated onto documentDirectory/clips/ below and handed
+  // to moveAsync/copyAsync, so it is the one place in this module where a
+  // string becomes a filesystem path. Every caller today builds it from a
+  // server-generated round uuid or a numeric row id, so nothing reaches this
+  // with a separator — but the guard belongs at the sink rather than in each
+  // of the callers, which this change took from one to three. A name carrying
+  // `/` or `..` could otherwise write over the SQLite database or settings
+  // elsewhere in the sandbox. Same reasoning as the identifier check in
+  // evictableUriSql (lib/clipPaths).
+  //
+  // Thrown ahead of the try below so it surfaces as a programming error
+  // instead of being swallowed into "returned the source uri" — the callers
+  // all handle a rejection by keeping the cache path, which the startup
+  // migration then rescues.
+  if (!filename || /[/\\]/.test(filename) || filename === '.' || filename === '..') {
+    throw new Error(`persistAsset: unsafe filename ${JSON.stringify(filename)}`);
+  }
+
   const t0 = Date.now();
   let method = 'none';
   try {

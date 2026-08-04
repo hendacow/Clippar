@@ -265,6 +265,19 @@ test('the trim is COPIED, so a mounted editor keeps a valid path', () => {
   assert.match(editor, /updatedClip\.sourceUri = result\.trimmedUri;/);
 });
 
+test('persistAsset refuses a filename that could escape clips/', () => {
+  // The filename is concatenated onto documentDirectory/clips/ and handed to
+  // moveAsync/copyAsync. No caller can reach it with a separator today (uuids
+  // and row ids), but this PR took persistAsset from one caller to three, so
+  // the guard belongs at the sink. Mirrors evictableUriSql's identifier check.
+  assert.match(media, /persistAsset: unsafe filename/);
+  assert.match(media, /\/\[\/\\\\\]\/\.test\(filename\)/);
+  // Ahead of the try, or it would be swallowed into "returned the source uri".
+  const guard = media.indexOf('unsafe filename');
+  const tryBlock = media.indexOf('const t0 = Date.now();');
+  assert.ok(guard < tryBlock, 'the filename guard must precede the try block');
+});
+
 test('a row deleted DURING the copy does not strand the durable file', () => {
   // The precheck cannot see a delete that lands while the copy is in flight.
   // The UPDATE's own row count can.
