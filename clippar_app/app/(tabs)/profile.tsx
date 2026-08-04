@@ -15,7 +15,6 @@ import {
   Settings,
   Trash2,
   MessageSquare,
-  Star,
   HelpCircle,
   Edit2,
   Film,
@@ -25,8 +24,10 @@ import {
   ShieldCheck,
   Activity,
   HardDrive,
+  Ticket,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
+import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
@@ -44,7 +45,18 @@ import {
   clearAccountLinkedCaches,
   removeLocalMediaForCurrentUser,
 } from '@/lib/localWipe';
+import { clearDisposableCaches, formatBytes } from '@/lib/cacheReclaim';
 import { supabase } from '@/lib/supabase';
+
+const SUPPORT_EMAIL = 'support@clippar.com';
+
+/**
+ * Shown in the footer and stamped into the feedback subject line, so a support
+ * email arrives already saying which build it came from — the first thing you
+ * otherwise have to ask for. Read from app.config.js rather than typed out
+ * twice, so bumping the release doesn't leave one of the two behind.
+ */
+const APP_VERSION = Constants.expoConfig?.version ?? '1.0.0';
 
 interface ProfileRow {
   display_name: string | null;
@@ -431,8 +443,76 @@ export default function ProfileScreen() {
     );
   };
 
-  // Debug: smoke-test reachability of every round in Supabase so the user
-  // can confirm their videos would survive a reinstall / cross-device sign-in.
+  /**
+   * Clear Cache. What stood here was a lone
+   * `Haptics.notificationAsync(Success)` under copy promising "Cached
+   * thumbnails and temp files will be removed" — it buzzed success and freed
+   * nothing, which is both dishonest to a golfer hunting for storage and
+   * exactly the kind of feature App Review 2.1 rejects for not doing what it
+   * says. lib/cacheReclaim.ts now does the work, and carries the inventory of
+   * what must never be swept (source clips, composed reels, the database).
+   *
+   * We report the byte count because that is what makes the claim checkable —
+   * by the user, and by a reviewer. The three outcomes are kept distinct on
+   * purpose: freed something, had nothing to free, or failed. Only the first
+   * gets the success buzz.
+   */
+  const [clearingCache, setClearingCache] = useState(false);
+  const runClearCache = useCallback(async () => {
+    setClearingCache(true);
+    try {
+      const { bytesFreed, hadErrors } = await clearDisposableCaches();
+      if (bytesFreed > 0) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        Alert.alert('Cache Cleared', `Freed ${formatBytes(bytesFreed)}.`);
+      } else if (hadErrors) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+        Alert.alert(
+          'Couldn’t clear the cache',
+          'Something went wrong, so nothing was freed. Your rounds and videos are untouched — please try again.'
+        );
+      } else {
+        // Say so plainly. Buzzing success over a no-op is the bug being fixed.
+        Alert.alert(
+          'Nothing to clear',
+          'There were no cached files to remove. Everything Clippar is storing right now is your rounds, clips and reels, and we will not delete those.'
+        );
+      }
+    } catch {
+      // clearDisposableCaches only rejects before it has deleted anything —
+      // it refuses to sweep without knowing which files are still in use — so
+      // "nothing was freed" is accurate here.
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
+      Alert.alert(
+        'Couldn’t clear the cache',
+        'Something went wrong, so nothing was freed. Your rounds and videos are untouched — please try again.'
+      );
+    } finally {
+      setClearingCache(false);
+    }
+  }, []);
+
+  const handleClearCache = useCallback(() => {
+    if (clearingCache) return;
+    Haptics.selectionAsync();
+    Alert.alert(
+      'Clear Cache',
+      'Removes cached thumbnails and old temporary files. Your rounds, clips and highlight reels stay exactly where they are.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Clear',
+          style: 'destructive',
+          onPress: () => {
+            void runClearCache();
+          },
+        },
+      ]
+    );
+  }, [clearingCache, runClearCache]);
+
+  // Dev-only smoke test — see the __DEV__ gate on its row below for why it is
+  // not shown to users. Reports raw round UUIDs and internal issue strings.
   const [verifying, setVerifying] = useState(false);
   const handleVerifyRounds = useCallback(async () => {
     if (verifying) return;
@@ -796,27 +876,22 @@ export default function ProfileScreen() {
               onPress={() => router.push('/profile/orders')}
             />
             <Divider />
+            {/* Ambassador / early-supporter lifetime codes. Shown to Pro users
+                too: redeeming is idempotent for the same account, and someone
+                who subscribed before their card arrived still needs somewhere
+                to enter it. */}
+            <SettingsRow
+              icon={<Ticket size={18} color={theme.colors.accentGold} />}
+              title="Redeem a code"
+              subtitle="Turn a Clippar code into Pro for life"
+              onPress={() => router.push('/profile/redeem')}
+            />
+            <Divider />
             <SettingsRow
               icon={<Trash2 size={18} color={theme.colors.textTertiary} />}
-              title="Clear Cache"
-              subtitle="Free up space from thumbnails"
-              onPress={() => {
-                Haptics.selectionAsync();
-                Alert.alert(
-                  'Clear Cache',
-                  'Cached thumbnails and temp files will be removed. Your rounds and reels stay safe.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Clear',
-                      style: 'destructive',
-                      onPress: () => {
-                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-                      },
-                    },
-                  ]
-                );
-              }}
+              title={clearingCache ? 'Clearing Cache…' : 'Clear Cache'}
+              subtitle="Remove thumbnails and old temporary files"
+              onPress={handleClearCache}
             />
           </Card>
 
@@ -840,46 +915,85 @@ export default function ProfileScreen() {
                 });
               }}
             />
-            <Divider />
-            <SettingsRow
-              icon={<Activity size={18} color={theme.colors.primary} />}
-              title="Diagnostics"
-              subtitle="Data integrity, upload queue, reachability"
-              onPress={() => {
-                Haptics.selectionAsync();
-                router.push('/profile/diagnostics');
-              }}
-            />
-            <Divider />
-            <SettingsRow
-              icon={<Star size={18} color={theme.colors.accentGold} />}
-              title="Rate Clippar"
-              subtitle="Coming soon"
-              onPress={() => {
-                Haptics.selectionAsync();
-                Alert.alert('Coming Soon', "We'll wire this up when we're live on the App Store.");
-              }}
-            />
+            {/* Internal support tool: dev builds only — App Review reads a
+                data-integrity/queue inspector as unfinished developer UI
+                (2.1 / 4.0), and it means nothing to a golfer. */}
+            {__DEV__ && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.primary} />}
+                  title="Diagnostics"
+                  subtitle="Data integrity, upload queue, reachability"
+                  onPress={() => {
+                    Haptics.selectionAsync();
+                    router.push('/profile/diagnostics');
+                  }}
+                />
+              </>
+            )}
+            {/* There is deliberately no "Rate Clippar" row. It shipped as a
+                placeholder — subtitle "Coming soon", alert "We'll wire this up
+                when we're live on the App Store" — which is a visible
+                non-functional feature (App Review 2.1: placeholder and other
+                temporary content must be scrubbed before submission), and an
+                odd thing to show the reviewer deciding whether to put us there.
+                Deleted rather than __DEV__-gated: unlike Diagnostics above, it
+                has no internal use to preserve.
+
+                To build the real thing later, do NOT reinstate this row —
+                add expo-store-review and call StoreReview.requestReview()
+                behind `await StoreReview.isAvailableAsync()`. iOS rate-limits
+                the system prompt, so it must never be the only affordance nor
+                be presented as a guaranteed action. */}
             <Divider />
             <SettingsRow
               icon={<MessageSquare size={18} color={theme.colors.textTertiary} />}
               title="Feedback"
-              subtitle="Email us at support@clippar.com"
+              subtitle={`Email us at ${SUPPORT_EMAIL}`}
               onPress={() => {
                 Haptics.selectionAsync();
-                Alert.alert(
-                  'Send Feedback',
-                  'Email support@clippar.com with your thoughts. We read every one.'
-                );
+                // openURL REJECTS when the device has no mail client — the norm
+                // on a simulator and on any phone with no Mail account set up.
+                // Fall back to telling them the address rather than letting the
+                // rejection go unhandled and the tap do nothing.
+                Linking.openURL(
+                  `mailto:${SUPPORT_EMAIL}?subject=${encodeURIComponent(
+                    `Clippar feedback (v${APP_VERSION})`
+                  )}`
+                ).catch(() => {
+                  Alert.alert(
+                    'Send Feedback',
+                    `No mail app is set up on this device. Email ${SUPPORT_EMAIL} with your thoughts — we read every one.`
+                  );
+                });
               }}
             />
-            <Divider />
-            <SettingsRow
-              icon={<ShieldCheck size={18} color={theme.colors.primary} />}
-              title={verifying ? 'Verifying Rounds…' : 'Verify My Rounds'}
-              subtitle="Check every round is playable after reinstall"
-              onPress={handleVerifyRounds}
-            />
+            {/* Internal smoke test: dev builds only, for the same reasons as
+                Diagnostics above, plus one specific to this check. It asks
+                Supabase whether every round's clips and reel can be signed —
+                i.e. it measures the CLOUD. Cloud backup is off by default and
+                Pro-gated, so on a normal free account the raw clips were never
+                uploaded and this reports every round as broken. That is a false
+                alarm dressed as a data-loss warning, on top of showing raw
+                round UUIDs, internal issue strings and the backend's name.
+                The genuine user question behind it — "will my videos survive a
+                reinstall?" — is already answered honestly, per setting, by the
+                "What happens if I uninstall Clippar?" card in
+                app/profile/storage-settings.tsx, one tap away on this screen.
+                The Divider lives inside the gate so the Support card does not
+                end on a stray rule in production. */}
+            {__DEV__ && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<ShieldCheck size={18} color={theme.colors.primary} />}
+                  title={verifying ? 'Verifying Rounds…' : 'Verify My Rounds (debug)'}
+                  subtitle="Check every round is playable after reinstall"
+                  onPress={handleVerifyRounds}
+                />
+              </>
+            )}
           </Card>
 
           {/* ---- LEGAL (App Review 5.1.1: privacy policy must be reachable
@@ -926,7 +1040,7 @@ export default function ProfileScreen() {
               marginTop: 16,
             }}
           >
-            Clippar v1.0.0
+            Clippar v{APP_VERSION}
           </Text>
         </View>
       </ScrollView>

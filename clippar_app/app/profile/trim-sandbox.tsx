@@ -37,13 +37,6 @@ export default function TrimSandboxScreen() {
   const [running, setRunning] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
-  const player = ExpoVideo && previewUri
-    ? ExpoVideo.useVideoPlayer(previewUri, (p) => {
-        p.loop = true;
-        p.play();
-      })
-    : null;
-
   const pickAndRun = useCallback(async () => {
     if (!ImagePicker) return;
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -150,28 +143,7 @@ export default function TrimSandboxScreen() {
         </Pressable>
 
         {/* Preview of the most recent trimmed clip */}
-        {previewUri && ExpoVideo && player && (
-          <View
-            style={{
-              backgroundColor: theme.colors.surfaceElevated,
-              borderRadius: theme.radius.lg,
-              borderWidth: 1,
-              borderColor: theme.colors.surfaceBorder,
-              padding: 8,
-              marginBottom: 16,
-              alignItems: 'center',
-            }}
-          >
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 11, marginBottom: 6 }}>
-              Most recent trim file (looping)
-            </Text>
-            <ExpoVideo.VideoView
-              player={player as any}
-              style={{ width: 220, aspectRatio: 9 / 16, borderRadius: theme.radius.md }}
-              contentFit="contain"
-            />
-          </View>
-        )}
+        {ExpoVideo && previewUri ? <TrimPreview Video={ExpoVideo} uri={previewUri} /> : null}
 
         {/* Action buttons */}
         {runs.length > 0 && (
@@ -275,6 +247,54 @@ export default function TrimSandboxScreen() {
         ))}
       </ScrollView>
     </>
+  );
+}
+
+/**
+ * The player lives down here, in its own component, because a hook may never be
+ * called behind a condition — React matches hooks to their state by call order,
+ * so the render where `previewUri` first turns from null into a URI would call
+ * one more hook than the render before it and take the screen down with
+ * "Rendered more hooks than during the previous render".
+ *
+ * The parent cannot simply call `useVideoPlayer` unconditionally either:
+ * `ExpoVideo` is a lazily-required optional module and is genuinely null off
+ * native, where there is no hook to call at all. A component that isn't
+ * rendered runs no hooks, so mounting this one only once the module and a URI
+ * both exist keeps the parent's hook order fixed for its whole lifetime, while
+ * in here `useVideoPlayer` runs unconditionally on every render.
+ *
+ * Swapping in a second trim reuses this instance rather than remounting it —
+ * `useVideoPlayer` keys its player on the source and replaces it when `uri`
+ * changes, so the hook count stays put here too.
+ */
+function TrimPreview({ Video, uri }: { Video: typeof import('expo-video'); uri: string }) {
+  const player = Video.useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    p.play();
+  });
+
+  return (
+    <View
+      style={{
+        backgroundColor: theme.colors.surfaceElevated,
+        borderRadius: theme.radius.lg,
+        borderWidth: 1,
+        borderColor: theme.colors.surfaceBorder,
+        padding: 8,
+        marginBottom: 16,
+        alignItems: 'center',
+      }}
+    >
+      <Text style={{ color: theme.colors.textSecondary, fontSize: 11, marginBottom: 6 }}>
+        Most recent trim file (looping)
+      </Text>
+      <Video.VideoView
+        player={player}
+        style={{ width: 220, aspectRatio: 9 / 16, borderRadius: theme.radius.md }}
+        contentFit="contain"
+      />
+    </View>
   );
 }
 

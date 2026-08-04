@@ -365,6 +365,31 @@ export default function PaywallScreen() {
           </Pressable>
         </View>
 
+        {/* Lifetime redemption codes (ambassadors / early supporters).
+            Deliberately the same visual weight as Restore, below the fold of
+            the CTA: App Review 3.1.1 expects StoreKit to be the prominent way
+            to buy, and a second big button here reads as a competing purchase
+            path.
+            Hidden in the pre-signup funnel (?from=onboarding): a code attaches
+            to an account and there isn't one yet, so the link could only lead
+            to "Sign in first". The Profile tab row picks that user up the
+            moment they have an account. */}
+        {!fromOnboarding ? (
+          <Pressable
+            onPress={() => {
+              Haptics.selectionAsync();
+              router.push('/profile/redeem');
+            }}
+            hitSlop={8}
+            style={{ alignSelf: 'center', marginTop: 14 }}
+          >
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>
+              Have a code?{' '}
+              <Text style={{ color: theme.colors.primary, fontWeight: '700' }}>Redeem it</Text>
+            </Text>
+          </Pressable>
+        ) : null}
+
         {/* Dev-only escape hatch: com.clippar.app.dev has no App Store
             products, so a real purchase can never succeed in dev builds.
             Never rendered outside the dev variant (fail-closed). */}

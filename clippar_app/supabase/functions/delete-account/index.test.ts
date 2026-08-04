@@ -18,6 +18,7 @@ import {
   revokeAppleForUser,
   type DeleteClient,
 } from './index.ts';
+import { reelStoragePath } from '../../../lib/storagePaths.ts';
 
 const USER = 'user-123';
 
@@ -41,9 +42,16 @@ function makeClient(opts: {
   files?: Record<string, { name: string }[]>;
   deleteUserError?: { message?: string; status?: number } | null;
   appleCreds?: { refresh_token: string; client_id: string }[];
+  /** Buckets whose list() throws, simulating "Bucket not found" / a storage outage. */
+  brokenBuckets?: string[];
 } = {}) {
   const deletes: { table: string; col: string; val: string | string[] }[] = [];
   const removed: string[] = [];
+  const listed: string[] = [];
+  // Mutable so a remove actually empties the folder — otherwise the paginating
+  // loop in removeStorageFolder would see the same page forever.
+  const files: Record<string, { name: string }[]> = {};
+  for (const [k, v] of Object.entries(opts.files ?? {})) files[k] = [...v];
   let deleteUserCalledWith: string | null = null;
 
   const client: DeleteClient = {
@@ -69,9 +77,25 @@ function makeClient(opts: {
     }),
     storage: {
       from: (bucket: string) => ({
-        list: async (path: string) => ({ data: opts.files?.[`${bucket}/${path}`] ?? [] }),
+        list: async (path: string, options?: { limit?: number; offset?: number }) => {
+          if (opts.brokenBuckets?.includes(bucket)) {
+            throw new Error(`Bucket not found: ${bucket}`);
+          }
+          listed.push(`${bucket}/${path}`);
+          const all = files[`${bucket}/${path}`] ?? [];
+          const offset = options?.offset ?? 0;
+          const limit = options?.limit ?? 100;
+          return { data: all.slice(offset, offset + limit) };
+        },
         remove: async (paths: string[]) => {
-          removed.push(...paths);
+          removed.push(...paths.map((p) => `${bucket}/${p}`));
+          for (const p of paths) {
+            const cut = p.lastIndexOf('/');
+            const folder = cut === -1 ? '' : p.slice(0, cut);
+            const name = p.slice(cut + 1);
+            const key = `${bucket}/${folder}`;
+            if (files[key]) files[key] = files[key].filter((f) => f.name !== name);
+          }
           return null;
         },
       }),
@@ -90,6 +114,7 @@ function makeClient(opts: {
     client,
     deletes,
     removed,
+    listed,
     get deleteUserCalledWith() {
       return deleteUserCalledWith;
     },
@@ -154,14 +179,91 @@ Deno.test('purgeAndDeleteUser: throws on a real auth-delete failure', async () =
   await assertRejects(() => purgeAndDeleteUser(h.client, USER), Error, 'Failed to delete account');
 });
 
-Deno.test('purgeAndDeleteUser: removes storage objects under each round', async () => {
+Deno.test('purgeAndDeleteUser: removes the per-hole clips of each round', async () => {
   const h = makeClient({
-    rounds: [{ id: 'r1' }],
-    files: { 'clips/r1': [{ name: 'a.mp4' }], 'reels/r1': [{ name: 'reel.mp4' }] },
+    rounds: [{ id: 'r1' }, { id: 'r2' }],
+    files: {
+      'clips/r1': [{ name: 'a.mp4' }, { name: 'b.mp4' }],
+      'clips/r2': [{ name: 'c.mp4' }],
+    },
   });
   await purgeAndDeleteUser(h.client, USER);
-  assert(h.removed.includes('r1/a.mp4'));
-  assert(h.removed.includes('r1/reel.mp4'));
+  assert(h.removed.includes('clips/r1/a.mp4'));
+  assert(h.removed.includes('clips/r1/b.mp4'));
+  assert(h.removed.includes('clips/r2/c.mp4'));
+});
+
+// THE BUG. The reel is uploaded to `clips/reels/<roundId>.mp4` (lib/r2.ts), a
+// SIBLING of the round's clips folder. The old cleanup listed the folder
+// `<roundId>` in buckets `clips` and `reels`, so it never matched the reel and
+// the deleted account kept it. Both halves are locked down here.
+Deno.test('purgeAndDeleteUser: removes the composed reel at its real key', async () => {
+  const h = makeClient({ rounds: [{ id: 'r1' }, { id: 'r2' }] });
+  await purgeAndDeleteUser(h.client, USER);
+  assertEquals(reelStoragePath('r1'), 'reels/r1.mp4'); // the key r2.ts uploads to
+  assert(h.removed.includes(`clips/${reelStoragePath('r1')}`), 'reel of r1 not removed');
+  assert(h.removed.includes(`clips/${reelStoragePath('r2')}`), 'reel of r2 not removed');
+});
+
+Deno.test('purgeAndDeleteUser: never touches a bucket named `reels` (there is none)', async () => {
+  const h = makeClient({ rounds: [{ id: 'r1' }] });
+  await purgeAndDeleteUser(h.client, USER);
+  assert(
+    !h.listed.some((l) => l.startsWith('reels/')),
+    `listed a non-existent reels bucket: ${h.listed.join(', ')}`
+  );
+  assert(!h.removed.some((r) => r.startsWith('reels/')));
+});
+
+Deno.test('purgeAndDeleteUser: removes the profile photo whatever its extension', async () => {
+  const h = makeClient({
+    rounds: [],
+    files: { [`avatars/${USER}`]: [{ name: 'avatar.heic' }] },
+  });
+  await purgeAndDeleteUser(h.client, USER);
+  assert(h.removed.includes(`avatars/${USER}/avatar.heic`), 'avatar not removed');
+});
+
+// Blast radius: everything listed or removed must be under a folder derived
+// from this user's id or one of their round ids. Never the bucket root, never
+// a shared prefix like `reels/`.
+Deno.test('purgeAndDeleteUser: never lists a bucket root or a shared prefix', async () => {
+  const h = makeClient({ rounds: [{ id: 'r1' }] });
+  await purgeAndDeleteUser(h.client, USER);
+  assertEquals(h.listed.sort(), ['avatars/user-123', 'clips/r1']);
+  for (const key of h.removed) {
+    assert(
+      key.startsWith('clips/r1/') ||
+        key === `clips/${reelStoragePath('r1')}` ||
+        key.startsWith(`avatars/${USER}/`),
+      `removed something outside the user's keyspace: ${key}`
+    );
+  }
+});
+
+// Storage list() truncates at 100 objects. A 36-hole round can exceed that, and
+// the remainder would survive the account — undeletable once the rounds row is
+// gone, because the storage policies authorise by round ownership.
+Deno.test('purgeAndDeleteUser: pages past the 100-object list() limit', async () => {
+  const many = Array.from({ length: 250 }, (_, i) => ({ name: `clip-${i}.mp4` }));
+  const h = makeClient({ rounds: [{ id: 'r1' }], files: { 'clips/r1': many } });
+  await purgeAndDeleteUser(h.client, USER);
+  for (const f of many) {
+    assert(h.removed.includes(`clips/r1/${f.name}`), `${f.name} left behind`);
+  }
+});
+
+// The failure posture that predates this fix and must survive it: cleanup is
+// best-effort, the deletion is not. A storage outage (or an `avatars` bucket
+// that was never created in this project) cannot strand an account.
+Deno.test('purgeAndDeleteUser: storage failures never block the account delete', async () => {
+  const h = makeClient({
+    rounds: [{ id: 'r1' }],
+    brokenBuckets: ['clips', 'avatars'],
+  });
+  await purgeAndDeleteUser(h.client, USER);
+  assertEquals(h.deleteUserCalledWith, USER);
+  assert(h.deletes.some((d) => d.table === 'profiles'));
 });
 
 // ── Sign-in-with-Apple revocation ───────────────────────────────────────────

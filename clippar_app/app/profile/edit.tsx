@@ -11,6 +11,7 @@ import {
   Platform,
 } from 'react-native';
 import { router, Stack } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
 import * as ImagePicker from 'expo-image-picker';
 import * as Haptics from 'expo-haptics';
@@ -30,6 +31,7 @@ interface ProfileData {
 
 export default function EditProfileScreen() {
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
@@ -156,20 +158,28 @@ export default function EditProfileScreen() {
     }
   }
 
-  if (loading) {
-    return (
-      <View style={{ flex: 1, backgroundColor: theme.colors.background, justifyContent: 'center', alignItems: 'center' }}>
-        <Stack.Screen options={{ headerShown: false }} />
-        <ActivityIndicator color={theme.colors.primary} size="large" />
-      </View>
-    );
-  }
-
+  /**
+   * ONE <Stack.Screen> for both states, on purpose.
+   *
+   * This screen used to declare the header twice: `{ headerShown: false }` in
+   * the loading branch, then a second <Stack.Screen> in the loaded branch
+   * carrying the title, the X and the ✓ Save. Expo Router / React Navigation
+   * MERGE screen options — a later options object overrides only the keys it
+   * names — so `headerShown: false` from the loading render survived into the
+   * loaded one. The header never came back, which meant:
+   *
+   *   1. no Save control at all, so a profile edit could never be committed; and
+   *   2. content laid out from y=0, putting the avatar under the Dynamic Island.
+   *
+   * Adding `headerShown: true` to the second object would have fixed both, but
+   * only until the next person adds a third state. Declaring the header once,
+   * above the loading branch, is what makes it unrepeatable: there is no
+   * earlier options object left to undo, and the header no longer pops in when
+   * the fetch lands. Save is inert while loading anyway — `hasChanges` is false
+   * until `original` is set, so the ✓ renders disabled and dimmed.
+   */
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: theme.colors.background }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
+    <>
       <Stack.Screen
         options={{
           title: 'Edit Profile',
@@ -195,138 +205,163 @@ export default function EditProfileScreen() {
         }}
       />
 
-      <ScrollView
-        contentContainerStyle={{ padding: 16, gap: 24 }}
-        keyboardShouldPersistTaps="handled"
-      >
-        {/* Avatar */}
-        <View style={{ alignItems: 'center', marginTop: 8, marginBottom: 8 }}>
-          <Pressable onPress={handlePickPhoto} disabled={uploadingPhoto}>
-            <View
-              style={{
-                width: 96,
-                height: 96,
-                borderRadius: 48,
-                backgroundColor: theme.colors.surface,
-                borderWidth: 2,
-                borderColor: theme.colors.surfaceBorder,
-                justifyContent: 'center',
-                alignItems: 'center',
-                overflow: 'hidden',
-              }}
-            >
-              {uploadingPhoto ? (
-                <ActivityIndicator color={theme.colors.primary} />
-              ) : profile.avatar_url ? (
-                <Image
-                  source={{ uri: profile.avatar_url }}
-                  style={{ width: 96, height: 96 }}
-                  contentFit="cover"
-                />
-              ) : (
-                <Text style={{ fontSize: 36, fontWeight: '800', color: theme.colors.primary }}>
-                  {(profile.display_name || 'G')[0].toUpperCase()}
-                </Text>
-              )}
-            </View>
-            <View
-              style={{
-                position: 'absolute',
-                bottom: 0,
-                right: 0,
-                width: 30,
-                height: 30,
-                borderRadius: 15,
-                backgroundColor: theme.colors.primary,
-                justifyContent: 'center',
-                alignItems: 'center',
-                borderWidth: 2,
-                borderColor: theme.colors.background,
-              }}
-            >
-              <Camera size={14} color="#fff" />
-            </View>
-          </Pressable>
+      {loading ? (
+        <View
+          style={{
+            flex: 1,
+            backgroundColor: theme.colors.background,
+            justifyContent: 'center',
+            alignItems: 'center',
+          }}
+        >
+          <ActivityIndicator color={theme.colors.primary} size="large" />
         </View>
-
-        {/* Display Name */}
-        <FieldGroup label="Display Name">
-          <TextInput
-            value={profile.display_name}
-            onChangeText={(t) => setProfile((p) => ({ ...p, display_name: t }))}
-            placeholder="Your name"
-            placeholderTextColor={theme.colors.textTertiary}
-            style={inputStyle}
-            autoCapitalize="words"
-            autoCorrect={false}
-          />
-        </FieldGroup>
-
-        {/* Email (read-only) */}
-        <FieldGroup label="Email">
-          <View style={[inputContainerStyle, { opacity: 0.6 }]}>
-            <Text style={{ color: theme.colors.textSecondary, fontSize: 16 }}>
-              {profile.email}
-            </Text>
-          </View>
-          <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 4 }}>
-            Email is managed through your login and cannot be changed here.
-          </Text>
-        </FieldGroup>
-
-        {/* Handicap */}
-        <FieldGroup label="Handicap">
-          <TextInput
-            value={profile.handicap}
-            onChangeText={(t) => setProfile((p) => ({ ...p, handicap: t }))}
-            placeholder="e.g. 18"
-            placeholderTextColor={theme.colors.textTertiary}
-            style={inputStyle}
-            keyboardType="decimal-pad"
-            returnKeyType="done"
-          />
-          <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 4 }}>
-            Your golf handicap index (-10 to 54)
-          </Text>
-        </FieldGroup>
-
-        {/* Home Course */}
-        <FieldGroup label="Home Course">
-          <TextInput
-            value={profile.home_course}
-            onChangeText={(t) => setProfile((p) => ({ ...p, home_course: t }))}
-            placeholder="e.g. Royal Melbourne"
-            placeholderTextColor={theme.colors.textTertiary}
-            style={inputStyle}
-            autoCapitalize="words"
-          />
-        </FieldGroup>
-
-        {/* Save Button (for scrolled view) */}
-        {hasChanges && (
-          <Pressable
-            onPress={handleSave}
-            disabled={saving}
-            style={{
-              backgroundColor: theme.colors.primary,
-              paddingVertical: 16,
-              borderRadius: theme.radius.full,
-              alignItems: 'center',
-              marginTop: 8,
-              opacity: saving ? 0.6 : 1,
+      ) : (
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: theme.colors.background }}
+          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        >
+          <ScrollView
+            // The header keeps the top clear of the Dynamic Island; the bottom
+            // inset is ours to add, or the "Save Changes" button lands under
+            // the home indicator on a gesture-nav device.
+            contentContainerStyle={{
+              padding: 16,
+              paddingBottom: insets.bottom + 24,
+              gap: 24,
             }}
+            keyboardShouldPersistTaps="handled"
           >
-            {saving ? (
-              <ActivityIndicator color="#fff" size="small" />
-            ) : (
-              <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
-                Save Changes
+            {/* Avatar */}
+            <View style={{ alignItems: 'center', marginTop: 8, marginBottom: 8 }}>
+              <Pressable onPress={handlePickPhoto} disabled={uploadingPhoto}>
+                <View
+                  style={{
+                    width: 96,
+                    height: 96,
+                    borderRadius: 48,
+                    backgroundColor: theme.colors.surface,
+                    borderWidth: 2,
+                    borderColor: theme.colors.surfaceBorder,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    overflow: 'hidden',
+                  }}
+                >
+                  {uploadingPhoto ? (
+                    <ActivityIndicator color={theme.colors.primary} />
+                  ) : profile.avatar_url ? (
+                    <Image
+                      source={{ uri: profile.avatar_url }}
+                      style={{ width: 96, height: 96 }}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <Text style={{ fontSize: 36, fontWeight: '800', color: theme.colors.primary }}>
+                      {(profile.display_name || 'G')[0].toUpperCase()}
+                    </Text>
+                  )}
+                </View>
+                <View
+                  style={{
+                    position: 'absolute',
+                    bottom: 0,
+                    right: 0,
+                    width: 30,
+                    height: 30,
+                    borderRadius: 15,
+                    backgroundColor: theme.colors.primary,
+                    justifyContent: 'center',
+                    alignItems: 'center',
+                    borderWidth: 2,
+                    borderColor: theme.colors.background,
+                  }}
+                >
+                  <Camera size={14} color="#fff" />
+                </View>
+              </Pressable>
+            </View>
+
+            {/* Display Name */}
+            <FieldGroup label="Display Name">
+              <TextInput
+                value={profile.display_name}
+                onChangeText={(t) => setProfile((p) => ({ ...p, display_name: t }))}
+                placeholder="Your name"
+                placeholderTextColor={theme.colors.textTertiary}
+                style={inputStyle}
+                autoCapitalize="words"
+                autoCorrect={false}
+              />
+            </FieldGroup>
+
+            {/* Email (read-only) */}
+            <FieldGroup label="Email">
+              <View style={[inputContainerStyle, { opacity: 0.6 }]}>
+                <Text style={{ color: theme.colors.textSecondary, fontSize: 16 }}>
+                  {profile.email}
+                </Text>
+              </View>
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 4 }}>
+                Email is managed through your login and cannot be changed here.
               </Text>
+            </FieldGroup>
+
+            {/* Handicap */}
+            <FieldGroup label="Handicap">
+              <TextInput
+                value={profile.handicap}
+                onChangeText={(t) => setProfile((p) => ({ ...p, handicap: t }))}
+                placeholder="e.g. 18"
+                placeholderTextColor={theme.colors.textTertiary}
+                style={inputStyle}
+                keyboardType="decimal-pad"
+                returnKeyType="done"
+              />
+              <Text style={{ color: theme.colors.textTertiary, fontSize: 12, marginTop: 4 }}>
+                Your golf handicap index (-10 to 54)
+              </Text>
+            </FieldGroup>
+
+            {/* Home Course */}
+            <FieldGroup label="Home Course">
+              <TextInput
+                value={profile.home_course}
+                onChangeText={(t) => setProfile((p) => ({ ...p, home_course: t }))}
+                placeholder="e.g. Royal Melbourne"
+                placeholderTextColor={theme.colors.textTertiary}
+                style={inputStyle}
+                autoCapitalize="words"
+              />
+            </FieldGroup>
+
+            {/* Save Button (for scrolled view) */}
+            {hasChanges && (
+              <Pressable
+                onPress={handleSave}
+                disabled={saving}
+                style={{
+                  backgroundColor: theme.colors.primary,
+                  paddingVertical: 16,
+                  borderRadius: theme.radius.full,
+                  alignItems: 'center',
+                  marginTop: 8,
+                  opacity: saving ? 0.6 : 1,
+                }}
+              >
+                {saving ? (
+                  <ActivityIndicator color="#fff" size="small" />
+                ) : (
+                  <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
+                    Save Changes
+                  </Text>
+                )}
+              </Pressable>
             )}
-          </Pressable>
-        )}
-      </ScrollView>
-    </KeyboardAvoidingView>
+          </ScrollView>
+        </KeyboardAvoidingView>
+      )}
+    </>
   );
 }
 

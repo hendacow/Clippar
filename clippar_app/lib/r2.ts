@@ -2,6 +2,7 @@ import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { config } from '@/constants/config';
 import { resolveAssetUri } from '@/lib/media';
+import { reelStoragePath } from '@/lib/storagePaths';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -268,6 +269,12 @@ async function _tusUpload(
  *
  * Returns the bucket-relative storage path (e.g. "reels/xxx.mp4") on success,
  * or throws if the upload fails.
+ *
+ * The key comes from reelStoragePath() and must keep coming from there: the
+ * deleters (lib/api.ts deleteRound, the delete-account Edge Function) derive
+ * the object they remove from the same helper, and they used to hardcode a
+ * different guess — which is how deleted accounts kept their reels. See
+ * lib/storagePaths.ts.
  */
 export async function uploadReelToStorage(
   roundId: string,
@@ -276,7 +283,7 @@ export async function uploadReelToStorage(
 ): Promise<string> {
   if (!isNative || !ExpoFS) {
     onProgress?.(1);
-    return `reels/${roundId}.mp4`;
+    return reelStoragePath(roundId);
   }
 
   const { data: { session } } = await supabase.auth.getSession();
@@ -348,7 +355,7 @@ export async function uploadReelToStorage(
     );
   }
 
-  const storagePath = `reels/${roundId}.mp4`;
+  const storagePath = reelStoragePath(roundId);
   const uploadProgress = origSize > COMPRESS_THRESHOLD && Compressor
     ? (p: number) => onProgress?.(0.5 + p * 0.5)
     : onProgress;

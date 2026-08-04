@@ -37,12 +37,41 @@ export const config = {
   // unread field here would have kept the key shipping while looking fixed.
   subscription: {
     websiteUrl: 'https://clippargolf.com',
-    monthlyPriceAud: 1999,
-    annualPriceAud: 14900,
+    // PLACEHOLDER PRICES, in AUD cents, matching the real App Store Connect
+    // prices (A$14.99/month, A$99.99/year). They are read ONLY by the STUB
+    // offering in lib/iap.ts — Expo Go, binaries without the RevenueCat native
+    // module, and builds with no RC key. A configured build renders
+    // store-localised priceStrings straight from RevenueCat and never reads
+    // these. Keep them in step with App Store Connect anyway: the stub is what
+    // a reviewer or a TestFlight user on an unconfigured build sees, and the
+    // annual card's "Save N%" badge is computed from the pair.
+    monthlyPriceAud: 1499,
+    annualPriceAud: 9999,
     // When true, "Create Highlight Reel" requires an active subscription
-    // (paywall shown otherwise). OFF until StoreKit IAP is live — flipping
-    // this before purchases exist would lock everyone out of exports.
-    enforceExportGate: false as boolean,
+    // (paywall shown otherwise — app/round/editor.tsx:925).
+    //
+    // ON as of 2026-08-04, Henry's call. It was off while StoreKit IAP didn't
+    // exist, because gating exports against a paywall nobody could complete
+    // would have locked everyone out. Both products now exist in App Store
+    // Connect (com.clippar.app.pro.monthly / .annual, 2-week free trial) and
+    // are wired through RevenueCat, so the gate has something to sell.
+    //
+    // Leaving it OFF was its own problem: the paywall advertises four Pro
+    // benefits while Pro granted nothing, which is a 3.1.2 misrepresentation
+    // and gave a subscriber nothing for their money.
+    //
+    // TWO THINGS THIS DEPENDS ON — check both before shipping:
+    //  1. App Review must be able to export. A reviewer who hits a paywall
+    //     they cannot complete files a 2.1 rejection. The demo account handed
+    //     to Apple MUST already hold the entitlement server-side (profiles
+    //     .subscription_status = 'active' with a NULL expiry) so the gate
+    //     never fires for them. Do not rely on them completing a sandbox
+    //     purchase against products that may still be in review.
+    //  2. Dev builds have no RevenueCat key by design, so iap falls back to
+    //     the stub and getProStatus() is false — use "Dev: unlock Pro" in
+    //     Profile to export while testing, or every export routes to the
+    //     paywall.
+    enforceExportGate: true as boolean,
     // RevenueCat public SDK key (per-platform). Empty → lib/iap falls back
     // to the stub provider (Expo Go / binaries without the native module).
     // EXPO_PUBLIC_RC_IOS_KEY is the canonical name; the longer
@@ -74,6 +103,22 @@ export const config = {
     // a checkout that can't take money. Dev builds always show the
     // surfaces (see mountCommerceEnabled in lib/mountOffer.ts).
     mountCommerceEnabled: false,
+    // Master switch for the IN-APP hardware Shop — the Shop tab and every
+    // route into it. A separate flag from mountCommerceEnabled above because
+    // they gate different checkouts: that one is the website cross-sell, which
+    // links out to Safari, while this one is the in-app Stripe PaymentSheet,
+    // whose create-payment-intent + stripe-webhook functions are not deployed.
+    // OFF for the v1 App Store launch: with them undeployed, Buy Now fails.
+    //
+    // This lives in config rather than as a local const in app/(tabs)/_layout.tsx
+    // where it started, because `href: null` only removes the TAB BUTTON — the
+    // route stays registered and `router.push('/(tabs)/shop')` reaches it
+    // normally. So hiding the Shop is not one edit in the tab bar: every entry
+    // point has to test the same flag, which means the flag has to be
+    // importable. app/profile/orders.tsx is the entry point that got missed,
+    // and it left App Review two taps from a storefront whose Buy Now errors.
+    // Re-enabling post-launch is this one line, once those functions are live.
+    inAppShopEnabled: false as boolean,
   },
   processing: {
     maxJobsPerDay: 2,
