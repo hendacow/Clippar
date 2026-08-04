@@ -47,8 +47,7 @@ import {
 } from '@/lib/localWipe';
 import { clearDisposableCaches, formatBytes } from '@/lib/cacheReclaim';
 import { supabase } from '@/lib/supabase';
-
-const SUPPORT_EMAIL = 'support@clippar.com';
+import { SUPPORT_EMAIL } from '@/constants/support';
 
 /**
  * Shown in the footer and stamped into the feedback subject line, so a support

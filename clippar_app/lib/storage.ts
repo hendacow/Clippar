@@ -512,6 +512,36 @@ export async function getClipsWithPhotosAssetId() {
   );
 }
 
+/**
+ * How many local clips are ACTUALLY in the user's Photos library.
+ *
+ * app/profile/storage-settings.tsx used to tick "Raw clips — mirrored to
+ * Photos, will re-import on reinstall" off the toggle's position alone. That
+ * is a claim about intent; this is a fact about footage. The two came apart
+ * badly: until the record path was wired up, no recorded clip had an asset id
+ * however the toggle was set — and even now, every clip captured BEFORE the
+ * user switched it on is unrecoverable, which is most of a returning user's
+ * history. Somebody deciding whether it is safe to wipe their phone is
+ * reading that line.
+ *
+ * The `mirrored` predicate must stay identical to getClipsWithPhotosAssetId's
+ * WHERE clause above — recovery is what "mirrored" means, so a count that
+ * admits rows recovery would skip is the same lie in a new place.
+ * tests/photosMirror.test.ts pins the two together.
+ */
+export async function getClipMirrorStats(): Promise<{
+  total: number;
+  mirrored: number;
+}> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ total: number; mirrored: number }>(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN photos_asset_id IS NOT NULL AND photos_asset_id != '' THEN 1 ELSE 0 END) AS mirrored
+     FROM local_clips`
+  );
+  return { total: row?.total ?? 0, mirrored: row?.mirrored ?? 0 };
+}
+
 // ────────────────────────────────────────────────────────────
 // Storage-policy settings (mirror to Photos / cloud backup)
 // ────────────────────────────────────────────────────────────

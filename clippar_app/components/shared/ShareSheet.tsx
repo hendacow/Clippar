@@ -4,6 +4,7 @@ import { Link2, Share2, X, Download, Camera, Check } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import {
   shareReel,
   getShareUrl,
@@ -219,20 +220,24 @@ export function ShareSheet({
           loading={shareState === 'loading'}
         />
 
-        {/* Copy Link — the only action here that uploads anything */}
-        <ActionRow
-          icon={Link2}
-          label={
-            linkState === 'loading'
-              ? 'Uploading reel...'
-              : shareLink
-                ? 'Copy Link'
-                : 'Create Share Link'
-          }
-          onPress={handleCopyLink}
-          disabled={!reelUrl || linkState === 'loading'}
-          loading={linkState === 'loading'}
-        />
+        {/* Copy Link — the only action here that uploads anything, and the only
+            one gated. With config.sharing.reelLinksEnabled off, this sheet
+            never leaves the device. See the flag for why. */}
+        {config.sharing.reelLinksEnabled ? (
+          <ActionRow
+            icon={Link2}
+            label={
+              linkState === 'loading'
+                ? 'Uploading reel...'
+                : shareLink
+                  ? 'Copy Link'
+                  : 'Create Share Link'
+            }
+            onPress={handleCopyLink}
+            disabled={!reelUrl || linkState === 'loading'}
+            loading={linkState === 'loading'}
+          />
+        ) : null}
 
         {/* Instagram Stories */}
         <ActionRow

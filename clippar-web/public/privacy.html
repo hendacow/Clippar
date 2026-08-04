@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Privacy Policy — Clippar</title>
-<meta name="description" content="How Clippar collects, uses, shares, and protects your data — account, location, camera/video, diagnostics, and payments — across the app and clippargolf.com.">
+<meta name="description" content="How Clippar handles your data. Your footage is edited on your phone, not on our servers. Cloud backup is off unless you turn it on. Here is exactly what we collect and who receives it.">
 <meta name="theme-color" content="#07100a">
 <link rel="canonical" href="https://clippargolf.com/privacy">
 <meta name="robots" content="index, follow">
@@ -51,7 +51,7 @@
   header .logo { display: flex; align-items: center; gap: 10px; }
   header .logo img { height: 24px; width: auto; display: block; flex-shrink: 0; }
   header .logo .logo-mark { height: 30px; width: 30px; }
-  header nav a { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.08em; }
+  header nav a { font-family: var(--font-mono); font-size: 12px; color: var(--muted); letter-spacing: 0.08em; margin-left: 18px; }
 
   main { max-width: 760px; margin: 0 auto; padding: 56px 28px 96px; }
 
@@ -78,10 +78,17 @@
   .toc ol { margin: 0 0 0 18px; color: #d6e0d2; columns: 2; column-gap: 28px; font-size: 14px; }
   .toc li { margin-bottom: 5px; }
 
+  .notice { background: var(--card); border: 1px solid var(--border); border-left: 3px solid var(--green); border-radius: 12px; padding: 18px 22px; margin: 18px 0 22px; }
+  .notice p:last-child { margin-bottom: 0; }
+  .notice h3 { margin-top: 0; }
+
+  .todo { color: #ffd24a; font-family: var(--font-mono); font-size: 13px; }
+
   table { width: 100%; border-collapse: collapse; margin: 8px 0 18px; font-size: 14px; }
   th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
   th { color: var(--green-dim); font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }
   td { color: #d6e0d2; }
+  .scroller { overflow-x: auto; }
 
   footer {
     border-top: 1px solid var(--border);
@@ -104,156 +111,203 @@
 <body>
 <header>
   <a class="logo" href="/"><img class="logo-mark" src="/landing_assets/clippar-icon-white.png" alt="" width="272" height="272"><img src="/landing_assets/clippar-wordmark-white.png" alt="Clippar Golf" width="360" height="107"></a>
-  <nav><a href="/terms">Terms of Service</a></nav>
+  <nav><a href="/terms">Terms of Service</a><a href="/hardware-terms">Mount Kit Terms</a></nav>
 </header>
 
 <main>
   <h1>Privacy Policy</h1>
   <p class="updated">Effective date: 26 June 2026 &nbsp;·&nbsp; Last updated: 4 August 2026</p>
 
-  <p>This Privacy Policy explains how Clippar (“Clippar”, “we”, “us”, “our”) collects, uses, shares, and protects information when you use the Clippar iOS app and the website at clippargolf.com (together, the “Service”). Clippar is operated by an independent developer based in Australia. If you do not agree with this policy, please do not use the Service.</p>
+  <p>This policy explains what Clippar does with your information — in the iOS app and on clippargolf.com. Clippar is operated by <span class="todo">[DECISION NEEDED: legal entity name and ABN]</span>, based in Brisbane, Queensland, Australia.</p>
+
+  <div class="notice">
+    <h3>The short version</h3>
+    <p><strong>Your footage is edited on your phone.</strong> Finding the swing, trimming the clip and stitching the reel all run inside the app on your iPhone. There is no video-processing company in the loop and we never send your footage anywhere to be edited.</p>
+    <p><strong>Cloud backup is off unless you turn it on.</strong> By default your clips, reels, rounds and GPS points stay on your device and we never receive them. Turning on cloud backup (a Clippar Pro feature) is what starts sending copies to our storage.</p>
+    <p><strong>No ads, no tracking, no selling data.</strong> There are no advertising or product-analytics SDKs in the app, no tracking across other apps or websites, and no advertising identifier.</p>
+  </div>
 
   <div class="toc">
     <h2>Contents</h2>
     <ol>
-      <li><a href="#who">Who we are &amp; how to contact us</a></li>
-      <li><a href="#collect">Information we collect</a></li>
+      <li><a href="#who">Who we are</a></li>
+      <li><a href="#collect">What we collect</a></li>
       <li><a href="#video">Video, audio &amp; location</a></li>
-      <li><a href="#use">How we use your information</a></li>
-      <li><a href="#third-parties">Service providers we share with</a></li>
-      <li><a href="#apple">App Store data disclosure</a></li>
-      <li><a href="#bases">Legal bases (GDPR)</a></li>
-      <li><a href="#retention">Data retention</a></li>
+      <li><a href="#ip">IP addresses</a></li>
+      <li><a href="#use">How we use it</a></li>
+      <li><a href="#third-parties">Who receives it</a></li>
+      <li><a href="#overseas">Sending data overseas</a></li>
+      <li><a href="#apple">App Store disclosure</a></li>
+      <li><a href="#retention">How long we keep it</a></li>
       <li><a href="#deletion">Deleting your account</a></li>
-      <li><a href="#rights">Your privacy rights</a></li>
+      <li><a href="#rights">Your rights</a></li>
+      <li><a href="#australia">Australian privacy law</a></li>
+      <li><a href="#breach">If there's a data breach</a></li>
+      <li><a href="#bases">Legal bases (GDPR)</a></li>
       <li><a href="#california">California (CCPA/CPRA)</a></li>
-      <li><a href="#australia">Australian users</a></li>
       <li><a href="#children">Children</a></li>
       <li><a href="#security">Security</a></li>
-      <li><a href="#transfers">International transfers</a></li>
       <li><a href="#changes">Changes &amp; contact</a></li>
     </ol>
   </div>
 
-  <h2 id="who">1. Who we are &amp; how to contact us</h2>
-  <p>Clippar is a golf highlight-reel app: you record your shots on the course and the app automatically detects, trims, and assembles them into a shareable video. For the purposes of data-protection law, Clippar is the <strong>data controller</strong> for the personal information described here. You can contact us about privacy at any time at <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
+  <h2 id="who">1. Who we are</h2>
+  <p>Clippar is a golf highlight-reel app. You record your shots on the course and the app finds each swing, trims it, and assembles a reel. We decide how the personal information described here is handled, which makes us the <strong>data controller</strong> for it.</p>
+  <p>Privacy questions, requests and complaints: <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>. A person reads that inbox.</p>
 
-  <h2 id="collect">2. Information we collect</h2>
-  <p>We collect the following, only as needed to provide the Service:</p>
+  <h2 id="collect">2. What we collect</h2>
+  <p>The <strong>Where it lives</strong> column is the important one. A lot of what Clippar handles never leaves your iPhone.</p>
+  <div class="scroller">
   <table>
-    <tr><th>Category</th><th>What it includes</th><th>Why</th></tr>
-    <tr><td>Account &amp; authentication</td><td>Email address, display name, and the identifier from your chosen sign-in method (email/password, “Sign in with Google”, or “Sign in with Apple”). For Sign in with Apple we also store an Apple token so we can revoke access if you delete your account.</td><td>Create and secure your account; sign you in</td></tr>
-    <tr><td>Profile</td><td>Optional details you add — such as handicap, home course, and avatar — and a paired Bluetooth clicker's device ID if you use one.</td><td>Personalise your rounds and enable accessory features</td></tr>
-    <tr><td>Rounds &amp; scoring</td><td>Courses played, dates, hole-by-hole scores, putts, penalties, notes, and shot metadata.</td><td>Organise your rounds and label your clips</td></tr>
-    <tr><td>Video &amp; audio content</td><td>The video and audio you record, and the clips and highlight reels created from it.</td><td>Capture, process, store, and play back your reels</td></tr>
-    <tr><td>Precise location (GPS)</td><td>GPS coordinates captured while you record a round, stored per shot.</td><td>Match each shot to the correct hole and reconstruct ball flight</td></tr>
-    <tr><td>Purchases &amp; subscription</td><td>Your Clippar Pro subscription status and expiry. Apple processes the payment; we receive the status, not your card details.</td><td>Provide and maintain your subscription</td></tr>
-    <tr><td>Merchandise orders</td><td>If you buy physical kit: order details and shipping name and address. Card details are entered into Stripe and are not stored by us.</td><td>Process and ship your order</td></tr>
-    <tr><td>Diagnostics &amp; crash data</td><td>Crash reports, error stack traces, and basic device/app information when the app encounters an error.</td><td>Find and fix bugs; keep the app stable</td></tr>
-    <tr><td>Push token</td><td>A device push-notification token, if generated.</td><td>To send notifications (where enabled)</td></tr>
-    <tr><td>Waitlist (website)</td><td>If you join the waitlist on clippargolf.com: your name, email, and chosen update frequency.</td><td>To send you product updates you asked for</td></tr>
+    <tr><th>What</th><th>Details</th><th>Where it lives</th></tr>
+    <tr><td>Account</td><td>Your email address, display name, and the identifier from how you signed in (email, Apple or Google). If you use Sign in with Apple we also store an Apple token so we can tell Apple to disconnect your account when you delete it.</td><td>Our servers (Supabase)</td></tr>
+    <tr><td>Profile</td><td>Optional details you add — handicap, home course, profile photo — and the device ID of a Bluetooth clicker if you pair one.</td><td>Our servers</td></tr>
+    <tr><td>Rounds &amp; scores</td><td>Courses played, dates, hole-by-hole scores, putts, penalties and shot records.</td><td>Your phone. Copied to our servers <strong>only if you turn on cloud backup</strong>.</td></tr>
+    <tr><td>Video &amp; audio</td><td>The clips you record, including the audio track, and the reels made from them.</td><td>Your phone. Copied to our storage <strong>only if you turn on cloud backup</strong>, or if you create a web share link for a reel.</td></tr>
+    <tr><td>Location (GPS)</td><td>A GPS point captured with each shot while you're recording a round.</td><td>Your phone. Copied to our servers <strong>only if you turn on cloud backup</strong>.</td></tr>
+    <tr><td>Subscription</td><td>Whether you have Clippar Pro and when it expires. Apple takes the payment; we only get the status. We never see your card.</td><td>Our servers, and RevenueCat</td></tr>
+    <tr><td>Mount Kit orders</td><td>If you buy the Mount Kit: your name, email, delivery address and order details, entered into Stripe's checkout. We never see or store your card number.</td><td>Stripe</td></tr>
+    <tr><td>Crash reports</td><td>Error messages, stack traces and basic device and app information when something goes wrong.</td><td>Sentry (United States)</td></tr>
+    <tr><td>IP addresses</td><td>See section 4 — collected briefly to stop abuse of our public endpoints.</td><td>Our servers</td></tr>
+    <tr><td>Waitlist (website only)</td><td>If you join the waitlist on clippargolf.com: your name, email and how often you'd like updates.</td><td>Neon (database) and Sender.net (email)</td></tr>
   </table>
-  <p>We do <strong>not</strong> run advertising or third-party product-analytics SDKs in the app, we do <strong>not</strong> sell your personal information, and we do <strong>not</strong> use your golf footage to train third-party advertising or AI models. The website does not use advertising or analytics trackers; it loads Google Fonts, which may receive your IP address as part of serving the fonts.</p>
+  </div>
+  <p>We do <strong>not</strong> collect: advertising identifiers, contacts, health data, browsing history, or anything about you from other apps. We do <strong>not</strong> run ads or third-party analytics SDKs. We do <strong>not</strong> sell your personal information. We do <strong>not</strong> use your golf footage to train AI models, ours or anyone else's.</p>
+  <p><strong>One thing worth knowing:</strong> if you upload a profile photo, it's stored in a public bucket at a web address that can be worked out from your user ID. It isn't listed or indexed anywhere, but it isn't behind a login either. If that bothers you, don't upload one — everything else about your account is access-controlled.</p>
 
   <h2 id="video">3. Video, audio &amp; location</h2>
-  <p><strong>Video and audio</strong> are recorded only when you actively start a recording in the app. Your footage is uploaded to our storage and to our video-processing service so it can be analysed, trimmed, and stitched into a reel, and is kept so you can play it back, edit it, and share it. If you create a public share link for a round, anyone with that link can view that reel until you remove the link.</p>
-  <p><strong>Precise location</strong> is collected in the foreground only while a round is active, to associate each shot with a hole and to reconstruct ball flight. You can decline or revoke the location permission in your device settings; hole-matching and shot-tracer features will be less accurate or unavailable without it. We do not track your location in the background or when you are not recording.</p>
 
-  <h2 id="use">4. How we use your information</h2>
+  <h3>Everything is edited on your phone</h3>
+  <p>When you record a shot, the app analyses the video on your iPhone to find the swing, trims the clip, and later stitches your clips together with music into a reel. All of that uses your phone's own processor. <strong>No footage is sent anywhere to be edited.</strong> There is no third-party video-processing service. (An earlier version of this policy said there was. That was wrong, and this corrects it.)</p>
+
+  <h3>Cloud backup is opt-in</h3>
+  <p>By default, your clips and reels stay on your device. Nothing is uploaded. If you have Clippar Pro you can turn on <strong>cloud backup</strong> in <em>Profile → Storage &amp; Backup</em>, which copies your clips to our storage so they survive reinstalling the app or changing phone. Turning it on is also what starts sending your round, score and GPS data to our servers. You can turn it off again at any time.</p>
+
+  <h3>Audio</h3>
+  <p>Clips are recorded with their audio track, and the app can use impact sound to help find the swing. If you'd rather not record audio, decline or revoke the microphone permission in your iPhone settings — Clippar still detects and trims swings without it. Please also read the <a href="/terms#filming">filming other people</a> section of our Terms, because recording other people's conversations is the part of this that carries real legal risk for you.</p>
+
+  <h3>Location</h3>
+  <p>Clippar asks for location <strong>only while you're using the app</strong> — never in the background, and we haven't requested the “Always” permission. A GPS point is captured with each shot so the app can work out which hole you're on and how far the shot went. Decline it and hole-matching gets less accurate; everything else still works.</p>
+
+  <h2 id="ip">4. IP addresses</h2>
+  <p>Some of our endpoints are open to the internet, so we record IP addresses briefly to stop them being abused:</p>
   <ul>
-    <li>To provide the core Service — recording, processing, storing, and playing back your reels;</li>
-    <li>To authenticate you and keep your account secure;</li>
-    <li>To match shots to holes and generate shot/scoring data;</li>
-    <li>To provide subscriptions and fulfil merchandise orders;</li>
-    <li>To diagnose crashes and improve the app's stability and features;</li>
-    <li>To respond to your support requests and send service or product communications you've asked for;</li>
-    <li>To comply with legal obligations and enforce our Terms.</li>
+    <li>When <strong>anyone opens a shared reel link</strong>, we store their IP address in a short-lived counter to cap how many times an hour one source can load reels. This applies to people who aren't Clippar users at all — if someone sends you a reel link, opening it means we briefly hold your IP.</li>
+    <li>When course search is used without being signed in, the same counter is keyed to the IP address.</li>
+    <li>When someone joins the website waitlist, we store the IP address to limit how many signups can come from one source.</li>
   </ul>
+  <p>These records exist to prevent abuse, nothing else. They aren't used to profile anyone, aren't linked to your account, and aren't shared. The website also loads fonts from Google Fonts, which means Google receives your IP address as part of serving them.</p>
 
-  <h2 id="third-parties">5. Service providers we share with</h2>
-  <p>We share limited data with the providers below, who process it on our behalf to run the Service, each under their own privacy terms. We rely on these third parties to protect your data consistent with this policy.</p>
+  <h2 id="use">5. How we use it</h2>
+  <ul>
+    <li>To run the app — recording, detecting, trimming, storing and playing back your reels;</li>
+    <li>To sign you in and keep your account secure;</li>
+    <li>To match shots to holes and work out shot distances;</li>
+    <li>To manage your subscription and to fulfil Mount Kit orders;</li>
+    <li>To find and fix crashes and bugs;</li>
+    <li>To answer your emails and send you updates you asked for;</li>
+    <li>To stop abuse of our public endpoints;</li>
+    <li>To meet legal obligations and enforce our <a href="/terms">Terms</a>.</li>
+  </ul>
+  <p>That's the whole list. We don't use your information for anything you wouldn't expect from the above.</p>
+
+  <h2 id="third-parties">6. Who receives it</h2>
+  <p>These companies process information on our behalf so the Service can run. Each has its own privacy terms. Where they handle your personal information for us, we remain accountable to you for how they handle it.</p>
+  <div class="scroller">
   <table>
-    <tr><th>Provider</th><th>Data it receives</th><th>Role</th></tr>
-    <tr><td>Supabase</td><td>Account data, profile, rounds/scores/shots, location records, and your uploaded video clips and reels (authentication, database, and file storage)</td><td>Backend infrastructure (hosted in Australia — Sydney region)</td></tr>
-    <tr><td>Our video-processing service</td><td>Your round ID and clips, and optionally your name/email, to assemble the highlight reel</td><td>Reel processing</td></tr>
-    <tr><td>Apple</td><td>“Sign in with Apple” authentication and In-App Purchase of the subscription</td><td>Sign-in &amp; payment (independent controller for App Store transactions)</td></tr>
-    <tr><td>Google</td><td>“Sign in with Google” authentication</td><td>Sign-in</td></tr>
-    <tr><td>RevenueCat</td><td>Your account ID and subscription/purchase status, to manage entitlements</td><td>Subscription management (USA)</td></tr>
-    <tr><td>Stripe</td><td>Payment and shipping details you enter to buy physical kit</td><td>Payment processing (handles card data; we don't store it)</td></tr>
-    <tr><td>Sentry</td><td>Crash logs, stack traces, and device diagnostics; may include your user ID</td><td>Crash reporting (USA)</td></tr>
-    <tr><td>GolfCourseAPI</td><td>The course name you search for. No account-identifying data is sent.</td><td>Course search lookup</td></tr>
-    <tr><td>Neon (Postgres database)</td><td>Website waitlist only: name, email, update preference — stored as the system of record</td><td>Hosting database provider for the waitlist</td></tr>
-    <tr><td>Sender.net</td><td>Website waitlist only: name, email, update preference</td><td>Email updates you opted into</td></tr>
+    <tr><th>Provider</th><th>What it receives</th><th>Role &amp; location</th></tr>
+    <tr><td>Supabase</td><td>Your account, profile and — only if you turn on cloud backup — your rounds, scores, shots, GPS points, clips and reels</td><td>Database, sign-in and file storage. <span class="todo">[DECISION NEEDED: confirm the Supabase project region and state it here. Do not claim Sydney until verified in the dashboard.]</span></td></tr>
+    <tr><td>Apple</td><td>Sign in with Apple, and In-App Purchase of Clippar Pro</td><td>Sign-in and payment. Apple acts on its own account for App Store transactions.</td></tr>
+    <tr><td>Google</td><td>Sign in with Google, if you use it. Also your IP address when the website loads Google Fonts.</td><td>Sign-in; fonts (USA)</td></tr>
+    <tr><td>RevenueCat</td><td>Your account ID and subscription status</td><td>Subscription management (USA)</td></tr>
+    <tr><td>Stripe</td><td>Name, email, delivery address and payment details you enter when buying the Mount Kit</td><td>Payment processing. Stripe handles card data; we never see it.</td></tr>
+    <tr><td>Sentry</td><td>Crash reports, stack traces and device diagnostics. <strong>We do not attach your account ID or email to crash reports</strong> — the app has no code that does. Identifying details could still appear incidentally inside an error message.</td><td>Crash reporting (USA)</td></tr>
+    <tr><td>GolfCourseAPI</td><td>The course name you type into search. Nothing that identifies you is sent — the request goes through our server, not from your phone.</td><td>Course lookup</td></tr>
+    <tr><td>Expo</td><td>Device and app version information when the app checks for an over-the-air update</td><td>App updates (USA)</td></tr>
+    <tr><td>Neon</td><td>Website waitlist only: name, email, update preference, and the signup IP address</td><td>Waitlist database</td></tr>
+    <tr><td>Sender.net</td><td>Website waitlist only: name, email, update preference</td><td>Email updates you asked for</td></tr>
   </table>
-  <p>We may also disclose information where required by law, to protect our rights or the safety of others, or in connection with a business transfer.</p>
+  </div>
+  <p>We may also disclose information where the law requires it, to protect someone's safety or our legal rights, or if the business is ever sold or transferred — in which case we'd tell you.</p>
 
-  <h2 id="apple">6. App Store data disclosure summary</h2>
-  <p>This mirrors the “App Privacy” information shown on our App Store listing. Clippar collects the following data, which is <strong>linked to your identity</strong>:</p>
+  <h2 id="overseas">7. Sending data overseas</h2>
+  <p>Some of the companies above store and process data outside Australia, mainly in the United States — RevenueCat, Sentry, Expo and, for the website waitlist, Neon and Sender.net. Stripe and Apple also operate internationally.</p>
+  <p>Before disclosing personal information overseas we take reasonable steps to make sure the recipient handles it consistently with the Australian Privacy Principles, and we do that through our contracts with them. Australian law is clear that this obligation stays with us — if an overseas provider mishandles your information, that is treated as our responsibility, not theirs alone. We don't outsource that to a disclaimer.</p>
+
+  <h2 id="apple">8. App Store disclosure</h2>
+  <p>This mirrors the “App Privacy” panel on our App Store listing. The following are collected and <strong>linked to your identity</strong>:</p>
   <ul>
-    <li><strong>Contact Info</strong> — email address and name;</li>
-    <li><strong>User Content</strong> — the videos, audio, and photos you record;</li>
-    <li><strong>Location</strong> — precise location, while recording;</li>
-    <li><strong>Identifiers</strong> — your account/user ID;</li>
-    <li><strong>Purchases</strong> — subscription and order history;</li>
-    <li><strong>Diagnostics</strong> — crash and error data.</li>
+    <li><strong>Contact info</strong> — email address and name;</li>
+    <li><strong>User content</strong> — videos and photos, where you've enabled cloud backup or created a share link;</li>
+    <li><strong>Location</strong> — precise location, where you've enabled cloud backup;</li>
+    <li><strong>Identifiers</strong> — your account ID;</li>
+    <li><strong>Purchases</strong> — subscription and order status;</li>
+    <li><strong>Diagnostics</strong> — crash and performance data.</li>
   </ul>
-  <p>Clippar does <strong>not</strong> use any data to <strong>track you</strong> across apps or websites owned by other companies, and contains no advertising. We do not use the App Tracking Transparency identifier (IDFA).</p>
+  <p>Clippar does <strong>not track you</strong> across apps or websites owned by other companies, contains no advertising, and does not use the advertising identifier (IDFA). Location and user content are declared as collected because they are, once you turn cloud backup on — even though most users won't.</p>
 
-  <h2 id="bases">7. Legal bases for processing (GDPR)</h2>
-  <p>Where the GDPR applies, we rely on these legal bases:</p>
+  <h2 id="retention">9. How long we keep it</h2>
+  <p>Account information and anything you've backed up is kept while your account is open, and deleted when you delete your account (section 10). Crash reports age out on Sentry's retention schedule. The abuse counters in section 4 hold an IP address only for the length of their window — an hour or a day depending on the endpoint. Routine database backups are overwritten on a rolling cycle.</p>
+  <p><strong>Mount Kit order records are kept by Stripe</strong> — name, email, delivery address, amount and date — because Australian tax law requires business records supporting a sale to be kept for five years. Deleting your Clippar account doesn't erase those, and we can't erase them for you.</p>
+
+  <h2 id="deletion">10. Deleting your account</h2>
+  <p>You can delete your account yourself, from <strong>Profile → Delete Account</strong>. It's a real deletion, not a deactivation, and it can't be undone. We ask you to sign in again first to make sure it's really you.</p>
+  <p>When you delete your account we:</p>
   <ul>
-    <li><strong>Performance of a contract</strong> — to create your account and provide the Service (storing and serving your reels, running your subscription, fulfilling orders);</li>
-    <li><strong>Consent</strong> — for camera, microphone, and precise-location access, which you grant through the iOS permission prompts and can withdraw at any time in your device settings; and for joining the website waitlist;</li>
-    <li><strong>Legitimate interests</strong> — to keep the app stable and secure and to fix bugs (crash diagnostics), where those interests are not overridden by your rights.</li>
+    <li>delete your uploaded clips and reels from storage, and your profile photo;</li>
+    <li>delete your rounds, scores, shots, saved course presets and usage records;</li>
+    <li>delete your profile and your sign-in account;</li>
+    <li>ask RevenueCat to delete your subscriber record, and ask Apple to revoke your Sign in with Apple connection. Both are best-effort — if one of them is unreachable, we still delete everything else.</li>
   </ul>
+  <p>Two things to know. <strong>Deleting your Clippar account does not cancel an Apple subscription</strong> — you must cancel that in <em>Settings → [your name] → Subscriptions</em> on your iPhone, or Apple will keep charging you. And if you shared a reel link you'd like taken down, tell us before you delete, because afterwards we can't identify which one was yours.</p>
+  <p>If deletion doesn't work for any reason, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> and we'll do it manually.</p>
 
-  <h2 id="retention">8. Data retention</h2>
-  <p>We keep your account data and content for as long as your account is active. When you delete your account, we delete or disconnect your personal data and recorded content as described below. We may retain certain records where required for legal, tax, or fraud-prevention reasons — for example, transaction and shipping records associated with a merchandise order are kept as part of our order history. Backups containing your data are overwritten on a rolling cycle.</p>
-
-  <h2 id="deletion">9. Deleting your account</h2>
-  <p>You can delete your account at any time from within the app at <strong>Profile → Delete Account</strong>. This is a real deletion, not a deactivation. When you delete your account, we:</p>
+  <h2 id="rights">11. Your rights</h2>
+  <p>Wherever you live, you can ask us to:</p>
   <ul>
-    <li>delete your uploaded clips and highlight reels from storage;</li>
-    <li>delete your rounds, scores, shots, processing jobs, saved course presets, and usage records;</li>
-    <li>delete your profile and sign-in account;</li>
-    <li>ask RevenueCat to delete your subscriber record and revoke your “Sign in with Apple” token (best effort).</li>
+    <li><strong>Show you</strong> what personal information we hold about you;</li>
+    <li><strong>Correct</strong> anything that's wrong;</li>
+    <li><strong>Delete</strong> it — you can do this yourself in the app;</li>
+    <li><strong>Send you a copy</strong> in a portable format;</li>
+    <li><strong>Stop or limit</strong> a particular use, or withdraw a permission you gave.</li>
   </ul>
-  <p>Please note: <strong>deleting your account does not cancel an active Apple subscription</strong> — you must cancel that in your iPhone's <em>Settings → [your name] → Subscriptions</em>. Merchandise order and shipping records are retained as part of our order history. If you created a public share link, remove it before deleting if you no longer want that reel to be viewable. If you have trouble deleting your account, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> and we will action it for you.</p>
+  <p>Email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>. We aim to respond within 30 days and won't charge you. If you're not happy with our answer, you can complain to a regulator — in Australia, the Office of the Australian Information Commissioner at <a href="https://www.oaic.gov.au">oaic.gov.au</a>.</p>
 
-  <h2 id="rights">10. Your privacy rights</h2>
-  <p>Depending on where you live, you may have rights to:</p>
+  <h2 id="australia">12. Australian privacy law</h2>
+  <p>The Privacy Act 1988 (Cth) exempts small businesses under a A$3 million annual turnover, and Clippar is currently below that threshold. <strong>We've chosen to write and operate this policy to the Australian Privacy Principles anyway</strong>, because the exemption is a technicality and you shouldn't get weaker treatment because we're small. If our turnover grows past the threshold, the Act applies to us permanently and nothing here would need to change.</p>
+  <p>Separately, note that the exemption has never applied to individuals. Since 10 June 2025 there is a national right to sue for a serious invasion of privacy, and it has no exemption for personal or non-commercial conduct. If you film other people, that applies to you. Our <a href="/terms#filming">Terms</a> explain what that means in practice.</p>
+  <p><span class="todo">[DECISION NEEDED: consider formally opting in to Privacy Act coverage under s 6EA — free, revocable, and it puts the business name and ABN on a public OAIC register.]</span></p>
+
+  <h2 id="breach">13. If there's a data breach</h2>
+  <p>If personal information we hold is lost or accessed by someone who shouldn't have it, and there's a real risk of serious harm to you, we will assess it promptly, notify you directly, and notify the Office of the Australian Information Commissioner. We'll tell you what happened, what information was involved, and what you should do about it. We won't sit on it.</p>
+
+  <h2 id="bases">14. Legal bases (GDPR)</h2>
+  <p>If you're in the UK or EU, we rely on:</p>
   <ul>
-    <li><strong>Access</strong> the personal data we hold about you;</li>
-    <li><strong>Correct</strong> inaccurate data;</li>
-    <li><strong>Delete</strong> your data (you can do this yourself in-app, as above);</li>
-    <li><strong>Export / port</strong> your data;</li>
-    <li><strong>Object to</strong> or <strong>restrict</strong> certain processing, and <strong>withdraw consent</strong> at any time.</li>
+    <li><strong>Performing our contract with you</strong> — running your account, your subscription, your backups and your orders;</li>
+    <li><strong>Your consent</strong> — for camera, microphone and location access, which you grant through the iPhone permission prompts and can withdraw at any time in your device settings, and for the website waitlist;</li>
+    <li><strong>Our legitimate interests</strong> — keeping the app stable and secure, fixing bugs, and stopping abuse of our public endpoints, where those interests don't override your rights.</li>
   </ul>
-  <p>To exercise any of these, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>. You also have the right to complain to your local data-protection authority.</p>
 
-  <h2 id="california">11. California privacy (CCPA/CPRA)</h2>
-  <p>If you are a California resident: in the past 12 months we have collected the categories of personal information described in section 2 (identifiers, internet/usage and diagnostic activity, geolocation, audio/visual content, and commercial/purchase information). We collect it for the purposes described in section 4. <strong>We do not sell or share your personal information, and have not done so in the preceding 12 months.</strong> You have the right to know, access, correct, and delete your personal information, and to not be discriminated against for exercising these rights. To make a request, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
+  <h2 id="california">15. California (CCPA/CPRA)</h2>
+  <p>If you're a California resident: in the past 12 months we've collected the categories described in section 2 — identifiers, internet and diagnostic activity, geolocation, audio and visual content, and commercial information — for the purposes in section 5. <strong>We have not sold or shared your personal information, and we don't.</strong> You can ask us to tell you what we hold, to correct it, or to delete it, and we won't treat you differently for asking. Email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
 
-  <h2 id="australia">12. Australian users</h2>
-  <p>We are based in Australia and aim to handle personal information consistently with the Australian Privacy Principles (APPs) under the Privacy Act 1988 (Cth). Your core account data and content (held by Supabase) are stored in Australia, in the Sydney region. Some of our other service providers (listed in section 5 — for example subscription management, crash reporting, and payments) are located overseas, including in the United States, and we take reasonable steps to ensure they handle your data appropriately. If you have a privacy concern, contact us at <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>; you may also contact the Office of the Australian Information Commissioner (OAIC).</p>
+  <h2 id="children">16. Children</h2>
+  <p>Clippar is for people aged 13 and over and isn't aimed at children. We don't knowingly collect personal information from anyone under 13. If you think a child has given us their information, email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> and we'll delete it.</p>
 
-  <h2 id="children">13. Children</h2>
-  <p>Clippar is intended for users aged 13 and over and is not directed to children. We do not knowingly collect personal information from children under 13 (or the minimum age required in your country). If you believe a child has provided us with personal information, contact <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a> and we will delete it.</p>
+  <h2 id="security">17. Security</h2>
+  <p>Everything travels over encrypted connections (HTTPS/TLS). Access to our database and storage is restricted so that your rows and files are only reachable by your account. Share links use a 128-bit random token that can't realistically be guessed, and the video address behind a link expires after an hour. Account deletion requires you to have signed in within the last ten minutes, so a stolen session can't be used to destroy your account.</p>
+  <p>No system is perfectly secure, and we won't claim otherwise. If something goes wrong, section 13 says what we'll do.</p>
 
-  <h2 id="security">14. Security</h2>
-  <p>We use measures to protect your information, including encrypted transport (HTTPS/TLS) for data in transit and access controls on our database and storage. No method of transmission or storage is completely secure, so we cannot guarantee absolute security. If we become aware of a breach affecting your personal data, we will act in line with our legal obligations.</p>
-
-  <h2 id="transfers">15. International transfers</h2>
-  <p>Your core account data and content are stored by Supabase in Australia (Sydney region). Some of our other service providers — such as subscription management, crash reporting, and payments — store and process data overseas, including in the United States, and the website waitlist database is hosted by Neon. If you are located outside the region where a provider stores data, your information may be transferred across borders; where required, we rely on appropriate safeguards (such as the providers' Standard Contractual Clauses) for those transfers.</p>
-
-  <h2 id="changes">16. Changes &amp; contact</h2>
-  <p>We may update this policy from time to time. When we make material changes we will update the “Last updated” date above and, where appropriate, notify you in the app or on this page. Questions about this policy or your data? Email <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
+  <h2 id="changes">18. Changes &amp; contact</h2>
+  <p>We may update this policy. When we change something that actually affects you, we'll update the “Last updated” date and tell you in the app or on this page. Questions, requests or complaints: <a href="mailto:clippargolf@gmail.com">clippargolf@gmail.com</a>.</p>
+  <p><span class="todo">[DECISION NEEDED: add the registered business name, ABN and a postal address here once the trading entity is settled.]</span></p>
 </main>
 
 <footer>
   <div class="logo"><img src="/landing_assets/clippar-stacked-white.png" alt="Clippar Golf" width="360" height="234"></div>
   <p>&copy; 2026 Clippar &middot; clippargolf@gmail.com</p>
-  <nav><a href="/">Home</a><a href="/terms">Terms</a></nav>
+  <nav><a href="/">Home</a><a href="/terms">Terms</a><a href="/hardware-terms">Mount Kit Terms</a></nav>
 </footer>
 </body>
 </html>

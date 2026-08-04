@@ -1,47 +1,88 @@
 import { useState, useEffect, useCallback } from 'react';
-import { View, Text, ScrollView, Pressable, Switch } from 'react-native';
+import { View, Text, ScrollView, Pressable } from 'react-native';
 import { Stack } from 'expo-router';
 import * as Haptics from 'expo-haptics';
-import { Scissors, Clock, Zap } from 'lucide-react-native';
+import { Clock, Zap } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
-import { config } from '@/constants/config';
+import {
+  config,
+  resolveSavedTrimWindow,
+  splitDurationPreset,
+  TRIM_WINDOW_MARKER,
+} from '@/constants/config';
 import { getSetting, setSetting } from '@/lib/storage';
 
+/**
+ * Trim Settings — how much of each swing is kept, before and after impact.
+ *
+ * EVERY CONTROL ON THIS SCREEN WRITES TRIM_WINDOW_MARKER, and the initial values
+ * come back through resolveSavedTrimWindow, the same resolver hooks/useCamera
+ * and hooks/useEditorState trim with. Both halves are load-bearing:
+ *
+ *  - Without the marker on save, hooks/useCamera.loadTrimSettings and
+ *    hooks/useEditorState.getTrimSettings discard the override as a pre-FIX-#8
+ *    leftover. That was the bug: the pickers and presets saved happily, showed
+ *    the new length, and every clip still trimmed to 2500/1500.
+ *  - Without the shared resolver on load, this screen shows a length the
+ *    pipeline does not use. It previously seeded from config.trim.defaultPre/
+ *    PostRollMs (3000/2000) and opened claiming 5.0s clips that never existed.
+ *
+ * See constants/config.ts for the full history of the guard.
+ *
+ * The "Auto-trim" switch that used to sit at the top of this screen is gone —
+ * nothing read it, and nothing safely could. Rationale lives with the removed
+ * config.trim.autoTrimEnabled field.
+ */
 export default function TrimSettingsScreen() {
-  const [autoTrimEnabled, setAutoTrimEnabled] = useState<boolean>(config.trim.autoTrimEnabled);
-  const [preRollMs, setPreRollMs] = useState<number>(config.trim.defaultPreRollMs);
-  const [postRollMs, setPostRollMs] = useState<number>(config.trim.defaultPostRollMs);
+  // Day-zero values are the window the pipeline actually falls back to, not the
+  // legacy "defaults" — so a first-run screen matches a first-run trim.
+  const [preRollMs, setPreRollMs] = useState<number>(config.trim.windows.fullSwing.preRollMs);
+  const [postRollMs, setPostRollMs] = useState<number>(config.trim.windows.fullSwing.postRollMs);
 
-  // Load saved settings
+  // Load saved settings through the readers' own resolver, so what is on screen
+  // is what the next clip will be trimmed to — including the case where a stale
+  // untagged override exists and is (correctly) ignored by both.
   useEffect(() => {
     (async () => {
-      const saved = await getSetting('trim_settings');
-      if (saved) {
-        try {
-          const parsed = JSON.parse(saved);
-          if (parsed.autoTrimEnabled !== undefined) setAutoTrimEnabled(parsed.autoTrimEnabled);
-          if (parsed.preRollMs) setPreRollMs(parsed.preRollMs);
-          if (parsed.postRollMs) setPostRollMs(parsed.postRollMs);
-        } catch {}
+      try {
+        const saved = await getSetting('trim_settings');
+        const window = resolveSavedTrimWindow(saved);
+        setPreRollMs(window.preRollMs);
+        setPostRollMs(window.postRollMs);
+      } catch {
+        // Keep the config window already in state.
       }
     })();
   }, []);
 
-  // Save settings on change
-  const save = useCallback(async (updates: Record<string, any>) => {
-    const current = {
-      autoTrimEnabled,
-      preRollMs,
-      postRollMs,
-      ...updates,
-    };
-    await setSetting('trim_settings', JSON.stringify(current));
-  }, [autoTrimEnabled, preRollMs, postRollMs]);
+  // Save settings on change.
+  //
+  // `window: TRIM_WINDOW_MARKER` is not decoration — it is the flag both readers
+  // gate on. Drop it and every control here goes silently dead again.
+  const save = useCallback(
+    async (next: { preRollMs: number; postRollMs: number }) => {
+      await setSetting(
+        'trim_settings',
+        JSON.stringify({ ...next, window: TRIM_WINDOW_MARKER })
+      );
+    },
+    []
+  );
+
+  const applyWindow = useCallback(
+    (next: { preRollMs: number; postRollMs: number }) => {
+      Haptics.selectionAsync();
+      setPreRollMs(next.preRollMs);
+      setPostRollMs(next.postRollMs);
+      void save(next);
+    },
+    [save]
+  );
 
   const totalDuration = (preRollMs + postRollMs) / 1000;
 
-  const PREROLL_OPTIONS = [1000, 1500, 2000, 2500, 3000, 3500, 4000];
-  const POSTROLL_OPTIONS = [1000, 1500, 2000, 2500, 3000, 3500, 4000, 5000];
+  const PREROLL_OPTIONS = config.trim.preRollOptionsMs;
+  const POSTROLL_OPTIONS = config.trim.postRollOptionsMs;
   const DURATION_PRESETS = config.trim.durationPresets;
 
   return (
@@ -51,56 +92,9 @@ export default function TrimSettingsScreen() {
         style={{ flex: 1, backgroundColor: theme.colors.background }}
         contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
       >
-        {/* Auto-trim toggle */}
-        <View
-          style={{
-            backgroundColor: theme.colors.surfaceElevated,
-            borderRadius: theme.radius.lg,
-            borderWidth: 1,
-            borderColor: theme.colors.surfaceBorder,
-            padding: 16,
-            marginBottom: 16,
-          }}
-        >
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12, flex: 1 }}>
-              <View
-                style={{
-                  width: 34,
-                  height: 34,
-                  borderRadius: 8,
-                  backgroundColor: theme.colors.primary + '20',
-                  justifyContent: 'center',
-                  alignItems: 'center',
-                }}
-              >
-                <Scissors size={18} color={theme.colors.primary} />
-              </View>
-              <View style={{ flex: 1 }}>
-                <Text style={{ color: theme.colors.textPrimary, fontWeight: '600', fontSize: 15 }}>
-                  Auto-trim
-                </Text>
-                <Text style={{ color: theme.colors.textSecondary, fontSize: 12, marginTop: 2 }}>
-                  Automatically detect and trim golf swings on import
-                </Text>
-              </View>
-            </View>
-            <Switch
-              value={autoTrimEnabled}
-              onValueChange={(val) => {
-                Haptics.selectionAsync();
-                setAutoTrimEnabled(val);
-                save({ autoTrimEnabled: val });
-              }}
-              trackColor={{ false: theme.colors.surfaceBorder, true: theme.colors.primary }}
-              thumbColor="#fff"
-            />
-          </View>
-        </View>
-
         {/* Duration presets */}
         <Text style={{ color: theme.colors.textPrimary, fontWeight: '700', fontSize: 15, marginBottom: 8 }}>
-          Auto-trim Duration
+          Clip Length
         </Text>
         <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginBottom: 12 }}>
           Total clip length after trimming. Currently: {totalDuration.toFixed(1)}s
@@ -111,15 +105,7 @@ export default function TrimSettingsScreen() {
             return (
               <Pressable
                 key={d}
-                onPress={() => {
-                  Haptics.selectionAsync();
-                  // Split duration: 40% pre, 60% post (slightly more follow-through)
-                  const pre = Math.round(d * 0.4);
-                  const post = d - pre;
-                  setPreRollMs(pre);
-                  setPostRollMs(post);
-                  save({ preRollMs: pre, postRollMs: post });
-                }}
+                onPress={() => applyWindow(splitDurationPreset(d))}
                 style={{
                   flex: 1,
                   paddingVertical: 12,
@@ -183,11 +169,7 @@ export default function TrimSettingsScreen() {
               return (
                 <Pressable
                   key={ms}
-                  onPress={() => {
-                    Haptics.selectionAsync();
-                    setPreRollMs(ms);
-                    save({ preRollMs: ms });
-                  }}
+                  onPress={() => applyWindow({ preRollMs: ms, postRollMs })}
                   style={{
                     paddingHorizontal: 14,
                     paddingVertical: 8,
@@ -251,11 +233,7 @@ export default function TrimSettingsScreen() {
               return (
                 <Pressable
                   key={ms}
-                  onPress={() => {
-                    Haptics.selectionAsync();
-                    setPostRollMs(ms);
-                    save({ postRollMs: ms });
-                  }}
+                  onPress={() => applyWindow({ preRollMs, postRollMs: ms })}
                   style={{
                     paddingHorizontal: 14,
                     paddingVertical: 8,
@@ -280,9 +258,13 @@ export default function TrimSettingsScreen() {
           </View>
         </View>
 
-        {/* Info note */}
+        {/* Info note. "Next" is exact, not a hedge: both readers resolve this
+            window when a clip is first processed, so shots already recorded or
+            imported keep the length they were trimmed at. Changing these
+            settings can never go back and shorten footage you already have. */}
         <Text style={{ color: theme.colors.textTertiary, fontSize: 12, textAlign: 'center', lineHeight: 18 }}>
-          Settings apply to the next video you import.{'\n'}
+          Applies to the next shot you record or import.{'\n'}
+          Clips already trimmed keep their current length.{'\n'}
           Trimming uses Apple Vision pose detection — no quality loss.
         </Text>
       </ScrollView>

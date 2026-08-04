@@ -12,46 +12,44 @@ import {
   clipExists,
 } from '@/lib/storage';
 import { detectAndTrim, deleteFile, getDevicePitchDeg, getMemoryStats } from 'shot-detector';
-import { config } from '@/constants/config';
+import { config, resolveEffectiveTrimWindow, type TrimWindow } from '@/constants/config';
 import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { persistAsset } from '@/lib/media';
 import { videoExtension } from '@/lib/clipPaths';
+import { mirrorRecordedClip } from '@/lib/photosMirror';
 import { logDetection } from '@/lib/detectionLog';
+import {
+  describeTrimWindowSource,
+  logTrimRequest,
+  logTrimResult,
+} from '@/lib/trimDiagnostics';
 import { canStartRecording, resolveStopRequest } from '@/lib/liveRecordingLogic';
 import { markTrimInFlight, clearTrimInFlight } from '@/lib/trimInFlight';
 
-// Resolve the active trim window (pre/post roll). Mirrors
-// useEditorState.getTrimSettings so live record uses the same numbers as import.
+// Resolve the active trim window (pre/post roll) for live capture.
 //
-// FIX #8 — full-swing window must win over a stale saved override.
-// The DEFAULT is now config.trim.windows.fullSwing (2500/1500, ~4s total),
-// NOT the legacy defaultPreRollMs/defaultPostRollMs (3000/2000). A saved
-// 'trim_settings' override is only honored when the user EXPLICITLY opted into
-// the new window (parsed.window === 'fullSwing'). Overrides written before this
-// change carry no `window` marker (or carry the old 3000/2000 numbers), so they
-// are intentionally ignored here — otherwise they would silently shadow the new
-// fullSwing window and day-zero clips would keep trimming to the old length.
-async function loadTrimSettings(): Promise<{ preRollMs: number; postRollMs: number }> {
-  let { preRollMs, postRollMs } = config.trim.windows.fullSwing;
+// This used to be a hand-copy of useEditorState.getTrimSettings, with a comment
+// on each asking the next person to keep the two in step. They are now the same
+// call — resolveEffectiveTrimWindow in constants/config — because a divergence
+// here means a clip re-trimmed in the editor differs from the one that was
+// recorded, on footage that cannot be shot again. That file also carries the
+// FIX #8 history: why a stored override needs the fullSwing marker to count,
+// and how the marker's absence in the settings UI made every user-set trim
+// length a no-op.
+// The RAW stored string is returned alongside the resolved window purely so the
+// [trim-diag] block can print it. Without it the console can show what the
+// pipeline trimmed to but not what the user actually saved, and those two being
+// indistinguishable is the whole reason "my trim setting does nothing" was
+// unanswerable. It is diagnostic only — nothing branches on `raw`.
+async function loadTrimSettings(): Promise<{ raw: string | null; effective: TrimWindow }> {
+  let saved: string | null = null;
   try {
-    const saved = await getSetting('trim_settings');
-    if (saved) {
-      const parsed = JSON.parse(saved);
-      // Only an explicit fullSwing-tagged override may replace the config window.
-      if (parsed.window === 'fullSwing') {
-        if (parsed.preRollMs) preRollMs = parsed.preRollMs;
-        if (parsed.postRollMs) postRollMs = parsed.postRollMs;
-      }
-    }
-  } catch {}
-  // Tracer hook (no-op at the default 0): a longer post-impact window keeps
-  // more ball flight in the trimmed clip for the arc draw-on. Gated on
-  // config.tracer.enabled so day-zero behavior is byte-identical. Mirrored in
-  // useEditorState.getTrimSettings so import re-trims match live record.
-  if (config.tracer.enabled && config.tracer.extraPostRollMs > 0) {
-    postRollMs += config.tracer.extraPostRollMs;
+    saved = await getSetting('trim_settings');
+  } catch {
+    // Storage read failed — fall through with null so we trim to the config
+    // window rather than skipping the recording's trim entirely.
   }
-  return { preRollMs, postRollMs };
+  return { raw: saved, effective: resolveEffectiveTrimWindow(saved) };
 }
 
 // Resolve the configured detection strategy + options for the native dispatch.
@@ -548,8 +546,19 @@ export function useCamera({
         // under the editor during "Review round so far").
         if (clipId) markTrimInFlight(clipId);
         InteractionManager.runAfterInteractions(() => {
-          loadTrimSettings().then(async ({ preRollMs, postRollMs }) => {
+          loadTrimSettings().then(async ({ raw: rawTrimSetting, effective }) => {
+          const { preRollMs, postRollMs } = effective;
           try {
+            // [trim-diag] steps 1-4, printed BEFORE the native call so a
+            // detectAndTrim that hangs or rejects still leaves the ask on the
+            // console. Non-fatal by construction — see lib/trimDiagnostics.
+            logTrimRequest({
+              path: 'live-capture',
+              clipId,
+              where: `hole ${hole}, shot ${shot}`,
+              source: describeTrimWindowSource(rawTrimSetting),
+              requested: { preRollMs, postRollMs },
+            });
             // Forward the configured detection strategy + options. Live record
             // processes one clip at a time with no inter-clip context ([]).
             const { strategy, optionsJson } = resolveDetection();
@@ -561,6 +570,19 @@ export function useCamera({
               strategy,
               optionsJson
             );
+            // [trim-diag] steps 5-7: what native returned, the window that
+            // implies, and an explicit MISMATCH line when it is not the window
+            // that was asked for. `durationSeconds` is the wall-clock length of
+            // the recording, which lets a swing near either end of the file be
+            // told apart from a setting that was ignored.
+            logTrimResult({
+              path: 'live-capture',
+              clipId,
+              where: `hole ${hole}, shot ${shot}`,
+              requested: { preRollMs, postRollMs },
+              outcome: result,
+              sourceDurationMs: durationSeconds > 0 ? durationSeconds * 1000 : null,
+            });
             // A/B harness (additive, non-fatal): record a structured row.
             void logDetection(clipId, result).catch(() => {});
             if (!clipId) return;
@@ -579,9 +601,23 @@ export function useCamera({
             }
 
             if (result.found && result.trimmedUri) {
-              // Swing detected + trimmed file produced
+              // Shot detected + trimmed file produced — SWING OR PUTT.
+              //
+              // This line said "Swing" unconditionally, and native produces a
+              // trimmed file for putts too (ShotDetectorModule.swift
+              // detectAndTrimVideo has no putt-specific early return), so every
+              // putt was reported to the console as a swing.
+              //
+              // That mislabel cost a day. A driver was classified `putt` at
+              // confidence 0.25 — the fallback classifier calls anything over
+              // 12s a putt on duration alone — which sent it through the native
+              // putt trim floor and overrode the user's post-roll setting. The
+              // console said "Swing", so the putt path was never suspected and
+              // it read as "trim settings are ignored". Print what native
+              // actually decided.
+              const label = result.shotType === 'putt' ? 'Putt' : 'Swing';
               console.log(
-                `[ShotDetector] Swing @ ${result.impactTimeMs}ms ` +
+                `[ShotDetector] ${label} @ ${result.impactTimeMs}ms ` +
                   `(conf ${result.confidence.toFixed(2)}) → trim ${result.trimStartMs}..${result.trimEndMs}ms`
               );
               await markClipTrimmed(
@@ -598,11 +634,31 @@ export function useCamera({
                 shot_type: result.shotType,
               }).catch(() => {});
               onShotClassified?.(result.shotType);
-            } else if (result.found && result.shotType === 'putt') {
-              // Putt — no trim file, keep full original
+            } else if (result.found) {
+              // DETECTED, BUT THE TRIM EXPORT FAILED — for a putt OR a swing.
+              //
+              // The branch above takes every result carrying a trimmedUri, and
+              // native writes one for putts as readily as for swings
+              // (ShotDetectorModule.swift detectAndTrimVideo has no
+              // putt-specific early return), so reaching here means
+              // AVAssetExportSession could not be created or the export
+              // errored. Keeping the full clip is the fallback, not the intent.
+              //
+              // This used to be `result.found && result.shotType === 'putt'`,
+              // which quietly sent a SWING with a failed export to the final
+              // else — where it was logged as "No swing detected" and persisted
+              // with `markClipTrimmed(clipId, finalUri, null, null)`. Two
+              // things were thrown away that we already had: the impact time,
+              // which the manual trimmer and the tracer anchor on, so the
+              // golfer opened the trimmer on a clip with no anchor; and the
+              // classification, replaced by an assumed 'swing' that happened to
+              // be right only because the assumption matched. A failed export
+              // is an export problem — it says nothing about whether a shot was
+              // detected, so the detection must survive it.
+              const label = result.shotType === 'putt' ? 'Putt' : 'Swing';
               console.log(
-                `[ShotDetector] Putt @ ${result.impactTimeMs}ms ` +
-                  `(conf ${result.confidence.toFixed(2)}) — keeping full clip`
+                `[ShotDetector] ${label} @ ${result.impactTimeMs}ms ` +
+                  `(conf ${result.confidence.toFixed(2)}) — trim export failed, keeping full clip`
               );
               await markClipTrimmed(
                 clipId,
@@ -611,14 +667,17 @@ export function useCamera({
                 result.confidence
               ).catch(() => {});
               await updateClipEditorState(clipId, {
+                // 0 / -1 is "the whole file", the same shape the untrimmed
+                // fallback has always used.
                 trim_start_ms: 0,
                 trim_end_ms: -1,
-                shot_type: 'putt',
+                shot_type: result.shotType,
               }).catch(() => {});
-              onShotClassified?.('putt');
+              onShotClassified?.(result.shotType);
             } else {
-              // No usable detection — still mark as processed so editor won't retry
-              console.log('[ShotDetector] No swing detected — keeping full clip, mark processed');
+              // NOTHING DETECTED — now the only thing this branch means. Mark
+              // processed anyway so the editor's retry pass leaves it alone.
+              console.log('[ShotDetector] No shot detected — keeping full clip, mark processed');
               await markClipTrimmed(clipId, finalUri, null, null).catch(() => {});
               // Assume swing for hole-advance purposes; the auto-advance logic
               // is tolerant of bogus classifications across many clips.
@@ -631,6 +690,31 @@ export function useCamera({
           }
           });
         });
+
+        // "Save raw clips to Photos" — the RECORD half of the setting.
+        //
+        // This setting had exactly one reader, on the import path, for its
+        // whole life. Recorded clips — the way most footage enters the app —
+        // were saved with no photos_asset_id, so reinstall recovery
+        // (lib/photosRecovery.ts, which selects on that column) could not see
+        // them, and Storage & Backup showed a green tick saying otherwise. A
+        // golfer who trusted it and wiped their phone lost rounds that cannot
+        // be re-shot. lib/photosMirrorPolicy.ts holds the shared WHEN so this
+        // path and import.tsx can't answer it differently again.
+        //
+        // Ordering is load-bearing and deliberately UNLIKE import's:
+        //   - AFTER saveLocalClip, so the row exists before we touch Photos
+        //     and a MediaLibrary stall/throw can never cost the clip;
+        //   - inside runAfterInteractions and never awaited, so copying a
+        //     ~150MB movie never sits between the golfer and their next shot;
+        //   - registered AFTER detection above, so the trim still goes first.
+        // mirrorRecordedClip swallows every failure and writes the asset id
+        // onto the row itself (setClipPhotosAssetId).
+        if (clipId) {
+          InteractionManager.runAfterInteractions(() => {
+            void mirrorRecordedClip(clipId, finalUri);
+          });
+        }
 
         const clip: ClipMetadata = {
           // Carry the SQLite rowid so "Delete last shot" can actually delete
