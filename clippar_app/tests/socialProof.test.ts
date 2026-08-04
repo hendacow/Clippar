@@ -41,7 +41,20 @@ const codeOnly = (src: string) =>
  *  hooks + lib), excluding tests and generated/vendored trees. */
 function sourceFiles(): string[] {
   const out: string[] = [];
-  const skip = new Set(['node_modules', '.git', 'tests', 'ios', 'android', '.expo', 'dist']);
+  // `.claude` holds agent worktrees — full nested copies of this repo, pinned
+  // at whatever commit they were cut from. Without it the walker re-scans a
+  // PRE-FIX snapshot of onboardingFlow.ts and reports the very figures this PR
+  // removed, so the test fails on source that does not ship.
+  const skip = new Set([
+    'node_modules',
+    '.git',
+    '.claude',
+    'tests',
+    'ios',
+    'android',
+    '.expo',
+    'dist',
+  ]);
   const walk = (dir: string) => {
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       if (skip.has(entry.name)) continue;
