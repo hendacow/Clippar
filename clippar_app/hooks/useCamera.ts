@@ -600,8 +600,47 @@ export function useCamera({
               return;
             }
 
-            if (result.found && result.trimmedUri) {
-              // Shot detected + trimmed file produced — SWING OR PUTT.
+            if (result.found && result.shotType === 'putt') {
+              // PUTT — KEEP THE WHOLE RECORDING, whatever its length.
+              //
+              // Henry's call 2026-08-05: trimming is for swings. A putt is
+              // worth keeping in full — the interesting part is the ball
+              // travelling to the hole, which has no fixed relationship to
+              // the moment of contact, so any window centred on impact cuts
+              // off the part the golfer wants.
+              //
+              // This runs BEFORE the trimmed-file branch on purpose. Native
+              // trims putts as readily as swings, so `result.trimmedUri` is
+              // usually set here and the old ordering silently applied the
+              // swing window to putts. The trimmed file is deleted rather
+              // than orphaned in the cache.
+              //
+              // The classification and impact time are still persisted: the
+              // putt→swing hole-advance detector reads shotType, and the
+              // manual trimmer anchors on impactTimeMs even for an untrimmed
+              // clip. 0 / -1 is the established "whole file" pair.
+              if (result.trimmedUri && result.trimmedUri !== finalUri) {
+                deleteFile(result.trimmedUri).catch(() => {});
+              }
+              console.log(
+                `[ShotDetector] Putt @ ${result.impactTimeMs}ms ` +
+                  `(conf ${result.confidence.toFixed(2)}) — keeping the full recording, not trimmed`
+              );
+              await markClipTrimmed(
+                clipId,
+                finalUri,
+                result.impactTimeMs,
+                result.confidence
+              ).catch(() => {});
+              await updateClipEditorState(clipId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              }).catch(() => {});
+              onShotClassified?.('putt');
+            } else if (result.found && result.trimmedUri) {
+              // SWING detected + trimmed file produced. Putts no longer reach
+              // this branch — see above.
               //
               // This line said "Swing" unconditionally, and native produces a
               // trimmed file for putts too (ShotDetectorModule.swift

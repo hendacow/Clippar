@@ -661,7 +661,28 @@ export function useEditorState(roundId: string | undefined) {
         // Persist to SQLite
         const numId = parseInt(clipId, 10);
         if (!isNaN(numId) && storage) {
-          if (result.found && result.trimmedUri) {
+          if (result.found && result.shotType === 'putt') {
+            // PUTT — KEEP THE WHOLE RECORDING. Same rule as live capture
+            // (hooks/useCamera.ts): trimming is for swings, and a window
+            // centred on impact cuts off the ball travelling to the hole,
+            // which is the part worth keeping. Runs before the trimmed-file
+            // branch because native trims putts too, so trimmedUri is
+            // normally set here; the trimmed file is deleted rather than
+            // orphaned. Classification and impact time still persist.
+            if (result.trimmedUri && result.trimmedUri !== originalSourceUri) {
+              deleteFile(result.trimmedUri).catch(() => {});
+            }
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
+              .catch(() => {});
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              })
+              .catch(() => {});
+          } else if (result.found && result.trimmedUri) {
             await storage
               .markClipTrimmed(
                 numId,
@@ -857,7 +878,13 @@ export function useEditorState(roundId: string | undefined) {
 
         const originalSourceUri = clip.sourceUri!;
 
-        if (result.found && result.trimmedUri) {
+        if (result.found && result.shotType === 'putt') {
+          // PUTT — the in-memory clip keeps pointing at the full recording.
+          // Only the impact time and confidence are worth carrying, so the
+          // trimmer has an anchor on an untrimmed clip.
+          updatedClip.trimConfidence = result.confidence;
+          updatedClip.impactTimeMs = result.impactTimeMs;
+        } else if (result.found && result.trimmedUri) {
           updatedClip.sourceUri = result.trimmedUri;
           updatedClip.originalUri = originalSourceUri;
           // Store trim offsets relative to the ORIGINAL video (for full-timeline trimmer)
@@ -875,7 +902,23 @@ export function useEditorState(roundId: string | undefined) {
         // Persist to SQLite
         const numId = parseInt(clip.id, 10);
         if (!isNaN(numId) && storage) {
-          if (result.found && result.trimmedUri) {
+          if (result.found && result.shotType === 'putt') {
+            // PUTT — keep the whole recording. Same rule as trimClip above
+            // and as live capture.
+            if (result.trimmedUri && result.trimmedUri !== originalSourceUri) {
+              deleteFile(result.trimmedUri).catch(() => {});
+            }
+            await storage
+              .markClipTrimmed(numId, originalSourceUri, result.impactTimeMs, result.confidence)
+              .catch(() => {});
+            await storage
+              .updateClipEditorState(numId, {
+                trim_start_ms: 0,
+                trim_end_ms: -1,
+                shot_type: 'putt',
+              })
+              .catch(() => {});
+          } else if (result.found && result.trimmedUri) {
             await storage
               .markClipTrimmed(
                 numId,
