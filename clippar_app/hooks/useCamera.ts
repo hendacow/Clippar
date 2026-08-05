@@ -19,6 +19,7 @@ import { persistAsset } from '@/lib/media';
 import { videoExtension } from '@/lib/clipPaths';
 import { mirrorRecordedClip } from '@/lib/photosMirror';
 import { logDetection } from '@/lib/detectionLog';
+import { visionDetectAndTrim } from '@/lib/visionTrim';
 import {
   describeTrimWindowSource,
   logTrimRequest,
@@ -563,14 +564,31 @@ export function useCamera({
             // Forward the configured detection strategy + options. Live record
             // processes one clip at a time with no inter-clip context ([]).
             const { strategy, optionsJson } = resolveDetection();
-            const result = await detectAndTrim(
-              finalUri,
-              preRollMs,
-              postRollMs,
-              [],
-              strategy,
-              optionsJson
-            );
+            // VISION FIRST, shot-detector as the fallback.
+            //
+            // swing-vision localizes the swing INSTANT by motion (the club's
+            // reversal at the top of the backswing, then the downswing spike
+            // ~0.20s later) and decides shot-vs-putt by BODY POSE (peak wrist
+            // height in torso lengths) — measured 52/56 on 56 labelled clips.
+            // Its result is shaped as a DetectAndTrimResult so every branch
+            // below (including shouldKeepFullRecording and onShotClassified
+            // for hole auto-advance) is unchanged.
+            //
+            // visionDetectAndTrim returns null and never throws when
+            // config.detection.swingVision is off, when the module or model
+            // isn't in this build, when the native call rejects, or when the
+            // trim produced no file — we then fall through to the unchanged
+            // detectAndTrim path.
+            const result =
+              (await visionDetectAndTrim(finalUri, { preRollMs, postRollMs })) ??
+              (await detectAndTrim(
+                finalUri,
+                preRollMs,
+                postRollMs,
+                [],
+                strategy,
+                optionsJson
+              ));
             // [trim-diag] steps 5-7: what native returned, the window that
             // implies, and an explicit MISMATCH line when it is not the window
             // that was asked for. `durationSeconds` is the wall-clock length of

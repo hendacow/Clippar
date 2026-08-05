@@ -6,7 +6,10 @@ import { dirname, join } from 'node:path';
 import {
   isConfidentClassification,
   shouldKeepFullRecording,
+  resolveVisionStroke,
   REAL_CLASSIFICATION_MIN_CONFIDENCE,
+  VISION_POSE_CONFIDENCE,
+  VISION_MOTION_FALLBACK_CONFIDENCE,
 } from '../lib/shotPolicy';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -81,6 +84,101 @@ test('the threshold sits in the gap between the two classifiers', () => {
 
   assert.equal(isConfidentClassification({ found: true, confidence: ceiling }), false);
   assert.equal(isConfidentClassification({ found: true, confidence: 0.6 }), true);
+});
+
+// swing-vision reports confidence as an image-prototype score (~0.0-0.1). If
+// that were passed through raw, EVERY vision result would land below the
+// threshold above — including the pose classifications that are the best
+// signal the app has — so resolveVisionStroke translates onto this scale.
+
+test('a pose-seen putt keeps the full recording', () => {
+  const s = resolveVisionStroke({ strokeType: 'putt', wristHeight: -0.7 });
+  assert.equal(s.strokeType, 'putt');
+  assert.equal(s.poseDecided, true);
+  assert.equal(
+    shouldKeepFullRecording({ found: true, shotType: s.strokeType, confidence: s.confidence }),
+    true,
+    'pose measured the wrist height — that is a real classification'
+  );
+});
+
+test('a putt with NO pose reading is trimmed, not kept', () => {
+  // Without a body to measure, 'putt' is a residue label that non-golf footage
+  // lands in too. The 36-clip round is what this rule exists to prevent.
+  for (const wristHeight of [undefined, null, NaN, Infinity] as unknown[]) {
+    const s = resolveVisionStroke({
+      strokeType: 'putt',
+      wristHeight: wristHeight as number,
+    });
+    assert.equal(s.strokeType, 'swing', 'an unseen putt must be trimmed like any shot');
+    assert.equal(
+      shouldKeepFullRecording({ found: true, shotType: s.strokeType, confidence: s.confidence }),
+      false
+    );
+  }
+});
+
+test('a vision swing is never kept whole, pose or not', () => {
+  for (const wristHeight of [0.6, undefined] as unknown[]) {
+    const s = resolveVisionStroke({ strokeType: 'swing', wristHeight: wristHeight as number });
+    assert.equal(s.strokeType, 'swing');
+    assert.equal(
+      shouldKeepFullRecording({ found: true, shotType: s.strokeType, confidence: s.confidence }),
+      false
+    );
+  }
+});
+
+test('the two vision confidences sit on the correct sides of the bar', () => {
+  // The whole translation depends on this ordering. Pin it so a future tuning
+  // pass cannot move one across the threshold without a failing test.
+  assert.ok(
+    VISION_POSE_CONFIDENCE >= REAL_CLASSIFICATION_MIN_CONFIDENCE,
+    'a pose classification must read as real'
+  );
+  assert.ok(
+    VISION_MOTION_FALLBACK_CONFIDENCE < REAL_CLASSIFICATION_MIN_CONFIDENCE,
+    'the unmeasured motion fallback must read as a guess'
+  );
+});
+
+test('the vision adapter uses the shared policy rather than its own rule', () => {
+  const src = read('lib/visionTrim.ts');
+  assert.match(src, /resolveVisionStroke\(r\)/, 'visionTrim must not re-derive the stroke rule');
+  assert.doesNotMatch(
+    src,
+    /confidence:\s*r\.confidence/,
+    'the native prototype score must never be passed through as a confidence'
+  );
+});
+
+test('the vision path can only add detections, never remove one', () => {
+  // Every non-detection must return null so shot-detector still runs. If this
+  // module ever answers `found: false` it has ENDED the clip's processing on
+  // its own abstention, and a clip the old path would have trimmed comes back
+  // full length — the exact regression this feature is meant to fix.
+  const src = read('lib/visionTrim.ts');
+  const code = src
+    .slice(src.indexOf('export async function visionDetectAndTrim'))
+    // Drop comments — the rule is explained in prose that quotes the very
+    // thing it forbids, and only real code should be asserted against.
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^\s*\/\/.*$/gm, '');
+  assert.doesNotMatch(
+    code,
+    /found:\s*false/,
+    'a NO_SWING result must fall through to shot-detector, not answer for it'
+  );
+});
+
+test('the vision path is gated on a config flag that needs no rebuild', () => {
+  // Henry has to be able to revert this in one line if it disappoints in the
+  // field. The check must come BEFORE anything touches native, so that "off"
+  // is the same route as "module not in this build".
+  const src = read('lib/visionTrim.ts');
+  assert.match(src, /config\.detection\.swingVision/, 'visionTrim must read the kill switch');
+  const cfg = read('constants/config.ts');
+  assert.match(cfg, /swingVision:\s*true as boolean/, 'the flag must exist and default on');
 });
 
 test('all three trim paths route through the shared policy', () => {

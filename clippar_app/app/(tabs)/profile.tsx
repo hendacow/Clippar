@@ -800,6 +800,18 @@ export default function ProfileScreen() {
                   subtitle="Synthetic GPS shots → rendered tracer arcs"
                   onPress={() => router.push('/(dev)/tracer-sim')}
                 />
+                <Divider />
+                {/* The fastest way to tell whether swing-vision actually made
+                    it into a build: it names which of the two failure modes
+                    happened (native module didn't link vs model didn't load)
+                    instead of silently falling back to shot-detector, which is
+                    what every other surface does by design. */}
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Swing Vision (debug)"
+                  subtitle="Pick a clip → the instant it thinks you swung"
+                  onPress={() => router.push('/(dev)/swing-vision')}
+                />
               </>
             )}
           </Card>

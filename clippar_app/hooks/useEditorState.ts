@@ -6,6 +6,7 @@ import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTrac
 import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
+import { visionDetectAndTrim } from '@/lib/visionTrim';
 import { isTrimInFlight } from '@/lib/trimInFlight';
 import {
   describeTrimWindowSource,
@@ -623,14 +624,29 @@ export function useEditorState(roundId: string | undefined) {
           source: describeTrimWindowSource(rawTrimSetting),
           requested: { preRollMs, postRollMs },
         });
-        const result = await detectAndTrim(
-          originalSourceUri,
-          preRollMs,
-          postRollMs,
-          [],
-          strategy,
-          optionsJson
-        );
+        // VISION FIRST, shot-detector as the fallback.
+        //
+        // swing-vision localizes the swing INSTANT by motion (the club's
+        // direction reversal at the top of the backswing, then the downswing
+        // spike ~0.20s later) and decides shot-vs-putt by BODY POSE (peak wrist
+        // height in torso lengths). That is a different question from the one
+        // the older detector asks, and it measured 52/56 on 56 labelled clips.
+        //
+        // visionDetectAndTrim returns null — never throws — whenever
+        // config.detection.swingVision is off, the module or model isn't in
+        // this build (Expo Go, web), the native call rejects, or the trim
+        // produced no file. In every one of those cases we fall through to the
+        // unchanged detectAndTrim path below.
+        const result =
+          (await visionDetectAndTrim(originalSourceUri, { preRollMs, postRollMs })) ??
+          (await detectAndTrim(
+            originalSourceUri,
+            preRollMs,
+            postRollMs,
+            [],
+            strategy,
+            optionsJson
+          ));
         // [trim-diag] steps 5-7: returned window, derived window, MISMATCH.
         logTrimResult({
           path: 'import-retrim',
@@ -847,14 +863,24 @@ export function useEditorState(roundId: string | undefined) {
           source: trimSource,
           requested: { preRollMs, postRollMs },
         });
-        const result = await detectAndTrim(
-          clip.sourceUri!,
-          preRollMs,
-          postRollMs,
-          recentForHole,
-          strategy,
-          optionsJson
-        );
+        // VISION FIRST, shot-detector as the fallback — same rationale as
+        // trimClip above: swing-vision finds the swing INSTANT by motion and
+        // decides shot-vs-putt by BODY POSE, measured 52/56 on 56 labelled
+        // clips. It returns null (never throws) when disabled, unavailable, or
+        // when it finds nothing usable, and we fall through to the unchanged
+        // detectAndTrim path below. Note vision ignores recentForHole — it has
+        // no inter-clip context — so that lean-heuristic only applies on the
+        // fallback path.
+        const result =
+          (await visionDetectAndTrim(clip.sourceUri!, { preRollMs, postRollMs })) ??
+          (await detectAndTrim(
+            clip.sourceUri!,
+            preRollMs,
+            postRollMs,
+            recentForHole,
+            strategy,
+            optionsJson
+          ));
         // [trim-diag] steps 5-7: returned window, derived window, MISMATCH.
         logTrimResult({
           path: 'import-batch',

@@ -206,6 +206,35 @@ export const config = {
     // byte-for-byte the historical detector (day-zero default). The other
     // strategies are additive experiments toggled via this one string.
     strategy: 'baseline' as 'baseline' | 'aboveShoulderGate' | 'velocityPeak' | 'audioFused',
+    // SWING-VISION AUTO-TRIM. ON — this is the detector Henry asked to get back.
+    //
+    // WHY IT EXISTS. Every clip in the 2026-08-05 round came back
+    // `strategy=baseline episodes=0 audioUsable=n conf=0.20-0.30`: the pose
+    // state machine found no swing at all, audio was rejected, and
+    // fallbackClassify guessed the impact instant from a rough audio
+    // transient. The 2-second window was always exactly 2 seconds — the
+    // WINDOW was never the bug. It was landing in the wrong place because
+    // nothing had actually located the swing.
+    //
+    // swing-vision asks a different question. It finds WHEN by motion — the
+    // energy dip where the club reverses at the top of the backswing, then
+    // the clip's sharpest spike ~0.20s later on the downswing — and Core ML
+    // only ever judges ~6 candidate moments rather than searching for the
+    // instant itself. Measured on Henry's labelled clips: 41/42 instants
+    // correct, 52/56 shot-vs-putt (see modules/swing-vision and
+    // experiments/vision-swing-classifier/FINDINGS_V2.md).
+    //
+    // TURNING IT OFF IS ONE LINE AND NEEDS NO REBUILD. Set this to false and
+    // the app reverts to the shot-detector path byte-for-byte — lib/visionTrim
+    // returns null before touching native, which is the same route already
+    // taken when the module or its model is missing from the build. Nothing
+    // downstream can tell the difference.
+    //
+    // NOT YET VERIFIED ON A REAL ROUND. Every number above comes from a Mac
+    // harness over recorded clips; no clip has been through this path on a
+    // phone. If it disappoints in the field, flip this rather than debugging
+    // under time pressure.
+    swingVision: true as boolean,
     // Strategy tuning knobs forwarded to native as optionsJson. See
     // DetectionOptions in modules/shot-detector/index.ts for recognized keys.
     options: {
