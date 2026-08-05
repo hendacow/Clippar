@@ -370,7 +370,7 @@ export default function ProfileScreen() {
     } catch {
       Alert.alert(
         'Deletion failed',
-        'Something went wrong deleting your account. Please try again, or email support@clippar.com and we will delete it for you.'
+        `Something went wrong deleting your account. Please try again, or email ${SUPPORT_EMAIL} and we will delete it for you.`
       );
     } finally {
       setDeletingAccount(false);
