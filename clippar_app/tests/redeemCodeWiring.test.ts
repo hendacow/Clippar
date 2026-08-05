@@ -267,8 +267,14 @@ test('"couldn\'t determine" still throws instead of returning false', () => {
 // ─── Pricing ───
 
 test('the placeholder prices match the real App Store prices', () => {
-  assert.match(config, /monthlyPriceAud: 1499,/, 'monthly is A$14.99');
-  assert.match(config, /annualPriceAud: 9999,/, 'annual is A$99.99');
+  // Verified against the live paywall on 2026-08-06: com.clippar.app.pro.monthly
+  // renders "A$9.99 per month" and com.clippar.app.pro.annual "A$59.99 per year"
+  // from RevenueCat. These were 1499/9999 until then, which is also what
+  // clippar-web/public/terms.html published — so the Terms of Service stated a
+  // price ~50% above what the app actually charged. Both were corrected
+  // together; if the App Store price ever changes, all three move at once.
+  assert.match(config, /monthlyPriceAud: 999,/, 'monthly is A$9.99');
+  assert.match(config, /annualPriceAud: 5999,/, 'annual is A$59.99');
 });
 
 test('the stub savings badge still computes to a sensible whole percentage', () => {
@@ -283,7 +289,10 @@ test('the stub savings badge still computes to a sensible whole percentage', () 
   const monthly = Number(config.match(/monthlyPriceAud: (\d+),/)?.[1]);
   const annual = Number(config.match(/annualPriceAud: (\d+),/)?.[1]);
   const savings = Math.round((1 - annual / (monthly * 12)) * 100);
-  assert.equal(savings, 44, `expected "Save 44%", got "Save ${savings}%"`);
+  // 50% at A$9.99/A$59.99, and the live paywall's annual card reads
+  // "Save 50%" — so this number is checked against the running app, not just
+  // against the constants it is derived from.
+  assert.equal(savings, 50, `expected "Save 50%", got "Save ${savings}%"`);
   assert.ok(Number.isInteger(savings) && savings > 0 && savings < 100);
 });
 
