@@ -47,13 +47,28 @@ export default function SignUpScreen() {
     setLoading(true);
     setError('');
     try {
-      await signUp(email.trim(), password, displayName.trim() || undefined);
-      // New account created (session arrives later, after email
-      // confirmation + first login) — flag it locally so that first login
-      // shows the one-time mount offer (lib/mountOffer). Scoped to this
-      // email so another account logging in next never inherits the offer.
-      void markMountOfferPending(email);
-      setSuccess(true);
+      const { needsEmailConfirmation } = await signUp(
+        email.trim(),
+        password,
+        displayName.trim() || undefined
+      );
+      // Flag the new account locally so its first arrival shows the one-time
+      // mount offer (lib/mountOffer). Scoped to this email so another account
+      // logging in next never inherits the offer. Awaited rather than
+      // fire-and-forget, because resolvePostAuthRoute below reads exactly what
+      // this writes — racing them sent brand-new accounts straight past the
+      // offer they had just been marked for.
+      await markMountOfferPending(email);
+
+      if (needsEmailConfirmation) {
+        // No session: the project requires a confirmation click before this
+        // account can sign in. Tell the user to go and find that email.
+        setSuccess(true);
+        return;
+      }
+      // Signed in already — sending them to "Check Your Email" would strand
+      // them waiting on a message that is never sent. Go where a login goes.
+      router.replace((await resolvePostAuthRoute()) as never);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Sign up failed';
       setError(message);
