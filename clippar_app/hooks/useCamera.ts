@@ -4,6 +4,7 @@ import * as Haptics from 'expo-haptics';
 import type { CameraView } from 'expo-camera';
 import type { ClipMetadata } from '@/types/round';
 import type { ShotTypeClassification, DetectionStrategy } from 'shot-detector';
+import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import {
   saveLocalClip,
   updateClipEditorState,
@@ -600,7 +601,7 @@ export function useCamera({
               return;
             }
 
-            if (result.found && result.shotType === 'putt') {
+            if (shouldKeepFullRecording(result)) {
               // PUTT — KEEP THE WHOLE RECORDING, whatever its length.
               //
               // Henry's call 2026-08-05: trimming is for swings. A putt is

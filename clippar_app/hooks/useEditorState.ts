@@ -3,6 +3,7 @@ import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getClipUrl } from '@/lib/r2';
 import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
+import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
 import { isTrimInFlight } from '@/lib/trimInFlight';
@@ -666,7 +667,7 @@ export function useEditorState(roundId: string | undefined) {
         // Persist to SQLite
         const numId = parseInt(clipId, 10);
         if (!isNaN(numId) && storage) {
-          if (result.found && result.shotType === 'putt') {
+          if (shouldKeepFullRecording(result)) {
             // PUTT — KEEP THE WHOLE RECORDING. Same rule as live capture
             // (hooks/useCamera.ts): trimming is for swings, and a window
             // centred on impact cuts off the ball travelling to the hole,
@@ -883,7 +884,7 @@ export function useEditorState(roundId: string | undefined) {
 
         const originalSourceUri = clip.sourceUri!;
 
-        if (result.found && result.shotType === 'putt') {
+        if (shouldKeepFullRecording(result)) {
           // PUTT — the in-memory clip keeps pointing at the full recording.
           // Only the impact time and confidence are worth carrying, so the
           // trimmer has an anchor on an untrimmed clip.
@@ -907,7 +908,7 @@ export function useEditorState(roundId: string | undefined) {
         // Persist to SQLite
         const numId = parseInt(clip.id, 10);
         if (!isNaN(numId) && storage) {
-          if (result.found && result.shotType === 'putt') {
+          if (shouldKeepFullRecording(result)) {
             // PUTT — keep the whole recording. Same rule as trimClip above
             // and as live capture.
             if (result.trimmedUri && result.trimmedUri !== originalSourceUri) {
