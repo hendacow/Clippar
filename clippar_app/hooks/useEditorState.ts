@@ -54,6 +54,9 @@ function buildHoleSections(
       par,
       strokes,
       scoreToPar: strokes - par,
+      // A score row only exists once the hole was actually ended, so its
+      // presence is the "hole finished" signal the preview scorecard needs.
+      hasScore: !!score,
       clips: (holeMap.get(holeNum) ?? []).sort(
         (a, b) => a.shotNumber - b.shotNumber
       ),
@@ -386,6 +389,8 @@ export function useEditorState(roundId: string | undefined) {
               par: DEFAULT_PAR,
               strokes: 1,
               scoreToPar: 1 - DEFAULT_PAR,
+              // Freshly created by a clip move — no score row exists for it.
+              hasScore: false,
               clips: [movedUpdated],
             },
           ];

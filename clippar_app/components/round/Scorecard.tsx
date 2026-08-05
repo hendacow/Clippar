@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { View, Text, ScrollView, ActivityIndicator } from 'react-native';
 import { theme } from '@/constants/theme';
 import { getScores, getCourseHoles } from '@/lib/api';
+import { getScoreColor, getScoreBg, formatDiff } from '@/lib/scoreDisplay';
 
 interface Score {
   hole_number: number;
@@ -24,27 +25,8 @@ interface ScorecardProps {
 const CELL_WIDTH = 44;
 const LABEL_WIDTH = 52;
 
-function getScoreColor(diff: number): string {
-  if (diff <= -2) return theme.colors.eagle;
-  if (diff === -1) return theme.colors.birdie;
-  if (diff === 0) return theme.colors.par;
-  if (diff === 1) return theme.colors.bogey;
-  return theme.colors.doubleBogey;
-}
-
-function getScoreBg(diff: number): string {
-  if (diff <= -2) return 'rgba(255, 215, 0, 0.15)';
-  if (diff === -1) return 'rgba(76, 175, 80, 0.15)';
-  if (diff === 0) return 'transparent';
-  if (diff === 1) return 'rgba(255, 152, 0, 0.15)';
-  return 'rgba(255, 68, 68, 0.15)';
-}
-
-function formatDiff(diff: number): string {
-  if (diff === 0) return 'E';
-  if (diff > 0) return `+${diff}`;
-  return `${diff}`;
-}
+// Score colours / diff formatting now live in lib/scoreDisplay.ts so the
+// round-preview scorecard overlay uses the exact same mapping as this card.
 
 export function Scorecard({ roundId, courseId, holesPlayed = 18 }: ScorecardProps) {
   const [scores, setScores] = useState<Score[]>([]);

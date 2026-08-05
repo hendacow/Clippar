@@ -8,6 +8,7 @@ import {
   ActivityIndicator,
   PanResponder,
   Image,
+  ScrollView,
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -18,6 +19,13 @@ import { theme } from '@/constants/theme';
 import { useEditorState } from '@/hooks/useEditorState';
 import { trimVideo } from 'shot-detector';
 import { type EditorClip, type EditorHoleSection, getInitialTrimBounds } from '@/types/editor';
+import {
+  getScoreColor,
+  formatDiff,
+  holeResultLabel,
+  isHoleComplete,
+  completedTotals,
+} from '@/lib/scoreDisplay';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -44,21 +52,82 @@ const THUMB_COUNT = 12;
 const THUMB_WIDTH = Math.floor(TIMELINE_WIDTH / THUMB_COUNT);
 
 // ============================================================
-// SCORECARD OVERLAY — persistent, looks like a real scorecard
+// SCORECARD CARD — docked at the TOP, looks like a real scorecard
 // ============================================================
-// Shows: course name, hole grid, shot label, running score.
-// Score only updates AFTER a hole finishes (not during).
+// Shows: course name, TOTAL over completed holes, hole grid, current
+// hole + shot chip. A hole shows NO score indication until it has
+// actually been finished — "finished" means a score row exists for it
+// (EditorHoleSection.hasScore, written when the hole is ended), never
+// the playback position. Completed holes are colour-coded by result vs
+// par with the same colours as components/round/Scorecard.tsx.
+
+// How many hole cells fit across the card before the grid scrolls.
+const GRID_VISIBLE_HOLES = 9;
+// Card grid width: screen minus top-overlay padding (8+8) and the grid's
+// own horizontal padding (8+8).
+const GRID_CELL_WIDTH = Math.floor((SCREEN_WIDTH - 32) / GRID_VISIBLE_HOLES);
+
+function HoleCell({
+  hole,
+  isCurrent,
+  width,
+}: {
+  hole: EditorHoleSection;
+  isCurrent: boolean;
+  width?: number;
+}) {
+  const complete = isHoleComplete(hole);
+  const cellColor = complete
+    ? getScoreColor(hole.strokes - hole.par)
+    : 'rgba(255,255,255,0.25)';
+
+  return (
+    <View
+      style={{
+        ...(width ? { width } : { flex: 1 }),
+        alignItems: 'center',
+        paddingVertical: 4,
+        borderRadius: 6,
+        backgroundColor: isCurrent ? 'rgba(255,255,255,0.1)' : 'transparent',
+      }}
+    >
+      <Text
+        style={{
+          color: isCurrent ? '#fff' : 'rgba(255,255,255,0.4)',
+          fontSize: 10,
+          fontWeight: '600',
+        }}
+      >
+        {hole.holeNumber}
+      </Text>
+      <Text
+        style={{
+          color: cellColor,
+          fontSize: 13,
+          fontWeight: '800',
+          marginTop: 1,
+        }}
+      >
+        {complete ? hole.strokes : '-'}
+      </Text>
+      <Text
+        style={{
+          color: 'rgba(255,255,255,0.25)',
+          fontSize: 9,
+        }}
+      >
+        {hole.par}
+      </Text>
+    </View>
+  );
+}
 
 function ScorecardOverlay({
   clip,
-  clipIndex,
-  allClips,
   holes,
   courseName,
 }: {
   clip: EditorClip;
-  clipIndex: number;
-  allClips: EditorClip[];
   holes: EditorHoleSection[];
   courseName: string;
 }) {
@@ -67,66 +136,27 @@ function ScorecardOverlay({
 
   const holeClips = currentHole.clips.filter((c) => !c.isExcluded);
   const shotIndex = holeClips.findIndex((c) => c.id === clip.id);
-  const shotLabel = `Shot ${shotIndex + 1}`;
   const totalShots = holeClips.length;
-  const isLastShotOfHole = shotIndex === totalShots - 1;
 
-  // Running score = sum of strokes for all COMPLETED holes BEFORE this one.
-  // A hole is "completed" if the current clip is past the last shot of that hole.
-  // During a hole's shots the running score doesn't include that hole yet.
-  let runningStrokes = 0;
-  let runningPar = 0;
-  for (const h of holes) {
-    if (h.holeNumber < clip.holeNumber) {
-      runningStrokes += h.strokes;
-      runningPar += h.par;
-    }
-  }
+  // TOTAL reflects only holes with a real score row. Mid-round, unfinished
+  // holes contribute nothing; before any hole is finished it shows "-".
+  const totals = completedTotals(holes);
+  const totalColor = totals ? getScoreColor(totals.diff) : '#FFFFFF';
 
-  // If this is the LAST shot of the current hole, include this hole's score
-  // (user sees the score update after the last shot plays)
-  if (isLastShotOfHole) {
-    runningStrokes += currentHole.strokes;
-    runningPar += currentHole.par;
-  }
+  // Current hole's result chip — only once the hole is actually finished.
+  const currentHoleComplete = isHoleComplete(currentHole);
+  const holeDiff = currentHole.strokes - currentHole.par;
+  const holeColor = getScoreColor(holeDiff);
 
-  const scoreToPar = runningStrokes - runningPar;
-  const scoreColor =
-    scoreToPar < 0 ? '#4ADE80' : scoreToPar === 0 ? '#FFFFFF' : '#FF7366';
-  const scoreLabel =
-    runningStrokes === 0
-      ? '-'
-      : scoreToPar < 0
-        ? `${scoreToPar}`
-        : scoreToPar === 0
-          ? 'E'
-          : `+${scoreToPar}`;
-
-  // Hole score for current hole (only show if last shot)
-  const holeScoreToPar = currentHole.strokes - currentHole.par;
-  const holeScoreColor =
-    holeScoreToPar < 0 ? '#4ADE80' : holeScoreToPar === 0 ? '#FFFFFF' : '#FF7366';
-  const holeScoreLabel =
-    holeScoreToPar < 0
-      ? scoreName(holeScoreToPar)
-      : holeScoreToPar === 0
-        ? 'Par'
-        : holeScoreToPar === 1
-          ? 'Bogey'
-          : holeScoreToPar === 2
-            ? 'Double Bogey'
-            : `+${holeScoreToPar}`;
+  // Up to 9 holes fit across the card; longer rounds scroll horizontally.
+  const scrollable = holes.length > GRID_VISIBLE_HOLES;
 
   return (
-    <View
-      style={{
-        position: 'absolute',
-        bottom: 24,
-        left: 12,
-        right: 12,
-      }}
-      pointerEvents="none"
-    >
+    // pointerEvents: the card is normally tap-transparent so the left/right
+    // clip-navigation tap zones keep working underneath it. When the grid
+    // must scroll (18-hole rounds) it needs to own horizontal drags, so
+    // touches over the card are kept.
+    <View style={{ marginTop: 10 }} pointerEvents={scrollable ? 'auto' : 'none'}>
       {/* Main scorecard container */}
       <View
         style={{
@@ -137,7 +167,7 @@ function ScorecardOverlay({
           borderColor: 'rgba(255,255,255,0.1)',
         }}
       >
-        {/* Top row: course name + running score */}
+        {/* Top row: course name + total over completed holes */}
         <View
           style={{
             flexDirection: 'row',
@@ -158,20 +188,20 @@ function ScorecardOverlay({
             <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>
               TOTAL
             </Text>
-            <Text style={{ color: scoreColor, fontWeight: '800', fontSize: 14 }}>
-              {runningStrokes > 0 ? runningStrokes : '-'}
+            <Text style={{ color: totalColor, fontWeight: '800', fontSize: 14 }}>
+              {totals ? totals.strokes : '-'}
             </Text>
-            {runningStrokes > 0 && (
+            {totals && (
               <View
                 style={{
-                  backgroundColor: scoreColor + '25',
+                  backgroundColor: totalColor + '25',
                   paddingHorizontal: 5,
                   paddingVertical: 1,
                   borderRadius: 4,
                 }}
               >
-                <Text style={{ color: scoreColor, fontWeight: '800', fontSize: 11 }}>
-                  {scoreLabel}
+                <Text style={{ color: totalColor, fontWeight: '800', fontSize: 11 }}>
+                  {formatDiff(totals.diff)}
                 </Text>
               </View>
             )}
@@ -181,69 +211,44 @@ function ScorecardOverlay({
         {/* Divider */}
         <View style={{ height: 1, backgroundColor: 'rgba(255,255,255,0.08)', marginHorizontal: 12 }} />
 
-        {/* Hole mini-grid — shows recent holes with scores */}
-        <View
-          style={{
-            flexDirection: 'row',
-            paddingHorizontal: 8,
-            paddingTop: 8,
-            paddingBottom: 4,
-          }}
-        >
-          {holes.slice(0, Math.min(holes.length, 9)).map((h) => {
-            const isCurrent = h.holeNumber === clip.holeNumber;
-            const isCompleted = h.holeNumber < clip.holeNumber || (isCurrent && isLastShotOfHole);
-            const hSTP = h.strokes - h.par;
-            const hColor = !isCompleted
-              ? 'rgba(255,255,255,0.25)'
-              : hSTP < 0
-                ? '#4ADE80'
-                : hSTP === 0
-                  ? '#FFFFFF'
-                  : '#FF7366';
-
-            return (
-              <View
+        {/* Hole mini-grid — completed holes show their colour-coded score */}
+        {scrollable ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={{
+              paddingHorizontal: 8,
+              paddingTop: 8,
+              paddingBottom: 4,
+            }}
+          >
+            {holes.map((h) => (
+              <HoleCell
                 key={h.holeNumber}
-                style={{
-                  flex: 1,
-                  alignItems: 'center',
-                  paddingVertical: 4,
-                  borderRadius: 6,
-                  backgroundColor: isCurrent ? 'rgba(255,255,255,0.1)' : 'transparent',
-                }}
-              >
-                <Text
-                  style={{
-                    color: isCurrent ? '#fff' : 'rgba(255,255,255,0.4)',
-                    fontSize: 10,
-                    fontWeight: '600',
-                  }}
-                >
-                  {h.holeNumber}
-                </Text>
-                <Text
-                  style={{
-                    color: hColor,
-                    fontSize: 13,
-                    fontWeight: '800',
-                    marginTop: 1,
-                  }}
-                >
-                  {isCompleted ? h.strokes : '-'}
-                </Text>
-                <Text
-                  style={{
-                    color: 'rgba(255,255,255,0.25)',
-                    fontSize: 9,
-                  }}
-                >
-                  {h.par}
-                </Text>
-              </View>
-            );
-          })}
-        </View>
+                hole={h}
+                isCurrent={h.holeNumber === clip.holeNumber}
+                width={GRID_CELL_WIDTH}
+              />
+            ))}
+          </ScrollView>
+        ) : (
+          <View
+            style={{
+              flexDirection: 'row',
+              paddingHorizontal: 8,
+              paddingTop: 8,
+              paddingBottom: 4,
+            }}
+          >
+            {holes.map((h) => (
+              <HoleCell
+                key={h.holeNumber}
+                hole={h}
+                isCurrent={h.holeNumber === clip.holeNumber}
+              />
+            ))}
+          </View>
+        )}
 
         {/* Bottom row: current hole + shot info */}
         <View
@@ -275,22 +280,22 @@ function ScorecardOverlay({
               }}
             >
               <Text style={{ color: theme.colors.primary, fontWeight: '700', fontSize: 13 }}>
-                {shotLabel} of {totalShots}
+                Shot {shotIndex + 1} of {totalShots}
               </Text>
             </View>
 
-            {/* Show hole result on last shot */}
-            {isLastShotOfHole && (
+            {/* Hole result — only once the hole is finished */}
+            {currentHoleComplete && (
               <View
                 style={{
-                  backgroundColor: holeScoreColor + '25',
+                  backgroundColor: holeColor + '25',
                   paddingHorizontal: 8,
                   paddingVertical: 4,
                   borderRadius: 8,
                 }}
               >
-                <Text style={{ color: holeScoreColor, fontWeight: '800', fontSize: 12 }}>
-                  {holeScoreLabel}
+                <Text style={{ color: holeColor, fontWeight: '800', fontSize: 12 }}>
+                  {holeResultLabel(holeDiff)}
                 </Text>
               </View>
             )}
@@ -299,13 +304,6 @@ function ScorecardOverlay({
       </View>
     </View>
   );
-}
-
-function scoreName(toPar: number): string {
-  if (toPar === -3) return 'Albatross';
-  if (toPar === -2) return 'Eagle';
-  if (toPar === -1) return 'Birdie';
-  return `${toPar}`;
 }
 
 // ============================================================
@@ -521,6 +519,7 @@ function InlineTrimPanel({
   onSeekTarget?: (target: 'start' | 'end') => void;
   onDraggingHandle?: (handle: 'none' | 'start' | 'end') => void;
 }) {
+  const insets = useSafeAreaInsets();
   const initialBounds = getInitialTrimBounds(clip, clip.durationMs || 5000);
   const [durationMs, setDurationMs] = useState(clip.durationMs || 5000);
   const [startMs, setStartMs] = useState(initialBounds.startMs);
@@ -720,7 +719,9 @@ function InlineTrimPanel({
         right: 0,
         backgroundColor: 'rgba(0,0,0,0.92)',
         paddingTop: 12,
-        paddingBottom: 32,
+        // Clear the home indicator so the Reset/Cancel/Save row stays
+        // fully visible and tappable at the true bottom of the screen.
+        paddingBottom: Math.max(32, insets.bottom + 20),
       }}
     >
       {/* Duration info */}
@@ -1140,18 +1141,9 @@ export default function PreviewScreen() {
         </View>
       )}
 
-      {/* Scorecard overlay — always visible, hides during trim */}
-      {currentClip && !trimMode && (
-        <ScorecardOverlay
-          clip={currentClip}
-          clipIndex={currentIndex}
-          allClips={allClips}
-          holes={editor.state.holes}
-          courseName={editor.state.courseName}
-        />
-      )}
-
-      {/* Top overlay */}
+      {/* Top overlay — progress dots, action buttons, and the scorecard
+          card (moved up from the bottom so the bottom edge stays free for
+          the trim panel). Sits below the notch via insets.top. */}
       <View
         style={{
           position: 'absolute', top: 0, left: 0, right: 0,
@@ -1169,14 +1161,9 @@ export default function PreviewScreen() {
         >
           <View style={{ flex: 1 }}>
             {currentClip && (
-              <>
-                <Text style={{ color: '#fff', fontWeight: '700', fontSize: 15 }}>
-                  Hole {currentClip.holeNumber} · Stroke {currentClip.shotNumber}
-                </Text>
-                <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12 }}>
-                  {currentIndex + 1} of {allClips.length}
-                </Text>
-              </>
+              <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12 }}>
+                {currentIndex + 1} of {allClips.length}
+              </Text>
             )}
           </View>
 
@@ -1241,9 +1228,19 @@ export default function PreviewScreen() {
             </Pressable>
           </View>
         </View>
+
+        {/* Scorecard card — replaces the old "Hole N · Stroke M" header.
+            Hidden while trimming so the video stays unobstructed. */}
+        {currentClip && !trimMode && (
+          <ScorecardOverlay
+            clip={currentClip}
+            holes={editor.state.holes}
+            courseName={editor.state.courseName}
+          />
+        )}
       </View>
 
-      {/* Inline trim panel */}
+      {/* Inline trim panel — docked to the bottom of the screen */}
       {trimMode && currentClip && (
         <InlineTrimPanel
           clip={currentClip}

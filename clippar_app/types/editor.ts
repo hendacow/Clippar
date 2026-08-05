@@ -34,6 +34,13 @@ export interface EditorHoleSection {
   par: number;
   strokes: number;
   scoreToPar: number;
+  /**
+   * True only when a real score row exists for this hole — a row is written
+   * when the hole is ENDED (hooks/useRound.ts endHole / pickup / next-hole
+   * commit paths). When false, `strokes` is just the clip-count fallback
+   * from buildHoleSections and must not be displayed as a score.
+   */
+  hasScore: boolean;
   clips: EditorClip[];
 }
 
