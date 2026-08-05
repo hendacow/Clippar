@@ -61,11 +61,11 @@ import { getOnboardingProfile, intentEcho } from '@/lib/onboardingProfile';
  * a feature the build does not deliver as misrepresentation, so every line
  * here must be true of the shipping app at the moment it renders:
  *
- *  • Unlimited reels / exports — real: config.subscription.enforceExportGate
- *    is ON, so "Create Highlight Reel" routes free users to this paywall
- *    (app/round/editor.tsx).
- *  • Cloud backup — real: gated on isSubscribed in
- *    app/profile/storage-settings.tsx.
+ *  • Cloud backup — real, and with the export gate OFF (2026-08-05, see
+ *    config.subscription.enforceExportGate) it is the ONLY thing Pro gates:
+ *    isSubscribed in app/profile/storage-settings.tsx + lib/uploadQueue.ts.
+ *    The three bullets are three true facets of that one feature — safety,
+ *    automatic upload, reinstall survival — not three features.
  *  • Shot tracer — DERIVED from config.tracer.enabled, never hardcoded. The
  *    flag is OFF for v1 prod (it hasn't passed a real-round field test), so
  *    the line is absent from the shipping build and comes back on its own the
@@ -73,15 +73,19 @@ import { getOnboardingProfile, intentEcho } from '@/lib/onboardingProfile';
  *    sell it as "coming soon" — Apple does not allow charging for
  *    unreleased functionality either.
  *
- * Dropped deliberately: "All detection & trim settings". Trim Settings is an
- * ungated row in Profile (app/(tabs)/profile.tsx) — free users already have
- * it, so billing it as a Pro benefit was the same misrepresentation.
+ * Dropped deliberately:
+ *  - "Unlimited highlight reels" / "Unlimited exports & shares" — removed
+ *    2026-08-05 with the export gate. Everyone gets those free now; selling
+ *    them as Pro is the same misrepresentation in the other direction. If
+ *    the gate goes back ON, restore them — flag and copy move together.
+ *  - "All detection & trim settings". Trim Settings is an ungated row in
+ *    Profile (app/(tabs)/profile.tsx) — free users already have it.
  */
 const PRO_FEATURES = [
-  'Unlimited highlight reels',
-  'Unlimited exports & shares',
-  ...(config.tracer.enabled ? ['Shot tracer on every full swing'] : []),
   'Cloud backup for every clip',
+  'Automatic upload in the background',
+  ...(config.tracer.enabled ? ['Shot tracer on every full swing'] : []),
+  'Rounds that survive a lost or new phone',
 ];
 
 // This screen is the full-price offer. The constant is what stops a future

@@ -1,7 +1,7 @@
 import { View, Text, ActivityIndicator, ScrollView, Pressable } from 'react-native';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Cloud, Film, Infinity as InfinityIcon, SlidersHorizontal } from 'lucide-react-native';
+import { Cloud, Film, Infinity as InfinityIcon } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { Button } from '@/components/ui/Button';
@@ -53,26 +53,28 @@ import {
  * every other reason to be here still holds.
  */
 
-// What Pro is, in terms of what the app actually gates today:
-//  - the finished reel (app/round/editor.tsx export gate, config.subscription
-//    .enforceExportGate),
-//  - cloud backup of raw clips (app/profile/storage-settings.tsx),
-//  - the detection/trim settings.
-// The shot tracer is on layer 1's marketing list but deliberately NOT here:
-// config.tracer.enabled is false in the v1 production build, and this is the
-// screen that gets specific. Specific claims about a feature that does not
-// render are the 3.1.2 misrepresentation that gets an app pulled — add it
-// back the day the kill switch flips.
+// What Pro is, in terms of what the app actually gates today — which, with
+// config.subscription.enforceExportGate OFF (2026-08-05, Henry's call: the
+// whole reel pipeline is free for v1), is exactly ONE thing: cloud backup
+// (app/profile/storage-settings.tsx + lib/uploadQueue.ts, the only remaining
+// getProStatus gates in the app). So this screen is a backup pitch, told as
+// three facets of that one true feature rather than four claims of which
+// three were free anyway:
+//  - "The reel stays free" was previously "Pro is the part that turns a round
+//    into a finished reel" — false the moment the export gate went off.
+//  - "Unlimited reels/exports" sold what everyone gets free — gone.
+//  - "Every setting unlocked" claimed the settings screens are Pro. They
+//    never were (Trim Settings has no gate) — gone, and do not bring it back.
+// The shot tracer is on layer 1's marketing list (flag-derived) but
+// deliberately NOT here: config.tracer.enabled is false in the v1 build, and
+// this is the screen that gets specific. If the export gate ever goes back
+// ON, restore the reel claims here and on layer 1 — flag and copy move
+// together (see the comment on enforceExportGate).
 const PRO_DETAIL = [
   {
     Icon: Film,
-    title: 'The reel itself',
-    body: 'Recording, shot detection and trimming stay free. Pro is the part that turns a round into a finished reel you can watch and send.',
-  },
-  {
-    Icon: InfinityIcon,
-    title: 'Every round, not just the good one',
-    body: 'Unlimited reels, unlimited exports, unlimited shares — a quick nine or a full comp day.',
+    title: 'The reel stays free',
+    body: 'Recording, shot detection, trimming, reels and exports — all of it, free. Pro is for keeping the footage safe.',
   },
   {
     Icon: Cloud,
@@ -80,9 +82,9 @@ const PRO_DETAIL = [
     body: 'Cloud backup keeps your raw clips safe through a reinstall, a lost handset or a full camera roll.',
   },
   {
-    Icon: SlidersHorizontal,
-    title: 'Every setting unlocked',
-    body: 'Detection sensitivity and trim windows, tuned to how you actually play.',
+    Icon: InfinityIcon,
+    title: 'Backed up as you go',
+    body: 'With backup on, every clip uploads automatically in the background — nothing to remember after the round.',
   },
 ];
 

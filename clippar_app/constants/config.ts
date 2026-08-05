@@ -50,28 +50,26 @@ export const config = {
     // When true, "Create Highlight Reel" requires an active subscription
     // (paywall shown otherwise — app/round/editor.tsx:925).
     //
-    // ON as of 2026-08-04, Henry's call. It was off while StoreKit IAP didn't
-    // exist, because gating exports against a paywall nobody could complete
-    // would have locked everyone out. Both products now exist in App Store
-    // Connect (com.clippar.app.pro.monthly / .annual, 2-week free trial) and
-    // are wired through RevenueCat, so the gate has something to sell.
+    // OFF as of 2026-08-05, Henry's call: the whole reel pipeline — record,
+    // detect, trim, compose, EXPORT — is free for v1. He hit his own gate on
+    // a real round and the verdict was immediate: "it actually shouldn't
+    // block anything." Pro still exists and still sells the thing it
+    // genuinely gates: cloud backup (storage-settings + lib/uploadQueue are
+    // the only remaining getProStatus gates in the app).
     //
-    // Leaving it OFF was its own problem: the paywall advertises four Pro
-    // benefits while Pro granted nothing, which is a 3.1.2 misrepresentation
-    // and gave a subscriber nothing for their money.
+    // THE PAYWALL COPY IS COUPLED TO THIS FLAG. When this was ON, both
+    // paywall layers sold "unlimited reels / unlimited exports". With it OFF
+    // those bullets sell what everyone gets free, so they were rewritten to a
+    // cloud-backup pitch the same day. If you turn this back ON, restore the
+    // reel/export bullets in app/paywall.tsx and app/paywall-trial.tsx or Pro
+    // under-claims; if you copy old bullets back without turning this on,
+    // Pro over-claims (3.1.2). Flag and copy move together, both directions.
     //
-    // TWO THINGS THIS DEPENDS ON — check both before shipping:
-    //  1. App Review must be able to export. A reviewer who hits a paywall
-    //     they cannot complete files a 2.1 rejection. The demo account handed
-    //     to Apple MUST already hold the entitlement server-side (profiles
-    //     .subscription_status = 'active' with a NULL expiry) so the gate
-    //     never fires for them. Do not rely on them completing a sandbox
-    //     purchase against products that may still be in review.
-    //  2. Dev builds have no RevenueCat key by design, so iap falls back to
-    //     the stub and getProStatus() is false — use "Dev: unlock Pro" in
-    //     Profile to export while testing, or every export routes to the
-    //     paywall.
-    enforceExportGate: true as boolean,
+    // History: ON 2026-08-04 (gate needed something to sell once StoreKit
+    // products existed); OFF before that (no completable paywall existed).
+    // A reviewer-friendly side effect of OFF: App Review can exercise the
+    // core flow with no entitlement at all.
+    enforceExportGate: false as boolean,
     // RevenueCat public SDK key (per-platform). Empty → lib/iap falls back
     // to the stub provider (Expo Go / binaries without the native module).
     // EXPO_PUBLIC_RC_IOS_KEY is the canonical name; the longer

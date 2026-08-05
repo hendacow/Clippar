@@ -915,8 +915,11 @@ export default function EditorScreen() {
   const handleExportConfirm = useCallback(async () => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
-    // Pro gate (config.subscription.enforceExportGate — OFF until StoreKit
-    // IAP ships; flipping it without purchases would lock exports for all).
+    // Pro gate — OFF as of 2026-08-05: the whole reel pipeline including
+    // export is free for v1 (Henry's call, made after hitting his own gate on
+    // a real round). The branch stays because re-gating is a config flip, and
+    // the flag's comment in constants/config.ts explains the paywall-copy
+    // coupling that has to move with it.
     if (config.subscription.enforceExportGate) {
       const isPro = await getProStatus().catch(() => false);
       if (!isPro) {
