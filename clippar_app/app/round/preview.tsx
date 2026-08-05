@@ -49,6 +49,10 @@ const TIMELINE_WIDTH = SCREEN_WIDTH - TIMELINE_PADDING * 2;
 const HANDLE_WIDTH = 24;
 const MIN_TRIM_MS = 500;
 const THUMB_COUNT = 12;
+// How long a clip must stay on screen before its filmstrip starts decoding.
+// Swiping through a round should cost nothing; only a clip you stop on earns
+// twelve video decodes. See the filmstrip effect for why this exists.
+const FILMSTRIP_SETTLE_MS = 350;
 const THUMB_WIDTH = Math.floor(TIMELINE_WIDTH / THUMB_COUNT);
 
 // ============================================================
@@ -702,10 +706,26 @@ function InlineTrimPanel({
       return;
     }
     let cancelled = false;
+
+    // SEQUENTIAL, AND ONLY AFTER THE CLIP SETTLES. Both matter, and both are
+    // consequences of docking the panel permanently (2fc88b0).
+    //
+    // This used to fire 12 getThumbnailAsync calls through Promise.all. That
+    // was fine when the filmstrip existed only inside trim mode: the user
+    // entered it deliberately, on one clip, and stayed. Now the effect re-runs
+    // on EVERY clip they swipe past — and `cancelled` cannot stop a decode
+    // already in flight, it only suppresses the result. Swiping through ten
+    // clips could leave ~120 AVAssetImageGenerators decoding video at once,
+    // which iOS answers by killing the app: no JS error, no red box, straight
+    // to the home screen. That is the crash Henry hit on a 36-clip round.
+    //
+    // Sequential caps live decoders at one and makes the cancel flag actually
+    // effective — it is checked between frames, so a swipe abandons the strip
+    // after at most one more frame instead of after twelve.
     const generateThumbs = async () => {
       const thumbs: (string | null)[] = new Array(THUMB_COUNT).fill(null);
       const interval = durationMs / THUMB_COUNT;
-      const promises = Array.from({ length: THUMB_COUNT }, async (_, i) => {
+      for (let i = 0; i < THUMB_COUNT; i += 1) {
         if (cancelled) return;
         try {
           const time = Math.round(i * interval + interval / 2);
@@ -713,14 +733,23 @@ function InlineTrimPanel({
             time,
             quality: 0.3,
           });
-          if (!cancelled) thumbs[i] = result.uri;
+          if (cancelled) return;
+          thumbs[i] = result.uri;
+          // Paint as they arrive so the strip fills in rather than appearing
+          // all at once at the end — sequential is slower per strip, and this
+          // keeps it from reading as a stall.
+          setFilmstripThumbs([...thumbs]);
         } catch {}
-      });
-      await Promise.all(promises);
-      if (!cancelled) setFilmstripThumbs([...thumbs]);
+      }
     };
-    generateThumbs();
-    return () => { cancelled = true; };
+
+    // Fast swiping should generate nothing at all. A clip must hold still
+    // before its filmstrip is worth decoding.
+    const settleTimer = setTimeout(generateThumbs, FILMSTRIP_SETTLE_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(settleTimer);
+    };
   }, [activeUri, clip.sourceUri, durationMs, durationKnown]);
 
   const handleReset = useCallback(() => {
