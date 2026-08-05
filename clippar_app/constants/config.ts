@@ -38,15 +38,15 @@ export const config = {
   subscription: {
     websiteUrl: 'https://clippargolf.com',
     // PLACEHOLDER PRICES, in AUD cents, matching the real App Store Connect
-    // prices (A$14.99/month, A$99.99/year). They are read ONLY by the STUB
+    // prices (A$9.99/month, A$59.99/year). They are read ONLY by the STUB
     // offering in lib/iap.ts — Expo Go, binaries without the RevenueCat native
     // module, and builds with no RC key. A configured build renders
     // store-localised priceStrings straight from RevenueCat and never reads
     // these. Keep them in step with App Store Connect anyway: the stub is what
     // a reviewer or a TestFlight user on an unconfigured build sees, and the
     // annual card's "Save N%" badge is computed from the pair.
-    monthlyPriceAud: 1499,
-    annualPriceAud: 9999,
+    monthlyPriceAud: 999,
+    annualPriceAud: 5999,
     // When true, "Create Highlight Reel" requires an active subscription
     // (paywall shown otherwise — app/round/editor.tsx:925).
     //
