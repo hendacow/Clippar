@@ -118,6 +118,36 @@ export const config = {
     // Re-enabling post-launch is this one line, once those functions are live.
     inAppShopEnabled: false as boolean,
   },
+  auth: {
+    // Master switch for the "Continue with Google" BUTTON on the sign-in and
+    // sign-up screens. Sign in with Apple and email/password are unaffected.
+    //
+    // OFF for v1, Henry's call (2026-08-05). Google sign-in routes through
+    // Supabase's hosted callback, so Google's consent screen shows whatever the
+    // Google Cloud OAuth app is named — currently not "Clippar". Two problems
+    // follow, and only the second is actually dangerous:
+    //
+    //   1. A user (or an App Review tester) is asked to grant access to a name
+    //      they have never heard of. Confusing, not fatal.
+    //   2. While the OAuth consent screen is in "Testing" publishing status,
+    //      ONLY allowlisted Google accounts can complete the flow at all. Every
+    //      other user gets an error. That is a broken button shipped to
+    //      production, and a reviewer who taps it sees the app fail.
+    //
+    // Guideline 4.8 is not a reason to keep it: 4.8 only applies when a
+    // third-party login IS offered, and it is satisfied either way because Sign
+    // in with Apple is present.
+    //
+    // This hides the button ONLY. `signInWithGoogle` stays wired in useAuth
+    // because app/(tabs)/profile.tsx re-authenticates through it before account
+    // deletion, and an already-Google-linked account still needs that path to
+    // satisfy the in-app deletion App Review 5.1.1(v) requires.
+    //
+    // To re-enable: verify the OAuth consent screen in Google Cloud Console
+    // (app name "Clippar", logo, support email), move publishing status from
+    // Testing to In production, then flip this to true.
+    googleSignInEnabled: false as boolean,
+  },
   sharing: {
     // Master switch for PUBLIC SHARE LINKS — the "Create Share Link" action in
     // the share sheet, which uploads the stitched reel to Supabase Storage and

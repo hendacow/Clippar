@@ -3,6 +3,7 @@ import { View, Text, Pressable, Platform, ActivityIndicator } from 'react-native
 import * as AppleAuthentication from 'expo-apple-authentication';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
+import { config } from '@/constants/config';
 import { useAuth } from '@/hooks/useAuth';
 
 interface Props {
@@ -51,6 +52,15 @@ export function SocialAuthButtons({ onAuthSuccess, onAuthError }: Props) {
     }
   };
 
+  // Which social options this build actually offers. Google is behind a config
+  // flag (see constants/config.ts `auth.googleSignInEnabled` for why it is off
+  // for v1). With neither on offer there is nothing to separate from the email
+  // form above, so the whole block — including the "or" divider — collapses
+  // rather than leaving an orphaned rule across the screen.
+  const showGoogle = config.auth.googleSignInEnabled;
+  const showApple = Platform.OS === 'ios';
+  if (!showGoogle && !showApple) return null;
+
   return (
     <View style={{ gap: 12 }}>
       {/* Divider with "or" label — separates email auth from social options. */}
@@ -71,7 +81,7 @@ export function SocialAuthButtons({ onAuthSuccess, onAuthError }: Props) {
           guideline compliance (auto-sized, correct styling per HIG). Apple
           Sign-In has been available on every iOS 13+ device since 2019, well
           below our minimum target, so no runtime availability check needed. */}
-      {Platform.OS === 'ios' && (
+      {showApple && (
         <View style={{ height: 50, position: 'relative' }}>
           <AppleAuthentication.AppleAuthenticationButton
             buttonType={AppleAuthentication.AppleAuthenticationButtonType.CONTINUE}
@@ -101,6 +111,7 @@ export function SocialAuthButtons({ onAuthSuccess, onAuthError }: Props) {
           marker. Branded "G" SVG isn't in our icon set; the colored letter is
           clear enough and stays within fair-use for in-app login until we
           adopt an SVG icon package. */}
+      {showGoogle && (
       <Pressable
         onPress={handleGoogle}
         disabled={googleLoading}
@@ -136,6 +147,7 @@ export function SocialAuthButtons({ onAuthSuccess, onAuthError }: Props) {
           </>
         )}
       </Pressable>
+      )}
     </View>
   );
 }
