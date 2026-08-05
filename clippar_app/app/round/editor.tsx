@@ -19,6 +19,7 @@ import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
 import { emitPipelineEvent, subscribePipeline } from '@/lib/pipelineEvents';
+import { buildReelScorecard } from '@/lib/reelScorecard';
 import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
@@ -1141,39 +1142,37 @@ export default function EditorScreen() {
       setComposeProgress('Composing reel on device...');
 
       try {
-        // Build scorecard data with per-hole timing
-        let cumulativeMs = 0;
-        const scorecardHoles = state.holes.map((hole) => {
-          const holeClips = hole.clips.filter((c) => !c.isExcluded);
-          const holeDurationMs = holeClips.reduce((sum, c) => {
-            // Pre-trimmed clips: sourceUri IS the trim file, so its
-            // durationMs (now correctly written by markClipTrimmed) is
-            // the right number. trimEndMs - trimStartMs would give the
-            // same value but in original-timeline coords, which are
-            // duplicate info — use durationMs as the source of truth.
-            const isPreTrimmed = !!(c.autoTrimmed && c.originalUri);
-            const dur = isPreTrimmed
-              ? c.durationMs
-              : (c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs));
-            return sum + dur;
-          }, 0);
-          const startMs = cumulativeMs;
-          cumulativeMs += holeDurationMs;
-          return {
-            holeNumber: hole.holeNumber,
-            par: hole.par,
-            strokes: hole.strokes,
-            startMs,
-            endMs: cumulativeMs,
-          };
-        });
-
-        const scorecardData: ScorecardData = {
-          courseName: state.courseName || 'Round',
-          totalPar: state.holes.reduce((sum, h) => sum + h.par, 0),
-          totalStrokes: state.holes.reduce((sum, h) => sum + h.strokes, 0),
-          holes: scorecardHoles,
-        };
+        // Build scorecard data with per-hole timing.
+        //
+        // `hasScore` rides along so the reel's card can obey the same rule as
+        // the preview card: a hole shows nothing until it was actually ended.
+        // buildReelScorecard does the totals (completed holes only) — see
+        // lib/reelScorecard.ts.
+        const scorecardData: ScorecardData = buildReelScorecard(
+          state.courseName,
+          state.holes.map((hole) => {
+            const holeClips = hole.clips.filter((c) => !c.isExcluded);
+            const durationMs = holeClips.reduce((sum, c) => {
+              // Pre-trimmed clips: sourceUri IS the trim file, so its
+              // durationMs (now correctly written by markClipTrimmed) is
+              // the right number. trimEndMs - trimStartMs would give the
+              // same value but in original-timeline coords, which are
+              // duplicate info — use durationMs as the source of truth.
+              const isPreTrimmed = !!(c.autoTrimmed && c.originalUri);
+              const dur = isPreTrimmed
+                ? c.durationMs
+                : (c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs));
+              return sum + dur;
+            }, 0);
+            return {
+              holeNumber: hole.holeNumber,
+              par: hole.par,
+              strokes: hole.strokes,
+              hasScore: hole.hasScore,
+              durationMs,
+            };
+          }),
+        );
 
         // Resolve music to a local file path the native engine can read
         let musicFileUri: string | null = null;

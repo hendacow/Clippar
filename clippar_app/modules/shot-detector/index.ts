@@ -157,14 +157,25 @@ export type ScorecardHole = {
   holeNumber: number;
   par: number;
   strokes: number;
+  /**
+   * True only when the hole was actually ended (a score row exists for it —
+   * EditorHoleSection.hasScore). When false, `strokes` is just the clip-count
+   * fallback and the reel's card must render an empty score cell, exactly as
+   * the in-app preview does. See lib/scoreDisplay.ts.
+   */
+  hasScore: boolean;
   startMs: number;
   endMs: number;
 };
 
 export type ScorecardData = {
   courseName: string;
+  /** Par over COMPLETED holes only (0 when no hole is finished). */
   totalPar: number;
+  /** Strokes over COMPLETED holes only (0 when no hole is finished). */
   totalStrokes: number;
+  /** How many holes are finished — 0 means the card shows "-" and no chip. */
+  holesCompleted: number;
   holes: ScorecardHole[];
 };
 
