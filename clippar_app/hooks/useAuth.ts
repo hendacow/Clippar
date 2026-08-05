@@ -129,16 +129,38 @@ export function useAuth() {
     if (error) throw error;
   }, []);
 
-  const signUp = useCallback(async (email: string, password: string, displayName?: string) => {
-    const { error } = await supabase.auth.signUp({
-      email,
-      password,
-      options: {
-        data: { full_name: displayName },
-      },
-    });
-    if (error) throw error;
-  }, []);
+  /**
+   * Create an account.
+   *
+   * Returns whether the caller must still send the user to a "check your
+   * email" screen. Supabase decides that, not us: when the project requires
+   * email confirmation it returns a user with NO session, and when it does not
+   * it signs the account straight in and returns one.
+   *
+   * This used to discard `data` entirely, so the signup screen had no way to
+   * tell the two apart and showed "Check Your Email" every time. With
+   * confirmation off (2026-08-05) that stranded every new user on a dead end
+   * telling them to click a link that would never be sent, while their account
+   * existed and was already signed in.
+   */
+  const signUp = useCallback(
+    async (
+      email: string,
+      password: string,
+      displayName?: string
+    ): Promise<{ needsEmailConfirmation: boolean }> => {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: {
+          data: { full_name: displayName },
+        },
+      });
+      if (error) throw error;
+      return { needsEmailConfirmation: !data.session };
+    },
+    []
+  );
 
   const signOut = useCallback(async () => {
     const { error } = await supabase.auth.signOut();
