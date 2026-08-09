@@ -7,6 +7,7 @@ import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { Button } from '@/components/ui/Button';
 import { iap, type ProOffering, type ProPlan } from '@/lib/iap';
+import { analytics, ANALYTICS_EVENTS } from '@/lib/analytics';
 
 /**
  * Clippar Pro paywall (App Review 3.1.1-compliant: StoreKit IAP only — no
@@ -29,6 +30,8 @@ export default function PaywallScreen() {
 
   useEffect(() => {
     iap.getOfferings().then(setOfferings).catch(() => {});
+    // Funnel: paywall impression.
+    void analytics.capture(ANALYTICS_EVENTS.PAYWALL_VIEWED);
   }, []);
 
   const handlePurchase = async () => {
@@ -37,6 +40,9 @@ export default function PaywallScreen() {
     Haptics.selectionAsync();
     try {
       await iap.purchase(selected);
+      // Funnel: subscription purchased AND the Pro entitlement is active
+      // (iap.purchase only resolves once the entitlement check passes).
+      void analytics.capture(ANALYTICS_EVENTS.SUBSCRIPTION_STARTED, { plan: selected });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert('Welcome to Clippar Pro!', 'Everything is unlocked. Go film something great.');
       router.back();

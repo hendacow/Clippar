@@ -24,6 +24,7 @@ import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
+import { analytics, ANALYTICS_EVENTS } from '@/lib/analytics';
 import { markReelFresh } from '@/lib/storage';
 import { saveClipToPhotos, saveHoleToPhotos, shareHole, stitchHoleClips, shareClip } from '@/lib/clipShare';
 // `uploadReelToStorage` is now invoked lazily by the share-link flow rather
@@ -1182,6 +1183,13 @@ export default function EditorScreen() {
         if (result.reelUri) {
           setComposeProgress('Reel complete!');
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+          // Funnel: a highlight reel was successfully composed.
+          void analytics.capture(ANALYTICS_EVENTS.REEL_CREATED, {
+            clip_count: result.clipCount,
+            duration_ms: result.durationMs,
+            recompose: recompose === '1',
+          });
 
           // Save to camera roll if available
           if (isNative) {

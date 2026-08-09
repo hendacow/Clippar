@@ -6,6 +6,7 @@ import * as Linking from 'expo-linking';
 import * as AppleAuthentication from 'expo-apple-authentication';
 import { supabase } from '@/lib/supabase';
 import { iap } from '@/lib/iap';
+import { analytics, ANALYTICS_EVENTS } from '@/lib/analytics';
 
 // Required so the browser-based Google OAuth flow completes cleanly when the
 // system browser hands control back to the app. No-op when not in an auth
@@ -24,14 +25,21 @@ export function useAuth() {
       setLoading(false);
       // Alias the RevenueCat customer to the Supabase user so StoreKit and
       // web subscriptions resolve to the same person. Fire-and-forget.
-      if (session?.user) void iap.identify(session.user.id);
+      if (session?.user) {
+        void iap.identify(session.user.id);
+        // Stitch the anonymous pre-signup funnel onto the user's profile.
+        void analytics.identify(session.user.id, { email: session.user.email });
+      }
     });
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
       setSession(session);
       setUser(session?.user ?? null);
       setLoading(false);
-      if (session?.user) void iap.identify(session.user.id);
+      if (session?.user) {
+        void iap.identify(session.user.id);
+        void analytics.identify(session.user.id, { email: session.user.email });
+      }
     });
 
     return () => subscription.unsubscribe();
@@ -51,11 +59,16 @@ export function useAuth() {
       },
     });
     if (error) throw error;
+    // Funnel: account created. Fires pre-confirmation (no session yet) so it
+    // uses the anonymous id; the later identify() merges it onto the user.
+    void analytics.capture(ANALYTICS_EVENTS.SIGNED_UP, { method: 'email' });
   }, []);
 
   const signOut = useCallback(async () => {
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
+    // Flush queued events, then drop identity so the next session is anonymous.
+    void analytics.reset();
   }, []);
 
   // Sends a password-reset email via Supabase. The email link redirects the

@@ -23,9 +23,14 @@ import { repairScoresParData } from '@/lib/api';
 import { migrateLegacyUris } from '@/lib/uriMigration';
 import { hydrateMissingClipsFromPhotos } from '@/lib/photosRecovery';
 import { initializeUploadQueueProcessor } from '@/lib/uploadQueue';
+import { analytics, ANALYTICS_EVENTS } from '@/lib/analytics';
 import '@/global.css';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
+
+// Fire `app_opened` once per cold start (this module is evaluated once per JS
+// runtime, so a module-scoped flag is the right granularity).
+let appOpenedTracked = false;
 
 // Sentry — error tracking. Init must happen synchronously at module load,
 // BEFORE the first React render, so uncaught errors during boot are captured.
@@ -106,6 +111,13 @@ function RootLayout() {
       }
       setBiometricChecked(true);
       SplashScreen.hideAsync();
+
+      // Top of the funnel: app reached an interactive state. Anonymous until
+      // the user signs in (useAuth then identifies + merges this profile).
+      if (!appOpenedTracked) {
+        appOpenedTracked = true;
+        void analytics.capture(ANALYTICS_EVENTS.APP_OPENED);
+      }
 
       // One-time idempotent repair: backfill scores.par/score_to_par for rows
       // written before migration 005. Safe to call every startup (no-op when

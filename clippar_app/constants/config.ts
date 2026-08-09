@@ -138,6 +138,19 @@ export const config = {
     // future clips keep more ball flight. 0 = no-op; set 2000 for cinematic.
     extraPostRollMs: 0,
   },
+  analytics: {
+    // PostHog product analytics. Master switch — when false, every
+    // capture()/identify() is a no-op so the app is byte-identical with it
+    // off (per the feature-flag convention). ON by default; events are
+    // fire-and-forget and swallow all errors, so a not-yet-deployed
+    // ingest-analytics function or missing secret degrades to silent no-ops.
+    enabled: true as boolean,
+    // NOTE: there is deliberately NO PostHog key here. The project API key is
+    // held server-side as a Supabase secret (POSTHOG_API_KEY) and injected by
+    // the `ingest-analytics` Edge Function — the client posts keyless events
+    // through that proxy, so no analytics key ever ships in the bundle.
+    // (See supabase/functions/ingest-analytics + lib/analytics.ts.)
+  },
   export: {
     defaultResolution: '1080p' as const,
     defaultFrameRate: 30 as const,

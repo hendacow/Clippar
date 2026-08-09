@@ -5,6 +5,7 @@ import type { RoundState, HoleScore, ClipMetadata, PenaltyType, HoleData } from 
 import { PENALTY_STROKES } from '@/types/round';
 import type { ShotTypeClassification } from 'shot-detector';
 import { createRound, updateRound, upsertScore } from '@/lib/api';
+import { analytics, ANALYTICS_EVENTS } from '@/lib/analytics';
 import { deleteFile } from 'shot-detector';
 import {
   saveLocalRound,
@@ -95,6 +96,12 @@ export function useRound() {
         round.id, courseName, courseId, courseHoles,
         holesPlayed, startHole,
       ));
+      // Funnel: a round successfully started (server round row exists).
+      void analytics.capture(ANALYTICS_EVENTS.ROUND_STARTED, {
+        holes_played: holesPlayed,
+        start_hole: startHole,
+        has_course_id: Boolean(courseId),
+      });
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       return true;
     } catch (err) {
