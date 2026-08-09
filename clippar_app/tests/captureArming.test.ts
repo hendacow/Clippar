@@ -74,3 +74,68 @@ test('the intro card blocks even a focused, in-progress round (all terms are AND
     false
   );
 });
+
+// ─── The predicate is only half the control ───
+
+// isCaptureArmed above is correct and always was. The bug on 2026-08-06 was
+// that its RESULT never reached the volume channel: useShutter read `armed`
+// as an early return inside its volume effect, but the dependency array was
+// [emitPress]. `armed` is dynamic — record.tsx passes isCaptureArmed(...),
+// false until a round is in progress AND the screen is focused — so the
+// effect ran once while disarmed, bailed before installing anything, and
+// never re-ran when the round started.
+//
+// For the whole round there was then no addVolumeListener, no
+// showNativeVolumeUI({enabled:false}) and no re-centering, so every clicker
+// press went straight to iOS: the volume rose, the HUD appeared, and no shot
+// was captured. Henry hit exactly this on TestFlight.
+//
+// Asserting on source text because hooks/useShutter.ts imports react-native,
+// which the node test runner cannot transform — same approach as
+// redeemCodeWiring.test.ts and privacyManifest.test.ts.
+
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
+
+const shutter = readFileSync(
+  join(dirname(fileURLToPath(import.meta.url)), '..', 'hooks/useShutter.ts'),
+  'utf8'
+);
+
+test('the volume effect re-runs when `armed` changes', () => {
+  const start = shutter.indexOf('const subscription = VolumeManager.addVolumeListener');
+  assert.notEqual(start, -1, 'expected the volume listener effect in useShutter.ts');
+  const depsAt = shutter.indexOf('}, [', start);
+  assert.notEqual(depsAt, -1, 'expected a dependency array closing that effect');
+  const deps = shutter.slice(depsAt, shutter.indexOf(']', depsAt) + 1);
+  assert.match(
+    deps,
+    /\barmed\b/,
+    `the volume effect gates on \`armed\` but does not depend on it — it will ` +
+      `never install the listener for a round that starts after mount. Deps: ${deps}`
+  );
+});
+
+test('the volume effect still gates on armed at all', () => {
+  // If this early return is ever removed, the test above passes vacuously
+  // while the effect starts hijacking device volume outside a capture screen.
+  const start = shutter.indexOf('const subscription = VolumeManager.addVolumeListener');
+  const effectStart = shutter.lastIndexOf('useEffect(() => {', start);
+  const body = shutter.slice(effectStart, start);
+  assert.match(body, /if \(!armed\)/, 'the volume channel must stay armed-only');
+});
+
+test("the user's volume is handed back on disarm", () => {
+  // The effect pins the system volume to 0.5 as its working point. userVolume
+  // is captured on arm for the express purpose of restoring it; for a while it
+  // was captured and never used, which left the phone at half volume after
+  // every round and read to the user as "the clicker changed my volume".
+  const start = shutter.indexOf('let userVolume');
+  assert.notEqual(start, -1, 'expected userVolume to be captured on arm');
+  assert.match(
+    shutter.slice(start),
+    /setVolume\(userVolume/,
+    'userVolume is captured but never restored — the phone stays pinned at 0.5'
+  );
+});

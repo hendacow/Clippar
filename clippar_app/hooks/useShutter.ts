@@ -532,8 +532,29 @@ export function useShutter({ armed = true }: UseShutterOptions = {}): ShutterSta
       subscription?.remove?.();
       appStateSub?.remove?.();
       try { VolumeManager.showNativeVolumeUI({ enabled: true }); } catch {}
+      // Hand the volume back. Without this the phone is left pinned at our
+      // 0.5 working point after every round — the user's music comes back at
+      // half volume and looks like the clicker "changed the volume", which is
+      // the same complaint the missing dependency below caused for a different
+      // reason. Captured on arm above; skipped if the read never resolved.
+      if (typeof userVolume === 'number') {
+        try { VolumeManager.setVolume(userVolume, { showUI: false }); } catch {}
+      }
     };
-  }, [emitPress]);
+    // `armed` MUST be here. It is read at the top of this effect as an early
+    // return, and it is dynamic: record.tsx passes isCaptureArmed(...), which
+    // is false until a round is in progress and the screen is focused. With
+    // only [emitPress], the effect ran once while disarmed, bailed before
+    // installing anything, and never re-ran when the round started — so for
+    // the whole round there was NO volume listener, NO HUD suppression and NO
+    // re-centering. Every clicker press then went straight to iOS: the volume
+    // went up, the HUD appeared, and no shot was captured.
+    //
+    // The teardown direction matters just as much. The block above mutates
+    // GLOBAL device state, and the comment at the top of the effect requires
+    // it exist "only while the caller is a live capture surface". Without
+    // `armed` in the deps that teardown could never fire on disarm either.
+  }, [emitPress, armed]);
 
   // --- Determine connection status ---
   const bleConnected = ble.connectionState === 'connected';
