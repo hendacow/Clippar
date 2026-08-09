@@ -23,7 +23,6 @@ import {
   Hash,
   Ruler,
   ShieldCheck,
-  Activity,
   HardDrive,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -511,26 +510,6 @@ export default function ProfileScreen() {
               subtitle="Photos mirroring, cloud backup, cache"
               onPress={() => router.push('/profile/storage-settings')}
             />
-            {/* Debug harnesses: dev builds only — App Review rejects visible
-                developer UI in production (2.2 beta/demo content). */}
-            {__DEV__ && (
-              <>
-                <Divider />
-                <SettingsRow
-                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
-                  title="Trim Sandbox (debug)"
-                  subtitle="Pick a video, see auto-trim output instantly"
-                  onPress={() => router.push('/profile/trim-sandbox')}
-                />
-                <Divider />
-                <SettingsRow
-                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
-                  title="Tracer Sim (debug)"
-                  subtitle="Synthetic GPS shots → rendered tracer arcs"
-                  onPress={() => router.push('/(dev)/tracer-sim')}
-                />
-              </>
-            )}
           </Card>
 
           {/* ---- UNITS ---- */}
@@ -647,16 +626,6 @@ export default function ProfileScreen() {
                 requestAnimationFrame(() => {
                   void replayOnboarding();
                 });
-              }}
-            />
-            <Divider />
-            <SettingsRow
-              icon={<Activity size={18} color={theme.colors.primary} />}
-              title="Diagnostics"
-              subtitle="Data integrity, upload queue, reachability"
-              onPress={() => {
-                Haptics.selectionAsync();
-                router.push('/profile/diagnostics');
               }}
             />
             <Divider />
