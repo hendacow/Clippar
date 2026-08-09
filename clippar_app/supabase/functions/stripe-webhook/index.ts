@@ -32,20 +32,48 @@ Deno.serve(async (req: Request) => {
   if (event.type === 'payment_intent.succeeded') {
     const paymentIntent = event.data.object as Stripe.PaymentIntent;
     const userId = paymentIntent.metadata.user_id;
-    const productType = paymentIntent.metadata.product_type || 'standard';
-    const userEmail = paymentIntent.metadata.user_email || '';
+    // `product_type` is the PaymentIntent metadata name (set by
+    // create-payment-intent); the column is `kit_type` and is CHECK-constrained
+    // to standard|premium, so anything else falls back rather than failing the
+    // whole insert. The buyer's email is not duplicated here — it lives on
+    // profiles.email, joined via user_id.
+    const kitType =
+      paymentIntent.metadata.product_type === 'premium' ? 'premium' : 'standard';
 
     if (userId) {
       // Create hardware order
-      await supabase.from('hardware_orders').insert({
+      const { error } = await supabase.from('hardware_orders').insert({
         user_id: userId,
-        product_type: productType,
+        kit_type: kitType,
         amount_cents: paymentIntent.amount,
         currency: paymentIntent.currency,
         stripe_payment_intent_id: paymentIntent.id,
         status: 'paid',
-        email: userEmail,
       });
+
+      if (error) {
+        // 23505 = unique violation on stripe_payment_intent_id, i.e. Stripe
+        // redelivered an event we already recorded. That is success, not failure.
+        if (error.code === '23505') {
+          console.log(
+            `[stripe-webhook] order already exists for ${paymentIntent.id}, ignoring replay`
+          );
+        } else {
+          console.error(
+            `[stripe-webhook] failed to insert hardware_order for payment_intent ${paymentIntent.id} (user ${userId}): ${error.code ?? 'no-code'} ${error.message}`
+          );
+          // Non-2xx tells Stripe to retry the event, so a transient DB failure
+          // doesn't silently lose a paid order.
+          return new Response(
+            JSON.stringify({ error: 'Failed to record hardware order' }),
+            { status: 500, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+      }
+    } else {
+      console.error(
+        `[stripe-webhook] payment_intent ${paymentIntent.id} succeeded with no user_id in metadata; no hardware order recorded`
+      );
     }
   }
 

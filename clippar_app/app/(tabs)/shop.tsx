@@ -351,7 +351,7 @@ export default function ShopScreen() {
                 </Text>
               </View>
               <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
-                {existingOrder.product_type === 'premium' ? 'Premium' : 'Standard'} Kit &middot;{' '}
+                {existingOrder.kit_type === 'premium' ? 'Premium' : 'Standard'} Kit &middot;{' '}
                 {new Date(existingOrder.created_at).toLocaleDateString('en-AU')}
               </Text>
             </Card>
