@@ -71,11 +71,9 @@ All 5 blockers from the pre-submission review are resolved:
 
 ### Apple Sign-In
 
-- **Code:** wired and correct (`usesAppleSignIn: true`, `expo-apple-authentication` plugin, `.p8` key referenced in `SETUP_AUTH.md`)
-- **Apple JWT expiry (⚠️ CRITICAL DEADLINE):** The prompt notes the original Apple private key JWT was set to expire **Nov 15, 2026** — 89 days from today. Apple's policy limits client_secret JWTs to 6 months. If a JWT was generated ~May 2026, it expires ~Nov 2026. **Apple Sign-In will silently break the moment it expires.** Henry must:
-  1. Check the Apple private key status in Apple Developer Portal → Keys
-  2. Confirm the `.p8` key has NOT been revoked
-  3. Regenerate the `client_secret` JWT in Supabase → Authentication → Providers → Apple, and set it to the maximum 6-month window. **Do this before Nov 15, 2026 — ideally immediately so a full 6-month window is in place.**
+- **Code:** wired and correct (`usesAppleSignIn: true`, `expo-apple-authentication` plugin, `.p8` key stored in Supabase)
+- **How Apple Sign-In JWTs work in this codebase:** `supabase/functions/_shared/apple.ts:124-149` generates a fresh 5-minute client-secret JWT from the stored `.p8` private key on every request (`exp: nowSeconds + 300`). There is no pre-generated 6-month JWT to rotate. **The only thing that can break Apple Sign-In is the `.p8` private key being revoked in Apple Developer Portal.**
+- **Apple private key check (⚠️ verify):** The prompt flagged a Nov 15, 2026 expiry. That date likely refers to the original concern about pre-generated JWTs — not applicable here. However, Henry must still confirm the private key in Apple Developer Portal → Keys has **not been revoked**. A revoked key silently breaks Apple Sign-In with no in-app error. If the key was revoked, create a new one, download the `.p8`, and update the Supabase Apple provider config.
 - **Bundle ID capability:** Henry must confirm all 3 app identifiers (`com.clippar.app`, `.dev`, `.staging`) have "Sign In with Apple" enabled in Apple Developer → Identifiers.
 
 ### Google Sign-In
@@ -114,14 +112,12 @@ All 5 blockers from the pre-submission review are resolved:
 
 ---
 
-## 5. Known security landmines (from CLAUDE.md — unchanged)
+## 5. Known security items
 
-These are documented but NOT fixed. Not blocking launch if the risk is accepted, but worth flagging:
-
-| Risk | Severity | Detail |
+| Risk | Severity | Status |
 |------|----------|--------|
-| Storage RLS not owner-scoped | High | `clips` bucket allows any auth'd user to read/write any user's clips. Table RLS is correct. |
-| Secret keys in client bundle | Medium | `EXPO_PUBLIC_PIPELINE_API_KEY`, `EXPO_PUBLIC_GOLF_COURSE_API_KEY` embedded in bundle — move to Edge Function proxy |
+| Storage RLS owner scope | High | ✅ **Fixed** — migration `011_clips_storage_owner_scope.sql` already scopes reads/updates/deletes to round owner via `r.user_id = auth.uid()`. The CLAUDE.md landmine note is stale. Test coverage in `tests/migrationAuthz.test.ts:231-279`. |
+| Secret keys in client bundle | Medium | `EXPO_PUBLIC_PIPELINE_API_KEY`, `EXPO_PUBLIC_GOLF_COURSE_API_KEY` embedded in bundle — move to Edge Function proxy (P2, post-launch) |
 | No soft-delete | Low | All deletes are permanent; no `deleted_at` anywhere |
 
 ---
@@ -130,14 +126,14 @@ These are documented but NOT fixed. Not blocking launch if the risk is accepted,
 
 ### P0 — Must fix before App Store submission
 
-1. **Apple JWT renewal (deadline: Nov 15, 2026)** — Regenerate the client_secret JWT in Supabase → Apple provider right now. 89 days away but Apple Sign-In breaks hard on expiry with no warning to users.
+1. **Apple private key — confirm not revoked** — This codebase generates fresh 5-minute JWTs from the stored `.p8` key per request; there is no 6-month JWT to rotate. The only failure mode is the key being revoked. Check Apple Developer Portal → Keys and confirm the Clippar Sign-In key is still active. If revoked, create a new key and update Supabase → Auth → Apple provider.
 2. **Confirm Sign In with Apple capability** on all 3 App IDs in Apple Developer Portal.
 3. **Confirm `EXPO_PUBLIC_RC_IOS_KEY`** is set in EAS production environment. Without it, the paywall falls back to StubProvider and IAP is non-functional for reviewers.
 4. **Set up 14-day free trial introductory offer** in App Store Connect → Subscriptions (monthly + annual products). Exact steps in `APP_STORE_SUBMISSION.md`.
 5. **Fill App Privacy nutrition label** in App Store Connect → App Privacy.
 6. **Add demo account** to App Store Connect → App Review Information (with note about sample round).
 7. **Complete Age Rating questionnaire** (expected 4+).
-8. **Upload screenshots** to App Store Connect (use `store-assets/screenshots/6.9-inch-1320x2868/` and `6.7-inch-1290x2796/` — do NOT upload `originals/`).
+8. **Upload screenshots** to App Store Connect (use `clippar_app/store-assets/screenshots/6.9-inch-1320x2868/` and `clippar_app/store-assets/screenshots/6.7-inch-1290x2796/` — do NOT upload `originals/`).
 
 ### P1 — Should do before or shortly after launch
 
@@ -146,7 +142,7 @@ These are documented but NOT fixed. Not blocking launch if the risk is accepted,
 11. **Faster export (Wave 6)** — Verify whether this was addressed. If not, open a dedicated issue and track.
 12. **expo-doctor pre-build** — Run `npx expo install --check` before final production build (4 non-blocking but real dependency hygiene issues noted in `APPSTORE_READINESS.md`).
 13. **Device-verify audio fix** — Issues `#53`/`#54` (clips no volume on export) likely fixed by `#132` but needs device confirmation before it closes.
-14. **Storage RLS** — Scope `clips` bucket to `owner = auth.uid()`. This is a live cross-user data leak.
+14. ~~**Storage RLS**~~ — Already fixed by migration `011_clips_storage_owner_scope.sql` (owner-scoped via round join). No action needed.
 
 ### P2 — Nice to have / post-launch
 
