@@ -94,7 +94,16 @@ export default function PaywallTrialScreen() {
   const insets = useSafeAreaInsets();
   const { from } = useLocalSearchParams<{ from?: string }>();
   const { fromOnboarding, exit } = usePaywallExit(from);
-  const { offerings, selected, setSelected, selectedOffering, busy, handlePurchase, handleRestore } =
+  const {
+    offerings,
+    offeringsLoaded,
+    selected,
+    setSelected,
+    selectedOffering,
+    busy,
+    handlePurchase,
+    handleRestore,
+  } =
     usePaywallCommerce({ onDone: exit });
 
   // Null whenever the store did not confirm a trial for this Apple ID — in
@@ -209,7 +218,25 @@ export default function PaywallTrialScreen() {
 
         {/* Plans */}
         {offerings.length === 0 ? (
-          <ActivityIndicator color={theme.colors.primary} style={{ marginVertical: 24 }} />
+          /* Three states, not two. A spinner forever is what an empty list
+             used to render, and the stub now returns empty whenever StoreKit
+             is unreachable — so say so rather than spin. Never a price here:
+             we do not know the user's storefront in this branch. */
+          offeringsLoaded ? (
+            <Text
+              style={{
+                color: theme.colors.textSecondary,
+                textAlign: 'center',
+                marginVertical: 24,
+                paddingHorizontal: 24,
+              }}
+            >
+              Clippar Pro isn&apos;t available right now. Check your connection and try
+              again — nothing has been charged.
+            </Text>
+          ) : (
+            <ActivityIndicator color={theme.colors.primary} style={{ marginVertical: 24 }} />
+          )
         ) : (
           <View style={{ marginBottom: 16 }}>
             <PlanCards

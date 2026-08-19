@@ -31,7 +31,7 @@ export type ProPlan = 'monthly' | 'annual' | 'lifetime';
 
 export interface ProOffering {
   plan: ProPlan;
-  /** Store-localized display price (stub: config AUD prices). */
+  /** Store-localized display price, always straight from StoreKit. */
   priceLabel: string;
   periodLabel: string;
   /** Savings hook for the annual card, e.g. "Save 38%". */
@@ -103,25 +103,30 @@ export type CodeRedemptionOutcome =
   | { status: 'dismissed' }
   | { status: 'unavailable'; reason: string };
 
-const aud = (cents: number) => `A$${(cents / 100).toFixed(2).replace(/\.00$/, '')}`;
-
 // ─── Stub (Expo Go / unconfigured) ───
 
 const StubProvider: IapProvider = {
   isAvailable: () => false,
-  async getOfferings() {
-    const monthly = config.subscription.monthlyPriceAud;
-    const annual = config.subscription.annualPriceAud;
-    const savings = Math.round((1 - annual / (monthly * 12)) * 100);
-    return [
-      { plan: 'monthly', priceLabel: aud(monthly), periodLabel: 'per month' },
-      {
-        plan: 'annual',
-        priceLabel: aud(annual),
-        periodLabel: 'per year',
-        badge: `Save ${savings}%`,
-      },
-    ];
+  /**
+   * NO offerings — deliberately empty, never placeholder prices.
+   *
+   * The stub runs when StoreKit is unreachable: Expo Go, a binary without the
+   * native module, no API key, or a `Purchases.configure` failure in
+   * production. In every one of those cases we do not know the user's
+   * storefront, so any price we render is a guess.
+   *
+   * It used to return the config AUD placeholders. That shipped A$14.99 /
+   * A$99.99 to a user in any country — a US customer saw Australian dollars
+   * for a product Apple would charge them USD for. Displaying a price the
+   * store did not report is an App Review 3.1.2 problem and, if they then
+   * buy, real-money harm.
+   *
+   * Empty is honest: `purchase()` throws in stub mode anyway, so cards here
+   * were never actionable. The paywall reads the empty list and says Pro is
+   * unavailable instead of quoting a number it cannot stand behind.
+   */
+  async getOfferings(): Promise<ProOffering[]> {
+    return [];
   },
   async purchase() {
     throw new Error(
