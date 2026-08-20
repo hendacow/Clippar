@@ -331,10 +331,13 @@ export default function HomeScreen() {
     }, [fetchRounds]),
   );
 
-  // Initial fetch + drain the GATED backup queue (free tier / backup-off
-  // users exit immediately inside processUploadQueue).
+  // Drain the GATED backup queue (free tier / backup-off users exit
+  // immediately inside processUploadQueue) and refetch once it settles.
+  // The initial rounds fetch is NOT fired here: useFocusEffect above
+  // already fires on mount, and running both meant two identical
+  // fetchRounds chains (rounds+scores query, status I/O, thumbnails)
+  // racing each other on first paint.
   useEffect(() => {
-    fetchRounds();
     fetchName();
     processUploadQueue()
       .then(() => fetchRounds())

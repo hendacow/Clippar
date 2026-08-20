@@ -1010,9 +1010,18 @@ export default function PreviewScreen() {
   // playback. When on, draws the detected skeleton over the clip while it plays.
   const [showPoseOverlay, setShowPoseOverlay] = useState(false);
 
-  // Reload editor state on focus to pick up trim changes from other screens
+  // Reload editor state on RE-focus to pick up trim changes from other
+  // screens. The first focus is skipped: it coincides with mount, where
+  // useEditorState's own effect is already loading — running both meant the
+  // entire load waterfall (round + scores + a signed URL per clip) executed
+  // twice, concurrently, before first playback.
+  const hasFocusedRef = useRef(false);
   useFocusEffect(
     useCallback(() => {
+      if (!hasFocusedRef.current) {
+        hasFocusedRef.current = true;
+        return;
+      }
       editor.reload();
     }, [editor.reload])
   );

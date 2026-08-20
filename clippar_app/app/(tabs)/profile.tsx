@@ -35,7 +35,7 @@ import { Button } from '@/components/ui/Button';
 import { useAuth } from '@/hooks/useAuth';
 import { useSubscription } from '@/hooks/useSubscription';
 import { useOnboarding } from '@/contexts/OnboardingContext';
-import { getProfile, getRounds, deleteAccount } from '@/lib/api';
+import { getProfile, getRoundStatusCounts, deleteAccount } from '@/lib/api';
 import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
 import { processUploadQueue } from '@/lib/uploadQueue';
@@ -150,14 +150,13 @@ export default function ProfileScreen() {
         .then((data) => setProfile(data as ProfileRow))
         .catch(() => {});
 
-      getRounds()
-        .then((data) => {
-          if (data) {
-            setRoundsCount(data.length);
-            setDraftCount(
-              data.filter((r: any) => r.status !== 'ready' && r.status !== 'failed').length
-            );
-          }
+      // Two pill counts are all this screen shows — fetch only id+status
+      // (was getRounds(): every column of every round re-downloaded on each
+      // tab focus, just to be counted and discarded).
+      getRoundStatusCounts()
+        .then(({ total, drafts }) => {
+          setRoundsCount(total);
+          setDraftCount(drafts);
         })
         .catch(() => {});
     }, [])

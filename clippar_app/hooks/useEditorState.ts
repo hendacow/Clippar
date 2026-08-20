@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { getClipUrl } from '@/lib/r2';
+import { getSignedClipUrls } from '@/lib/api';
 import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
 import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
@@ -138,31 +138,33 @@ export function useEditorState(roundId: string | undefined) {
         );
       }
 
-      // Generate signed URLs for all remaining clips
-      const clips = await Promise.all(
-        realShots.map(async (shot): Promise<EditorClip> => {
-          let sourceUri: string | null = null;
-          if (shot.clip_url) {
-            sourceUri = await getClipUrl(shot.clip_url);
-            if (!sourceUri) {
-              console.warn(
-                `[useEditorState] Hole ${shot.hole_number} shot ${shot.shot_number}: getClipUrl returned null for "${shot.clip_url}"`
-              );
-            }
-          }
-          return {
-            id: shot.id,
-            type: 'shot',
-            holeNumber: shot.hole_number,
-            shotNumber: shot.shot_number,
-            sourceUri,
-            storagePath: shot.clip_url,
-            trimStartMs: 0,
-            trimEndMs: -1,
-            durationMs: 0,
-          };
-        })
+      // Sign all clip URLs in ONE storage request (was one createSignedUrl
+      // round trip per shot — a full round meant dozens of parallel HTTPS
+      // requests before the editor could render). Same 7-day expiry the
+      // per-clip getClipUrl path used.
+      const signedByPath = await getSignedClipUrls(
+        realShots.map((s) => s.clip_url!),
+        86400 * 7,
       );
+      const clips = realShots.map((shot): EditorClip => {
+        const sourceUri = signedByPath[shot.clip_url!] ?? null;
+        if (!sourceUri) {
+          console.warn(
+            `[useEditorState] Hole ${shot.hole_number} shot ${shot.shot_number}: no signed URL for "${shot.clip_url}"`
+          );
+        }
+        return {
+          id: shot.id,
+          type: 'shot',
+          holeNumber: shot.hole_number,
+          shotNumber: shot.shot_number,
+          sourceUri,
+          storagePath: shot.clip_url,
+          trimStartMs: 0,
+          trimEndMs: -1,
+          durationMs: 0,
+        };
+      });
 
       // Need at least scores or clips to consider this a valid load
       if (clips.length === 0 && scores.length === 0) return false;
@@ -293,7 +295,16 @@ export function useEditorState(roundId: string | undefined) {
   const loadRound = useCallback(async () => {
     if (!roundId) return;
 
-    setState((prev) => ({ ...prev, loading: true, error: null }));
+    // Only surface the loading state when there's nothing to show yet.
+    // A reload with holes already on screen (preview/editor re-focus)
+    // revalidates behind the rendered content instead of swapping the
+    // whole screen for a spinner — the fresh setState below replaces
+    // state wholesale either way.
+    setState((prev) => ({
+      ...prev,
+      loading: prev.holes.length === 0,
+      error: null,
+    }));
 
     // On native, try local SQLite first (clips live here after import/record)
     if (isNative) {
