@@ -34,6 +34,7 @@ import { ShareSheet } from '@/components/shared/ShareSheet';
 import { ReelStage } from '@/components/shared/ReelStage';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { getRound, deleteRound } from '@/lib/api';
+import { takePrefetchedRound } from '@/lib/roundPrefetch';
 import { deleteLocalRound } from '@/lib/storage';
 import { runDeleteRound } from '@/lib/roundDeleteLogic';
 import { computeRoundStatus, type RoundStatusResult } from '@/lib/roundStatus';
@@ -264,7 +265,15 @@ export default function RoundViewer() {
 
   const fetchRound = useCallback(() => {
     if (!id) return;
-    getRound(id)
+    // Use the payload warmed on press-in from Home if one is waiting; a warmed
+    // entry that errored (resolves null) falls back to a live fetch, so this
+    // never trades correctness for the speed-up. On focus after the first
+    // paint the cache is empty and this is a normal live fetch.
+    const warmed = takePrefetchedRound(id);
+    const source = warmed
+      ? warmed.then((data) => data ?? getRound(id))
+      : getRound(id);
+    source
       .then((data) => {
         roundRef.current = data;
         setRound(data);

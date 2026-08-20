@@ -90,33 +90,36 @@ export function useEditorState(roundId: string | undefined) {
 
       if (roundErr || !round) return false;
 
-      // Fetch scores
-      let scores: { hole_number: number; strokes: number; par: number }[] = [];
-      try {
-        const { data } = await supabase
-          .from('scores')
-          .select('hole_number, strokes, par')
-          .eq('round_id', roundId)
-          .order('hole_number');
-        if (data) scores = data;
-      } catch {}
-
-      // Fetch course hole pars
-      let courseHolePars: Record<number, number> = {};
-      if (round.course_id) {
-        try {
-          const { data: holeData } = await supabase
-            .from('holes')
-            .select('hole_number, par')
-            .eq('course_id', round.course_id)
-            .order('hole_number');
-          if (holeData) {
-            holeData.forEach((h) => {
-              courseHolePars[h.hole_number] = h.par;
-            });
+      // Scores and course-hole-pars are independent queries — both keyed off
+      // the round we just fetched. Run them together rather than one after the
+      // other so the editor loads a round trip sooner.
+      const [scores, courseHolePars] = await Promise.all([
+        (async (): Promise<{ hole_number: number; strokes: number; par: number }[]> => {
+          try {
+            const { data } = await supabase
+              .from('scores')
+              .select('hole_number, strokes, par')
+              .eq('round_id', roundId)
+              .order('hole_number');
+            return data ?? [];
+          } catch {
+            return [];
           }
-        } catch {}
-      }
+        })(),
+        (async (): Promise<Record<number, number>> => {
+          const pars: Record<number, number> = {};
+          if (!round.course_id) return pars;
+          try {
+            const { data } = await supabase
+              .from('holes')
+              .select('hole_number, par')
+              .eq('course_id', round.course_id)
+              .order('hole_number');
+            if (data) data.forEach((h) => { pars[h.hole_number] = h.par; });
+          } catch {}
+          return pars;
+        })(),
+      ]);
 
       const shots = (round.shots ?? []) as {
         id: string;
@@ -189,8 +192,28 @@ export function useEditorState(roundId: string | undefined) {
       const localRound = await storage.getLocalRound(roundId);
       if (!localRound) return false;
 
-      const localScores = await storage.getLocalScores(roundId);
-      const localClips = await storage.getClipsForRound(roundId);
+      // These three reads are independent — two local SQLite queries and one
+      // remote course-holes fetch (needs only course_id, already resolved).
+      // Firing them together overlaps the remote round trip with the local
+      // reads instead of stacking them, so round detail (which opens through
+      // this path) paints one round trip sooner.
+      const [localScores, localClips, holeData] = await Promise.all([
+        storage.getLocalScores(roundId),
+        storage.getClipsForRound(roundId),
+        (async (): Promise<{ hole_number: number; par: number }[] | null> => {
+          if (!localRound.course_id) return null;
+          try {
+            const { data } = await supabase
+              .from('holes')
+              .select('hole_number, par')
+              .eq('course_id', localRound.course_id)
+              .order('hole_number');
+            return data;
+          } catch {
+            return null;
+          }
+        })(),
+      ]);
 
       const scores = localScores.map((s) => ({
         hole_number: s.hole_number,
@@ -242,21 +265,12 @@ export function useEditorState(roundId: string | undefined) {
         };
       });
 
-      // Fetch course hole pars if course_id exists
-      let courseHolePars: Record<number, number> = {};
-      if (localRound.course_id) {
-        try {
-          const { data: holeData } = await supabase
-            .from('holes')
-            .select('hole_number, par')
-            .eq('course_id', localRound.course_id)
-            .order('hole_number');
-          if (holeData) {
-            holeData.forEach((h) => {
-              courseHolePars[h.hole_number] = h.par;
-            });
-          }
-        } catch {}
+      // Course hole pars were fetched above, concurrently with the local reads.
+      const courseHolePars: Record<number, number> = {};
+      if (holeData) {
+        holeData.forEach((h) => {
+          courseHolePars[h.hole_number] = h.par;
+        });
       }
 
       const holes = buildHoleSections(clips, scores, courseHolePars);

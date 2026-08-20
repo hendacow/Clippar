@@ -42,6 +42,7 @@ export function RoundListCard({
   composePercent,
   thumbUri,
   onPress,
+  onPressIn,
   onDelete,
   onRetry,
 }: {
@@ -52,6 +53,8 @@ export function RoundListCard({
   /** Precomputed cached thumbnail — rows never do per-render I/O. */
   thumbUri?: string | null;
   onPress: () => void;
+  /** Fires on finger-down — used to warm the round-detail payload early. */
+  onPressIn?: () => void;
   onDelete?: () => void;
   onRetry?: () => void;
 }) {
@@ -66,6 +69,7 @@ export function RoundListCard({
 
   const row = (
     <Pressable
+      onPressIn={onPressIn}
       onPress={() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
         onPress();
