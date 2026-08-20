@@ -645,8 +645,14 @@ export default function HomeScreen() {
                   compose.active && compose.roundId === round.id ? compose.percent : null
                 }
                 thumbUri={thumbs[round.id]}
-                onPressIn={() => prefetchRound(round.id)}
-                onPress={() => router.push(`/round/${round.id}`)}
+                onPress={() => {
+                  // Warm the detail payload on the committed tap (not press-in,
+                  // which also fires when the finger is starting a scroll and
+                  // would fetch rounds the user only scrolls past). getRound then
+                  // runs during the slide-from-bottom transition to the screen.
+                  prefetchRound(round.id);
+                  router.push(`/round/${round.id}`);
+                }}
                 onDelete={() => handleDeleteRound(round.id)}
                 onRetry={status === 'FAILED' ? () => goEditorRecompose(round.id) : undefined}
               />

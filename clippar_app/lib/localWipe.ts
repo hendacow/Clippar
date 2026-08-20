@@ -1,5 +1,6 @@
 import { Platform } from 'react-native';
 import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting } from './storage';
+import { clearRoundPrefetch } from './roundPrefetch';
 
 /**
  * Local, app-owned secure-store keys that survive a Supabase sign-out (sign-out
@@ -107,6 +108,11 @@ export async function wipeLocalUserData(): Promise<void> {
   await removeOwnedMediaDirectories();
   await removeTemporaryExports();
 
+  // In-memory round-detail prefetch cache: carries the departing user's round
+  // payloads (GPS + clip URLs) for its TTL. Drop it so a next account on this
+  // handset can never be served the previous golfer's warmed data.
+  clearRoundPrefetch();
+
   if (Platform.OS === 'web') return;
 
   try {
@@ -133,6 +139,12 @@ export async function wipeLocalUserData(): Promise<void> {
  * storage layer can no longer resolve whose data this is.
  */
 export async function clearAccountLinkedCaches(): Promise<void> {
+  // The round-detail prefetch cache is account-linked residue too — it holds
+  // the signed-in user's round payloads (GPS + clip URLs) in memory for its
+  // TTL. Sign-out must drop it so the next account is never served warmed data
+  // from the previous one. Synchronous in-memory clear; nothing to await.
+  clearRoundPrefetch();
+
   for (const key of ACCOUNT_LINKED_SETTING_KEYS) {
     try {
       await setSetting(key, null);
