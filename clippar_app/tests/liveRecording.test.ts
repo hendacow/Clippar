@@ -4,7 +4,7 @@ import {
   classifyVolumeEvent,
   resolveStopRequest,
   canStartRecording,
-  isRoundOver,
+  nextHoleAfter,
   lastHoleOf,
   findLastClipIndexOnHole,
   previousHoleTarget,
@@ -86,18 +86,35 @@ test('start is blocked while recording and while the previous clip finalizes', (
 
 // ---- round-over / last hole ---------------------------------------------
 
-test('lastHoleOf covers all three round shapes', () => {
+test('lastHoleOf covers all four round shapes, including the wrap', () => {
   assert.equal(lastHoleOf(18, 1), 18);
   assert.equal(lastHoleOf(9, 1), 9);
   assert.equal(lastHoleOf(9, 10), 18);
+  // Shotgun full round: tees off on 10, plays 10..18 then 1..9, ends on 9 —
+  // the last hole in PLAY order, not the numerically largest.
+  assert.equal(lastHoleOf(18, 10), 9);
 });
 
-test('isRoundOver flips exactly past the last hole', () => {
-  assert.equal(isRoundOver(18, 18, 1), false);
-  assert.equal(isRoundOver(19, 18, 1), true);
-  assert.equal(isRoundOver(10, 9, 1), true);
-  assert.equal(isRoundOver(18, 9, 10), false);
-  assert.equal(isRoundOver(19, 9, 10), true);
+test('nextHoleAfter advances in play order and ends exactly at the last hole', () => {
+  assert.equal(nextHoleAfter(1, 18, 1), 2);
+  assert.equal(nextHoleAfter(17, 18, 1), 18);
+  assert.equal(nextHoleAfter(18, 18, 1), null); // round over
+  assert.equal(nextHoleAfter(9, 9, 1), null);
+  assert.equal(nextHoleAfter(17, 9, 10), 18);
+  assert.equal(nextHoleAfter(18, 9, 10), null);
+});
+
+test('nextHoleAfter wraps 18 → 1 on a shotgun full round, and ends on 9', () => {
+  assert.equal(nextHoleAfter(10, 18, 10), 11);
+  assert.equal(nextHoleAfter(18, 18, 10), 1); // THE wrap — not 19, not over
+  assert.equal(nextHoleAfter(1, 18, 10), 2);
+  assert.equal(nextHoleAfter(8, 18, 10), 9);
+  assert.equal(nextHoleAfter(9, 18, 10), null); // real end of the round
+});
+
+test('nextHoleAfter refuses a hole the round does not contain', () => {
+  assert.equal(nextHoleAfter(12, 9, 1), null); // hole 12 isn't in a front nine
+  assert.equal(nextHoleAfter(3, 9, 10), null);
 });
 
 // ---- findLastClipIndexOnHole --------------------------------------------
@@ -121,17 +138,23 @@ test('a hole with no clips yields -1 (nothing to delete)', () => {
 
 // ---- previousHoleTarget (manual Previous Hole clamping) ------------------
 
-test('previousHoleTarget steps back one hole', () => {
-  assert.equal(previousHoleTarget(5, 1), 4);
-  assert.equal(previousHoleTarget(18, 1), 17);
+test('previousHoleTarget steps back one hole in play order', () => {
+  assert.equal(previousHoleTarget(5, 18, 1), 4);
+  assert.equal(previousHoleTarget(18, 18, 1), 17);
+  // Wrapping round: the hole before 1 is 18 in play order.
+  assert.equal(previousHoleTarget(1, 18, 10), 18);
+  assert.equal(previousHoleTarget(9, 18, 10), 8);
 });
 
 test('previousHoleTarget clamps at the round start hole (never below)', () => {
   // Front-9 / full round: can't go below hole 1.
-  assert.equal(previousHoleTarget(1, 1), null);
+  assert.equal(previousHoleTarget(1, 18, 1), null);
   // Back-nine round: can't go below hole 10.
-  assert.equal(previousHoleTarget(10, 10), null);
-  assert.equal(previousHoleTarget(11, 10), 10);
+  assert.equal(previousHoleTarget(10, 9, 10), null);
+  assert.equal(previousHoleTarget(11, 9, 10), 10);
+  // Shotgun full round: 10 is the FIRST hole played, so no previous — even
+  // though 9 exists on the card, it's the round's last hole, not its prior.
+  assert.equal(previousHoleTarget(10, 18, 10), null);
 });
 
 // ---- resumeShotNumber (shot counter when landing on a hole) --------------
@@ -195,5 +218,9 @@ test('orderedHoleNumbers yields real hole numbers for each round shape', () => {
   // Back-nine round renders holes 10–18, NOT 1–9.
   assert.deepEqual(orderedHoleNumbers(9, 10), [
     10, 11, 12, 13, 14, 15, 16, 17, 18,
+  ]);
+  // Shotgun full round wraps after 18 back to 1, in PLAY order.
+  assert.deepEqual(orderedHoleNumbers(18, 10), [
+    10, 11, 12, 13, 14, 15, 16, 17, 18, 1, 2, 3, 4, 5, 6, 7, 8, 9,
   ]);
 });

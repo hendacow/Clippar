@@ -7,6 +7,7 @@ import {
   clampRecoveredPointer,
   insertClipInOrder,
   previousHoleTarget,
+  nextHoleAfter,
   resumeShotNumber,
   upsertHoleScore,
   findLastClipIndexOnHole,
@@ -143,11 +144,13 @@ function simulateRound(startHole: 1 | 10, holesPlayed: 9 | 18) {
         strokes,
         par: 4,
       });
-      state.currentHole += 1;
+      const nxt = nextHoleAfter(state.currentHole, holesPlayed, startHole);
+      if (nxt === null) return; // round over — mirrors useRound's finished branch
+      state.currentHole = nxt;
       state.currentShot = resumeShotNumber(state.scores, state.clips, state.currentHole);
     },
     previousHole() {
-      const target = previousHoleTarget(state.currentHole, startHole);
+      const target = previousHoleTarget(state.currentHole, holesPlayed, startHole);
       if (target === null) return false;
       // Commit the departing hole's strokes so penalties survive — the REAL
       // decision from useRound.previousHole.
@@ -346,4 +349,30 @@ test('endHole and previousHole both route through departingHoleStrokes', () => {
     'endRoundEarly lost its hasCurrentHoleShots guard — it would then commit a ' +
       'score for a hole the golfer never played',
   );
+});
+
+
+// ---- shotgun full round: 18 holes teeing off on the 10th ------------------
+
+test('shotgun 18 from the 10th: wraps 18→1, previous from 1 is 18, ends after 9', () => {
+  const sim = simulateRound(10, 18);
+  // Play 10..18: nine advances land us on hole 18's successor — hole 1.
+  for (let i = 0; i < 8; i++) sim.record() && sim.nextHole();
+  assert.equal(sim.state.currentHole, 18);
+  sim.record();
+  sim.nextHole();
+  assert.equal(sim.state.currentHole, 1); // THE wrap
+  // A clip recorded here belongs to hole 1, play-order position 10.
+  const clip = sim.record();
+  assert.equal(clip.holeNumber, 1);
+  // Previous Hole from 1 steps back to 18 — play order, not number order.
+  assert.equal(sim.previousHole(), true);
+  assert.equal(sim.state.currentHole, 18);
+  sim.nextHole();
+  // Play out 1..9; the round refuses to advance past its true last hole, 9.
+  for (let i = 0; i < 8; i++) sim.record() && sim.nextHole();
+  assert.equal(sim.state.currentHole, 9);
+  sim.record();
+  sim.nextHole(); // round over — pointer must NOT move
+  assert.equal(sim.state.currentHole, 9);
 });

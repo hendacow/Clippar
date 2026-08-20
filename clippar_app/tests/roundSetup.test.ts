@@ -34,15 +34,18 @@ test('startHoleOptions: 9 holes can tee off on 1 or 10', () => {
   );
 });
 
-test('startHoleOptions: 18 holes only ever start on hole 1 (the round never wraps)', () => {
+test('startHoleOptions: 18 holes can also tee off on 1 or 10 (wrapping shotgun start)', () => {
   assert.deepEqual(
     startHoleOptions(18).map((o) => o.value),
-    [1],
+    [1, 10]
   );
 });
 
-test('normalizeStartHole: a back-nine start does not survive a flip to 18', () => {
-  assert.equal(normalizeStartHole(18, 10), 1);
+test('normalizeStartHole: passes valid picks through for both lengths', () => {
+  // Both lengths now allow both tees — flipping 9 → 18 keeps a hole-10 start
+  // (it becomes a wrapping shotgun round), and vice versa.
+  assert.equal(normalizeStartHole(18, 10), 10);
+  assert.equal(normalizeStartHole(18, 1), 1);
   assert.equal(normalizeStartHole(9, 10), 10);
   assert.equal(normalizeStartHole(9, 1), 1);
 });
