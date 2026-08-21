@@ -57,9 +57,25 @@ export function usePaywallCommerce({ onDone }: { onDone: () => void }) {
   const [offerings, setOfferings] = useState<ProOffering[]>([]);
   const [selected, setSelected] = useState<ProPlan>('annual');
   const [busy, setBusy] = useState(false);
+  // Distinguishes "still asking the store" from "the store has nothing".
+  // Without it an empty list renders a spinner forever, which is what the
+  // stub path now produces whenever StoreKit is unreachable.
+  const [offeringsLoaded, setOfferingsLoaded] = useState(false);
 
   useEffect(() => {
-    iap.getOfferings().then(setOfferings).catch(() => {});
+    let cancelled = false;
+    iap
+      .getOfferings()
+      .then((o) => {
+        if (!cancelled) setOfferings(o);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setOfferingsLoaded(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const selectedOffering = offerings.find((o) => o.plan === selected) ?? null;
@@ -101,7 +117,16 @@ export function usePaywallCommerce({ onDone }: { onDone: () => void }) {
     }
   }, [busy, onDone]);
 
-  return { offerings, selected, setSelected, selectedOffering, busy, handlePurchase, handleRestore };
+  return {
+    offerings,
+    offeringsLoaded,
+    selected,
+    setSelected,
+    selectedOffering,
+    busy,
+    handlePurchase,
+    handleRestore,
+  };
 }
 
 /* ── Chrome ───────────────────────────────────────────────────────────── */

@@ -37,16 +37,18 @@ export const config = {
   // unread field here would have kept the key shipping while looking fixed.
   subscription: {
     websiteUrl: 'https://clippargolf.com',
-    // PLACEHOLDER PRICES, in AUD cents, matching the real App Store Connect
-    // prices (A$14.99/month, A$99.99/year). They are read ONLY by the STUB
-    // offering in lib/iap.ts — Expo Go, binaries without the RevenueCat native
-    // module, and builds with no RC key. A configured build renders
-    // store-localised priceStrings straight from RevenueCat and never reads
-    // these. Keep them in step with App Store Connect anyway: the stub is what
-    // a reviewer or a TestFlight user on an unconfigured build sees, and the
-    // annual card's "Save N%" badge is computed from the pair.
-    monthlyPriceAud: 1499,
-    annualPriceAud: 9999,
+    // NO placeholder prices live here. There were two (monthlyPriceAud /
+    // annualPriceAud) feeding the stub offering, and they were a standing
+    // hazard on two counts: they were AUD, so a user on any other storefront
+    // was shown Australian dollars for a product Apple charges them in their
+    // own currency; and a hardcoded constant drifts from App Store Connect
+    // silently (see APP_REVIEW_2026-08-04.md — config said A$14.99/A$99.99
+    // while IAP_SETUP.md said A$19.99/A$149.00).
+    //
+    // Prices now come from exactly one place: the store-localised
+    // priceString RevenueCat reports for the user's own storefront. When
+    // that is unavailable the paywall says Pro is unavailable rather than
+    // quoting a number nobody can stand behind. Do not reintroduce these.
     // When true, "Create Highlight Reel" requires an active subscription
     // (paywall shown otherwise — app/round/editor.tsx:925).
     //

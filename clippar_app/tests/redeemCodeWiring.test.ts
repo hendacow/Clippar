@@ -26,6 +26,15 @@ const here = dirname(fileURLToPath(import.meta.url));
 const path = (rel: string) => join(here, '..', rel);
 const read = (rel: string) => readFileSync(path(rel), 'utf8');
 
+/**
+ * Source with comments removed. Several assertions below are of the form
+ * "this file must never mention X" — and the comment explaining WHY X is
+ * banned necessarily mentions X. Strip prose so the guard tests what the
+ * code does, not what the docs say.
+ */
+const codeOnly = (src: string) =>
+  src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/[^\n]*/g, '');
+
 const REDEEM_ROUTE = '/profile/redeem';
 
 const screen = read('app/profile/redeem.tsx');
@@ -266,40 +275,62 @@ test('"couldn\'t determine" still throws instead of returning false', () => {
 
 // ─── Pricing ───
 
-test('the placeholder prices match the real App Store prices', () => {
-  assert.match(config, /monthlyPriceAud: 1499,/, 'monthly is A$14.99');
-  assert.match(config, /annualPriceAud: 9999,/, 'annual is A$99.99');
-});
-
-test('the stub savings badge still computes to a sensible whole percentage', () => {
-  // lib/iap.ts derives the annual card's "Save N%" from these two constants.
-  // A pair that produces 0%, a negative, or a non-integer would ship a
-  // nonsense badge to anyone on an unconfigured build.
-  assert.match(
-    iap,
-    /Math\.round\(\(1 - annual \/ \(monthly \* 12\)\) \* 100\)/,
-    'if the badge formula changes, this expectation has to change with it'
+test('no placeholder prices exist anywhere in config', () => {
+  // They used to. The stub rendered them as real prices, which meant a user
+  // on any non-AU storefront saw Australian dollars for a product Apple would
+  // charge them in their own currency — an App Review 3.1.2 problem, and real
+  // money harm if they bought. Hardcoded prices also drift from App Store
+  // Connect in silence.
+  assert.doesNotMatch(
+    codeOnly(config),
+    /monthlyPriceAud|annualPriceAud/,
+    'placeholder prices must never come back — the store is the only price source'
   );
-  const monthly = Number(config.match(/monthlyPriceAud: (\d+),/)?.[1]);
-  const annual = Number(config.match(/annualPriceAud: (\d+),/)?.[1]);
-  const savings = Math.round((1 - annual / (monthly * 12)) * 100);
-  assert.equal(savings, 44, `expected "Save 44%", got "Save ${savings}%"`);
-  assert.ok(Number.isInteger(savings) && savings > 0 && savings < 100);
 });
 
-test('the placeholder prices still feed only the stub offering', () => {
-  // Real builds render store-localised priceStrings. If config prices ever
-  // reach the RevenueCat path, a stale constant becomes a price a customer is
-  // shown next to a different price Apple actually charges.
+test('the stub offers nothing rather than inventing a price', () => {
   const stubStart = iap.indexOf('const StubProvider');
   const stubEnd = iap.indexOf('const RevenueCatProvider');
   assert.ok(stubStart !== -1 && stubEnd > stubStart);
-  const rcProvider = iap.slice(stubEnd);
-  assert.doesNotMatch(
-    rcProvider,
-    /monthlyPriceAud|annualPriceAud/,
-    'the RevenueCat provider must never read the placeholder prices'
+  const stub = iap.slice(stubStart, stubEnd);
+
+  // The stub runs whenever StoreKit is unreachable, and in that state we do
+  // not know the user's storefront. An empty list is the only honest answer.
+  assert.match(
+    stub,
+    /async getOfferings\(\): Promise<ProOffering\[\]> \{\s*return \[\];\s*\},/,
+    'StubProvider.getOfferings must return [] — never a fabricated offering'
   );
-  assert.match(iap.slice(stubStart, stubEnd), /config\.subscription\.monthlyPriceAud/);
+  const stubCode = codeOnly(stub);
+  assert.doesNotMatch(stubCode, /priceLabel:/, 'the stub must not set a price label at all');
+  assert.doesNotMatch(stubCode, /A\$/, 'the stub must not format a currency string');
+});
+
+test('prices are only ever the store-reported priceString', () => {
+  const rcProvider = iap.slice(iap.indexOf('const RevenueCatProvider'));
   assert.match(rcProvider, /priceLabel: pkg\.product\.priceString/);
+  // The savings badge must be derived from the same store prices, never from
+  // constants — otherwise the discount claim can contradict the real pair.
+  assert.match(
+    rcProvider,
+    /pkg\.product\.price \/ \(monthly\.product\.price \* 12\)/,
+    'the "Save N%" badge must be computed from store prices'
+  );
+});
+
+test('the paywall distinguishes loading from unavailable', () => {
+  // An empty offerings list used to render a spinner forever. Now that the
+  // stub returns empty by design, that state is reachable in production and
+  // has to say something true.
+  const kit = read('components/paywall/PaywallKit.tsx');
+  assert.match(kit, /offeringsLoaded/, 'the commerce hook must expose a loaded flag');
+  for (const screen of ['app/paywall.tsx', 'app/paywall-trial.tsx']) {
+    const src = read(screen);
+    assert.match(src, /offeringsLoaded/, `${screen} must distinguish loading from unavailable`);
+    assert.match(
+      src,
+      /isn&apos;t available right now/,
+      `${screen} must tell the user Pro is unavailable instead of spinning`
+    );
+  }
 });
