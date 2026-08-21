@@ -38,6 +38,13 @@ test('liveHoleNumbers: 9 from hole 10 (back nine) → 10..18', () => {
   assert.deepEqual(liveHoleNumbers(9, 10), [10, 11, 12, 13, 14, 15, 16, 17, 18]);
 });
 
+test('liveHoleNumbers: 18 from hole 10 wraps → 10..18 then 1..9', () => {
+  assert.deepEqual(
+    liveHoleNumbers(18, 10),
+    [10, 11, 12, 13, 14, 15, 16, 17, 18, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+  );
+});
+
 // ── buildHoleDataFromPars ──────────────────────────────────
 
 test('buildHoleDataFromPars: startHole 1 maps holeNumber N → pars[N-1]', () => {
