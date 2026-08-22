@@ -90,11 +90,14 @@ plan → pre-mortem → build → SEE it render → review → signal done
 
 ## Known security landmines (see foundations audit)
 
-- **Storage RLS is NOT owner-scoped.** The `clips` bucket policies are
-  `bucket_id = 'clips'` for all authenticated users → any signed-in user can
-  list/read/overwrite/delete ANY user's clips. Fix: scope to `owner = auth.uid()`
-  (or a `<user_id>/` path prefix). Table RLS (rounds/scores/shots/etc.) IS
-  correctly scoped to `auth.uid()`.
+- **Storage RLS on `clips` is owner-scoped — keep it that way.** Fixed across
+  migrations 011 → 017 → 019: SELECT/UPDATE/DELETE require owning the clip's
+  round, INSERT is quota-gated and owner-scoped (raw clip backup is Pro-only),
+  and 019 §4d forces the bucket private. Any new storage policy must join
+  through `public.rounds` the same way. What the repo cannot prove is dashboard
+  state: on the next deploy, read migration 019 §6's policy dump to confirm the
+  `avatars` bucket is owner-scoped and the prod `clips` bucket's `public` flag
+  is false. Table RLS (rounds/scores/shots/etc.) is scoped to `auth.uid()`.
 - **Secret keys ship in the client:** `EXPO_PUBLIC_PIPELINE_API_KEY`,
   `EXPO_PUBLIC_GOLF_COURSE_API_KEY` are embedded in the bundle. Move behind an
   Edge Function proxy. (The Supabase anon key is meant to be public.)
