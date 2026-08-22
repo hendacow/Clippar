@@ -64,6 +64,36 @@ test('buildHoleDataFromPars: back-nine start maps element 0 → hole 10', () => 
   assert.deepEqual(holes[8], { holeNumber: 18, par: 4 });
 });
 
+test('buildHoleDataFromPars: 18 from the 10th tee wraps — slot 9 is hole 1, never hole 19', () => {
+  // Slot i is the i-th hole PLAYED. Before the wrap fix, an 18-from-10 round
+  // assigned slots 9..17 to holes 19..27 — numbers no lookup ever asks for —
+  // so every wrapped front-nine hole silently scored DEFAULT_PAR instead of
+  // the par the golfer entered, and that wrong par was burned into the reel.
+  const pars = [4, 3, 5, 4, 4, 3, 5, 4, 4, 5, 4, 3, 4, 5, 4, 3, 4, 4];
+  const holes = buildHoleDataFromPars(pars, 10);
+  assert.deepEqual(holes[0], { holeNumber: 10, par: 4 });
+  assert.deepEqual(holes[8], { holeNumber: 18, par: 4 });
+  assert.deepEqual(holes[9], { holeNumber: 1, par: 5 });
+  assert.deepEqual(holes[17], { holeNumber: 9, par: 4 });
+  assert.ok(holes.every((h) => h.holeNumber >= 1 && h.holeNumber <= 18));
+});
+
+test('buildHoleDataFromPars: hole numbers stay in lockstep with liveHoleNumbers', () => {
+  // The entry screen labels slot i with liveHoleNumbers(...)[i]; this builder
+  // must attach slot i's par to the same hole number, for every round shape.
+  for (const holesPlayed of [9, 18] as const) {
+    for (const startHole of [1, 10] as const) {
+      const pars = new Array<number>(holesPlayed).fill(4);
+      const holes = buildHoleDataFromPars(pars, startHole);
+      assert.deepEqual(
+        holes.map((h) => h.holeNumber),
+        liveHoleNumbers(holesPlayed, startHole),
+        `${holesPlayed} from ${startHole}`,
+      );
+    }
+  }
+});
+
 test('buildHoleDataFromPars: defaults startHole to 1', () => {
   assert.deepEqual(buildHoleDataFromPars([4, 4]), [
     { holeNumber: 1, par: 4 },
