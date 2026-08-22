@@ -90,14 +90,18 @@ plan → pre-mortem → build → SEE it render → review → signal done
 
 ## Known security landmines (see foundations audit)
 
-- **Storage RLS on `clips` is owner-scoped — keep it that way.** Fixed across
-  migrations 011 → 017 → 019: SELECT/UPDATE/DELETE require owning the clip's
-  round, INSERT is quota-gated and owner-scoped (raw clip backup is Pro-only),
-  and 019 §4d forces the bucket private. Any new storage policy must join
-  through `public.rounds` the same way. What the repo cannot prove is dashboard
-  state: on the next deploy, read migration 019 §6's policy dump to confirm the
-  `avatars` bucket is owner-scoped and the prod `clips` bucket's `public` flag
-  is false. Table RLS (rounds/scores/shots/etc.) is scoped to `auth.uid()`.
+- **Storage RLS on `clips`: fixed in-tree, deployment NOT verified.**
+  Migrations 011 → 017 → 019 owner-scope SELECT/UPDATE/DELETE (including the
+  reel keyspace), owner-scope + quota-gate INSERT, and force the bucket private
+  (019 §4d). But the repo cannot prove what is applied: as of 31 Jul, 019 had
+  not been executed anywhere (`TENANT_ISOLATION_2026-07-31.md`, "Not run"),
+  and `lib/api.ts` deleteRound still documents 011 as the policy in force.
+  Until 019 is confirmed applied — DEV first with the two-account checks in
+  that audit, then prod — treat its findings (reel-policy gaps, a possibly
+  still-public bucket) as potentially live in production, and read 019 §6's
+  policy dump at apply time to confirm `avatars` owner-scoping and the `clips`
+  `public` flag. Any new storage policy must join through `public.rounds` the
+  same way. Table RLS (rounds/scores/shots/etc.) is scoped to `auth.uid()`.
 - **Secret keys ship in the client:** `EXPO_PUBLIC_PIPELINE_API_KEY`,
   `EXPO_PUBLIC_GOLF_COURSE_API_KEY` are embedded in the bundle. Move behind an
   Edge Function proxy. (The Supabase anon key is meant to be public.)
