@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { buildReelScorecard } from '../lib/reelScorecard';
+import { buildReelScorecard, holeReelDurationMs } from '../lib/reelScorecard';
 
 // Henry: "the same scorecard that's on the preview is the exact same I want
 // on the export reel." The preview card obeys lib/scoreDisplay.ts — a hole
@@ -148,4 +148,116 @@ test('native ports the score palette and names lib/scoreDisplay.ts as its source
   // The card must key off completion, not playback position.
   assert.match(src, /hole\.isComplete/);
   assert.doesNotMatch(src, /let isPlayed = cellIdx <= index/);
+});
+
+// ─── The reel timeline counts only clips that are IN the reel ───
+//
+// Native decides which hole's card to draw over a shot by matching that shot's
+// position in the reel against the cumulative startMs/endMs below. So the
+// timeline has to be built from the clips that actually got composed. The
+// editor drops clips whose file is gone from disk and could not be
+// re-downloaded — iOS evicts app files routinely, so that is an ordinary
+// event — and counting a dropped clip's duration here pushes every later hole
+// boundary past where the video really is, until shots carry an earlier hole's
+// card.
+
+const timed = (
+  id: string,
+  durationMs: number,
+  extra: Partial<{
+    isExcluded: boolean;
+    autoTrimmed: boolean;
+    originalUri: string;
+    trimStartMs: number;
+    trimEndMs: number;
+  }> = {},
+) => ({
+  id,
+  durationMs,
+  trimStartMs: extra.trimStartMs ?? 0,
+  trimEndMs: extra.trimEndMs ?? -1,
+  isExcluded: extra.isExcluded,
+  autoTrimmed: extra.autoTrimmed,
+  originalUri: extra.originalUri,
+});
+
+test('holeReelDurationMs: a dropped clip contributes nothing', () => {
+  const clips = [timed('a', 3000), timed('b', 4000), timed('c', 2000)];
+  const inReel = new Set(['a', 'c']); // 'b' was missing on disk and unrecoverable
+  assert.equal(holeReelDurationMs(clips, (c) => inReel.has(c.id)), 5000);
+});
+
+test('holeReelDurationMs: excluded clips still contribute nothing', () => {
+  const clips = [timed('a', 3000), timed('b', 4000, { isExcluded: true })];
+  assert.equal(holeReelDurationMs(clips, () => true), 3000);
+});
+
+test('holeReelDurationMs: a user trim is measured, a full clip uses its duration', () => {
+  const clips = [
+    timed('a', 10000, { trimStartMs: 2000, trimEndMs: 5000 }), // 3000
+    timed('b', 4000), // trimEndMs -1 → full 4000
+  ];
+  assert.equal(holeReelDurationMs(clips, () => true), 7000);
+});
+
+test('holeReelDurationMs: a pre-trimmed clip uses its own file duration, not original-timeline bounds', () => {
+  // sourceUri IS the trim file; trimStart/End are coords in the ORIGINAL
+  // video and would be nonsense to subtract here.
+  const clips = [
+    timed('a', 2500, {
+      autoTrimmed: true,
+      originalUri: 'file:///orig.mov',
+      trimStartMs: 12000,
+      trimEndMs: 14500,
+    }),
+  ];
+  assert.equal(holeReelDurationMs(clips, () => true), 2500);
+});
+
+test('holeReelDurationMs: never subtracts, so reversed bounds cannot pull a hole backwards', () => {
+  const clips = [timed('a', 3000, { trimStartMs: 4000, trimEndMs: 1000 })];
+  assert.equal(holeReelDurationMs(clips, () => true), 0);
+});
+
+test('a dropped clip does not shift every later hole boundary', () => {
+  const holes = [
+    { holeNumber: 1, par: 4, strokes: 4, hasScore: true, clips: [timed('a', 3000), timed('b', 5000)] },
+    { holeNumber: 2, par: 3, strokes: 3, hasScore: true, clips: [timed('c', 4000)] },
+  ];
+  const inReel = new Set(['a', 'c']); // 'b' never made it into the composition
+
+  const sc = buildReelScorecard(
+    'Royal Melbourne',
+    holes.map((h) => ({
+      holeNumber: h.holeNumber,
+      par: h.par,
+      strokes: h.strokes,
+      hasScore: h.hasScore,
+      durationMs: holeReelDurationMs(h.clips, (c) => inReel.has(c.id)),
+    })),
+  );
+
+  // Hole 2 starts where the real video does (3000ms), not 5000ms later.
+  assert.equal(sc.holes[0].startMs, 0);
+  assert.equal(sc.holes[0].endMs, 3000);
+  assert.equal(sc.holes[1].startMs, 3000);
+  assert.equal(sc.holes[1].endMs, 7000);
+});
+
+test('the editor builds the reel timeline from the composed clips, not every clip', () => {
+  const src = read('app/round/editor.tsx');
+  // The scorecard must be gated on the same set that reaches composeReel.
+  assert.match(src, /holeReelDurationMs\(hole\.clips/);
+  assert.match(src, /inReelClipIds/);
+  // The old inline arithmetic — which counted every non-excluded clip,
+  // including ones dropped as unrecoverable — must not come back.
+  assert.doesNotMatch(src, /hole\.clips\.filter\(\(c\) => !c\.isExcluded\)/);
+});
+
+test('compose trim bounds are paired to clips by index, not by string-matching URIs', () => {
+  const src = read('app/round/editor.tsx');
+  assert.match(src, /validClips\.map\(\(clip, idx\) =>/);
+  // The old walk guessed at recovered URIs and, on a miss, ran off the end
+  // and silently dropped the user's trims for every remaining clip.
+  assert.doesNotMatch(src, /uri\.includes\(`\$\{clip\.id\}\.mp4`\)/);
 });
