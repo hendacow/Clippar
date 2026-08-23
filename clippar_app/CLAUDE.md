@@ -90,18 +90,24 @@ plan → pre-mortem → build → SEE it render → review → signal done
 
 ## Known security landmines (see foundations audit)
 
-- **Storage RLS on `clips`: fixed in-tree, deployment NOT verified.**
-  Migrations 011 → 017 → 019 owner-scope SELECT/UPDATE/DELETE (including the
-  reel keyspace), owner-scope + quota-gate INSERT, and force the bucket private
-  (019 §4d). But the repo cannot prove what is applied: as of 31 Jul, 019 had
-  not been executed anywhere (`TENANT_ISOLATION_2026-07-31.md`, "Not run"),
-  and `lib/api.ts` deleteRound still documents 011 as the policy in force.
-  Until 019 is confirmed applied — DEV first with the two-account checks in
-  that audit, then prod — treat its findings (reel-policy gaps, a possibly
-  still-public bucket) as potentially live in production, and read 019 §6's
-  policy dump at apply time to confirm `avatars` owner-scoping and the `clips`
-  `public` flag. Any new storage policy must join through `public.rounds` the
-  same way. Table RLS (rounds/scores/shots/etc.) is scoped to `auth.uid()`.
+- **Storage RLS on `clips`: CLOSED — fixed in-tree and verified applied in
+  production** (checked 2026-08-23 against prod `xdefwnqyjffgclzqmvax`, read-only).
+  Migrations 011 → 017 → 019 owner-scope SELECT/UPDATE/DELETE (including the reel
+  keyspace), owner-scope + quota-gate INSERT, and force the bucket private (019 §4d).
+  All four are live: every `storage.objects` policy joins through `public.rounds`
+  on `r.user_id = auth.uid()` and covers both `<round_id>/…` and
+  `reels/<round_id>.mp4`; INSERT additionally gates on `clips_quota_ok()` and
+  `has_active_pro()`; `storage.buckets` reports `clips` **private**. There is no
+  `avatars` bucket, so that open question is moot. Any new storage policy must
+  join through `public.rounds` the same way. Table RLS (rounds/scores/shots/etc.)
+  is scoped to `auth.uid()`.
+
+  **Do not re-open this from the repo alone.** `TENANT_ISOLATION_2026-07-31.md`
+  says 019 was "Not run", and `lib/api.ts` deleteRound still documents 011 as the
+  policy in force — both are stale, and reading either as current state is what
+  produced a three-week false alarm that reached the founder as an urgent live
+  vulnerability. **A git checkout cannot tell you what is deployed.** If you need
+  the answer, query the database.
 - **Secret keys ship in the client:** `EXPO_PUBLIC_PIPELINE_API_KEY`,
   `EXPO_PUBLIC_GOLF_COURSE_API_KEY` are embedded in the bundle. Move behind an
   Edge Function proxy. (The Supabase anon key is meant to be public.)
