@@ -45,9 +45,11 @@ jobs:
           additional_permissions: |
             actions: read
 
-          # Use Opus 4.7 for the @claude flow — Henry is usually not at his Mac
-          # when this runs, so the model needs to get changes right first try
-          # rather than ping-ponging through "regenerate the PR" cycles. Cost is
-          # the same since the OAuth token routes through his Claude Max sub.
-          claude_args: '--model claude-opus-4-7'
+          # Opus for the @claude flow — Henry is usually not at his Mac when
+          # this runs, so the model needs to get changes right first try rather
+          # than ping-ponging through "regenerate the PR" cycles. Cost is the
+          # same since the OAuth token routes through his Claude Max sub.
+          # Pinned explicitly, NOT left to the default: the default resolves at
+          # run time and silently changes tier underneath us.
+          claude_args: '--model claude-opus-5'
 

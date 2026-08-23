@@ -47,6 +47,10 @@ jobs:
           plugin_marketplaces: 'https://github.com/anthropics/claude-code.git'
           plugins: 'code-review@claude-code-plugins'
           prompt: '/code-review:code-review ${{ github.repository }}/pull/${{ github.event.pull_request.number }}'
+          # Pinned explicitly. Reviewing code is Opus work, and an unpinned job
+          # follows whatever the account default resolves to at run time — which
+          # silently changed this gate's tier without anyone choosing it.
+          claude_args: '--model claude-opus-5'
           # See https://github.com/anthropics/claude-code-action/blob/main/docs/usage.md
           # or https://code.claude.com/docs/en/cli-reference for available options
 
