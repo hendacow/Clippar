@@ -14,21 +14,20 @@
  * so the freshness contract is unchanged — the prefetch only affects the very
  * first paint, milliseconds after the press.
  *
- * Account hygiene (security review, PR #136): a cached payload is another
+ * Account hygiene (security review, PR #136/#145): a cached payload is another
  * query's RESULT handed out without re-running RLS, so the cache must never
  * outlive or cross the session that warmed it. Three guards enforce that:
- *   1. every entry is stamped with the userId that warmed it, and a take by
- *      any other (or no) user resolves null — the consumer then falls back to
- *      a live getRound, which RLS authorises;
+ *   1. every entry records the userId that warmed it (resolved from the local
+ *      session), and a take by any other (or no) user resolves null — the
+ *      consumer then falls back to a live getRound, which RLS authorises;
  *   2. clearRoundPrefetch() runs on EVERY way a session ends — the sign-out
  *      button (clearAccountLinkedCaches), account deletion (wipeLocalUserData),
  *      and the auth listener's SIGNED_OUT branch (hooks/useAuth.ts), which
  *      catches remote revokes and refresh-token failures that never pass
  *      through the button;
- *   3. retention is bounded: expired entries are swept opportunistically on
- *      every prefetch/take, and the whole cache is dropped when the app goes
- *      to the background — an untaken entry can't sit in memory for the life
- *      of the process.
+ *   3. retention is bounded by a per-entry expiry timer (an untaken entry is
+ *      deleted when its TTL lapses, on every platform, foregrounded or not),
+ *      plus dropping the whole cache when a native app backgrounds.
  */
 import { AppState, Platform } from 'react-native';
 import { getRound } from '@/lib/api';
@@ -36,8 +35,15 @@ import { supabase } from '@/lib/supabase';
 
 interface Entry {
   at: number;
-  /** The signed-in user who warmed this entry — a take by anyone else misses. */
-  userId: string;
+  /**
+   * The signed-in user who warmed this entry, resolved from the local session
+   * asynchronously — a promise so the entry itself can be registered
+   * SYNCHRONOUSLY at press time. If registration waited on getSession, the
+   * detail screen (mounting right behind router.push) could miss the cache,
+   * start a live fetch, and leave this warm's own fetch behind as a cached
+   * duplicate that a later focus would wrongly consume.
+   */
+  owner: Promise<string | null>;
   promise: Promise<any>;
 }
 
@@ -46,54 +52,51 @@ interface Entry {
 const TTL_MS = 15_000;
 const cache = new Map<string, Entry>();
 
-/** Drop entries past their serve-by time so the map never accumulates. */
-function sweepExpired(): void {
-  const now = Date.now();
-  for (const [key, entry] of cache) {
-    if (now - entry.at > TTL_MS) cache.delete(key);
-  }
-}
-
 // Nothing warmed is worth keeping across a backgrounding — the press → mount
-// window it bridges is long gone by the time the app comes back, and dropping
-// it bounds how long a payload (GPS + clip paths) can sit in memory.
+// window it bridges is long gone by the time the app comes back. The per-entry
+// expiry timers below already bound retention everywhere (web included);
+// this just drops the memory sooner on native.
 if (Platform.OS === 'ios' || Platform.OS === 'android') {
   try {
     AppState.addEventListener('change', (state) => {
       if (state === 'background') cache.clear();
     });
   } catch {
-    // AppState unavailable (tests/SSR) — the TTL sweep still bounds retention.
+    // AppState unavailable (tests/SSR) — the expiry timers still bound retention.
   }
 }
 
 /**
  * Warm the round-detail payload for `id`. Fire from a row's onPress. Cheap to
  * call repeatedly — an in-flight/fresh entry short-circuits. Never throws; a
- * failed fetch resolves to null and is retried live by the consumer. No-op
- * when signed out (there is no user to bind the entry to).
+ * failed fetch (or a signed-out warm) resolves to null and the consumer falls
+ * back to a live fetch. The entry is registered synchronously so a take
+ * immediately after the press can never miss it.
  */
 export function prefetchRound(id: string | null | undefined): void {
   if (!id) return;
-  sweepExpired();
   const existing = cache.get(id);
   if (existing && Date.now() - existing.at < TTL_MS) return;
-  // getSession is a local read — resolve the owner first so the entry is
-  // bound to the account that warmed it, then fetch.
-  void supabase.auth
+
+  // getSession is a local read; resolve the owner in the entry rather than
+  // before registration (see Entry.owner). No owner → no fetch at all.
+  const owner = supabase.auth
     .getSession()
-    .then(({ data }) => {
-      const userId = data.session?.user?.id;
-      if (!userId) return;
-      const race = cache.get(id);
-      if (race && Date.now() - race.at < TTL_MS) return;
-      cache.set(id, {
-        at: Date.now(),
-        userId,
-        promise: getRound(id).catch(() => null),
-      });
-    })
-    .catch(() => {});
+    .then(({ data }) => data.session?.user?.id ?? null)
+    .catch(() => null);
+  const entry: Entry = {
+    at: Date.now(),
+    owner,
+    promise: owner.then((userId) => (userId ? getRound(id).catch(() => null) : null)),
+  };
+  cache.set(id, entry);
+
+  // Hard retention bound: delete at expiry even if nothing ever takes it and
+  // no other cache call runs (idle foreground, web). Identity-checked so a
+  // newer entry for the same round is never deleted by an older timer.
+  setTimeout(() => {
+    if (cache.get(id) === entry) cache.delete(id);
+  }, TTL_MS + 500);
 }
 
 /**
@@ -105,19 +108,22 @@ export function prefetchRound(id: string | null | undefined): void {
  */
 export function takePrefetchedRound(id: string | null | undefined): Promise<any> | null {
   if (!id) return null;
-  sweepExpired();
   const hit = cache.get(id);
   if (!hit) return null;
   cache.delete(id);
   if (Date.now() - hit.at > TTL_MS) return null;
   // Ownership gate: the cached payload is served without re-running RLS, so
-  // it must never cross an account boundary. Local session read, then compare
-  // against the user who warmed the entry.
-  return supabase.auth
-    .getSession()
-    .then(({ data }) => {
-      const userId = data.session?.user?.id;
-      if (!userId || userId !== hit.userId) return null;
+  // it must never cross an account boundary. Compare the warming user against
+  // the current session (both local reads); fail closed on any doubt.
+  return Promise.all([
+    hit.owner,
+    supabase.auth
+      .getSession()
+      .then(({ data }) => data.session?.user?.id ?? null)
+      .catch(() => null),
+  ])
+    .then(([warmedBy, current]) => {
+      if (!warmedBy || !current || warmedBy !== current) return null;
       return hit.promise;
     })
     .catch(() => null);
