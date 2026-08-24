@@ -50,6 +50,7 @@ import { StatsFilterBar } from '@/components/stats/StatsFilterBar';
 import { CompilationPlayer } from '@/components/stats/CompilationPlayer';
 import { useStatsFilter, type StatCategoryKey } from '@/hooks/useStatsFilter';
 import { processUploadQueue } from '@/lib/uploadQueue';
+import { prefetchRound } from '@/lib/roundPrefetch';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 
@@ -199,49 +200,64 @@ export default function HomeScreen() {
           best_hole: null,
         }));
 
+        // best_hole (from the remote scores query) and the local clips_count
+        // backfill (SQLite) are independent — one is a network round trip, the
+        // other on-device disk reads. Fire them together so Home paints without
+        // waiting for both to happen back-to-back. Both must complete before
+        // computeRoundStatuses below, since status derivation reads clips_count.
+        const roundIds = data.map((r: any) => r.id);
+        const scoresPromise = (async () => {
+          if (roundIds.length === 0) return null;
+          try {
+            const { data: scores } = await supabase
+              .from('scores')
+              .select('round_id, hole_number, strokes, par, score_to_par')
+              .in('round_id', roundIds);
+            return scores;
+          } catch {
+            return null;
+          }
+        })();
+
+        // Mutates clips_count in place on the `mapped` objects; the best_hole
+        // remap below spreads those same objects, so it must resolve first.
+        const clipsCountPromise =
+          isNative && storage
+            ? Promise.all(
+                mapped
+                  .filter((r) => r.clips_count === 0)
+                  .slice(0, 10)
+                  .map(async (r) => {
+                    try {
+                      const localClips = await storage!.getClipsForRound(r.id);
+                      if (localClips && localClips.length > 0) {
+                        r.clips_count = localClips.length;
+                      }
+                    } catch {}
+                  }),
+              )
+            : Promise.resolve([]);
+
+        const [scores] = await Promise.all([scoresPromise, clipsCountPromise]);
+
         // Compute best_hole for each round from scores (feeds the Birdies+
         // tile predicate — the SAME predicate filters the list, so counts
         // and results match by construction).
-        const roundIds = data.map((r: any) => r.id);
-        if (roundIds.length > 0) {
-          const { data: scores } = await supabase
-            .from('scores')
-            .select('round_id, hole_number, strokes, par, score_to_par')
-            .in('round_id', roundIds);
-
-          if (scores) {
-            const bestHoleMap = new Map<string, HomeRound['best_hole']>();
-            for (const s of scores) {
-              if (s.score_to_par == null) continue;
-              const existing = bestHoleMap.get(s.round_id);
-              if (!existing || s.score_to_par < existing.score - existing.par) {
-                let label = 'Par';
-                if (s.score_to_par <= -2) label = 'Eagle';
-                else if (s.score_to_par === -1) label = 'Birdie';
-                else if (s.score_to_par === 1) label = 'Bogey';
-                else if (s.score_to_par >= 2) label = 'Double Bogey';
-                bestHoleMap.set(s.round_id, { hole: s.hole_number, par: s.par, score: s.strokes, label });
-              }
+        if (scores) {
+          const bestHoleMap = new Map<string, HomeRound['best_hole']>();
+          for (const s of scores) {
+            if (s.score_to_par == null) continue;
+            const existing = bestHoleMap.get(s.round_id);
+            if (!existing || s.score_to_par < existing.score - existing.par) {
+              let label = 'Par';
+              if (s.score_to_par <= -2) label = 'Eagle';
+              else if (s.score_to_par === -1) label = 'Birdie';
+              else if (s.score_to_par === 1) label = 'Bogey';
+              else if (s.score_to_par >= 2) label = 'Double Bogey';
+              bestHoleMap.set(s.round_id, { hole: s.hole_number, par: s.par, score: s.strokes, label });
             }
-            mapped = mapped.map((r) => ({ ...r, best_hole: bestHoleMap.get(r.id) ?? null }));
           }
-        }
-
-        // Local SQLite fallback for clips_count (clips saved locally only).
-        if (isNative && storage) {
-          await Promise.all(
-            mapped
-              .filter((r) => r.clips_count === 0)
-              .slice(0, 10)
-              .map(async (r) => {
-                try {
-                  const localClips = await storage!.getClipsForRound(r.id);
-                  if (localClips && localClips.length > 0) {
-                    r.clips_count = localClips.length;
-                  }
-                } catch {}
-              }),
-          );
+          mapped = mapped.map((r) => ({ ...r, best_hole: bestHoleMap.get(r.id) ?? null }));
         }
 
         roundsRef.current = mapped;
@@ -315,10 +331,13 @@ export default function HomeScreen() {
     }, [fetchRounds]),
   );
 
-  // Initial fetch + drain the GATED backup queue (free tier / backup-off
-  // users exit immediately inside processUploadQueue).
+  // Drain the GATED backup queue (free tier / backup-off users exit
+  // immediately inside processUploadQueue) and refetch once it settles.
+  // The initial rounds fetch is NOT fired here: useFocusEffect above
+  // already fires on mount, and running both meant two identical
+  // fetchRounds chains (rounds+scores query, status I/O, thumbnails)
+  // racing each other on first paint.
   useEffect(() => {
-    fetchRounds();
     fetchName();
     processUploadQueue()
       .then(() => fetchRounds())
@@ -508,7 +527,12 @@ export default function HomeScreen() {
                 ? compose.failedCause
                 : null
             }
-            onOpen={() => router.push(`/round/${heroRound.id}`)}
+            onOpen={() => {
+              // Warm the detail payload so it loads during the slide-from-bottom
+              // transition rather than after the screen mounts.
+              prefetchRound(heroRound.id);
+              router.push(`/round/${heroRound.id}`);
+            }}
             onShare={() => setShowHeroShare(true)}
             onRebuild={() => goEditorRecompose(heroRound.id)}
             onMakeReel={() => router.push(`/round/editor?roundId=${heroRound.id}`)}
@@ -624,7 +648,14 @@ export default function HomeScreen() {
                   compose.active && compose.roundId === round.id ? compose.percent : null
                 }
                 thumbUri={thumbs[round.id]}
-                onPress={() => router.push(`/round/${round.id}`)}
+                onPress={() => {
+                  // Warm the detail payload on the committed tap (not press-in,
+                  // which also fires when the finger is starting a scroll and
+                  // would fetch rounds the user only scrolls past). getRound then
+                  // runs during the slide-from-bottom transition to the screen.
+                  prefetchRound(round.id);
+                  router.push(`/round/${round.id}`);
+                }}
                 onDelete={() => handleDeleteRound(round.id)}
                 onRetry={status === 'FAILED' ? () => goEditorRecompose(round.id) : undefined}
               />

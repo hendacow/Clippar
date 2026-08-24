@@ -98,6 +98,30 @@ export async function getRounds() {
   return data;
 }
 
+/**
+ * Lightweight counts for the Profile tab's two pills. Fetches id+status
+ * only — the tab used to re-download every column of every round on each
+ * focus just to count them.
+ */
+export async function getRoundStatusCounts(): Promise<{
+  total: number;
+  drafts: number;
+}> {
+  const user = await requireUser();
+
+  const { data, error } = await supabase
+    .from('rounds')
+    .select('id, status')
+    .eq('user_id', user.id);
+
+  if (error) throw error;
+  const rows = data ?? [];
+  return {
+    total: rows.length,
+    drafts: rows.filter((r) => r.status !== 'ready' && r.status !== 'failed').length,
+  };
+}
+
 export async function getRound(id: string) {
   // Try with scores join first; fall back to shots-only if scores table doesn't exist
   const { data, error } = await supabase
@@ -773,21 +797,21 @@ export async function getUserStats() {
     const uniqueCourses = new Set(rounds.map((r: any) => r.course_name));
     const coursesPlayed = uniqueCourses.size;
 
-    // Total clips from shots table
+    // Total clips (shots) and per-hole scores both depend only on roundIds —
+    // fire them together so this costs one round trip, not two.
     const roundIds = rounds.map((r: any) => r.id);
-    const { count: totalClips } = await supabase
-      .from('shots')
-      .select('*', { count: 'exact', head: true })
-      .in('round_id', roundIds);
+    const [{ count: totalClips }, { data: scores, error: scoresError }] =
+      await Promise.all([
+        supabase
+          .from('shots')
+          .select('*', { count: 'exact', head: true })
+          .in('round_id', roundIds),
+        supabase.from('scores').select('score_to_par').in('round_id', roundIds),
+      ]);
 
-    // Fetch per-hole scores for birdies and eagles
+    // Birdies and eagles from the per-hole scores
     let totalBirdies = 0;
     let totalEagles = 0;
-
-    const { data: scores, error: scoresError } = await supabase
-      .from('scores')
-      .select('score_to_par')
-      .in('round_id', roundIds);
 
     if (!scoresError && scores) {
       for (const s of scores) {
@@ -988,26 +1012,30 @@ export async function getSignedClipUrls(
   const result: Record<string, string> = {};
   if (clipPaths.length === 0) return result;
 
-  // Batch sign in parallel (Supabase doesn't have batch sign, so we do them individually)
-  const promises = clipPaths.map(async (path) => {
-    try {
-      // clip_url is stored as "clips/{roundId}/{filename}" but the bucket is already "clips",
-      // so we must strip the "clips/" prefix to avoid double-prefixing the path.
-      const pathInBucket = path.startsWith('clips/') ? path.slice(6) : path;
+  // One round trip for the whole list: storage-js createSignedUrls signs a
+  // batch of paths in a single POST. A failed path comes back with error set
+  // on its entry (not a thrown call), matching the old skip-silently shape.
+  try {
+    // clip_url is stored as "clips/{roundId}/{filename}" but the bucket is already "clips",
+    // so we must strip the "clips/" prefix to avoid double-prefixing the path.
+    const pathsInBucket = clipPaths.map((path) =>
+      path.startsWith('clips/') ? path.slice(6) : path,
+    );
 
-      const { data, error } = await supabase.storage
-        .from('clips')
-        .createSignedUrl(pathInBucket, expiresIn);
-      if (!error && data?.signedUrl) {
+    const { data, error } = await supabase.storage
+      .from('clips')
+      .createSignedUrls(pathsInBucket, expiresIn);
+    if (error || !data) return result;
+
+    data.forEach((entry, i) => {
+      if (!entry.error && entry.signedUrl) {
         // Key by the ORIGINAL path so lookups from shot.clipUrl still match
-        result[path] = data.signedUrl;
+        result[clipPaths[i]] = entry.signedUrl;
       }
-    } catch {
-      // Skip failed URLs silently
-    }
-  });
-
-  await Promise.all(promises);
+    });
+  } catch {
+    // Skip failed URLs silently
+  }
   return result;
 }
 

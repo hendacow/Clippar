@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
-import { getClipUrl } from '@/lib/r2';
+import { getSignedClipUrls } from '@/lib/api';
 import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
 import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
@@ -90,33 +90,36 @@ export function useEditorState(roundId: string | undefined) {
 
       if (roundErr || !round) return false;
 
-      // Fetch scores
-      let scores: { hole_number: number; strokes: number; par: number }[] = [];
-      try {
-        const { data } = await supabase
-          .from('scores')
-          .select('hole_number, strokes, par')
-          .eq('round_id', roundId)
-          .order('hole_number');
-        if (data) scores = data;
-      } catch {}
-
-      // Fetch course hole pars
-      let courseHolePars: Record<number, number> = {};
-      if (round.course_id) {
-        try {
-          const { data: holeData } = await supabase
-            .from('holes')
-            .select('hole_number, par')
-            .eq('course_id', round.course_id)
-            .order('hole_number');
-          if (holeData) {
-            holeData.forEach((h) => {
-              courseHolePars[h.hole_number] = h.par;
-            });
+      // Scores and course-hole-pars are independent queries — both keyed off
+      // the round we just fetched. Run them together rather than one after the
+      // other so the editor loads a round trip sooner.
+      const [scores, courseHolePars] = await Promise.all([
+        (async (): Promise<{ hole_number: number; strokes: number; par: number }[]> => {
+          try {
+            const { data } = await supabase
+              .from('scores')
+              .select('hole_number, strokes, par')
+              .eq('round_id', roundId)
+              .order('hole_number');
+            return data ?? [];
+          } catch {
+            return [];
           }
-        } catch {}
-      }
+        })(),
+        (async (): Promise<Record<number, number>> => {
+          const pars: Record<number, number> = {};
+          if (!round.course_id) return pars;
+          try {
+            const { data } = await supabase
+              .from('holes')
+              .select('hole_number, par')
+              .eq('course_id', round.course_id)
+              .order('hole_number');
+            if (data) data.forEach((h) => { pars[h.hole_number] = h.par; });
+          } catch {}
+          return pars;
+        })(),
+      ]);
 
       const shots = (round.shots ?? []) as {
         id: string;
@@ -135,31 +138,33 @@ export function useEditorState(roundId: string | undefined) {
         );
       }
 
-      // Generate signed URLs for all remaining clips
-      const clips = await Promise.all(
-        realShots.map(async (shot): Promise<EditorClip> => {
-          let sourceUri: string | null = null;
-          if (shot.clip_url) {
-            sourceUri = await getClipUrl(shot.clip_url);
-            if (!sourceUri) {
-              console.warn(
-                `[useEditorState] Hole ${shot.hole_number} shot ${shot.shot_number}: getClipUrl returned null for "${shot.clip_url}"`
-              );
-            }
-          }
-          return {
-            id: shot.id,
-            type: 'shot',
-            holeNumber: shot.hole_number,
-            shotNumber: shot.shot_number,
-            sourceUri,
-            storagePath: shot.clip_url,
-            trimStartMs: 0,
-            trimEndMs: -1,
-            durationMs: 0,
-          };
-        })
+      // Sign all clip URLs in ONE storage request (was one createSignedUrl
+      // round trip per shot — a full round meant dozens of parallel HTTPS
+      // requests before the editor could render). Same 7-day expiry the
+      // per-clip getClipUrl path used.
+      const signedByPath = await getSignedClipUrls(
+        realShots.map((s) => s.clip_url!),
+        86400 * 7,
       );
+      const clips = realShots.map((shot): EditorClip => {
+        const sourceUri = signedByPath[shot.clip_url!] ?? null;
+        if (!sourceUri) {
+          console.warn(
+            `[useEditorState] Hole ${shot.hole_number} shot ${shot.shot_number}: no signed URL for "${shot.clip_url}"`
+          );
+        }
+        return {
+          id: shot.id,
+          type: 'shot',
+          holeNumber: shot.hole_number,
+          shotNumber: shot.shot_number,
+          sourceUri,
+          storagePath: shot.clip_url,
+          trimStartMs: 0,
+          trimEndMs: -1,
+          durationMs: 0,
+        };
+      });
 
       // Need at least scores or clips to consider this a valid load
       if (clips.length === 0 && scores.length === 0) return false;
@@ -189,8 +194,28 @@ export function useEditorState(roundId: string | undefined) {
       const localRound = await storage.getLocalRound(roundId);
       if (!localRound) return false;
 
-      const localScores = await storage.getLocalScores(roundId);
-      const localClips = await storage.getClipsForRound(roundId);
+      // These three reads are independent — two local SQLite queries and one
+      // remote course-holes fetch (needs only course_id, already resolved).
+      // Firing them together overlaps the remote round trip with the local
+      // reads instead of stacking them, so round detail (which opens through
+      // this path) paints one round trip sooner.
+      const [localScores, localClips, holeData] = await Promise.all([
+        storage.getLocalScores(roundId),
+        storage.getClipsForRound(roundId),
+        (async (): Promise<{ hole_number: number; par: number }[] | null> => {
+          if (!localRound.course_id) return null;
+          try {
+            const { data } = await supabase
+              .from('holes')
+              .select('hole_number, par')
+              .eq('course_id', localRound.course_id)
+              .order('hole_number');
+            return data;
+          } catch {
+            return null;
+          }
+        })(),
+      ]);
 
       const scores = localScores.map((s) => ({
         hole_number: s.hole_number,
@@ -242,21 +267,12 @@ export function useEditorState(roundId: string | undefined) {
         };
       });
 
-      // Fetch course hole pars if course_id exists
-      let courseHolePars: Record<number, number> = {};
-      if (localRound.course_id) {
-        try {
-          const { data: holeData } = await supabase
-            .from('holes')
-            .select('hole_number, par')
-            .eq('course_id', localRound.course_id)
-            .order('hole_number');
-          if (holeData) {
-            holeData.forEach((h) => {
-              courseHolePars[h.hole_number] = h.par;
-            });
-          }
-        } catch {}
+      // Course hole pars were fetched above, concurrently with the local reads.
+      const courseHolePars: Record<number, number> = {};
+      if (holeData) {
+        holeData.forEach((h) => {
+          courseHolePars[h.hole_number] = h.par;
+        });
       }
 
       const holes = buildHoleSections(clips, scores, courseHolePars);
@@ -279,7 +295,16 @@ export function useEditorState(roundId: string | undefined) {
   const loadRound = useCallback(async () => {
     if (!roundId) return;
 
-    setState((prev) => ({ ...prev, loading: true, error: null }));
+    // Only surface the loading state when there's nothing to show yet.
+    // A reload with holes already on screen (preview/editor re-focus)
+    // revalidates behind the rendered content instead of swapping the
+    // whole screen for a spinner — the fresh setState below replaces
+    // state wholesale either way.
+    setState((prev) => ({
+      ...prev,
+      loading: prev.holes.length === 0,
+      error: null,
+    }));
 
     // On native, try local SQLite first (clips live here after import/record)
     if (isNative) {

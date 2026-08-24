@@ -12,20 +12,36 @@ export function useSubscription() {
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
-      // Single source of truth (lib/subscription.getProStatus): RevenueCat
-      // entitlement / Supabase profile, offline cache, dev-only override.
-      const subscribed = await getProStatus();
-      setIsSubscribed(subscribed);
+      // getSession() is a LOCAL read — the old getUser() here was a full
+      // Auth-server round trip that gated the whole chain (see lib/api.ts's
+      // note on the same swap). The entitlement check and the status-string
+      // read don't depend on each other, so they run together: this chain
+      // was 4 serial round trips (auth + entitlement pair + status) and is
+      // now 2 in parallel. Screens gate on `loading` (e.g. the Cloud-backup
+      // switch renders off+disabled until it clears), so every trip shaved
+      // here is UI-visible.
+      const { data: sessionData } = await supabase.auth.getSession();
+      const userId = sessionData.session?.user?.id ?? null;
 
-      const { data: { user } } = await supabase.auth.getUser();
-      if (user) {
-        const { data } = await supabase
-          .from('profiles')
-          .select('subscription_status')
-          .eq('id', user.id)
-          .single();
-        if (data) setStatus(data.subscription_status as SubscriptionStatus);
-      }
+      const [subscribed, statusRow] = await Promise.all([
+        // Single source of truth (lib/subscription.getProStatus): RevenueCat
+        // entitlement / Supabase profile, offline cache, dev-only override.
+        getProStatus(),
+        userId
+          ? supabase
+              .from('profiles')
+              .select('subscription_status')
+              .eq('id', userId)
+              .single()
+              .then(
+                (r) => r.data,
+                () => null,
+              )
+          : Promise.resolve(null),
+      ]);
+
+      setIsSubscribed(subscribed);
+      if (statusRow) setStatus(statusRow.subscription_status as SubscriptionStatus);
     } catch {
       // Silently fail — user will see paywall
     } finally {
