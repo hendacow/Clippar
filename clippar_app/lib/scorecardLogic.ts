@@ -23,12 +23,13 @@ export const MIN_HOLE_PAR = 3;
 export const MAX_HOLE_PAR = 6;
 
 /**
- * The consecutive hole numbers a live round plays for a given setup. A live
- * round never wraps: it plays holes [startHole .. startHole + holesPlayed-1].
- * e.g. 18 from 1 → 1..18; 9 from 1 → 1..9; 9 from 10 → 10..18.
+ * The hole numbers a live round plays, in play order, wrapping after 18.
+ * 18 from 1 → 1..18; 9 from 1 → 1..9; 9 from 10 → 10..18; and 18 from the
+ * 10th tee (shotgun/back start) → [10..18, 1..9]. Must stay in lockstep with
+ * liveRecordingLogic.orderedHoleNumbers — same formula, same wrap.
  */
 export function liveHoleNumbers(holesPlayed: 9 | 18, startHole: 1 | 10): number[] {
-  return Array.from({ length: holesPlayed }, (_, i) => startHole + i);
+  return Array.from({ length: holesPlayed }, (_, i) => ((startHole - 1 + i) % 18) + 1);
 }
 
 /**
@@ -68,15 +69,20 @@ export function playedHoles<T extends HolePlayEvidence>(
 
 /**
  * Build the authoritative HoleData[] from a positional per-hole par array.
- * Element i maps to holeNumber = startHole + i, so the resolved par lines up
- * with the hole numbers the round actually scores (getParForHole looks up by
- * holeNumber). For startHole = 1 this is holeNumber i → holePars[i-1].
+ * Element i maps to the i-th hole PLAYED — the same wrapping sequence as
+ * liveHoleNumbers — so the resolved par lines up with the hole numbers the
+ * round actually scores (getParForHole looks up by holeNumber). A linear
+ * `startHole + i` here would assign slots 10..18 of an 18-from-10 round to
+ * holes 19..27, and every wrapped front-nine hole would score DEFAULT_PAR.
  */
 export function buildHoleDataFromPars(
   holePars: readonly number[],
   startHole: 1 | 10 = 1,
 ): HoleData[] {
-  return holePars.map((par, i) => ({ holeNumber: startHole + i, par }));
+  return holePars.map((par, i) => ({
+    holeNumber: ((startHole - 1 + i) % 18) + 1,
+    par,
+  }));
 }
 
 /**

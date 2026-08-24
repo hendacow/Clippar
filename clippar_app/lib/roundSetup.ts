@@ -5,10 +5,9 @@
  * inline and only half-right:
  *
  *   1. WHICH START HOLES ARE VALID for a given hole count. The round model
- *      doesn't wrap — a round plays [startHole .. startHole + holesPlayed-1]
- *      (lib/liveRecordingLogic.lastHoleOf) — so a full 18 can only tee off on
- *      hole 1, and a back-nine (shotgun) start is a 9-hole round from 10.
- *      Picking 18 + hole 10 would score holes 19..27, which don't exist.
+ *      wraps after 18 (lib/liveRecordingLogic.orderedHoleNumbers) — so a full
+ *      18 can tee off on hole 1 OR hole 10 (shotgun/back-tee start plays
+ *      10..18 then 1..9), and a 9-hole round picks front or back nine.
  *
  *   2. DO WE ALREADY KNOW THIS COURSE'S PARS. If we don't, starting the round
  *      stamps DEFAULT_PAR = 4 on every hole and that wrong scorecard is burned
@@ -44,23 +43,23 @@ export interface StartHoleOption {
 }
 
 /**
- * The start holes a round of this length can actually tee off on. 9 holes is
- * a real choice (front or back); 18 has exactly one valid answer because the
- * round doesn't wrap back to hole 1 — see the header note.
+ * The start holes a round can tee off on — hole 1 or hole 10 for either
+ * length. A 9-hole round picks front or back nine; an 18-hole round from the
+ * 10th tee wraps (10..18 then 1..9), which is a routine shotgun/back-tee
+ * start. Coverage checks below still gate Continue on the scorecard actually
+ * knowing every hole the choice implies.
  */
-export function startHoleOptions(holesPlayed: 9 | 18): StartHoleOption[] {
-  if (holesPlayed === 9) {
-    return [
-      { value: 1, label: 'Hole 1' },
-      { value: 10, label: 'Hole 10' },
-    ];
-  }
-  return [{ value: 1, label: 'Hole 1' }];
+export function startHoleOptions(_holesPlayed: 9 | 18): StartHoleOption[] {
+  return [
+    { value: 1, label: 'Hole 1' },
+    { value: 10, label: 'Hole 10' },
+  ];
 }
 
 /**
- * Force a start hole to one the count allows. Flipping 9 → 18 while "back 9"
- * is selected would otherwise carry a hole 10 start into an 18-hole round.
+ * Force a start hole to one the count allows. Both lengths now allow both
+ * tees, so this passes valid picks through unchanged — kept as the single
+ * guard against garbage (and as the seam if a length ever restricts again).
  */
 export function normalizeStartHole(holesPlayed: 9 | 18, startHole: 1 | 10): 1 | 10 {
   return startHoleOptions(holesPlayed).some((o) => o.value === startHole)

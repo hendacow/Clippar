@@ -60,6 +60,7 @@ import {
   recentSetups,
 } from '@/lib/roundSetup';
 import { isCaptureArmed } from '@/lib/captureArming';
+import { previousHoleTarget } from '@/lib/liveRecordingLogic';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 import type { CoursePreset } from '@/types/preset';
@@ -1947,16 +1948,29 @@ export default function RecordScreen() {
           </Pressable>
 
           {/* Hole navigation — Previous / Next. Previous is disabled on the
-              first hole played (startHole) since there's nowhere to step back
-              to; a back-nine round clamps at hole 10. Both share the mid-clip
-              guard so a step can't reposition around an in-flight recording. */}
+              first hole played, POSITIONALLY: in a wrapped round (18 from the
+              10th tee) holes 1..9 are numerically below the start but are the
+              back half of the round, so a `currentHole <= startHole` check
+              would kill the button for nine real holes. Both share the
+              mid-clip guard so a step can't reposition around an in-flight
+              recording. */}
           <View style={styles.holeNavGroup}>
             <Pressable
               onPress={handlePreviousHole}
-              disabled={roundState.currentHole <= roundState.startHole}
+              disabled={
+                previousHoleTarget(
+                  roundState.currentHole,
+                  roundState.holesPlayed,
+                  roundState.startHole
+                ) === null
+              }
               style={[
                 styles.holeNavButton,
-                roundState.currentHole <= roundState.startHole && { opacity: 0.35 },
+                previousHoleTarget(
+                  roundState.currentHole,
+                  roundState.holesPlayed,
+                  roundState.startHole
+                ) === null && { opacity: 0.35 },
               ]}
             >
               <ChevronLeft size={16} color={theme.colors.textSecondary} />

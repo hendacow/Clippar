@@ -87,21 +87,30 @@ export function canStartRecording(args: {
 }
 
 /**
- * Where the round naturally ends. e.g. 18 holes starting at 1 → finish
- * after hole 18; 9 holes starting at 10 → finish after hole 18; 9 holes
- * starting at 1 → finish after hole 9.
+ * Where the round naturally ends — the LAST hole in play order, not the
+ * numerically largest. 18 from 1 → 18; 9 from 10 → 18; 9 from 1 → 9; and
+ * 18 from 10 (wrapping) → 9.
  */
 export function lastHoleOf(holesPlayed: 9 | 18, startHole: 1 | 10): number {
-  return startHole + holesPlayed - 1;
+  const seq = orderedHoleNumbers(holesPlayed, startHole);
+  return seq[seq.length - 1];
 }
 
-/** Has advancing to `nextHole` taken the round past its last hole? */
-export function isRoundOver(
-  nextHole: number,
+/**
+ * The hole played after `currentHole`, or null when `currentHole` is the last
+ * hole of the round (or isn't part of it). This is THE way to advance — a
+ * literal `currentHole + 1` is wrong for a wrapping round, where the hole
+ * after 18 is 1.
+ */
+export function nextHoleAfter(
+  currentHole: number,
   holesPlayed: 9 | 18,
   startHole: 1 | 10
-): boolean {
-  return nextHole > lastHoleOf(holesPlayed, startHole);
+): number | null {
+  const seq = orderedHoleNumbers(holesPlayed, startHole);
+  const i = seq.indexOf(currentHole);
+  if (i === -1) return null;
+  return i + 1 < seq.length ? seq[i + 1] : null;
 }
 
 /**
@@ -121,15 +130,18 @@ export function findLastClipIndexOnHole(
 
 /**
  * Where "Previous Hole" should land, or null when already on the first hole
- * played (so the caller can no-op / disable the button). Clamped at
- * `startHole` — a back-nine round (startHole 10) can never step below 10.
+ * played (so the caller can no-op / disable the button). Positional in play
+ * order, not `currentHole - 1`: in a wrapping round (18 from the 10th tee)
+ * the hole before 1 is 18, and a back-nine round can never step below 10.
  */
 export function previousHoleTarget(
   currentHole: number,
-  startHole: number
+  holesPlayed: 9 | 18,
+  startHole: 1 | 10
 ): number | null {
-  const target = currentHole - 1;
-  return target >= startHole ? target : null;
+  const seq = orderedHoleNumbers(holesPlayed, startHole);
+  const i = seq.indexOf(currentHole);
+  return i > 0 ? seq[i - 1] : null;
 }
 
 /**
@@ -174,17 +186,22 @@ export function upsertHoleScore<T extends { holeNumber: number }>(
 }
 
 /**
- * The real hole numbers a round covers, in play order. A front-9 round
- * (startHole 1) → [1..9]; a back-nine round (startHole 10) → [10..18]; a full
- * round → [1..18]. Recording tags each clip/score with these actual numbers
- * (currentHole = startHole + offset), so the editor/scorecard render 10–18 for
- * a back-nine round without any 1..N reconstruction.
+ * The real hole numbers a round covers, IN PLAY ORDER, wrapping after 18.
+ * Front-9 → [1..9]; back-nine → [10..18]; full round from 1 → [1..18]; and a
+ * full round teeing off on the 10th (shotgun/back-tee start) → [10..18, 1..9].
+ * Recording tags each clip/score with these actual numbers, so the
+ * editor/scorecard render the real card holes without any 1..N reconstruction.
+ *
+ * Everything positional (next hole, previous hole, round over, resume) derives
+ * from THIS sequence — never from `hole + 1` arithmetic, which is wrong the
+ * moment a round wraps (the hole after 18 is 1, and 1 comes after 18 in play
+ * order despite being numerically smaller).
  */
 export function orderedHoleNumbers(
   holesPlayed: 9 | 18,
   startHole: 1 | 10
 ): number[] {
-  return Array.from({ length: holesPlayed }, (_, i) => startHole + i);
+  return Array.from({ length: holesPlayed }, (_, i) => ((startHole - 1 + i) % 18) + 1);
 }
 
 /**
@@ -204,8 +221,21 @@ export function clampRecoveredPointer(
   holesPlayed: 9 | 18,
   startHole: 1 | 10
 ): { hole: number; shot: number | null } {
-  const lastHole = lastHoleOf(holesPlayed, startHole);
-  const hole = Math.min(Math.max(persistedHole ?? startHole, startHole), lastHole);
+  // Membership in the play sequence, not a numeric clamp: in a wrapping
+  // round (18 from the 10th) hole 3 is legitimately mid-round despite being
+  // numerically below the start, and a min/max clamp would corrupt it.
+  // Legacy overshoot (a pointer past every hole on the card — the old
+  // "hole 19 orphan") still lands on the LAST hole played rather than
+  // yanking the golfer back to the first tee.
+  const seq = orderedHoleNumbers(holesPlayed, startHole);
+  let hole: number;
+  if (persistedHole != null && seq.includes(persistedHole)) {
+    hole = persistedHole;
+  } else if (persistedHole != null && persistedHole > Math.max(...seq)) {
+    hole = seq[seq.length - 1];
+  } else {
+    hole = startHole;
+  }
   const clamped = hole !== persistedHole;
   return {
     hole,

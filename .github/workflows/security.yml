@@ -76,4 +76,8 @@ jobs:
             Be strict on CRITICAL/HIGH (real exploit paths). For MEDIUM/LOW (hardening,
             defense in depth) be selective — flag only the most actionable items so
             the PR author isn't drowning in noise.
-          claude_args: '--allowed-tools "Bash(gh pr *),Bash(gh api *),Read,Grep,Glob"'
+          # Model pinned explicitly. Security review is Opus work, and an
+          # unpinned job follows whatever the account default resolves to at run
+          # time — which silently changed this gate's tier without anyone
+          # choosing it.
+          claude_args: '--model claude-opus-5 --allowed-tools "Bash(gh pr *),Bash(gh api *),Read,Grep,Glob"'

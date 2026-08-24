@@ -8,7 +8,7 @@ import { createRound, updateRound, upsertScore, deleteRound } from '@/lib/api';
 import { runDiscardRound, type DiscardOutcome } from '@/lib/roundDiscardLogic';
 import { deleteFile } from 'shot-detector';
 import {
-  lastHoleOf,
+  nextHoleAfter,
   findLastClipIndexOnHole,
   previousHoleTarget,
   resumeShotNumber,
@@ -262,7 +262,9 @@ export function useRound() {
         const newScores = upsertHoleScore(prev.scores, score);
         const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
         const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
-        const nextHole = prev.currentHole + 1;
+        // Positional, wrap-aware: after hole 18 in a round that teed off on
+        // the 10th, the next hole is 1 — never `currentHole + 1`.
+          const nextHole = nextHoleAfter(prev.currentHole, prev.holesPlayed, prev.startHole);
 
         saveLocalScore({
           round_id: prev.roundId,
@@ -286,8 +288,7 @@ export function useRound() {
 
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
 
-        const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
-        if (nextHole > lastHole) {
+        if (nextHole === null) {
           // Round complete — persist 'finished' NOW, not just in memory.
           // Previously only the hole pointer was written (hole 19), so an
           // app kill on the Round Complete screen resurrected the round as
@@ -301,7 +302,8 @@ export function useRound() {
             scores: newScores,
             totalScore: newTotalScore,
             totalPar: newTotalPar,
-            currentHole: lastHole,
+            // The round finishes while standing ON its last hole.
+            currentHole: prev.currentHole,
             currentShot: prev.currentShot,
             status: 'finished' as const,
           };
@@ -392,7 +394,9 @@ export function useRound() {
       const newScores = scoredNow ? upsertHoleScore(prev.scores, scoredNow) : prev.scores;
       const newTotalScore = newScores.reduce((sum, s) => sum + s.strokes, 0);
       const newTotalPar = newScores.reduce((sum, s) => sum + s.par, 0);
-      const nextHole = prev.currentHole + 1;
+      // Positional, wrap-aware: after hole 18 in a round that teed off on
+      // the 10th, the next hole is 1 — never `currentHole + 1`.
+      const nextHole = nextHoleAfter(prev.currentHole, prev.holesPlayed, prev.startHole);
 
       // Persist — only when there is something real to persist. Writing a row
       // here is what made the skipped hole survive a reinstall and reappear on
@@ -421,8 +425,7 @@ export function useRound() {
 
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
-      const lastHole = lastHoleOf(prev.holesPlayed, prev.startHole);
-      if (nextHole > lastHole) {
+      if (nextHole === null) {
         // Round complete — persist 'finished' NOW, not just in memory.
         // Previously only the hole pointer was written (hole 19), so an
         // app kill on the Round Complete screen resurrected the round as
@@ -436,7 +439,8 @@ export function useRound() {
           scores: newScores,
           totalScore: newTotalScore,
           totalPar: newTotalPar,
-          currentHole: lastHole,
+          // The round finishes while standing ON its last hole.
+          currentHole: prev.currentHole,
           currentShot: prev.currentShot,
           status: 'finished' as const,
         };
@@ -487,7 +491,11 @@ export function useRound() {
     const current = stateRef.current;
     if (!current || current.status !== 'in_progress') return;
 
-    const target = previousHoleTarget(current.currentHole, current.startHole);
+    const target = previousHoleTarget(
+      current.currentHole,
+      current.holesPlayed,
+      current.startHole
+    );
     if (target === null) return; // already on the first hole played
 
     // COMMIT THE DEPARTING HOLE'S STROKES before stepping away. Penalty
