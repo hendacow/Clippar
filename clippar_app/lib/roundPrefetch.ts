@@ -61,6 +61,13 @@ const cache = new Map<string, Entry>();
 // making the scrub authoritative over everything in flight.
 let generation = 0;
 
+// Pending expiry timers. Tracked so a scrub can cancel them: each timer
+// closure holds its entry (and the payload its promise resolves to), so a
+// bare clear() of the Map would leave scrubbed payloads reachable in the
+// heap for up to TTL_MS until the timer fired — data remanence the security
+// review flagged. Cancelling drops the closures with the timers.
+const timers = new Set<ReturnType<typeof setTimeout>>();
+
 // Nothing warmed is worth keeping across a backgrounding — the press → mount
 // window it bridges is long gone by the time the app comes back. The per-entry
 // expiry timers below already bound retention everywhere; these hooks just
@@ -116,9 +123,11 @@ export function prefetchRound(id: string | null | undefined): void {
   // Hard retention bound: delete at expiry even if nothing ever takes it and
   // no other cache call runs (idle foreground, web). Identity-checked so a
   // newer entry for the same round is never deleted by an older timer.
-  setTimeout(() => {
+  const timer = setTimeout(() => {
+    timers.delete(timer);
     if (cache.get(id) === entry) cache.delete(id);
   }, TTL_MS + 500);
+  timers.add(timer);
 }
 
 /**
@@ -161,5 +170,7 @@ export function takePrefetchedRound(id: string | null | undefined): Promise<any>
  */
 export function clearRoundPrefetch(): void {
   generation++;
+  for (const t of timers) clearTimeout(t);
+  timers.clear();
   cache.clear();
 }
