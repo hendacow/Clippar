@@ -52,17 +52,34 @@ interface Entry {
 const TTL_MS = 15_000;
 const cache = new Map<string, Entry>();
 
+// Bumped by every scrub. A warm that started before the bump must not
+// proceed: without this, a prefetch whose getSession was still in flight when
+// clearRoundPrefetch() ran would go on to fetch (and briefly retain) the
+// departed user's payload — the TOCTOU the security review flagged. getSession
+// can be a full refresh round-trip wide, not just a tick, so the window is
+// real. Checked before the fetch is issued and again before a take is served,
+// making the scrub authoritative over everything in flight.
+let generation = 0;
+
 // Nothing warmed is worth keeping across a backgrounding — the press → mount
 // window it bridges is long gone by the time the app comes back. The per-entry
-// expiry timers below already bound retention everywhere (web included);
-// this just drops the memory sooner on native.
+// expiry timers below already bound retention everywhere; these hooks just
+// drop the memory sooner. Web has no AppState, so tab-hidden is its analogue.
 if (Platform.OS === 'ios' || Platform.OS === 'android') {
   try {
     AppState.addEventListener('change', (state) => {
-      if (state === 'background') cache.clear();
+      if (state === 'background') clearRoundPrefetch();
     });
   } catch {
     // AppState unavailable (tests/SSR) — the expiry timers still bound retention.
+  }
+} else if (Platform.OS === 'web') {
+  try {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'hidden') clearRoundPrefetch();
+    });
+  } catch {
+    // Non-DOM environment — the expiry timers still bound retention.
   }
 }
 
@@ -78,11 +95,16 @@ export function prefetchRound(id: string | null | undefined): void {
   const existing = cache.get(id);
   if (existing && Date.now() - existing.at < TTL_MS) return;
 
-  // getSession is a local read; resolve the owner in the entry rather than
-  // before registration (see Entry.owner). No owner → no fetch at all.
+  // Resolve the owner in the entry rather than before registration (see
+  // Entry.owner). No owner → no fetch at all — and a scrub that lands while
+  // getSession is in flight (generation bump) kills the warm the same way,
+  // so the departed session's payload is never even requested.
+  const startedAt = generation;
   const owner = supabase.auth
     .getSession()
-    .then(({ data }) => data.session?.user?.id ?? null)
+    .then(({ data }) =>
+      generation === startedAt ? (data.session?.user?.id ?? null) : null,
+    )
     .catch(() => null);
   const entry: Entry = {
     at: Date.now(),
@@ -114,7 +136,9 @@ export function takePrefetchedRound(id: string | null | undefined): Promise<any>
   if (Date.now() - hit.at > TTL_MS) return null;
   // Ownership gate: the cached payload is served without re-running RLS, so
   // it must never cross an account boundary. Compare the warming user against
-  // the current session (both local reads); fail closed on any doubt.
+  // the current session; a scrub arriving while these resolve (generation
+  // bump) also voids the take. Fail closed on any doubt.
+  const takenAt = generation;
   return Promise.all([
     hit.owner,
     supabase.auth
@@ -123,13 +147,19 @@ export function takePrefetchedRound(id: string | null | undefined): Promise<any>
       .catch(() => null),
   ])
     .then(([warmedBy, current]) => {
+      if (generation !== takenAt) return null;
       if (!warmedBy || !current || warmedBy !== current) return null;
       return hit.promise;
     })
     .catch(() => null);
 }
 
-/** Drops all warmed entries. Wired into every path a session can end on. */
+/**
+ * Drops all warmed entries AND voids everything in flight (generation bump),
+ * so a warm racing this scrub can neither land nor be served. Wired into
+ * every path a session can end on, plus the background/hidden hooks above.
+ */
 export function clearRoundPrefetch(): void {
+  generation++;
   cache.clear();
 }
