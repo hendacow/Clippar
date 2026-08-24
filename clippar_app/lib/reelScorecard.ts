@@ -60,6 +60,12 @@ export interface ReelClipTiming {
  * The editor drops clips whose file is missing from disk and could not be
  * re-downloaded, which iOS makes an ordinary event rather than a rare one, so
  * "included" and "not excluded" are genuinely different sets.
+ *
+ * Each clip must contribute EXACTLY what `composeClips` in app/round/editor.tsx
+ * asks native to play of it — the two numbers are read against each other, and
+ * anything else is drift that compounds down the reel. That contract is why the
+ * arithmetic below mirrors the `isPreTrimmed` split in `composeClips` rather
+ * than trusting any single cached field.
  */
 export function holeReelDurationMs<T extends ReelClipTiming>(
   clips: readonly T[],
@@ -68,17 +74,29 @@ export function holeReelDurationMs<T extends ReelClipTiming>(
   let total = 0;
   for (const clip of clips) {
     if (clip.isExcluded || !isInReel(clip)) continue;
-    // Pre-trimmed clips: sourceUri IS the trim file, so its durationMs (now
-    // correctly written by markClipTrimmed) is the right number.
-    // trimEndMs - trimStartMs would give the same value but in
-    // original-timeline coords, which are duplicate info — use durationMs as
-    // the source of truth.
     const isPreTrimmed = !!(clip.autoTrimmed && clip.originalUri);
-    const dur = isPreTrimmed
-      ? clip.durationMs
-      : clip.trimEndMs === -1
-        ? clip.durationMs
-        : clip.trimEndMs - clip.trimStartMs;
+    let dur: number;
+    if (isPreTrimmed) {
+      // sourceUri IS the trim file and composeClips sends native 0..-1, so the
+      // contribution is that file's whole length. trimStart/End are coords in
+      // the ORIGINAL video, so their WIDTH is that length — and it is exactly
+      // the number markClipTrimmed persists as duration_seconds.
+      //
+      // Prefer the width over `durationMs`, because `durationMs` is only right
+      // once the row has been re-read from SQLite. useEditorState's auto-trim
+      // swaps sourceUri to the trim file in React state but never refreshes
+      // durationMs, so for the whole session that trimmed the clips it is still
+      // the UNTRIMMED recording — minutes longer, across every clip. Nothing
+      // reloads the editor between auto-trim and Export.
+      dur = clip.trimEndMs === -1 ? clip.durationMs : clip.trimEndMs - clip.trimStartMs;
+    } else {
+      // sourceUri is the full recording and composeClips forwards the bounds
+      // verbatim, so native plays [trimStartMs, trimEndMs) of it. An open end
+      // means "to the end of the file" — it does NOT undo the start handle, so
+      // trimStartMs is subtracted either way.
+      const endMs = clip.trimEndMs === -1 ? clip.durationMs : clip.trimEndMs;
+      dur = endMs - clip.trimStartMs;
+    }
     total += Math.max(0, dur);
   }
   return total;
