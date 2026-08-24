@@ -109,8 +109,9 @@ export async function wipeLocalUserData(): Promise<void> {
   await removeTemporaryExports();
 
   // In-memory round-detail prefetch cache: carries the departing user's round
-  // payloads (GPS + clip URLs) for its TTL. Drop it so a next account on this
-  // handset can never be served the previous golfer's warmed data.
+  // payloads (GPS + clip URLs) until taken, swept, or the app backgrounds.
+  // Entries are also owner-stamped (a take by another account misses), but
+  // drop the memory itself here rather than rely on that gate alone.
   clearRoundPrefetch();
 
   if (Platform.OS === 'web') return;
@@ -140,9 +141,11 @@ export async function wipeLocalUserData(): Promise<void> {
  */
 export async function clearAccountLinkedCaches(): Promise<void> {
   // The round-detail prefetch cache is account-linked residue too — it holds
-  // the signed-in user's round payloads (GPS + clip URLs) in memory for its
-  // TTL. Sign-out must drop it so the next account is never served warmed data
-  // from the previous one. Synchronous in-memory clear; nothing to await.
+  // the signed-in user's round payloads (GPS + clip URLs) in memory until
+  // taken, swept, or the app backgrounds. Entries are owner-stamped so a take
+  // by the next account misses, and hooks/useAuth.ts scrubs on SIGNED_OUT for
+  // sessions that end without this button — but sign-out drops the memory here
+  // too. Synchronous in-memory clear; nothing to await.
   clearRoundPrefetch();
 
   for (const key of ACCOUNT_LINKED_SETTING_KEYS) {
