@@ -170,6 +170,8 @@ const timed = (
     originalUri: string;
     trimStartMs: number;
     trimEndMs: number;
+    autoTrimStartMs: number;
+    autoTrimEndMs: number;
   }> = {},
 ) => ({
   id,
@@ -179,7 +181,31 @@ const timed = (
   isExcluded: extra.isExcluded,
   autoTrimmed: extra.autoTrimmed,
   originalUri: extra.originalUri,
+  autoTrimStartMs: extra.autoTrimStartMs,
+  autoTrimEndMs: extra.autoTrimEndMs,
 });
+
+/**
+ * A clip as useEditorState leaves it after a successful auto-trim: sourceUri is
+ * the trim file, and BOTH the trim bounds and the auto-trim bounds are the
+ * window that produced it. `durationMs` is whatever React state still holds —
+ * the untrimmed recording in the session that trimmed it, the trim file's own
+ * length after a reload.
+ */
+const autoTrimmed = (
+  id: string,
+  cachedDurationMs: number,
+  startMs: number,
+  endMs: number,
+) =>
+  timed(id, cachedDurationMs, {
+    autoTrimmed: true,
+    originalUri: `file:///orig-${id}.mov`,
+    trimStartMs: startMs,
+    trimEndMs: endMs,
+    autoTrimStartMs: startMs,
+    autoTrimEndMs: endMs,
+  });
 
 test('holeReelDurationMs: a dropped clip contributes nothing', () => {
   const clips = [timed('a', 3000), timed('b', 4000), timed('c', 2000)];
@@ -203,14 +229,7 @@ test('holeReelDurationMs: a user trim is measured, a full clip uses its duration
 test('holeReelDurationMs: a pre-trimmed clip contributes its trim file, not the original video', () => {
   // sourceUri IS the trim file, and composeClips sends native 0..-1 for it, so
   // the contribution is that file's length — 2500ms, not the 14.5s original.
-  const clips = [
-    timed('a', 2500, {
-      autoTrimmed: true,
-      originalUri: 'file:///orig.mov',
-      trimStartMs: 12000,
-      trimEndMs: 14500,
-    }),
-  ];
+  const clips = [autoTrimmed('a', 2500, 12000, 14500)];
   assert.equal(holeReelDurationMs(clips, () => true), 2500);
 });
 
@@ -221,17 +240,36 @@ test('holeReelDurationMs: a pre-trimmed clip ignores a durationMs left at the or
   // (markClipTrimmed), and nothing reloads the editor between auto-trim and
   // Export — so this is the state every ordinary round exports in.
   //
-  // The trim window's WIDTH is the trim file's length by construction (it is
-  // the number markClipTrimmed persists), so it is what must be counted.
-  const clips = [
-    timed('a', 30000, {
-      autoTrimmed: true,
-      originalUri: 'file:///orig.mov',
-      trimStartMs: 12000,
-      trimEndMs: 15000,
-    }),
-  ];
+  // The auto-trim window's WIDTH is the trim file's length by construction (it
+  // is the number markClipTrimmed persists), so it is what must be counted.
+  const clips = [autoTrimmed('a', 30000, 12000, 15000)];
   assert.equal(holeReelDurationMs(clips, () => true), 3000);
+});
+
+test('holeReelDurationMs: a FAILED re-trim keeps the clip on its existing duration', () => {
+  // ClipTrimModal.handleSave saves the user's newly chosen original-timeline
+  // bounds WITHOUT a sourceOverride when trimVideo throws ("saving offsets
+  // only"), so sourceUri still points at the previous trim file and native
+  // plays that file in full. The new bounds describe a file that was never
+  // written, so their width must NOT be counted — durationMs, which that path
+  // deliberately leaves alone, is the trim file that actually exists.
+  const clip = {
+    ...autoTrimmed('a', 3000, 12000, 15000), // trim file on disk is 3000ms
+    trimStartMs: 4000, // user dragged the handles to a 9s window…
+    trimEndMs: 13000, // …and the re-trim export failed
+  };
+  assert.equal(holeReelDurationMs([clip], () => true), 3000);
+});
+
+test('holeReelDurationMs: a SUCCESSFUL re-trim uses the duration written with the new file', () => {
+  // Here updateTrim's sourceOverride swapped in the new file and wrote its
+  // length, so durationMs is authoritative and the auto-trim window is history.
+  const clip = {
+    ...autoTrimmed('a', 9000, 12000, 15000),
+    trimStartMs: 4000,
+    trimEndMs: 13000,
+  };
+  assert.equal(holeReelDurationMs([clip], () => true), 9000);
 });
 
 test('holeReelDurationMs: a pre-trimmed clip with no explicit end falls back to durationMs', () => {
@@ -257,12 +295,7 @@ test('an auto-trimmed round puts hole 2 where the video really starts', () => {
   // Counting durationMs put hole 2's card at 60s into a reel that is 9s long,
   // so every shot after the first carried hole 1's scorecard.
   const trimmed = (id: string, startMs: number, endMs: number) =>
-    timed(id, 30000, {
-      autoTrimmed: true,
-      originalUri: `file:///orig-${id}.mov`,
-      trimStartMs: startMs,
-      trimEndMs: endMs,
-    });
+    autoTrimmed(id, 30000, startMs, endMs);
   const holes = [
     { holeNumber: 1, par: 4, strokes: 4, hasScore: true, clips: [trimmed('a', 10000, 13000), trimmed('b', 4000, 7000)] },
     { holeNumber: 2, par: 3, strokes: 3, hasScore: true, clips: [trimmed('c', 21000, 24000)] },

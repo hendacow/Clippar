@@ -42,6 +42,9 @@ export interface ReelClipTiming {
   durationMs: number;
   trimStartMs: number;
   trimEndMs: number;
+  /** The window whose export actually produced `sourceUri`. See below. */
+  autoTrimStartMs?: number;
+  autoTrimEndMs?: number;
 }
 
 /**
@@ -78,17 +81,40 @@ export function holeReelDurationMs<T extends ReelClipTiming>(
     let dur: number;
     if (isPreTrimmed) {
       // sourceUri IS the trim file and composeClips sends native 0..-1, so the
-      // contribution is that file's whole length. trimStart/End are coords in
-      // the ORIGINAL video, so their WIDTH is that length — and it is exactly
-      // the number markClipTrimmed persists as duration_seconds.
+      // contribution is that file's WHOLE length, however the bounds read.
       //
-      // Prefer the width over `durationMs`, because `durationMs` is only right
-      // once the row has been re-read from SQLite. useEditorState's auto-trim
-      // swaps sourceUri to the trim file in React state but never refreshes
-      // durationMs, so for the whole session that trimmed the clips it is still
-      // the UNTRIMMED recording — minutes longer, across every clip. Nothing
-      // reloads the editor between auto-trim and Export.
-      dur = clip.trimEndMs === -1 ? clip.durationMs : clip.trimEndMs - clip.trimStartMs;
+      // Two fields claim to know that length and each is stale in a different
+      // situation, so neither can be trusted alone:
+      //
+      //   • `durationMs` is stale for the whole session that auto-trimmed the
+      //     clips. useEditorState swaps sourceUri to the trim file in React
+      //     state but never refreshes durationMs; only SQLite gets the
+      //     corrected value, and nothing reloads the editor between auto-trim
+      //     and Export. So on an ordinary round it is the UNTRIMMED recording,
+      //     many times too long, for every clip.
+      //
+      //   • the trim window's WIDTH is stale after a re-trim that FAILED.
+      //     ClipTrimModal.handleSave saves the user's newly chosen bounds
+      //     without a sourceOverride when trimVideo throws ("saving offsets
+      //     only"), so the bounds describe a file that was never written while
+      //     sourceUri still points at the previous trim — which is what native
+      //     plays in full.
+      //
+      // `autoTrimStartMs`/`autoTrimEndMs` are the record of which window
+      // actually produced sourceUri, and nothing but a real trim rewrites them
+      // (updateClipEditorState only ever touches trim_start_ms/trim_end_ms).
+      // So the width is the file's length exactly while the bounds still ARE
+      // that window; once they diverge, the manual re-trim path is in charge
+      // and it maintains durationMs itself (successfully via sourceOverride,
+      // or by leaving both sourceUri and durationMs untouched on failure).
+      const boundsMatchTrimFile =
+        clip.autoTrimStartMs !== undefined &&
+        clip.autoTrimEndMs !== undefined &&
+        clip.trimStartMs === clip.autoTrimStartMs &&
+        clip.trimEndMs === clip.autoTrimEndMs;
+      dur = boundsMatchTrimFile
+        ? clip.autoTrimEndMs! - clip.autoTrimStartMs!
+        : clip.durationMs;
     } else {
       // sourceUri is the full recording and composeClips forwards the bounds
       // verbatim, so native plays [trimStartMs, trimEndMs) of it. An open end
