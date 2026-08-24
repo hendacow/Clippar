@@ -19,7 +19,7 @@ import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
 import { useEditorState } from '@/hooks/useEditorState';
 import { emitPipelineEvent, subscribePipeline } from '@/lib/pipelineEvents';
-import { buildReelScorecard } from '@/lib/reelScorecard';
+import { buildReelScorecard, holeReelDurationMs } from '@/lib/reelScorecard';
 import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
@@ -1003,7 +1003,12 @@ export default function EditorScreen() {
       // background purges), so clips that were uploaded remain recoverable
       // even though the local path is gone. Only clips that never uploaded
       // AND are missing locally are dropped.
+      // `validClips[i]` is the EditorClip that produced `validClipUris[i]` —
+      // the two stay in lockstep so both the trim bounds and the scorecard's
+      // per-hole timeline can be derived from exactly the set of clips that
+      // reaches the composer.
       let validClipUris = clipUris;
+      let validClips: EditorClip[] = allClips.filter((c) => c.sourceUri);
       if (isNative) {
         // `expo-file-system`'s new top-level module no longer exports
         // `cacheDirectory` / `downloadAsync`. Pull those from the legacy
@@ -1039,6 +1044,11 @@ export default function EditorScreen() {
           }
         });
 
+        // Recovered local paths, keyed by index into `orderedForCompose`.
+        // Declared out here so the rebuild below is one expression for both
+        // the "something was recovered" and "nothing needed recovering" cases.
+        const recoveredUris = new Map<number, string>();
+
         if (missingRecoverable.length > 0) {
           console.warn(
             `[Editor] ${missingRecoverable.length} clip(s) missing locally — re-downloading from Supabase`
@@ -1073,7 +1083,6 @@ export default function EditorScreen() {
           } catch {}
 
           // Download each missing clip to the cache dir and patch the uri.
-          const recoveredUris = new Map<number, string>();
           await Promise.all(
             missingRecoverable.map(async ({ index, clip }) => {
               const url = signed[clip.storagePath!];
@@ -1095,17 +1104,21 @@ export default function EditorScreen() {
             })
           );
 
-          // Rebuild validClipUris preserving order.
-          validClipUris = orderedForCompose.map((c, idx) => {
-            if (existence[idx]) return c.sourceUri!;
-            const recovered = recoveredUris.get(idx);
-            return recovered ?? null;
-          }).filter((u): u is string => u !== null);
-        } else {
-          validClipUris = existence
-            .map((exists, idx) => (exists ? orderedForCompose[idx].sourceUri! : null))
-            .filter((u): u is string => u !== null);
         }
+
+        // Rebuild the URI list and its clip list together, preserving order.
+        // `recoveredUris` is empty when nothing needed recovering, so this one
+        // expression covers both cases. Pairing here — where the drop decision
+        // is actually made, and the index is still in hand — is what keeps
+        // `validClips[i]` guaranteed to be the clip behind `validClipUris[i]`.
+        const survivors = orderedForCompose
+          .map((clip, idx) => {
+            const uri = existence[idx] ? clip.sourceUri! : recoveredUris.get(idx) ?? null;
+            return uri === null ? null : { uri, clip };
+          })
+          .filter((s): s is { uri: string; clip: EditorClip } => s !== null);
+        validClipUris = survivors.map((s) => s.uri);
+        validClips = survivors.map((s) => s.clip);
 
         const totalMissing = missingUnrecoverable.length +
           (missingRecoverable.length - (validClipUris.length - existence.filter(Boolean).length));
@@ -1148,30 +1161,22 @@ export default function EditorScreen() {
         // the preview card: a hole shows nothing until it was actually ended.
         // buildReelScorecard does the totals (completed holes only) — see
         // lib/reelScorecard.ts.
+        //
+        // The timeline must be built from `validClips`, NOT from every
+        // non-excluded clip: anything dropped above as missing-and-
+        // unrecoverable is not in the reel, so counting its duration here
+        // pushes every later hole boundary past where the video actually is,
+        // and shots start carrying an earlier hole's card.
+        const inReelClipIds = new Set(validClips.map((c) => c.id));
         const scorecardData: ScorecardData = buildReelScorecard(
           state.courseName,
-          state.holes.map((hole) => {
-            const holeClips = hole.clips.filter((c) => !c.isExcluded);
-            const durationMs = holeClips.reduce((sum, c) => {
-              // Pre-trimmed clips: sourceUri IS the trim file, so its
-              // durationMs (now correctly written by markClipTrimmed) is
-              // the right number. trimEndMs - trimStartMs would give the
-              // same value but in original-timeline coords, which are
-              // duplicate info — use durationMs as the source of truth.
-              const isPreTrimmed = !!(c.autoTrimmed && c.originalUri);
-              const dur = isPreTrimmed
-                ? c.durationMs
-                : (c.trimEndMs === -1 ? c.durationMs : (c.trimEndMs - c.trimStartMs));
-              return sum + dur;
-            }, 0);
-            return {
-              holeNumber: hole.holeNumber,
-              par: hole.par,
-              strokes: hole.strokes,
-              hasScore: hole.hasScore,
-              durationMs,
-            };
-          }),
+          state.holes.map((hole) => ({
+            holeNumber: hole.holeNumber,
+            par: hole.par,
+            strokes: hole.strokes,
+            hasScore: hole.hasScore,
+            durationMs: holeReelDurationMs(hole.clips, (c) => inReelClipIds.has(c.id)),
+          })),
         );
 
         // Resolve music to a local file path the native engine can read
@@ -1226,44 +1231,27 @@ export default function EditorScreen() {
         // are saved to SQLite but ignored on stitch — the reel plays full
         // source clips even though the user trimmed them.
         //
-        // Map each entry in `validClipUris` (which may include recovered
-        // URIs that differ from clip.sourceUri) back to its EditorClip so
-        // we can attach trim bounds. Walk both lists in order and skip
-        // any orderedForCompose entry whose URI didn't make it into
-        // validClipUris (i.e. dropped during recovery as unrecoverable).
-        const orderedForCompose = allClips.filter((c) => c.sourceUri);
-        const composeClips: { uri: string; trimStartMs: number; trimEndMs: number }[] = [];
-        let orderedIdx = 0;
-        for (const uri of validClipUris) {
-          // Advance the source pointer to the next clip whose original
-          // sourceUri matches OR whose id is implicitly recovered. Since
-          // both arrays preserve order and the recovery flow keeps clips
-          // in their original positions (just rewriting URIs), aligning
-          // by index is correct as long as we step orderedIdx forward.
-          let clip: EditorClip | undefined = orderedForCompose[orderedIdx];
-          // Skip past any clips that were dropped (unrecoverable) so we
-          // land on the one that produced this URI.
-          while (
-            clip &&
-            clip.sourceUri !== uri &&
-            !uri.includes(`${clip.id}.mp4`)
-          ) {
-            orderedIdx++;
-            clip = orderedForCompose[orderedIdx];
-          }
+        // `validClips` was paired with `validClipUris` by index at the point
+        // the drop decision was made, so index i of one is index i of the
+        // other by construction. This replaced a walk that re-derived the
+        // pairing by string-matching each URI back against the clip list —
+        // which had to guess at recovered URIs (`uri.includes(id + '.mp4')`)
+        // and, on any miss, ran its cursor off the end and silently handed
+        // every remaining clip the default 0..-1 bounds, discarding the
+        // user's trims for the rest of the reel.
+        const composeClips = validClips.map((clip, idx) => {
           // When a clip has been auto-trimmed (or the user re-trimmed),
           // sourceUri IS the trim file already and trimStartMs/trimEndMs
           // are bounds in the ORIGINAL video's timeline — out-of-range
           // for the trim file. Pass full range so the native composer
           // uses the entire pre-trimmed clip.
-          const isPreTrimmed = !!(clip?.autoTrimmed && clip?.originalUri);
-          composeClips.push({
-            uri,
-            trimStartMs: isPreTrimmed ? 0 : (clip?.trimStartMs ?? 0),
-            trimEndMs: isPreTrimmed ? -1 : (clip?.trimEndMs ?? -1),
-          });
-          orderedIdx++;
-        }
+          const isPreTrimmed = !!(clip.autoTrimmed && clip.originalUri);
+          return {
+            uri: validClipUris[idx],
+            trimStartMs: isPreTrimmed ? 0 : clip.trimStartMs,
+            trimEndMs: isPreTrimmed ? -1 : clip.trimEndMs,
+          };
+        });
         console.log(
           `[Editor:Compose] composeClips trim ranges:`,
           composeClips.map((c, i) => `[${i}] ${c.trimStartMs}..${c.trimEndMs}`).join(', '),
