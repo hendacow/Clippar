@@ -45,6 +45,32 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 1b. No credential-carrying BINARY document may be tracked.
+# ─────────────────────────────────────────────────────────────────────────────
+# Every pattern check below is a text grep, and `git log -p` prints "Binary
+# files differ" for a .docx — so a credential inside an Office document is
+# invisible to all of them, at any pattern strength. That is not hypothetical:
+# a Word document holding a live Resend API key was committed and pushed, and
+# survived two security audits and this gate reporting CLEAN, because nothing
+# here could see inside it. Filename is the only signal available, so use it.
+#
+# Deliberately narrow: document containers and key-material extensions only, not
+# images/fonts/video, so this stays a rule people trust rather than one they
+# learn to ignore. Checked against the checked-out ref (`git ls-files`) so the
+# result is the same on a shallow CI clone as it is locally.
+echo
+echo "── tracked credential-carrying binaries ───────────────"
+BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|rtf|vsix|p8|p12|pfx|jks|keystore|ovpn|mobileprovision)$'
+tracked_bin="$(git ls-files | grep -EI "$BINARY_DOC_EXT" || true)"
+if [ -n "$tracked_bin" ]; then
+  bad "binary document/key file(s) tracked — text scans cannot see inside these:"
+  echo "$tracked_bin" | head -5 | while read -r f; do note "$f"; done
+  note "if this file is genuinely needed, store it outside the repo and link to it"
+else
+  note "no tracked office documents or key-material files"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 2. High-confidence live-credential shapes, in the working tree AND in history.
 # ─────────────────────────────────────────────────────────────────────────────
 # History matters: a key deleted in the next commit is still a leaked key. These
@@ -85,8 +111,19 @@ fi
 # Same patterns across every commit reachable from any ref. `git log -p` is
 # cheap on a repo this size and is the only way to see a key that was committed
 # and then removed.
-hist="$(git log -p --all --no-color -U0 2>/dev/null \
-  | grep -aInE "sk_live_[0-9A-Za-z]{16,}|whsec_[0-9A-Za-z]{16,}|APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*[\"']?ey[A-Za-z0-9_-]{20,}|$PEM_LINE" \
+#
+# The history sweep used to carry its OWN hand-written pattern list — a subset
+# of five. Anything added to CRED_PATTERNS after that line was written was
+# checked in the working tree and NOT in history, which is backwards: the tree
+# can be cleaned with a delete, history cannot. The Resend shape on line 59 was
+# in exactly that gap, and the scan reported "history clean" while a live Resend
+# key sat in a pushed blob. Build the alternation FROM the same array so the two
+# sweeps can never drift again, and exclude this file by pathspec so the pattern
+# definitions above don't match themselves.
+hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
+hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
+hist="$(git log -p --all --no-color -U0 -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
+  | grep -aInE "$hist_pat" \
   | head -5 || true)"
 if [ -n "$hist" ]; then
   bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"

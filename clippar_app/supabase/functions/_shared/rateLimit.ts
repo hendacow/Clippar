@@ -113,15 +113,16 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
 /**
  * The client's IP, for limits that have no authenticated subject.
  *
- * CAREFUL: X-Forwarded-For is a comma-separated list that grows left-to-right as
- * it crosses proxies, and the CLIENT can put anything it likes in the leftmost
- * position. Taking entry [0] — which is the obvious reading, and what most
- * examples do — means an attacker rotates a header value and gets a fresh bucket
- * per request, i.e. no limit at all.
+ * CAREFUL, and read the body before changing this: the generic advice for
+ * X-Forwarded-For — "the client controls entry [0], so take the LAST entry" —
+ * is measurably WRONG on this deployment, and the code below deliberately does
+ * the opposite. Supabase's gateway OVERWRITES the header instead of appending
+ * to it, so entry [0] is gateway-asserted and the trailing entries are its own
+ * internal hops; keying on the last entry bucketed every caller by Supabase's
+ * own load balancer. The measurement that establishes this is in the body.
  *
- * The last entry is the one appended by the proxy closest to us, which is the
- * peer address it actually observed. That is the only value here we did not let
- * the caller choose.
+ * This docstring used to assert the generic rule as fact, which is exactly the
+ * kind of comment that gets the code "corrected" back into the bug.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,

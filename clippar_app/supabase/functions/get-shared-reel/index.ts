@@ -74,9 +74,10 @@ Deno.serve(async (req: Request) => {
   // This is the only endpoint with no JWT, so there is no user to key on. Share
   // tokens are 128-bit random and were never enumerable, but nothing stopped one
   // host pulling this in a loop, and every call costs a database read plus a
-  // signed-URL mint. Keyed on the LAST X-Forwarded-For entry — see clientIp(),
-  // the leftmost entry is caller-controlled and would hand out a fresh bucket per
-  // request.
+  // signed-URL mint. Keyed on `cf-connecting-ip`, falling back to the FIRST
+  // X-Forwarded-For entry — see clientIp(): Supabase's gateway overwrites that
+  // header rather than appending to it, so entry [0] is gateway-asserted and
+  // the trailing entries are its own internal hops.
   //
   // Counted before the token is even read, so a flood of malformed requests is
   // limited too.
