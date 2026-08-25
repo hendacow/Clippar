@@ -218,17 +218,26 @@ CRED_PATTERNS=(
 # matches — and matching prose instead would just train everyone to ignore the
 # check.
 PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
+# PATH AND LINE ONLY — never the matched text. `git grep -n` emits
+# `path:line:content`, and that content IS the credential. This repo is public
+# and ci.yml runs this script on every PR, so Actions logs here are readable
+# unauthenticated and retained for 90 days. Printing the value would mean the
+# gate WORKING republishes the key to a durable second surface at a stable URL,
+# pre-extracted — worse than the blob it just found, which at least requires
+# cloning and grepping. `cut` keeps a fully actionable locator with no value in
+# it; anyone who needs the value runs this script locally.
 for pat in "${CRED_PATTERNS[@]}"; do
   hits="$(git grep -nE "$pat" 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     bad "credential-shaped string in the working tree: /$pat/"
-    echo "$hits" | head -5 | while read -r l; do note "$l"; done
+    echo "$hits" | head -5 | cut -d: -f1,2 | while read -r l; do note "$l"; done
+    note "(locations only — values are not printed; this log is public)"
   fi
 done
 pem_hits="$(git grep -nE "$PEM_LINE" 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   bad "private-key PEM material in the working tree:"
-  echo "$pem_hits" | head -5 | while read -r l; do note "$l"; done
+  echo "$pem_hits" | head -5 | cut -d: -f1,2 | while read -r l; do note "$l"; done
 fi
 
 # Same patterns across every commit reachable from any ref. `git log -p` is
@@ -292,16 +301,21 @@ hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
 # Same no-swallowing rule as the binary sweep above: a git-side failure must go
 # red, not read as clean.
-hist="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
-  | grep --binary-files=text -nE "$hist_pat" \
-  | head -5 || true)"
+# COUNT ONLY, for the same public-log reason as the working-tree sweep above,
+# and here there is not even a trade-off: `grep -n` would number lines of a
+# `git log -p` STREAM, so those offsets were never a usable locator anyway. A
+# count says everything the CI reader needs — go run it locally — and leaks
+# nothing. `grep -c` exits 1 when it finds nothing, hence the `|| true`.
+hist_n="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
+  | grep --binary-files=text -cE "$hist_pat" || true)"
 log_rc="${PIPESTATUS[0]}"
 if [ "$log_rc" -ne 0 ]; then
   bad "git log failed (rc=$log_rc) — credential history sweep did NOT run"
 fi
-if [ -n "$hist" ]; then
-  bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
-  echo "$hist" | while read -r l; do note "$l"; done
+if [ "${hist_n:-0}" -gt 0 ]; then
+  bad "credential-shaped string present in git HISTORY — ${hist_n} matching line(s)"
+  note "rotation required, not just deletion — the value is already published"
+  note "values are NOT printed here: this log is public. Run ./scripts/secret-scan.sh locally."
 else
   note "history clean for live-key shapes"
 fi
