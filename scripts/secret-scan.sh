@@ -73,7 +73,7 @@ fi
 echo
 echo "── tracked credential-carrying binaries ───────────────"
 BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|rtf|vsix|p8|p12|pfx|jks|keystore|ovpn|mobileprovision)$'
-tracked_bin="$(git ls-files | grep -EI "$BINARY_DOC_EXT" || true)"
+tracked_bin="$(git ls-files | grep -Ei "$BINARY_DOC_EXT" || true)"
 if [ -n "$tracked_bin" ]; then
   bad "binary document/key file(s) tracked — text scans cannot see inside these:"
   echo "$tracked_bin" | head -5 | while read -r f; do note "$f"; done
@@ -85,7 +85,7 @@ fi
 # Same rule against reachable history. A blob here is already leaked to anyone
 # who can clone, so deleting it is NOT the fix — it has to be rotated.
 hist_bin="$(git rev-list --objects HEAD 2>/dev/null \
-  | grep -EI "$BINARY_DOC_EXT" | awk '{ $1=""; sub(/^ /,""); print }' \
+  | grep -Ei "$BINARY_DOC_EXT" | awk '{ $1=""; sub(/^ /,""); print }' \
   | sort -u || true)"
 if [ -n "$hist_bin" ]; then
   bad "binary document/key file(s) in history reachable from HEAD:"
@@ -109,7 +109,15 @@ CRED_PATTERNS=(
   'whsec_[0-9A-Za-z]{16,}'            # Stripe webhook signing secret
   're_[0-9A-Za-z]{8}_[0-9A-Za-z]{16,}' # Resend API key
   'sk_[0-9A-Za-z]{24,}'               # RevenueCat secret key
-  'service_role"'                      # decoded service-role JWT payload
+  # Split literal so this line does not match ITSELF. Every other pattern here
+  # is safe already — their own text contains `[0-9A-Za-z]{16,}` rather than
+  # real alphanumerics, so they cannot self-match. This one is a plain literal
+  # and could, which used to force a `:(exclude)` pathspec on both sweeps. That
+  # pathspec was worse than the problem: it made THIS file the one path in the
+  # repo a committed credential could hide in, and on `git log` a pathspec also
+  # switches on default history simplification (see the history sweep below).
+  # Splitting the string kills both at the root and needs no exclusion.
+  'service_ro''le"'                    # decoded service-role JWT payload
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
@@ -120,14 +128,13 @@ CRED_PATTERNS=(
 # check.
 PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
 for pat in "${CRED_PATTERNS[@]}"; do
-  hits="$(git grep -InE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+  hits="$(git grep -InE "$pat" 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     bad "credential-shaped string in the working tree: /$pat/"
     echo "$hits" | head -5 | while read -r l; do note "$l"; done
   fi
 done
-pem_hits="$(git grep -InE "$PEM_LINE" \
-    -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+pem_hits="$(git grep -InE "$PEM_LINE" 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   bad "private-key PEM material in the working tree:"
   echo "$pem_hits" | head -5 | while read -r l; do note "$l"; done
@@ -140,14 +147,31 @@ fi
 # The history sweep used to carry its OWN hand-written pattern list — a subset
 # of five. Anything added to CRED_PATTERNS after that line was written was
 # checked in the working tree and NOT in history, which is backwards: the tree
-# can be cleaned with a delete, history cannot. The Resend shape on line 59 was
-# in exactly that gap, and the scan reported "history clean" while a live Resend
-# key sat in a pushed blob. Build the alternation FROM the same array so the two
-# sweeps can never drift again, and exclude this file by pathspec so the pattern
-# definitions above don't match themselves.
+# can be cleaned with a delete, history cannot. The Resend shape above was in
+# exactly that gap, and the scan reported "history clean" while a live Resend
+# key sat in a pushed blob. The alternation is now built FROM the same array so
+# the two sweeps can never drift again.
+#
+# `--full-history` IS LOAD-BEARING — do not drop it when touching this line.
+# Passing `git log` a pathspec (even a pure `:(exclude)`) switches on default
+# history simplification: for a merge TREESAME to one parent, git follows ONLY
+# that parent, so every commit reachable just through the side parent falls out
+# of the traversal and its `-p` output never reaches grep. `git merge -s ours`
+# is TREESAME by construction — and "merge the leak branch with -s ours, then
+# let GitHub delete the ref on merge" is a plausible attempt at tidying up a
+# leak. The key would still be in public history and the scan would print
+# "history clean". `--full-history` disables the simplification.
+#
+# The pathspec itself is only needed for THIS file's own past: the literal on
+# the `service_ro`+`le"` line above is split so today's file cannot self-match,
+# but commits that predate that split still contain the unsplit form and cannot
+# be changed. Note the exclusion applies to the HISTORY sweep only — the
+# working-tree sweep above scans this file like any other, so a credential
+# committed here now is still caught.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
-hist="$(git log -p --all --no-color -U0 -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
+hist="$(git log -p --all --full-history --no-color -U0 \
+    -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
   | grep -aInE "$hist_pat" \
   | head -5 || true)"
 if [ -n "$hist" ]; then
