@@ -141,7 +141,9 @@ const handler = async (req: Request): Promise<Response> => {
     // falls back to IP — clientIp() prefers `cf-connecting-ip` (set by the
     // Cloudflare edge, unforgeable) and only then the FIRST X-Forwarded-For
     // entry, because Supabase's gateway OVERWRITES that header rather than
-    // appending to it. See _shared/rateLimit.ts clientIp() for the measurement.
+    // appending to it. See _shared/rateLimit.ts clientIp() for the measurement
+    // — and for the KNOWN LIMIT: unforgeable is a property of the edge, not of
+    // the header, so off that ingress the fallback is caller-writable.
     const token = req.headers.get('Authorization')?.replace('Bearer ', '');
     let subject = `ip:${clientIp(req)}`;
     if (token) {

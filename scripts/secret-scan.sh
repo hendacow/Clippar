@@ -233,7 +233,12 @@ CRED_PATTERNS=(
 # material always has the header alone on its own line, which is what this
 # matches — and matching prose instead would just train everyone to ignore the
 # check.
-PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
+# `[-+ ]{0,2}`, not `[+-]?`: a combined diff (--diff-merges=cc, used by the
+# history sweep) prefixes each line with ONE COLUMN PER PARENT, so a line added
+# in a two-parent merge arrives as `++-----BEGIN` or ` +-----BEGIN`. A single
+# optional column would miss both. Still correct for the working-tree grep:
+# the quantifier backtracks past the real leading dashes.
+PEM_LINE='^[-+ ]{0,2}[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
 # PATH AND LINE ONLY — never the matched text. `git grep -n` emits
 # `path:line:content`, and that content IS the credential. This repo is public
 # and ci.yml runs this script on every PR, so Actions logs here are readable
@@ -328,12 +333,39 @@ hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|
 # BEFORE grep sees a byte, and `.gitattributes` is a tracked, PR-editable file
 # — so `notes.txt binary` plus commit-then-delete hid a key from this sweep
 # entirely. Verified: without --text the planted key scored 0, with it 2.
-hist_n="$(git log -p --all --full-history --text --no-color -U0 2>/dev/null \
-  | grep --binary-files=text -cE "$hist_pat" || true)"
-log_rc="${PIPESTATUS[0]}"
+# The pipeline runs in THIS shell, not inside a command substitution, and there
+# is no `|| true` on it. Both details are load-bearing and were got wrong once:
+# `PIPESTATUS` reflects the last foreground pipeline in the CURRENT shell, so a
+# pipeline inside `$( )` cannot report its status back — the parent reads the
+# status of the assignment, which the `|| true` pinned to 0. The guard below was
+# therefore dead code, in the one place whose whole job is to not fail silently.
+# `|| true` also clobbers PIPESTATUS, because it is itself a command.
+#
+# `--diff-merges=cc` shows hunks differing from ALL parents — i.e. content
+# introduced by a hand-resolved merge, which plain `git log -p` does not diff at
+# all (it defaults to --diff-merges=off). This repo has 19 merge commits.
+hist_err="$(mktemp)"; hist_out="$(mktemp)"
+git log -p --all --full-history --diff-merges=cc --text --no-color -U0 2>"$hist_err" \
+  | grep --binary-files=text -cE "$hist_pat" >"$hist_out"
+# Copy the WHOLE array in one go. Reading ${PIPESTATUS[0]} into a variable is
+# itself a command, which resets PIPESTATUS to a single element — so a second
+# read of [1] is unbound under `set -u`. (Caught by that, having just written a
+# comment about getting PIPESTATUS wrong.)
+pipe_rcs=("${PIPESTATUS[@]}")
+log_rc="${pipe_rcs[0]}"
+grep_rc="${pipe_rcs[1]}"
+hist_n="$(cat "$hist_out" 2>/dev/null || echo 0)"
+rm -f "$hist_out"
 if [ "$log_rc" -ne 0 ]; then
-  bad "git log failed (rc=$log_rc) — credential history sweep did NOT run"
+  bad "git log failed (rc=$log_rc) — credential history sweep did NOT run: $(head -1 "$hist_err")"
 fi
+# grep -c exits 1 for "no match" and >1 for a real error (a bad pattern, e.g. an
+# unbalanced bracket added to CRED_PATTERNS). Folding both into `|| true` would
+# let one malformed pattern silently disable the entire sweep.
+if [ "$grep_rc" -gt 1 ]; then
+  bad "grep rejected the pattern set (rc=$grep_rc) — credential history sweep did NOT run"
+fi
+rm -f "$hist_err"
 if [ "${hist_n:-0}" -gt 0 ]; then
   bad "credential-shaped string present in git HISTORY — ${hist_n} matching line(s)"
   note "rotation required, not just deletion — the value is already published"

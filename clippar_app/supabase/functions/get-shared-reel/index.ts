@@ -79,6 +79,12 @@ Deno.serve(async (req: Request) => {
   // header rather than appending to it, so entry [0] is gateway-asserted and
   // the trailing entries are its own internal hops.
   //
+  // "Gateway-asserted" holds only WHILE THE CLOUDFLARE EDGE IS IN FRONT, and
+  // the fallback is reached precisely when the evidence for that edge
+  // (`cf-connecting-ip`) is absent. See the KNOWN LIMIT in clientIp(): off that
+  // ingress this header is caller-writable and this limit is bypassable. That
+  // matters most here — this is the only endpoint with no JWT.
+  //
   // Counted before the token is even read, so a flood of malformed requests is
   // limited too.
   const limited = await enforceRateLimit(
