@@ -48,16 +48,28 @@ fi
 # 1b. No credential-carrying BINARY document may be tracked.
 # ─────────────────────────────────────────────────────────────────────────────
 # Every pattern check below is a text grep, and `git log -p` prints "Binary
-# files differ" for a .docx — so a credential inside an Office document is
+# files differ" for a document container — so a credential inside one is
 # invisible to all of them, at any pattern strength. That is not hypothetical:
-# a Word document holding a live Resend API key was committed and pushed, and
-# survived two security audits and this gate reporting CLEAN, because nothing
-# here could see inside it. Filename is the only signal available, so use it.
+# it is how a live credential got past two security audits and this gate
+# reporting CLEAN. Filename is the only signal available, so use it.
 #
 # Deliberately narrow: document containers and key-material extensions only, not
 # images/fonts/video, so this stays a rule people trust rather than one they
-# learn to ignore. Checked against the checked-out ref (`git ls-files`) so the
-# result is the same on a shallow CI clone as it is locally.
+# learn to ignore.
+#
+# Checked in the index AND across every commit reachable from HEAD. The index
+# alone is not enough, and the gap is the same shape as the one that hid the
+# leak: a branch that adds the document in one commit and deletes it in the
+# next has a clean tip index, and the history grep below cannot look inside the
+# blob — so commit-then-delete, the case where rotation is the only remedy,
+# would sail through. `ci.yml` checks out with `fetch-depth: 0`, so the
+# reachable history is really there to scan.
+#
+# Scoped to HEAD, NOT `--all`, and that is deliberate rather than lazy: refs
+# other than the one under test can carry unpurgeable blobs that no PR can fix,
+# and a gate that is red on every build regardless of the change is a gate
+# everyone learns to click past. HEAD-reachable is exactly the scope a PR author
+# can act on.
 echo
 echo "── tracked credential-carrying binaries ───────────────"
 BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|rtf|vsix|p8|p12|pfx|jks|keystore|ovpn|mobileprovision)$'
@@ -67,7 +79,20 @@ if [ -n "$tracked_bin" ]; then
   echo "$tracked_bin" | head -5 | while read -r f; do note "$f"; done
   note "if this file is genuinely needed, store it outside the repo and link to it"
 else
-  note "no tracked office documents or key-material files"
+  note "none in the working tree"
+fi
+
+# Same rule against reachable history. A blob here is already leaked to anyone
+# who can clone, so deleting it is NOT the fix — it has to be rotated.
+hist_bin="$(git rev-list --objects HEAD 2>/dev/null \
+  | grep -EI "$BINARY_DOC_EXT" | awk '{ $1=""; sub(/^ /,""); print }' \
+  | sort -u || true)"
+if [ -n "$hist_bin" ]; then
+  bad "binary document/key file(s) in history reachable from HEAD:"
+  echo "$hist_bin" | head -5 | while read -r f; do note "$f"; done
+  note "deleting the file does NOT undo this — treat anything inside it as compromised and rotate it"
+else
+  note "none in history reachable from HEAD"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
