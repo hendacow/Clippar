@@ -36,7 +36,13 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # it. This checks the thing that actually matters (is it tracked?) rather than
 # trusting the ignore list to be complete.
 echo "── tracked dotenv files ───────────────────────────────"
-tracked_env="$(git -c core.quotePath=false ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$' || true)"
+# `-z` rather than plain ls-files: `core.quotePath=false` only stops bytes ABOVE
+# 0x80 counting as unusual. Double-quote, backslash and control characters are
+# C-escaped regardless of it, so `.env".production` still arrives wrapped in
+# quotes, ending in `"` instead of the extension, and every $-anchored regex
+# here misses it. `-z` emits paths NUL-separated and RAW, which sidesteps
+# quoting as a category. Verified. Do not simplify the -z back out.
+tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n' || true)"
 if [ -n "$tracked_env" ]; then
   bad "dotenv file(s) committed to the repo:"
   echo "$tracked_env" | while read -r f; do note "$f"; done
@@ -81,9 +87,35 @@ fi
 # red on every build for something the current change did not introduce, and
 # cannot remove, is a gate everyone learns to click past.
 echo
+echo "── history completeness ───────────────────────────────"
+# ASSERT the precondition instead of documenting it. Both history sweeps below
+# depend on the clone being complete, and the argument for that used to live in
+# a comment pointing at `ci.yml`'s `fetch-depth: 0` — a value in a different
+# file that any "speed up CI" edit can drop.
+#
+# The failure is silent, which is what makes it serious: a shallow clone does
+# NOT error. `git log -p --all` and `git rev-list --objects HEAD` both succeed,
+# they just traverse almost nothing, so the sweeps come back empty and print
+# "clean". Verified: a --depth=1 clone of a repo with a committed-then-deleted
+# key prints "history clean for live-key shapes" and exits 0. That is a false
+# CLEAN for the exact class — commit-then-delete — where rotation is the only
+# remedy, and it is byte-identical in the CI log to a real pass.
+#
+# Every other workflow in this repo checks out shallow; only ci.yml uses
+# fetch-depth: 0. So this is one edit away at all times, and it is also what a
+# developer gets running the scan in a `git clone --depth` checkout.
+shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)"
+if [ "$shallow" != "false" ]; then
+  bad "shallow or unreadable clone (is-shallow=$shallow) — the history sweeps below CANNOT run"
+  note "check out with fetch-depth: 0 (ci.yml) or re-clone without --depth"
+else
+  note "full clone — history sweeps can see every reachable commit"
+fi
+
+echo
 echo "── tracked credential-carrying binaries ───────────────"
-BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|odp|rtf|pdf|zip|7z|rar|tar|tgz|gz|bz2|xz|zst|kdbx|vsix|p8|p12|pfx|der|p7b|p7c|pkcs12|pkcs8|crt|cer|key|asc|gpg|jks|keystore|bcfks|ppk|ovpn|mobileprovision)$'
-tracked_bin="$(git -c core.quotePath=false ls-files | grep -Ei "$BINARY_DOC_EXT" || true)"
+BINARY_DOC_EXT='\.(docx?|docm|xlsx?|xlsm|pptx?|pptm|odt|ods|odp|rtf|pdf|zip|7z|rar|tar|tgz|gz|bz2|xz|zst|kdbx?|vsix|p8|p12|pfx|der|p7b|p7c|pkcs12|pkcs8|crt|cer|key|asc|gpg|jks|keystore|bcfks|ppk|ovpn|mobileprovision)$'
+tracked_bin="$(git ls-files -z | grep -zEi "$BINARY_DOC_EXT" | tr '\0' '\n' || true)"
 if [ -n "$tracked_bin" ]; then
   bad "binary document/key file(s) tracked — text scans cannot see inside these:"
   echo "$tracked_bin" | head -5 | while read -r f; do note "$f"; done
@@ -94,7 +126,14 @@ fi
 
 # Same rule against reachable history. A blob here is already leaked to anyone
 # who can clone, so deleting it is NOT the fix — it has to be rotated.
-hist_bin="$(git -c core.quotePath=false rev-list --objects HEAD 2>/dev/null \
+# Errors are NOT swallowed here. `2>/dev/null || true` would make an unreadable
+# object, a corrupt pack or a partial (--filter) clone indistinguishable from a
+# clean result — the same silent-CLEAN shape this section exists to stop.
+if ! rev_out="$(git -c core.quotePath=false rev-list --objects HEAD 2>&1)"; then
+  bad "rev-list failed — binary history sweep did NOT run: $(printf '%s' "$rev_out" | head -1)"
+  rev_out=''
+fi
+hist_bin="$(printf '%s\n' "$rev_out" \
   | grep -Ei "$BINARY_DOC_EXT" | awk '{ $1=""; sub(/^ /,""); print }' \
   | sort -u || true)"
 if [ -n "$hist_bin" ]; then
@@ -180,13 +219,13 @@ CRED_PATTERNS=(
 # check.
 PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
 for pat in "${CRED_PATTERNS[@]}"; do
-  hits="$(git grep -InE "$pat" 2>/dev/null || true)"
+  hits="$(git grep -nE "$pat" 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     bad "credential-shaped string in the working tree: /$pat/"
     echo "$hits" | head -5 | while read -r l; do note "$l"; done
   fi
 done
-pem_hits="$(git grep -InE "$PEM_LINE" 2>/dev/null || true)"
+pem_hits="$(git grep -nE "$PEM_LINE" 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   bad "private-key PEM material in the working tree:"
   echo "$pem_hits" | head -5 | while read -r l; do note "$l"; done
@@ -199,10 +238,10 @@ fi
 # The history sweep used to carry its OWN hand-written pattern list — a subset
 # of five. Anything added to CRED_PATTERNS after that line was written was
 # checked in the working tree and NOT in history, which is backwards: the tree
-# can be cleaned with a delete, history cannot. The Resend shape above was in
-# exactly that gap, and the scan reported "history clean" while a live Resend
-# key sat in a pushed blob. The alternation is now built FROM the same array so
-# the two sweeps can never drift again.
+# can be cleaned with a delete, history cannot. At least one shape in
+# CRED_PATTERNS was in exactly that gap, so this sweep could report
+# "history clean" for a credential that had in fact been committed. The
+# alternation is now built FROM the same array so the two cannot drift again.
 #
 # NO PATHSPEC, and that is the whole point — do not re-add one. Passing
 # `git log` a pathspec (even a pure `:(exclude)`) switches on default history
@@ -246,15 +285,20 @@ fi
 # live-key shapes". Fail-open, silent, and byte-identical in the CI log to a
 # real pass — the exact failure this gate exists to stop.
 #
-# Reproduced end-to-end in a scratch repo: with a committed-then-deleted Resend
-# key plus one such file, `grep -aIcnE` finds 0 and `--binary-files=text` finds
-# 2. On THIS repo today it is latent, not active (2275 `diff --git` lines under
+# Reproduced end-to-end in a scratch repo: with a committed-then-deleted key
+# plus one such file, `grep -aIcnE` finds 0 and `--binary-files=text` finds 2. On THIS repo today it is latent, not active (2275 `diff --git` lines under
 # either form), but it is one committed blob away from permanent.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
+# Same no-swallowing rule as the binary sweep above: a git-side failure must go
+# red, not read as clean.
 hist="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
   | grep --binary-files=text -nE "$hist_pat" \
   | head -5 || true)"
+log_rc="${PIPESTATUS[0]}"
+if [ "$log_rc" -ne 0 ]; then
+  bad "git log failed (rc=$log_rc) — credential history sweep did NOT run"
+fi
 if [ -n "$hist" ]; then
   bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
   echo "$hist" | while read -r l; do note "$l"; done
