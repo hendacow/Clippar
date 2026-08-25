@@ -210,6 +210,22 @@ CRED_PATTERNS=(
   # test all shapes.
   '"role"[[:space:]]*:[[:space:]]*"service_ro''le"[[:space:]]*([,}]|$)'  # decoded service-role JWT payload
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
+  # A service-role JWT matched on its own PAYLOAD, not on the variable name it
+  # happens to be assigned to. The name-anchored entry above only fires for the
+  # single spelling SUPABASE_SERVICE_ROLE_KEY; a key pasted bare into a
+  # backfill script, a fixture, a workflow yaml under some other name, or a
+  # runbook has no name at all. This is the widest-blast-radius credential in
+  # the repo — it bypasses every RLS policy on every table.
+  #
+  # `service_role` base64url-encodes to a different string at each of the three
+  # byte alignments, and which one applies depends on the length of the `ref`
+  # claim ahead of it, so all three are listed. Verified by encoding real
+  # payloads at ref lengths 20/21/22 — one token matched at each.
+  #
+  # Does not self-match: the `eyJ` here is followed by `[A-Za-z0-9_-]{10,}`,
+  # whose leading `[` is not in that class. The ANON key is unaffected and stays
+  # committable — its payload carries the anon role, which encodes differently.
+  'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*(c2VydmljZV9yb2xl|cnZpY2Vfcm9s|ZXJ2aWNlX3Jv)'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
 # legitimately builds a PEM from a base64 secret at runtime (_shared/apple.ts)
@@ -306,7 +322,13 @@ hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|
 # `git log -p` STREAM, so those offsets were never a usable locator anyway. A
 # count says everything the CI reader needs — go run it locally — and leaks
 # nothing. `grep -c` exits 1 when it finds nothing, hence the `|| true`.
-hist_n="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
+# `--text` is load-bearing, and it is a SECOND binary decision from the one
+# --binary-files=text handles. That flag fixes grep's classification; this one
+# fixes git's. `git log -p` decides binary-ness from the `diff` gitattribute
+# BEFORE grep sees a byte, and `.gitattributes` is a tracked, PR-editable file
+# — so `notes.txt binary` plus commit-then-delete hid a key from this sweep
+# entirely. Verified: without --text the planted key scored 0, with it 2.
+hist_n="$(git log -p --all --full-history --text --no-color -U0 2>/dev/null \
   | grep --binary-files=text -cE "$hist_pat" || true)"
 log_rc="${PIPESTATUS[0]}"
 if [ "$log_rc" -ne 0 ]; then
