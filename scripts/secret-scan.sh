@@ -152,12 +152,24 @@ CRED_PATTERNS=(
   # example anywhere in this file to illustrate the point: the pattern is doing
   # its job and will match it. Verified the hard way.)
   #
+  # The trailing `([,}]|$)` is the same trick PEM_LINE uses below: anchor to the
+  # form real material takes rather than to prose that quotes it. In an actual
+  # decoded payload this key is followed by a comma, a closing brace, or the end
+  # of the line. In a security report describing the pattern it is followed by a
+  # markdown backtick — so the gate stops flagging its own documentation, which
+  # is the thing that "trains everyone to ignore the check".
+  #
+  # This was not a design choice up front. The un-anchored version failed the
+  # build on a report paragraph in this very PR, twice, and the second time the
+  # string was already in a pushed commit message where deleting it does not
+  # help. Do not remove the anchor to "tighten" the pattern.
+  #
   # KNOWN LIMIT: a single-quoted object literal — a Python or JS dict pasted
   # from a REPL — is not matched, and was not matched by the bare literal this
   # replaced either. Folding a `["']` class into this entry is how the escaping
   # silently breaks; if it is ever wanted, add it as a SEPARATE array entry and
   # test all shapes.
-  '"role"[[:space:]]*:[[:space:]]*"service_ro''le"'  # decoded service-role JWT payload
+  '"role"[[:space:]]*:[[:space:]]*"service_ro''le"[[:space:]]*([,}]|$)'  # decoded service-role JWT payload
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
