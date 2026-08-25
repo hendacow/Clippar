@@ -43,6 +43,16 @@ jobs:
         working-directory: clippar_app
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Full history, for the same reason as the secret-scan job above and
+          # one more: tests/buildEnvGuards.test.ts RUNS ./scripts/secret-scan.sh
+          # and asserts it exits 0. That script now refuses to run on a shallow
+          # clone rather than printing a meaningless "history clean", so at the
+          # default depth 1 this job fails on the assertion — and a test that
+          # can only pass where the scanner is half-blind is worse than no test.
+          # If you remove this, that test goes red; fix the coupling, not the
+          # depth.
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 20
