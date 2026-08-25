@@ -123,6 +123,25 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  *
  * This docstring used to assert the generic rule as fact, which is exactly the
  * kind of comment that gets the code "corrected" back into the bug.
+ *
+ * KNOWN LIMIT, stated so nobody mistakes the fallback for a guarantee: entry
+ * [0] is gateway-asserted only BECAUSE the Supabase Cloudflare-fronted gateway
+ * is in front, and the trust lives in that ingress, not in the header. The
+ * X-Forwarded-For branch is reached only when `cf-connecting-ip` is ABSENT —
+ * i.e. exactly when the evidence for that ingress is missing. Anywhere the edge
+ * is not in front (`supabase functions serve` exposed for testing, a self-hosted
+ * or relocated deployment, a Supabase ingress change) the header is fully
+ * caller-writable, and a rotating `X-Forwarded-For` buys a fresh bucket per
+ * request — the same unlimited outcome the generic advice warns about, reached
+ * through a different door. That matters most for `get-shared-reel`, the only
+ * unauthenticated endpoint here.
+ *
+ * NOT fixed in this pass, deliberately. The fix is a behaviour change to rate
+ * limiting (gate the fallback on an explicit trusted-ingress flag and collapse
+ * to one shared bucket otherwise), and its failure mode is self-throttling the
+ * whole endpoint if `cf-connecting-ip` ever goes missing in production. That is
+ * a decision to take deliberately with the ability to watch it, not a change to
+ * fold into a comment-only PR. See reports/cto/2026-08-25.md §5.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
