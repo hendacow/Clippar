@@ -49,9 +49,9 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # Every pattern check below is a text grep, and `git log -p` prints "Binary
 # files differ" for a document container — so a credential inside one is
-# invisible to all of them, at any pattern strength. That is not hypothetical:
-# it is how a live credential got past two security audits and this gate
-# reporting CLEAN. Filename is the only signal available, so use it.
+# invisible to all of them, at any pattern strength, and no amount of tuning
+# the patterns changes that. Filename is the only signal available for a
+# container the scanner cannot open, so use it.
 #
 # Deliberately narrow: document containers and key-material extensions only, not
 # images/fonts/video, so this stays a rule people trust rather than one they
@@ -65,11 +65,10 @@ fi
 # would sail through. `ci.yml` checks out with `fetch-depth: 0`, so the
 # reachable history is really there to scan.
 #
-# Scoped to HEAD, NOT `--all`, and that is deliberate rather than lazy: refs
-# other than the one under test can carry unpurgeable blobs that no PR can fix,
-# and a gate that is red on every build regardless of the change is a gate
-# everyone learns to click past. HEAD-reachable is exactly the scope a PR author
-# can act on.
+# Scoped to HEAD, NOT `--all`, and that is deliberate rather than lazy:
+# HEAD-reachable is the scope a PR author can actually act on. A gate that is
+# red on every build for something the current change did not introduce, and
+# cannot remove, is a gate everyone learns to click past.
 echo
 echo "── tracked credential-carrying binaries ───────────────"
 BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|rtf|pdf|zip|7z|rar|kdbx|vsix|p8|p12|pfx|der|p7b|pkcs12|crt|cer|key|asc|gpg|jks|keystore|ovpn|mobileprovision)$'
