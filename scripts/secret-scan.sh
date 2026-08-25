@@ -53,9 +53,20 @@ fi
 # the patterns changes that. Filename is the only signal available for a
 # container the scanner cannot open, so use it.
 #
-# Deliberately narrow: document containers and key-material extensions only, not
-# images/fonts/video, so this stays a rule people trust rather than one they
-# learn to ignore.
+# Deliberately narrow: document containers, ARCHIVES and key-material
+# extensions only — not images/fonts/video — so this stays a rule people trust
+# rather than one they learn to ignore.
+#
+# Archives earn their place: a tarball holding a `.env` defeats every other
+# check in this file. The dotenv rule at §1 matches on path and the archive's
+# path is not a dotenv path; both content sweeps are blind because `git grep`
+# skips binary files and `git log -p` prints only "Binary files differ".
+# `.tar.gz`/`.tar.bz2` need no multi-suffix handling — the bare `gz`/`bz2`
+# alternatives cover them.
+#
+# This list is open-ended by nature and will never be "complete". If a build
+# ever legitimately needs a tracked file with one of these extensions, carve it
+# out by PATH here rather than removing the extension, and say why.
 #
 # Checked in the index AND across every commit reachable from HEAD. The index
 # alone is not enough, and the gap is the same shape as the one that hid the
@@ -71,7 +82,7 @@ fi
 # cannot remove, is a gate everyone learns to click past.
 echo
 echo "── tracked credential-carrying binaries ───────────────"
-BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|rtf|pdf|zip|7z|rar|kdbx|vsix|p8|p12|pfx|der|p7b|pkcs12|crt|cer|key|asc|gpg|jks|keystore|ovpn|mobileprovision)$'
+BINARY_DOC_EXT='\.(docx?|xlsx?|pptx?|odt|ods|odp|rtf|pdf|zip|7z|rar|tar|tgz|gz|bz2|xz|zst|kdbx|vsix|p8|p12|pfx|der|p7b|p7c|pkcs12|pkcs8|crt|cer|key|asc|gpg|jks|keystore|bcfks|ppk|ovpn|mobileprovision)$'
 tracked_bin="$(git -c core.quotePath=false ls-files | grep -Ei "$BINARY_DOC_EXT" || true)"
 if [ -n "$tracked_bin" ]; then
   bad "binary document/key file(s) tracked — text scans cannot see inside these:"
