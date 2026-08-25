@@ -168,11 +168,38 @@ fi
 # be changed. Note the exclusion applies to the HISTORY sweep only — the
 # working-tree sweep above scans this file like any other, so a credential
 # committed here now is still caught.
+#
+# `--binary-files=text` is spelled out rather than using `-a`, and it must NOT
+# be shortened back. `-a` (--binary-files=text) and `-I`
+# (--binary-files=without-match) set the SAME grep option, so the last one on
+# the command line wins. This call used to read `grep -aInE`, where the `I`
+# comes after the `a` and therefore silently won:
+#
+#   grep -acE  PNG clippar_logo_green.png   -> 1
+#   grep -aIcE PNG clippar_logo_green.png   -> 0   <- what we were running
+#
+# The trigger is a NUL byte in the stream. (Not an encoding error — a latin-1
+# byte was tested in both C and C.UTF-8 locales on GNU grep 3.11 and did NOT
+# trip binary detection. Verify before believing either claim.)
+#
+# A NUL reaches this stream more easily than it looks, because git's own
+# "is this binary" heuristic only sniffs the FIRST 8000 BYTES of a blob. A file
+# that is ordinary text for 8kB and contains a NUL after that is classified as
+# text by git and inlined in full by `git log -p` — so the NUL lands in grep's
+# input, grep calls the whole stream binary, and `-I` discards ALL of it.
+# `$hist` comes back empty and the else-branch below prints "history clean for
+# live-key shapes". Fail-open, silent, and byte-identical in the CI log to a
+# real pass — the exact failure this gate exists to stop.
+#
+# Reproduced end-to-end in a scratch repo: with a committed-then-deleted Resend
+# key plus one such file, `grep -aIcnE` finds 0 and `--binary-files=text` finds
+# 2. On THIS repo today it is latent, not active (2275 `diff --git` lines under
+# either form), but it is one committed blob away from permanent.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
 hist="$(git log -p --all --full-history --no-color -U0 \
     -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
-  | grep -aInE "$hist_pat" \
+  | grep --binary-files=text -nE "$hist_pat" \
   | head -5 || true)"
 if [ -n "$hist" ]; then
   bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
