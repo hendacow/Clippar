@@ -118,11 +118,24 @@ CRED_PATTERNS=(
   # deleted was invisible to BOTH sweeps, and on `git log` a pathspec also
   # switches on default history simplification (see the history sweep below).
   #
-  # Anchoring on `"role":"` fixes it at the root: a real decoded service-role
+  # Anchoring on `"role":` fixes it at the root: a real decoded service-role
   # JWT payload always carries that prefix, while the bare literal this file
   # used to contain (still present in its own pre-anchor commits) does not. So
   # no pathspec is needed anywhere, and neither bypass can come back.
-  '"role":"service_ro''le"'            # decoded service-role JWT payload
+  #
+  # `[[:space:]]*` is NOT optional decoration — JSON permits whitespace after
+  # the colon, and every way a human actually produces one of these payloads
+  # (jwt.io, `jq`, the Supabase dashboard, a pretty-printed debug log) emits it
+  # pretty-printed, with a space between the colon and the value. Anchoring
+  # without it silently narrowed this pattern to the compact form, which is the
+  # LESS common paste of the two.
+  #
+  # It also preserves the no-self-match property, because in this line's own
+  # source text `[[:space:]]*` is literal bracket characters rather than
+  # whitespace — so the pathspec stays gone. (Do not write a pretty-printed
+  # example anywhere in this file to illustrate the point: the pattern is doing
+  # its job and will match it. Verified the hard way.)
+  '"role":[[:space:]]*"service_ro''le"'  # decoded service-role JWT payload
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
