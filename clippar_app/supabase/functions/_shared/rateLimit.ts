@@ -133,13 +133,25 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * or relocated deployment, a Supabase ingress change) the header is fully
  * caller-writable, and a rotating `X-Forwarded-For` buys a fresh bucket per
  * request — the same unlimited outcome the generic advice warns about, reached
- * through a different door. That matters most for `get-shared-reel`, the only
- * unauthenticated endpoint here.
+ * through a different door.
+ *
+ * The `x-real-ip` fallback below is WEAKER STILL, and leaving it out of this
+ * paragraph would be the same mistake this file is being corrected for. It is
+ * single-valued, so there is not even a gateway-asserted position to prefer:
+ * in those same deployments a caller who sends neither preferred header
+ * controls the bucket key outright. BOTH branches are in scope for the
+ * trusted-ingress fix described next; neither is a guarantee today.
+ *
+ * That matters most for `get-shared-reel`, the only unauthenticated endpoint
+ * here.
  *
  * NOT fixed in this pass, deliberately. The fix is a behaviour change to rate
- * limiting (gate the fallback on an explicit trusted-ingress flag and collapse
- * to one shared bucket otherwise), and its failure mode is self-throttling the
- * whole endpoint if `cf-connecting-ip` ever goes missing in production. That is
+ * limiting (gate BOTH fallback branches on an explicit trusted-ingress flag and
+ * collapse to one shared bucket otherwise — `x-real-ip` must not be left as an
+ * unguarded tail), and its failure mode is self-throttling the whole endpoint
+ * if `cf-connecting-ip` ever goes missing in production. Worth landing with an
+ * alert on the shared-bucket key appearing at all: if it ever shows up in prod
+ * the edge has dropped out, which is worth knowing regardless. That is
  * a decision to take deliberately with the ability to watch it, not a change to
  * fold into a comment-only PR. See reports/cto/2026-08-25.md §5.
  */
