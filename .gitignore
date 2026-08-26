@@ -50,9 +50,18 @@ tmp_flip_run/
 clippar.db-shm
 clippar.db-wal
 
-# Local secret / binary files that must never be committed
-Mailing key.docx
-# Office lock/owner files (e.g. ~$iling key.docx)
-~$*.docx
+# Local secret / binary files that must never be committed.
+#
+# Deliberately matched by EXTENSION, never by name. A named entry here is a
+# public index: this file is world-readable on a public repo, so naming a
+# specific document tells a reader that document exists and is worth finding.
+# One did name a credential-bearing file, which defeated an earlier redaction.
+# Extension rules ignore strictly more and disclose nothing — keep it that way.
+*.docx
+*.doc
+*.xlsx
+*.xls
+# Office lock/owner files
+~$*
 # Packaged VS Code extensions (e.g. clippar_app/kickbacks.vsix)
 *.vsix

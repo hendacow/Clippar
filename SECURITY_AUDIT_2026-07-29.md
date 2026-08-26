@@ -219,9 +219,11 @@ real work and left the half that mattered:
    machine, so the SQL has never been executed. Apply to **dev** first.
 4. **Migration number collision** — `perf/rls-initplan-and-indexes` also has a
    `016_`. Whichever branch merges second must renumber.
-5. Still open from the July 23 audit: rotate the Resend key in `Mailing key.docx`,
-   delete `clippar_app/kickbacks.vsix`, EAS Update code signing, Vercel
-   firewall/CAPTCHA on the waitlist form.
+5. Still open from the July 23 audit: rotate the exposed Resend key (the document
+   holding it is identified in the private notification to Henry, not here — this
+   file is on a public repo and the key is not yet rotated), delete
+   `clippar_app/kickbacks.vsix`, EAS Update code signing, Vercel firewall/CAPTCHA
+   on the waitlist form.
 
 ---
 
