@@ -50,12 +50,8 @@ tmp_flip_run/
 clippar.db-shm
 clippar.db-wal
 
-# Local secret / binary files that must never be committed.
-#
-# Matched by EXTENSION, never by name. This file is world-readable, so a named
-# entry is a public index: it tells a reader a specific document exists and is
-# worth finding. Extension rules cover strictly more and disclose nothing —
-# keep it that way.
+# Local / binary artefacts that should not be committed.
+# Match by extension only — never add a specific filename here.
 *.docx
 *.doc
 *.xlsx
