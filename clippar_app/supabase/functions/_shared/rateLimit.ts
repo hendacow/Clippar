@@ -113,15 +113,25 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
 /**
  * The client's IP, for limits that have no authenticated subject.
  *
- * CAREFUL: X-Forwarded-For is a comma-separated list that grows left-to-right as
- * it crosses proxies, and the CLIENT can put anything it likes in the leftmost
- * position. Taking entry [0] — which is the obvious reading, and what most
- * examples do — means an attacker rotates a header value and gets a fresh bucket
- * per request, i.e. no limit at all.
+ * CAREFUL — and the care is the opposite of the usual advice. The standard rule
+ * is "never take X-Forwarded-For entry [0], the caller controls it; take the
+ * LAST entry your proxy appended". This docblock used to say exactly that, and
+ * it was wrong *here*, which only a deployment showed: Supabase's gateway
+ * OVERWRITES the header rather than appending to it, so entry [0] is
+ * gateway-asserted and the last entry is Supabase's own load balancer. Keying on
+ * the last entry fragmented one machine's requests across 14 buckets and never
+ * saw the real client at all.
  *
- * The last entry is the one appended by the proxy closest to us, which is the
- * peer address it actually observed. That is the only value here we did not let
- * the caller choose.
+ * So the order of preference below is `cf-connecting-ip`, then entry [0]. **Read
+ * the measurement in the body before changing it** — the general principle will
+ * tell you to invert this, and the general principle does not hold on this
+ * deployment.
+ *
+ * The corollary matters too: entry [0] is trustworthy only *because* of that
+ * gateway. Off it — self-hosted, `supabase functions serve`, a custom domain
+ * terminating elsewhere, or any future direct-to-origin route — entry [0] is
+ * caller-typed again and this stops limiting, silently. Nothing here asserts
+ * that precondition at runtime; that is a known open decision, not an oversight.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
