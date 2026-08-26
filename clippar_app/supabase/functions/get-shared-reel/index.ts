@@ -79,10 +79,13 @@ Deno.serve(async (req: Request) => {
   // before changing anything here, because the reasoning is the opposite of the
   // usual advice and was settled by measurement, not first principles.
   //
-  // The fallback is only trustworthy while Supabase's Cloudflare gateway
-  // OVERWRITES X-Forwarded-For (which is what makes entry [0] gateway-asserted
-  // rather than caller-supplied). Off that gateway, entry [0] is whatever the
-  // caller typed and this limit stops limiting.
+  // That trust precondition covers EVERY header clientIp() reads, not just
+  // X-Forwarded-For — `cf-connecting-ip` included, and that one is consulted
+  // FIRST, so on this deployment it is what actually keys this limit. Off the
+  // gateway all three of `cf-connecting-ip`, X-Forwarded-For [0] and
+  // `x-real-ip` are plain caller-typed strings, the cheapest bypass is the
+  // first branch rather than the second, and this limit stops limiting with no
+  // error and no log line to show it. Harden the first branch, not this one.
   //
   // Counted before the token is even read, so a flood of malformed requests is
   // limited too.
