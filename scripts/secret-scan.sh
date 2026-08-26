@@ -96,6 +96,52 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 2b. No OPAQUE BINARY DOCUMENT may be tracked.
+# ─────────────────────────────────────────────────────────────────────────────
+# This is a FILENAME check on purpose, and the reason matters more than the rule.
+#
+# Every check above greps for credential SHAPES. An Office file is a
+# DEFLATE-compressed ZIP, so the literal bytes of a key are not present anywhere
+# in the blob — verified, not assumed. `git grep` finds nothing, and `git log -p`
+# renders the blob as "Binary files differ", so there is no content to match at
+# all. NO PATTERN ADDED TO CRED_PATTERNS CAN EVER FIRE ON OFFICE CONTENT.
+#
+# That is not hypothetical. A live credential sat in exactly such a file in this
+# repository's history while every check above reported CLEAN.
+#
+# .gitignore does not close it either: ignore rules are advisory, and `git add -f`,
+# an editor's "commit anyway", or a `git add .` predating the rule all walk past.
+# The only thing pattern-matching cannot miss is whether the blob EXISTS.
+echo
+echo "── opaque binary documents ────────────────────────────"
+BINDOC='[.](docx?|docm|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|vsix|zip|7z|numbers|pages)$'
+tracked_bin="$(git ls-files | grep -iE "$BINDOC" || true)"
+if [ -n "$tracked_bin" ]; then
+  bad "opaque binary document(s) tracked — credential patterns cannot see inside these:"
+  echo "$tracked_bin" | while read -r f; do note "$f"; done
+else
+  note "none tracked"
+fi
+
+# History half is a WARNING, not a failure: this repository's history already
+# contains such a blob, and wedging every merge until a purge lands would just
+# get this check deleted. Flip to `bad` once the purge is done.
+#
+# COUNT ONLY — never print the names. CI logs on a public repository are world
+# readable for 90 days, so a check that names the file it is worried about
+# publishes it somewhere easier to find than where it lives. This repo has made
+# that exact mistake before: an earlier version of this script printed the
+# matched line, password included, straight into the build log. Run the script
+# locally to see which files; that output is not public.
+hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=A 2>/dev/null \
+  | sort -u | grep -icE "$BINDOC" || true)"
+if [ "${hist_bin:-0}" -gt 0 ]; then
+  note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."
+  note "     Names deliberately not printed — CI logs are public. Run this"
+  note "     script locally to list them. Rotation, not deletion, is the remedy."
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 3. No non-production endpoint may be baked into shipped config.
 # ─────────────────────────────────────────────────────────────────────────────
 # Scoped to the files that actually decide what the binary talks to. Test
