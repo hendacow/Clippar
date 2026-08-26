@@ -74,9 +74,15 @@ Deno.serve(async (req: Request) => {
   // This is the only endpoint with no JWT, so there is no user to key on. Share
   // tokens are 128-bit random and were never enumerable, but nothing stopped one
   // host pulling this in a loop, and every call costs a database read plus a
-  // signed-URL mint. Keyed on the LAST X-Forwarded-For entry — see clientIp(),
-  // the leftmost entry is caller-controlled and would hand out a fresh bucket per
-  // request.
+  // signed-URL mint. Keyed on clientIp(), which prefers `cf-connecting-ip` and
+  // falls back to the FIRST X-Forwarded-For entry — read that function's comment
+  // before changing anything here, because the reasoning is the opposite of the
+  // usual advice and was settled by measurement, not first principles.
+  //
+  // The fallback is only trustworthy while Supabase's Cloudflare gateway
+  // OVERWRITES X-Forwarded-For (which is what makes entry [0] gateway-asserted
+  // rather than caller-supplied). Off that gateway, entry [0] is whatever the
+  // caller typed and this limit stops limiting.
   //
   // Counted before the token is even read, so a flood of malformed requests is
   // limited too.
