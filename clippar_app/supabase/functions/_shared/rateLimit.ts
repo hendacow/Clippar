@@ -127,17 +127,27 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * tell you to invert this, and the general principle does not hold on this
  * deployment.
  *
- * The corollary matters too: entry [0] is trustworthy only *because* of that
- * gateway. Off it — self-hosted, `supabase functions serve`, a custom domain
- * terminating elsewhere, or any future direct-to-origin route — entry [0] is
- * caller-typed again and this stops limiting, silently. Nothing here asserts
- * that precondition at runtime; that is a known open decision, not an oversight.
+ * The corollary matters too, and it is broader than the X-Forwarded-For branch.
+ * **Every header this function reads is trustworthy only because of that gateway
+ * — `cf-connecting-ip` included, and that one is consulted FIRST.** Off the
+ * gateway — self-hosted, `supabase functions serve`, a custom domain terminating
+ * elsewhere, or any future direct-to-origin route — all three of
+ * `cf-connecting-ip`, X-Forwarded-For `[0]` and `x-real-ip` are plain
+ * caller-supplied strings, and the cheapest bypass is the first branch, not the
+ * second. Anyone hardening only the X-Forwarded-For path would leave the easier
+ * door open. In that state a fresh header value per request keys a fresh bucket
+ * and the cap stops existing, with no error and no log line to show it.
+ *
+ * Nothing here asserts that precondition at runtime; that is a known open
+ * decision, not an oversight.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
-  // which sets this to a SINGLE address it observed itself. A caller cannot
-  // forge it — anything they send under that name is replaced at the edge — so
-  // it is the most trustworthy value available and needs no parsing.
+  // which sets this to a SINGLE address it observed itself. Behind that gateway
+  // a caller cannot forge it — anything they send under that name is replaced at
+  // the edge — so it is the most trustworthy value available and needs no
+  // parsing. OFF that gateway nothing replaces it and it is just a caller-typed
+  // string, which is why the docblock's corollary names this branch first.
   const cf = req.headers.get('cf-connecting-ip')?.trim();
   if (cf) return cf;
 
