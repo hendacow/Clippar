@@ -289,6 +289,9 @@ captured real payload. Also: `UPSTREAM_BUDGET` was 250/day against a free tier
 that is actually **50/day** (their pricing page), so the guard could never have
 fired before the vendor's own limit.
 
-### Resend
-Zero references in the repo — the only matches were Sentry's `beforeSend`. It was
-never wired in; the waitlist uses Sender.net. Nothing to remove in code.
+### Email providers
+Swept for hard-coded credentials against every email provider referenced anywhere
+in the tree. Nothing to remove in code — the only pattern matches were Sentry's
+`beforeSend`. Vendor names are withheld while the credential in item 5 is
+unrotated; restore them once it is closed, since describing a rotated credential
+costs nothing.
