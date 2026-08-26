@@ -62,5 +62,5 @@ clippar.db-wal
 *.xls
 # Office lock/owner files
 ~$*
-# Packaged VS Code extensions (e.g. clippar_app/kickbacks.vsix)
+# Packaged VS Code extensions
 *.vsix
