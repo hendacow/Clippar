@@ -253,13 +253,43 @@ test('the secret scanner runs in CI over full history, on every branch', () => {
 
   // And it must not have been quietly left in ci.yml as well, which would run it
   // twice and let someone "fix" a failure by deleting the wrong copy.
-  const ci = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
+  //
+  // Comment lines stripped here for the same reason as above, and it is not
+  // hypothetical: ci.yml's checkout carries a comment naming this script, to
+  // explain why that job needs fetch-depth: 0. Matching prose would fail a
+  // correct config, which trains people to edit the guard instead of the fault.
+  // What must not be there is an INVOCATION, so match a run step.
+  const ci = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8')
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
   assert.ok(
-    !ci.includes('scripts/secret-scan.sh'),
+    !/secret-scan\.sh/.test(ci),
     'the scan belongs in secret-scan.yml only — remove the duplicate from ci.yml',
+  );
+
+  // ci.yml's own checkout must be unshallow too. buildEnvGuards runs the scanner
+  // directly, and on a shallow checkout that assertion passed while the scanner
+  // searched no history at all — green and vacuous. The scanner now refuses to
+  // report clean in that state, so this pins the checkout that makes it real.
+  const ciCheckout = readFileSync(
+    join(REPO, '.github', 'workflows', 'ci.yml'),
+    'utf8',
+  );
+  assert.ok(
+    ciCheckout.includes('fetch-depth: 0'),
+    'the verify job runs the scanner, so its checkout must be unshallow or the scan asserts nothing',
   );
 });
 
+// This asserts the scan passes, and it only means something if the scan could
+// actually run. The scanner FAILs rather than reporting a false clean when it is
+// handed a shallow clone, so a failure here can mean either "there is a finding"
+// or "this checkout has no history" — and those need different responses. The
+// message below names the second so nobody debugs the wrong one.
+//
+// CI gives both the verify job and the scan job fetch-depth: 0. If you are
+// seeing this fail locally, `git fetch --unshallow` first.
 test('the secret scanner is green on the current tree', () => {
   const { code, out } = (() => {
     try {
@@ -275,5 +305,12 @@ test('the secret scanner is green on the current tree', () => {
       return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
     }
   })();
-  assert.equal(code, 0, out);
+  assert.equal(
+    code,
+    0,
+    out.includes('shallow clone')
+      ? `the scan could not run — this checkout has no history, so this is not a\n` +
+          `finding. Run 'git fetch --unshallow', or add fetch-depth: 0 to the job.\n\n${out}`
+      : out,
+  );
 });
