@@ -51,12 +51,50 @@ clippar.db-shm
 clippar.db-wal
 
 # Local / binary artefacts that should not be committed.
-# Match by extension only — never add a specific filename here.
-*.docx
+#
+# Match by extension only — never add a specific filename here: this file is
+# world-readable and its history stays readable after an edit, so a named entry
+# is a public index.
+#
+# Keep this list in sync with BINDOC in scripts/secret-scan.sh. Anything the
+# scan FAILs on should never have been stageable in the first place — the scan
+# only detects after a push, and on a public repo a pushed blob is already out.
 *.doc
-*.xlsx
+*.docx
+*.docm
 *.xls
+*.xlsx
+*.xlsm
+*.ppt
+*.pptx
+*.odt
+*.ods
+*.odp
+*.rtf
+*.pdf
+*.numbers
+*.pages
+*.vsix
+# Archives — a compressed container hides its contents from every text scan
+*.zip
+*.7z
+*.rar
+*.jar
+*.war
+*.tgz
+*.tar.gz
+# Binary credential containers — the higher-value half
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.bcfks
+*.mobileprovision
+*.cer
+*.der
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
 # Office lock/owner files
 ~$*
-# Packaged VS Code extensions
-*.vsix

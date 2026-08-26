@@ -113,18 +113,36 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # This is a FILENAME check on purpose, and the reason matters more than the rule.
 #
-# Every check above greps for credential SHAPES. An Office file is a
-# DEFLATE-compressed ZIP, so the literal bytes of a key are not present anywhere
-# in the blob — verified, not assumed. `git grep` finds nothing, and `git log -p`
-# renders the blob as "Binary files differ", so there is no content to match at
-# all. NO PATTERN ADDED TO CRED_PATTERNS CAN EVER FIRE ON OFFICE CONTENT.
+# Every check above greps for credential SHAPES, and they are blind to binary
+# blobs for TWO independent reasons — the second is the broader one and an
+# earlier version of this comment missed it:
+#
+#   1. `git grep -I` (used above) skips every file git considers binary, whether
+#      or not the key's bytes are actually in there. Verified, not assumed: a
+#      plain uncompressed file containing `sk_live_...` next to a NUL byte is
+#      found WITHOUT -I and skipped WITH it.
+#   2. A compressed container (Office, zip, tgz) does not contain the literal
+#      bytes at all, so even an unfiltered grep would miss it.
+#
+# `git log -p` compounds both by rendering any binary blob as
+# "Binary files differ". NO PATTERN ADDED TO CRED_PATTERNS CAN EVER FIRE ON
+# BINARY CONTENT.
+#
+# Reason 1 is why this list must cover credential CONTAINERS — a keystore, a
+# .p12, a SQLite file — and not just documents. Those are the higher-value leak:
+# an Android signing keystore or an APNs certificate is worse than a memo, and
+# the key material genuinely is in the bytes; git just never looks.
 #
 # .gitignore does not close it either: ignore rules are advisory, and `git add -f`,
 # an editor's "commit anyway", or a `git add .` predating the rule all walk past.
 # The only thing pattern-matching cannot miss is whether the blob EXISTS.
 echo
 echo "── opaque binary documents ────────────────────────────"
-BINDOC='[.](docx?|docm|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|vsix|zip|7z|numbers|pages)$'
+# Documents and archives, then — the half that matters more — binary credential
+# containers. Keep in sync with the extension list in .gitignore.
+BINDOC='[.](docx?|docm|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|vsix|numbers|pages)$'
+BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz)$|[.]tar[.]gz$'
+BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|mobileprovision|cer|der|sqlite3?|db)$'
 tracked_bin="$(git ls-files | grep -iE "$BINDOC" || true)"
 if [ -n "$tracked_bin" ]; then
   bad "opaque binary document(s) tracked — credential patterns cannot see inside these:"
@@ -143,7 +161,10 @@ fi
 # that exact mistake before: an earlier version of this script printed the
 # matched line, password included, straight into the build log. Run the script
 # locally to see which files; that output is not public.
-hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=A 2>/dev/null \
+# AMR, not A: `diff.renames` defaults on, so a blob added under a harmless name
+# and later renamed to a matching extension is reported as R and would never be
+# counted — a rename should not be a way around this.
+hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
   | sort -u | grep -icE "$BINDOC" || true)"
 if [ "${hist_bin:-0}" -gt 0 ]; then
   note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."
