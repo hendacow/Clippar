@@ -26,6 +26,15 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
+# path:line ONLY — never the matched text. `git grep -In` emits
+# "path:line:<the whole matching line>", so echoing its output verbatim prints
+# the credential this script just caught. CI logs on a public repository are
+# world-readable for ~90 days, so that republishes the secret to a URL an
+# attacker can poll, and that copy outlives deleting the key from the tree.
+# Piping every match through this is the difference between reporting a leak
+# and committing one.
+locs() { cut -d: -f1,2; }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,14 +81,14 @@ for pat in "${CRED_PATTERNS[@]}"; do
   hits="$(git grep -InE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     bad "credential-shaped string in the working tree: /$pat/"
-    echo "$hits" | head -5 | while read -r l; do note "$l"; done
+    echo "$hits" | head -5 | locs | while read -r l; do note "$l"; done
   fi
 done
 pem_hits="$(git grep -InE "$PEM_LINE" \
     -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   bad "private-key PEM material in the working tree:"
-  echo "$pem_hits" | head -5 | while read -r l; do note "$l"; done
+  echo "$pem_hits" | head -5 | locs | while read -r l; do note "$l"; done
 fi
 
 # Same patterns across every commit reachable from any ref. `git log -p` is
@@ -89,8 +98,12 @@ hist="$(git log -p --all --no-color -U0 2>/dev/null \
   | grep -aInE "sk_live_[0-9A-Za-z]{16,}|whsec_[0-9A-Za-z]{16,}|APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*[\"']?ey[A-Za-z0-9_-]{20,}|$PEM_LINE" \
   | head -5 || true)"
 if [ -n "$hist" ]; then
+  # COUNT ONLY. `git log -p | grep -n` numbers lines in the DIFF STREAM, so there
+  # is no useful path to print anyway — and a location in history is itself a
+  # search-narrowing locator for a key that is, by definition, already committed.
   bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
-  echo "$hist" | while read -r l; do note "$l"; done
+  note "$(echo "$hist" | wc -l | tr -d ' ') match(es). Locations deliberately not"
+  note "printed — CI logs are public. Run ./scripts/secret-scan.sh locally to see them."
 else
   note "history clean for live-key shapes"
 fi
