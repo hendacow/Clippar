@@ -119,9 +119,6 @@ fi
 # renders the blob as "Binary files differ", so there is no content to match at
 # all. NO PATTERN ADDED TO CRED_PATTERNS CAN EVER FIRE ON OFFICE CONTENT.
 #
-# That is not hypothetical. A live credential sat in exactly such a file in this
-# repository's history while every check above reported CLEAN.
-#
 # .gitignore does not close it either: ignore rules are advisory, and `git add -f`,
 # an editor's "commit anyway", or a `git add .` predating the rule all walk past.
 # The only thing pattern-matching cannot miss is whether the blob EXISTS.
@@ -136,9 +133,9 @@ else
   note "none tracked"
 fi
 
-# History half is a WARNING, not a failure: this repository's history already
-# contains such a blob, and wedging every merge until a purge lands would just
-# get this check deleted. Flip to `bad` once the purge is done.
+# History half is a WARNING, not a failure: a pre-existing blob would otherwise
+# wedge every merge until a purge lands, and a check that blocks everything gets
+# deleted rather than fixed. Flip to `bad` once history is clean.
 #
 # COUNT ONLY — never print the names. CI logs on a public repository are world
 # readable for 90 days, so a check that names the file it is worried about
