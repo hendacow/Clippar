@@ -52,11 +52,10 @@ clippar.db-wal
 
 # Local secret / binary files that must never be committed.
 #
-# Deliberately matched by EXTENSION, never by name. A named entry here is a
-# public index: this file is world-readable on a public repo, so naming a
-# specific document tells a reader that document exists and is worth finding.
-# One did name a credential-bearing file, which defeated an earlier redaction.
-# Extension rules ignore strictly more and disclose nothing — keep it that way.
+# Matched by EXTENSION, never by name. This file is world-readable, so a named
+# entry is a public index: it tells a reader a specific document exists and is
+# worth finding. Extension rules cover strictly more and disclose nothing —
+# keep it that way.
 *.docx
 *.doc
 *.xlsx
