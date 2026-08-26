@@ -91,13 +91,44 @@ if [ -n "$pem_hits" ]; then
   echo "$pem_hits" | head -5 | locs | while read -r l; do note "$l"; done
 fi
 
+# A SHALLOW clone cannot answer this question, and it fails silently in the one
+# direction that matters. `git log --all` on a grafted repo walks the handful of
+# commits it has, finds nothing, and the else-branch below prints "history
+# clean" — byte-identical to a real pass. That is not hypothetical: it is the
+# exact shape of this repository's own incident, where a check reported CLEAN
+# because it never looked at the refs the key was on. "I cannot see history" and
+# "history is clean" are different sentences and the script must not confuse
+# them, so refuse to make the claim instead of making a false one.
+#
+# CI is unshallow (secret-scan.yml pins fetch-depth: 0, and a test pins that),
+# so this guard is for a local run, a fork, or the day someone edits the
+# workflow. Failing is right: an unverifiable gate is not a passing gate.
+shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || true)"
+if [ "$shallow" != "true" ] && [ "$shallow" != "false" ]; then
+  # git < 2.15 has no --is-shallow-repository; the marker file is the same fact.
+  if [ -f "$(git rev-parse --git-dir 2>/dev/null || echo .git)/shallow" ]; then
+    shallow=true
+  else
+    shallow=false
+  fi
+fi
+
 # Same patterns across every commit reachable from any ref. `git log -p` is
 # cheap on a repo this size and is the only way to see a key that was committed
 # and then removed.
-hist="$(git log -p --all --no-color -U0 2>/dev/null \
-  | grep -aInE "sk_live_[0-9A-Za-z]{16,}|whsec_[0-9A-Za-z]{16,}|APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*[\"']?ey[A-Za-z0-9_-]{20,}|$PEM_LINE" \
-  | head -5 || true)"
-if [ -n "$hist" ]; then
+if [ "$shallow" = "true" ]; then
+  hist=""
+else
+  hist="$(git log -p --all --no-color -U0 2>/dev/null \
+    | grep -aInE "sk_live_[0-9A-Za-z]{16,}|whsec_[0-9A-Za-z]{16,}|APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*[\"']?ey[A-Za-z0-9_-]{20,}|$PEM_LINE" \
+    | head -5 || true)"
+fi
+if [ "$shallow" = "true" ]; then
+  bad "history scan CANNOT RUN: this is a shallow clone."
+  note "A key that was committed and then deleted is invisible from here, so"
+  note "\"clean\" would be a false statement, not a pass. Re-run with full"
+  note "history: fetch-depth: 0 in CI, or 'git fetch --unshallow' locally."
+elif [ -n "$hist" ]; then
   # COUNT ONLY. `git log -p | grep -n` numbers lines in the DIFF STREAM, so there
   # is no useful path to print anyway — and a location in history is itself a
   # search-narrowing locator for a key that is, by definition, already committed.
@@ -164,8 +195,17 @@ fi
 # AMR, not A: `diff.renames` defaults on, so a blob added under a harmless name
 # and later renamed to a matching extension is reported as R and would never be
 # counted — a rename should not be a way around this.
-hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
-  | sort -u | grep -icE "$BINDOC" || true)"
+#
+# Shallow clones: this sweep is as blind as the one above. It says nothing when
+# the count is zero, and silence reads as "none" — so say which it is. The run
+# is already FAILing by this point, but the log should not imply a clean sweep.
+if [ "$shallow" = "true" ]; then
+  hist_bin=0
+  note "history not searched — shallow clone (see above)."
+else
+  hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
+    | sort -u | grep -icE "$BINDOC" || true)"
+fi
 if [ "${hist_bin:-0}" -gt 0 ]; then
   note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."
   note "     Names deliberately not printed — CI logs are public. Run this"
