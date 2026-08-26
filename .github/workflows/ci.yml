@@ -1,13 +1,17 @@
 name: CI
 
-# Keeps main green: runs the verify gate (typecheck + tests) and the secret scan
-# on every PR into main and on pushes to main.
+# Keeps main green: runs the verify gate (typecheck + tests) and the edge-function
+# gate on every PR into main and on pushes to main.
 #
-# NOTE: deliberately no `paths:` filter. It used to be scoped to
-# `clippar_app/**`, which is fine for a typecheck gate and wrong for a secret
-# scan — a path filter means committing a credential anywhere outside the listed
-# prefix skips the check entirely, and the whole point of the scan is that it
-# cannot be routed around. The extra minutes on web-only changes are cheap.
+# The secret scan used to live here and now has its own workflow
+# (.github/workflows/secret-scan.yml), because these triggers are wrong for it.
+# The reasoning that removed the `paths:` filter — a scan that can be routed
+# around is not a scan — applies with equal force to the BRANCH filter below: a
+# credential pushed on any branch with no open PR into main was never looked at.
+# The typecheck and edge-function gates only need to protect main, so they stay.
+#
+# NOTE: deliberately no `paths:` filter here either. The extra minutes on
+# web-only changes are cheap.
 on:
   pull_request:
     branches: [main]
@@ -15,24 +19,6 @@ on:
     branches: [main]
 
 jobs:
-  secret-scan:
-    name: secret + endpoint scan
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      # Actions are pinned to immutable commit SHAs, never to tags. A tag is
-      # movable by whoever publishes the action, so `@v4` is "whatever that
-      # account points it at today" — and the workflows in this repo hand
-      # third-party actions the EAS release token. See eas-update.yml.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          # Full history: a key that was committed and then deleted is still a
-          # leaked key, and a shallow clone cannot see it.
-          fetch-depth: 0
-      - name: Scan for secrets and non-production endpoints
-        run: ./scripts/secret-scan.sh
-
   verify:
     name: typecheck + tests
     runs-on: ubuntu-latest
