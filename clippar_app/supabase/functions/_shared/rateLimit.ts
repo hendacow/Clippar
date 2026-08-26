@@ -143,11 +143,24 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
-  // which sets this to a SINGLE address it observed itself. Behind that gateway
-  // a caller cannot forge it — anything they send under that name is replaced at
-  // the edge — so it is the most trustworthy value available and needs no
-  // parsing. OFF that gateway nothing replaces it and it is just a caller-typed
-  // string, which is why the docblock's corollary names this branch first.
+  // which sets this to a SINGLE address it observed itself, so it needs no
+  // parsing and is the most trustworthy value on offer.
+  //
+  // **HONEST SCOPE — this branch is NOT covered by the measurement below.** That
+  // measurement spoofed X-Forwarded-For and watched it be discarded; nothing
+  // here has ever spoofed `cf-connecting-ip`. Cloudflare *should* replace an
+  // inbound value of its own header for proxied traffic, and that is the whole
+  // basis for trusting this branch — but it is first-principles reasoning about
+  // this gateway's header handling, which is exactly the reasoning the docblock
+  // above records as having produced an inverted conclusion once already.
+  //
+  // One request settles it: send `cf-connecting-ip: 198.51.100.77` to the dev
+  // project and log what this returns. Real address -> record it here beside the
+  // X-Forwarded-For result and the question is closed. Echoed back -> it is a
+  // live bypass on the hosted deployment, not an off-gateway hypothetical.
+  //
+  // OFF the gateway nothing replaces it either way and it is plainly a
+  // caller-typed string, which is why the corollary names this branch first.
   const cf = req.headers.get('cf-connecting-ip')?.trim();
   if (cf) return cf;
 

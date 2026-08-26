@@ -44,10 +44,16 @@ function stubClient(handler: (fn: string, args: unknown) => unknown): AnyClient 
 // clientIp — the header-trust question
 // ─────────────────────────────────────────────────────────────────────────────
 
-Deno.test('clientIp prefers cf-connecting-ip, which the gateway sets and a caller cannot forge', () => {
-  // Supabase fronts Edge Functions with Cloudflare. Anything a caller sends
-  // under this name is replaced at the edge, so it needs no parsing and is the
-  // most trustworthy value on offer.
+Deno.test('clientIp PREFERS cf-connecting-ip over X-Forwarded-For (precedence only)', () => {
+  // NAME CHANGED 2026-08-26. This test used to be called "...which the gateway
+  // sets and a caller cannot forge", which claimed a security property it does
+  // not check and structurally cannot: un-forgeability is a fact about what
+  // Cloudflare does to inbound headers, and no unit test can observe that. All
+  // this asserts is PRECEDENCE — given both headers, the first one wins.
+  //
+  // The distinction matters because a test name is read as a guarantee. See the
+  // honest-scope note in clientIp() for the one request that would settle
+  // forgeability.
   const req = reqWith({
     'cf-connecting-ip': '203.0.113.9',
     'x-forwarded-for': 'attacker-supplied, 10.0.0.1',
