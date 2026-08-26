@@ -289,9 +289,7 @@ captured real payload. Also: `UPSTREAM_BUDGET` was 250/day against a free tier
 that is actually **50/day** (their pricing page), so the guard could never have
 fired before the vendor's own limit.
 
-### Email providers
-Swept for hard-coded credentials against every email provider referenced anywhere
-in the tree. Nothing to remove in code — the only pattern matches were Sentry's
-`beforeSend`. Vendor names are withheld while the credential in item 5 is
-unrotated; restore them once it is closed, since describing a rotated credential
-costs nothing.
+### Provider credentials in code
+Swept for hard-coded provider credentials. Nothing to remove in code — the only
+pattern matches were Sentry's `beforeSend`. Application code only: it says
+nothing about git history, which `scripts/secret-scan.sh` covers separately.
