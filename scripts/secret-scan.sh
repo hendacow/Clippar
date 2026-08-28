@@ -327,9 +327,9 @@ fi
 # It used to be its own list of five, and everything added to CRED_PATTERNS
 # after that line was written got checked in the working tree and NOT in
 # history — backwards, because a tree is cleaned with a delete and history is
-# not. The Resend shape on line 68 sat in exactly that gap while a live Resend
-# key was in a pushed blob, and this sweep printed "history clean for live-key
-# shapes". Deriving it here is what stops the two lists drifting again; the
+# not. One of the shapes above sat in exactly that gap while a real key of that
+# shape was in a pushed blob, and this sweep still printed "history clean".
+# Deriving it here is what stops the two lists drifting again; the
 # pathspec keeps the pattern definitions above from matching themselves.
 # ONE alternation, built by filtering the same array so it cannot drift from
 # CRED_PATTERNS. There used to be a second, unfiltered `hist_pat` beside this —
