@@ -118,6 +118,40 @@ test('a wrapped address keys its own host, not the shared fallback', async () =>
   assert.equal(bucketFor('[fe80::1%25eth0]:443'), bucketFor('fe80::1'));
 });
 
+test('one IPv6 allocation is one subject, and two are still two', async () => {
+  const { clientIp } = await load();
+  const bucketFor = (ip: string) => clientIp(req({ 'cf-connecting-ip': ip }));
+  // The tests above are all about how a caller SPELLS an address it holds. This
+  // one is about how many addresses it holds, which is the larger number: an
+  // IPv6 host is delegated a whole /64 — free with every cloud instance, and
+  // the normal per-subscriber allocation on mobile and residential ISPs — so
+  // the low four groups cost nothing to vary and each was its own bucket.
+  // Against the 120/hour cap on `get-shared-reel`, the one endpoint with no
+  // login, that is not a raised cap but no cap, with no forged header involved.
+  const alloc = bucketFor('2001:db8:1:2::1');
+  for (
+    const sameHost of [
+      '2001:db8:1:2::2',
+      '2001:db8:1:2:ffff:ffff:ffff:ffff',
+      '2001:db8:1:2:dead:beef:0:1',
+      '[2001:db8:1:2::9]:443',
+    ]
+  ) {
+    assert.equal(bucketFor(sameHost), alloc, `${sameHost} is the same allocation`);
+  }
+
+  // The other direction matters just as much: truncate too far and one noisy
+  // /64 can 429 its neighbours, so separate allocations must stay separate.
+  for (const other of ['2001:db8:1:3::1', '2001:db8:2:2::1', '2001:db9:1:2::1']) {
+    assert.notEqual(bucketFor(other), alloc, `${other} is a different allocation`);
+  }
+
+  // IPv4 is deliberately untouched — a v4 address is the host itself, not a
+  // prefix it was handed, so aggregating it would merge unrelated callers.
+  assert.notEqual(bucketFor('203.0.113.9'), bucketFor('203.0.113.10'));
+  assert.equal(bucketFor('::ffff:203.0.113.9'), bucketFor('203.0.113.9'));
+});
+
 test('anything that is not an address shares the fallback bucket', async () => {
   const { canonicalIp, clientIp } = await load();
   const bucketFor = (ip: string) => clientIp(req({ 'cf-connecting-ip': ip }));

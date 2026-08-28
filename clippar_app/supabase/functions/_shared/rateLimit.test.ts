@@ -143,9 +143,11 @@ Deno.test('clientIp never returns a value that is not address-shaped', () => {
   // time this deploys — a single reset of an hour-long window, which is why it
   // is noted here rather than treated as a migration.
   assertEquals(clientIp(reqWith({ 'cf-connecting-ip': '203.0.113.9' })), '203.0.113.9');
+  // An IPv6 subject is the /64, not the address — see canonicalIp's closing
+  // comment. The low four groups are the half the caller can rotate for free.
   assertEquals(
     clientIp(reqWith({ 'cf-connecting-ip': '2001:db8::8a2e:370:7334' })),
-    '2001:db8:0:0:0:8a2e:370:7334',
+    '2001:db8:0:0:0:0:0:0',
   );
   // ::ffff:a.b.c.d IS a.b.c.d, so it folds onto the v4 form rather than being a
   // second bucket for the same host.
@@ -219,6 +221,30 @@ Deno.test('one host cannot spell itself into more than one rate-limit bucket', (
   assertEquals(bucketFor('[fe80::1%eth0]'), bucketFor('fe80::1'));
   assertEquals(bucketFor('[fe80::1%eth0]:443'), bucketFor('fe80::1'));
   assertEquals(bucketFor('[fe80::1%25eth0]:443'), bucketFor('fe80::1'));
+
+  // ONE ALLOCATION IS ONE SUBJECT. Everything above is about how a caller
+  // SPELLS an address it holds; this is about how many addresses it holds. An
+  // IPv6 host is delegated a whole /64, so the low four groups cost nothing to
+  // vary and every one of them was a fresh bucket — no forged header needed,
+  // which made the 120/hour cap on the unauthenticated endpoint unenforceable.
+  const alloc = bucketFor('2001:db8:1:2::1');
+  for (
+    const sameHost of [
+      '2001:db8:1:2::2',
+      '2001:db8:1:2:ffff:ffff:ffff:ffff',
+      '2001:db8:1:2:dead:beef:0:1',
+      '[2001:db8:1:2::9]:443',
+    ]
+  ) {
+    assertEquals(bucketFor(sameHost), alloc, `${sameHost} is the same allocation`);
+  }
+  // ...and the truncation must not go so far that separate allocations merge,
+  // which would make one noisy /64 able to 429 its neighbours.
+  for (const other of ['2001:db8:1:3::1', '2001:db8:2:2::1', '2001:db9:1:2::1']) {
+    assert(bucketFor(other) !== alloc, `${other} is a different allocation`);
+  }
+  // IPv4 is untouched: a v4 address is the host, not a prefix.
+  assert(bucketFor('203.0.113.9') !== bucketFor('203.0.113.10'));
 
   // Structure, not character class: these were all accepted by the earlier
   // /^[0-9A-Fa-f:.]+$/ test and each one was a free extra bucket.

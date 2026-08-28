@@ -135,6 +135,12 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * own. This is a real STRUCTURE test, and it CANONICALISES rather than merely
  * accepting, so every spelling of one address collapses onto one bucket.
  *
+ * For IPv6 it goes one step further and returns the /64 rather than the address,
+ * because an IPv6 caller is handed a whole prefix and can vary the low half for
+ * nothing — so canonicalising the spelling alone still leaves the cap
+ * unenforceable. The reasoning, and the cost of it, is at the end of the
+ * function. IPv4 is returned in full: there, the address IS the host.
+ *
  * A value that fails falls through to the next header and ultimately to the
  * shared 'unknown' bucket. That is the safe direction for JUNK — it over-counts
  * a malformed caller rather than handing them a private allowance — but it is
@@ -269,7 +275,32 @@ export function canonicalIp(input: string): string | null {
     const lo = parseInt(full[7], 16);
     return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
   }
-  return full.join(':');
+
+  // KEY THE ALLOCATION, NOT THE ADDRESS. Everything above normalises how ONE
+  // address is written; this is the level below it, and it is the difference
+  // between a rate limit and a decoration.
+  //
+  // An IPv6 host is not given an address, it is given a prefix. Every cloud and
+  // VPS host hands out a /64 free with the instance, and most mobile carriers
+  // and residential ISPs delegate /64 or larger per subscriber. Each of those
+  // 2^64 addresses is bindable, routes back to the same machine, and arrives at
+  // the gateway as a genuine observed source — so `cf-connecting-ip` is honest,
+  // this function canonicalises it faithfully, and it is still a fresh
+  // `api_rate_limit` row every time. Nothing is forged; the attacker just uses
+  // the next address they already own. Against getSharedReel (120/hour, the one
+  // endpoint with no JWT) and the pre-signup `ip:` bucket in search-courses,
+  // that is not a raised cap, it is no cap.
+  //
+  // /64 is the smallest unit an end host is guaranteed to hold ALL of, so it is
+  // the smallest cut that cannot be rotated within. /56 and /48 are the other
+  // defensible cuts if a shared /64 ever proves too coarse; /128 is not one,
+  // because it is the level the caller picks for free.
+  //
+  // Costs, stated rather than discovered later: two subscribers behind one
+  // delegated /64 share a 120/hour share-link allowance, and the non-routable
+  // families collapse (`::1` and `::` to one subject, all of `fe80::/64` to
+  // another). Neither reaches a real client on this deployment.
+  return full.slice(0, 4).concat('0', '0', '0', '0').join(':');
 }
 
 /**
