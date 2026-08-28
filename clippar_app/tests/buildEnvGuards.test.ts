@@ -468,3 +468,104 @@ test('a credential committed into the scanner itself is not invisible to it', ()
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// `git grep -I` skips every file git CLASSIFIES as binary, and that
+// classification is caller-controllable: one line in .gitattributes marking a
+// path `binary` hides a plaintext credential from the content sweeps, while the
+// bytes stay readable to anyone who clones. The filename gate cannot compensate
+// — it is an extension allowlist, and you cannot enumerate every name someone
+// might use.
+test('a credential hidden behind a .gitattributes binary marker is still caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-attr-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+    // Split so this test file carries no matchable literal of its own.
+    writeFileSync(join(dir, 'notes.dat'), `KEY=sk_live_${'A'.repeat(20)}\n`);
+    writeFileSync(join(dir, '.gitattributes'), 'notes.dat binary\n');
+    git('add', '-A', '-f');
+    git('commit', '-qm', 'plant');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a plaintext credential in a file marked 'binary' in .gitattributes was\n` +
+        `reported CLEAN. The content sweeps must not pass -I to git grep.\n\n${out}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// grep exits 0 for matched, 1 for no match, and >1 for "I could not do it".
+// Flattening those into "no hits" means a rule that fails to compile is silently
+// inactive while the gate reports CLEAN — and since the history alternation is
+// derived from the same array, every pattern is now compiled by two engines that
+// do not accept identical dialects.
+test('a credential pattern that cannot compile fails the gate instead of passing it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-badpat-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    // `a{2,1}` is an invalid repetition in POSIX ERE and stays invalid when
+    // joined into an alternation, unlike an unterminated bracket which a later
+    // `]` in the joined pattern can accidentally close.
+    const broken = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8')
+      .replace('CRED_PATTERNS=(\n', "CRED_PATTERNS=(\n  'sk_bad_a{2,1}'\n");
+    assert.notEqual(
+      broken,
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8'),
+      'could not inject the broken pattern — CRED_PATTERNS declaration moved?',
+    );
+    writeFileSync(join(dir, 'scripts', 'secret-scan.sh'), broken, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a pattern that cannot compile was treated as "no matches" and the gate\n` +
+        `reported CLEAN. A grep that did not run is not a grep that found nothing.\n\n${out}`,
+    );
+    assert.match(out, /CANNOT RUN/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

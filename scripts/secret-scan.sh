@@ -26,13 +26,26 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
-# NOTHING IN THIS FILE PRINTS A PATH OR A MATCHED LINE. Every sweep reports a
-# COUNT. `git grep` emits "path:line:<the whole matching line>", so echoing its
-# output prints the credential this script just caught — and CI logs on a public
-# repository are world-readable for ~90 days at a pollable URL, so that copy
-# outlives deleting the key from the tree. The file NAME alone is a locator too,
-# which is why the filename gates count as well. Run the script locally to see
-# what it found; that output is not public.
+# NO SWEEP THAT CAN MATCH A CREDENTIAL PRINTS A PATH OR A MATCHED LINE —
+# sections 1, 2 and 2b all report a COUNT. `git grep` emits
+# "path:line:<the whole matching line>", so echoing its output prints the
+# credential this script just caught, and CI logs on a public repository are
+# world-readable for ~90 days at a pollable URL, so that copy outlives deleting
+# the key from the tree. The file NAME alone is a locator too, which is why the
+# filename gates count as well.
+#
+# SECTIONS 3 AND 4 ARE THE STATED EXCEPTION and still print matching lines,
+# because what they match is a hostname or an import specifier, never key
+# material. That is a property of their PATTERNS, not of the sections, so it has
+# to be maintained: **anything added to CONFIG_FILES or to those patterns that
+# could match a line carrying a secret must move to the count-only form above.**
+# Section 3 greps whole config files that legitimately carry EXPO_PUBLIC_* values,
+# so this is a real constraint rather than a formality.
+#
+# An earlier version of this comment claimed the no-locations rule held for the
+# whole file. It did not, and a blanket claim is exactly what someone adds a new
+# pattern underneath. Run the script locally to see what it found; that output is
+# not public.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
@@ -160,13 +173,37 @@ PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space
 # and this exclusion can go entirely — that is a real follow-up, not a
 # permanent design.
 self_ref='InNlcnZpY2Vfcm9sZ[S]I|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
+# NO `-I`. It tells git grep to skip every file git CLASSIFIES as binary,
+# whether or not the credential's bytes are plainly in there — and the
+# classification is caller-controllable: one line in `.gitattributes` marking a
+# path `binary` makes `git grep -I` skip it entirely, while the bytes stay
+# readable to anyone who clones. The filename gate in section 2b cannot
+# compensate, because it is an extension allowlist and you cannot enumerate every
+# name someone might use (`notes.dat`, `dump.bin`, or no extension at all).
+# Dropping the flag closes it structurally: git grep reports binary matches too,
+# and -c still counts them.
+#
+# A GREP THAT DID NOT RUN IS NOT A GREP THAT FOUND NOTHING. grep exits 0 for
+# matched, 1 for no match, and >1 for "I could not do it" — a pattern that failed
+# to compile, or a read error. The old `|| true` flattened all three into "no
+# hits", so a CRED_PATTERNS entry that git grep rejects would be silently
+# inactive while the gate reported CLEAN. That matters more since hist_pat became
+# derived from this same array: every entry is now compiled by TWO engines
+# (git grep -E here, plain grep -E in the history sweep) and they do not accept
+# exactly the same dialect, so a future entry can be live in one sweep and dead
+# in the other with nothing to show it.
 for pat in "${CRED_PATTERNS[@]}"; do
   if [ "$pat" = "$self_ref" ]; then
-    hits="$(git grep -IcE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+    hits="$(git grep -cE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>&1)"
   else
-    hits="$(git grep -IcE "$pat" 2>/dev/null || true)"
+    hits="$(git grep -cE "$pat" 2>&1)"
   fi
-  if [ -n "$hits" ]; then
+  st=$?
+  if [ "$st" -gt 1 ]; then
+    bad "working-tree scan CANNOT RUN for one pattern (git grep exit ${st})."
+    note "Every CRED_PATTERNS entry must be valid POSIX ERE. A pattern that"
+    note "fails to compile is a rule that silently checks nothing."
+  elif [ "$st" -eq 0 ] && [ -n "$hits" ]; then
     n_hit="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
     bad "credential-shaped string in the working tree, in ${n_hit} file(s)."
     note "Pattern and locations deliberately not printed — CI logs are public."
@@ -175,8 +212,14 @@ for pat in "${CRED_PATTERNS[@]}"; do
 done
 # No exclusion: PEM_LINE is anchored to a whole line and this file only ever
 # mentions the header mid-line, inside the pattern definition.
-pem_hits="$(git grep -IcE "$PEM_LINE" 2>/dev/null || true)"
-if [ -n "$pem_hits" ]; then
+pem_hits="$(git grep -cE "$PEM_LINE" 2>&1)"
+pem_st=$?
+if [ "$pem_st" -gt 1 ]; then
+  bad "working-tree PEM scan CANNOT RUN (git grep exit ${pem_st})."
+  note "See the note on pattern compilation above."
+  pem_hits=""
+fi
+if [ "$pem_st" -eq 0 ] && [ -n "$pem_hits" ]; then
   n_pem="$(printf '%s\n' "$pem_hits" | wc -l | tr -d ' ')"
   bad "private-key PEM material in the working tree, in ${n_pem} file(s)."
   note "Names deliberately not printed — CI logs are public. Run"
@@ -253,14 +296,20 @@ hist_pat_rest="${hist_pat_rest}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9
 # every shape except the self-referential one. Pass 2 scans for that one shape
 # with this file excluded, because its match text is in this file's own history
 # in cleartext and history cannot be rewritten here.
+hist_broken=0
 if [ "$shallow" = "true" ]; then
   hist_n=0
 else
-  hist_all="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
-    | grep -acE "$hist_pat_rest" || true)"
+  # Same rule as the working-tree sweep: >1 means the grep did not run. With
+  # `set -o pipefail` on, a git log failure surfaces here too, so neither can be
+  # mistaken for "no matches".
+  hist_all="$(git log -p --all --full-history --no-color -U0 \
+    | grep -acE "$hist_pat_rest")"
+  [ $? -gt 1 ] && hist_broken=1
   hist_self="$(git log -p --all --full-history --no-color -U0 \
-      -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
-    | grep -acE "$self_ref" || true)"
+      -- . ':(exclude)scripts/secret-scan.sh' \
+    | grep -acE "$self_ref")"
+  [ $? -gt 1 ] && hist_broken=1
   hist_n=$(( ${hist_all:-0} + ${hist_self:-0} ))
 fi
 if [ "$shallow" = "true" ]; then
@@ -268,6 +317,11 @@ if [ "$shallow" = "true" ]; then
   note "A key that was committed and then deleted is invisible from here, so"
   note "\"clean\" would be a false statement, not a pass. Re-run with full"
   note "history: fetch-depth: 0 in CI, or 'git fetch --unshallow' locally."
+elif [ "$hist_broken" = "1" ]; then
+  bad "history scan CANNOT RUN: a credential pattern failed to compile, or the"
+  note "log could not be read. \"I cannot see history\" and \"history is clean\""
+  note "are different sentences — every CRED_PATTERNS entry must be valid POSIX"
+  note "ERE for plain grep -E, not only for git grep -E."
 elif [ "${hist_n:-0}" -gt 0 ]; then
   # COUNT ONLY. A location in history is itself a search-narrowing locator for a
   # key that is, by definition, already committed.
@@ -319,7 +373,7 @@ BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz|tar|gz|bz2|xz|zst)$|[.]tar[.](gz|bz
 # `kdbx` is a password database — a pure credential container, higher value than
 # any office format above it. The mobile bundles ship signing and provisioning
 # material.
-BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der|sqlite3?|db)$'
+BINDOC="$BINDOC"'|[.](p8|p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der|sqlite3?|db)$'
 BINDOC="$BINDOC"'|[.](apk|aab|ipa)$'
 # `-z` for the quoting reason given in full at the dotenv check above: without
 # it a single accented character in the filename walks straight past this gate.
