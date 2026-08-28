@@ -133,16 +133,25 @@ Deno.test('clientIp never returns a value that is not address-shaped', () => {
     '203.0.113.9',
   );
 
-  // Real values of every shape are keyed exactly as before — this guard must be
-  // invisible to legitimate traffic.
+  // Real values are ACCEPTED — but IPv6 is no longer returned in the caller's own
+  // spelling, and that is the point rather than a regression. An earlier version
+  // of this block asserted "keyed exactly as before" and returned the input
+  // verbatim, which is precisely what let one host key many buckets.
+  //
+  // What is preserved is BUCKET IDENTITY: one host, one subject. What changes is
+  // the string, so IPv6 and v4-mapped callers get one fresh counter the first
+  // time this deploys — a single reset of an hour-long window, which is why it
+  // is noted here rather than treated as a migration.
   assertEquals(clientIp(reqWith({ 'cf-connecting-ip': '203.0.113.9' })), '203.0.113.9');
   assertEquals(
     clientIp(reqWith({ 'cf-connecting-ip': '2001:db8::8a2e:370:7334' })),
-    '2001:db8::8a2e:370:7334',
+    '2001:db8:0:0:0:8a2e:370:7334',
   );
+  // ::ffff:a.b.c.d IS a.b.c.d, so it folds onto the v4 form rather than being a
+  // second bucket for the same host.
   assertEquals(
     clientIp(reqWith({ 'cf-connecting-ip': '::ffff:203.0.113.9' })),
-    '::ffff:203.0.113.9',
+    '203.0.113.9',
   );
 });
 
