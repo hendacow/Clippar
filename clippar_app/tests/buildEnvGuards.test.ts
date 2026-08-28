@@ -725,3 +725,93 @@ test('a service-role key is caught even when the role is the last claim', () => 
     }
   }
 });
+
+// `--diff-merges=cc` renders a COMBINED diff, which uses one prefix column PER
+// PARENT — so a line added while resolving a conflict arrives as `++-----BEGIN`,
+// not `+-----BEGIN`. The PEM anchor allowed one prefix character, so adding the
+// flag without widening the anchor left the merge case still uncovered. Half a
+// fix here is worse than none: it looks handled.
+//
+// Isolation matters in this test. Adding the key in a merge and then DELETING it
+// in an ordinary commit proves nothing, because the deletion's own `-` prefix
+// matches the narrow anchor — so the key is removed in a second merge, and the
+// test asserts no ordinary commit ever carries a PEM line.
+test('a private key added while resolving a merge conflict is caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-pem-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, 'a.txt'), 'base\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    // Introduce the key ONLY in a merge resolution.
+    git('checkout', '-qb', 'side');
+    writeFileSync(join(dir, 'b.txt'), 'side\n');
+    git('add', '-A');
+    git('commit', '-qm', 'side');
+    git('checkout', '-q', '-');
+    writeFileSync(join(dir, 'a.txt'), 'base\nmain\n');
+    git('add', '-A');
+    git('commit', '-qm', 'mainline');
+    execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side'], { cwd: dir, stdio: 'pipe' });
+    const dashes = '-'.repeat(5);
+    writeFileSync(
+      join(dir, 'key.pem'),
+      `${dashes}BEGIN RSA PRIVATE KEY${dashes}\nMIInotarealkey\n${dashes}END RSA PRIVATE KEY${dashes}\n`,
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'merge introduces the key');
+
+    // Remove it in ANOTHER merge, so no ordinary commit ever shows a PEM line.
+    git('checkout', '-qb', 'side2');
+    writeFileSync(join(dir, 'c.txt'), 'side2\n');
+    git('add', '-A');
+    git('commit', '-qm', 'side2');
+    git('checkout', '-q', '-');
+    execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side2'], { cwd: dir, stdio: 'pipe' });
+    rmSync(join(dir, 'key.pem'));
+    git('add', '-A');
+    git('commit', '-qm', 'merge removes it');
+
+    assert.equal(
+      execFileSync('git', ['log', '-p', '--no-merges', '--text', '--no-color', '-U0'], {
+        cwd: dir,
+        encoding: 'utf8',
+      }).split('\n').filter((l) => /^[+-]-{5}BEGIN/.test(l)).length,
+      0,
+      'test setup is not isolating the merge case — an ordinary commit carries a PEM line',
+    );
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a private key introduced in a merge resolution was reported CLEAN. A\n` +
+        `combined diff prefixes added lines with one column PER PARENT, so\n` +
+        `PEM_LINE must tolerate two, not one.\n\n${out}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -173,7 +173,16 @@ CRED_PATTERNS=(
 # material always has the header alone on its own line, which is what this
 # matches — and matching prose instead would just train everyone to ignore the
 # check.
-PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
+# UP TO TWO prefix columns, not one. A COMBINED diff — which `--diff-merges=cc`
+# turns on for merge commits — uses one prefix column PER PARENT, so a private
+# key added while resolving a conflict arrives as `++-----BEGIN ...` and a
+# single-character anchor misses it entirely. Measured on a purpose-built merge:
+# the one-column form finds 0, this one finds 1.
+#
+# That makes `--diff-merges=cc` and this anchor a PAIR. Adding the flag without
+# widening the anchor was half a fix, and half a fix here is worse than none,
+# because it looks like the merge case is covered.
+PEM_LINE='^[-+ ]{0,2}[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
 # COUNT ONLY here too. These sweeps used to print `path:line` via locs(), which
 # is the sharpest locator in the file — it names the file AND the line holding a
 # live credential — and it is now emitted on every ref into world-readable CI
