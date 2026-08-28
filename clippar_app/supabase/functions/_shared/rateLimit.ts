@@ -141,6 +141,37 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * Nothing here asserts that precondition at runtime; that is a known open
  * decision, not an oversight.
  */
+/**
+ * Does this look like an IP address at all?
+ *
+ * A SHAPE test, not a validity test, and the distinction is the point. What it
+ * defends is not the trust question the docblock above leaves open — a forged
+ * but well-formed address still buys a fresh bucket, and only the trusted-ingress
+ * decision closes that. What it defends is the DATABASE.
+ *
+ * Whatever this function returns is passed as `p_subject` to
+ * `consume_rate_limit`, and `api_rate_limit.subject` is unbounded TEXT inside
+ * the primary key (migration 016). The value came straight off a caller-typed
+ * header with nothing between the two, so on `get-shared-reel` — the one
+ * endpoint with no JWT — an anonymous caller could write one row per distinct
+ * string, of any length they liked, by varying a header. That is storage
+ * amplification against our own table, and it is live independently of whether
+ * the header can be spoofed past the gateway at all.
+ *
+ * Deliberately loose (it accepts `999.1.2.3`) because tightening it buys
+ * nothing here: the job is to bound the keyspace to something address-shaped and
+ * short, not to adjudicate addresses. Every real value — Cloudflare's own
+ * `cf-connecting-ip`, a gateway-asserted X-Forwarded-For entry, IPv4 or IPv6 —
+ * passes unchanged, so legitimate traffic is keyed exactly as before. A value
+ * that fails falls through to the next branch and ultimately to the shared
+ * 'unknown' bucket, which is the safe direction: it over-counts a malformed
+ * caller rather than handing them a private one.
+ */
+function isIpShaped(v: string): boolean {
+  if (v.length === 0 || v.length > 45) return false;
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9A-Fa-f:.]+$/.test(v);
+}
+
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
   // which sets this to a SINGLE address it observed itself, so it needs no
@@ -162,7 +193,7 @@ export function clientIp(req: Request): string {
   // OFF the gateway nothing replaces it either way and it is plainly a
   // caller-typed string, which is why the corollary names this branch first.
   const cf = req.headers.get('cf-connecting-ip')?.trim();
-  if (cf) return cf;
+  if (cf && isIpShaped(cf)) return cf;
 
   // Fallback: the FIRST X-Forwarded-For entry.
   //
@@ -189,10 +220,11 @@ export function clientIp(req: Request): string {
   const xff = req.headers.get('x-forwarded-for');
   if (xff) {
     const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 0) return parts[0];
+    if (parts.length > 0 && isIpShaped(parts[0])) return parts[0];
   }
 
-  return req.headers.get('x-real-ip')?.trim() ?? 'unknown';
+  const real = req.headers.get('x-real-ip')?.trim();
+  return real && isIpShaped(real) ? real : 'unknown';
 }
 
 export interface RateLimitDecision {

@@ -101,6 +101,50 @@ Deno.test('clientIp falls back through x-real-ip, then to a constant', () => {
   assertEquals(clientIp(reqWith({})), 'unknown');
 });
 
+Deno.test('clientIp never returns a value that is not address-shaped', () => {
+  // Whatever this returns becomes `api_rate_limit.subject`, which is unbounded
+  // TEXT inside the primary key. Without a shape test an anonymous caller on
+  // get-shared-reel writes one row per distinct header value, of any length —
+  // storage amplification against our own table, and separate from whether the
+  // header can be spoofed past the gateway at all.
+  //
+  // Each of these must fall THROUGH to the shared bucket rather than becoming
+  // one of its own.
+  for (
+    const junk of [
+      'a'.repeat(4096),
+      'not-an-ip',
+      "'; DROP TABLE api_rate_limit; --",
+      '203.0.113.9 <script>',
+      '  ',
+    ]
+  ) {
+    assertEquals(clientIp(reqWith({ 'cf-connecting-ip': junk })), 'unknown');
+    assertEquals(clientIp(reqWith({ 'x-forwarded-for': junk })), 'unknown');
+    assertEquals(clientIp(reqWith({ 'x-real-ip': junk })), 'unknown');
+  }
+
+  // A junk value must not shadow a good one further down the chain — otherwise
+  // the guard would hand every caller sending junk the same bucket as every
+  // caller sending nothing, which is a different bug.
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': 'not-an-ip', 'x-forwarded-for': '203.0.113.9' })),
+    '203.0.113.9',
+  );
+
+  // Real values of every shape are keyed exactly as before — this guard must be
+  // invisible to legitimate traffic.
+  assertEquals(clientIp(reqWith({ 'cf-connecting-ip': '203.0.113.9' })), '203.0.113.9');
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': '2001:db8::8a2e:370:7334' })),
+    '2001:db8::8a2e:370:7334',
+  );
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': '::ffff:203.0.113.9' })),
+    '::ffff:203.0.113.9',
+  );
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // consumeRateLimit — reading the RPC result
 // ─────────────────────────────────────────────────────────────────────────────

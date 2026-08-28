@@ -137,25 +137,43 @@ fi
 # pathspec keeps the pattern definitions above from matching themselves.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
+# `--full-history` is REQUIRED and is not decoration. Handing `git log` a
+# pathspec — which the exclude above is — switches on default history
+# simplification, and at a merge that is TREESAME to one parent for that
+# pathspec git follows only that parent and PRUNES THE OTHER PARENT'S HISTORY
+# ENTIRELY. `--all` does not save you: it adds start points, it does not disable
+# simplification. So a branch that commits a key, deletes it, and is then merged
+# TREESAME (`-s ours`, or work reverted before the merge) goes invisible the
+# moment its own ref is deleted — and this sweep prints "history clean".
+#
+# Measured, not reasoned: on a repo built to that shape, the sweep finds 2
+# without the pathspec, **0** with the pathspec, and 2 again with
+# `--full-history`. That is the exact false-clean this check exists to prevent,
+# reintroduced by the fix for a different false-clean. Never add a pathspec here
+# without this flag.
+#
+# COUNT FIRST, then decide. `grep -c` on the untruncated stream is the real
+# tally; the old form piped through `head -5` and then counted the truncated
+# result, so any incident with more than five hits reported exactly "5
+# match(es)" — a number that reads as complete and is not.
 if [ "$shallow" = "true" ]; then
-  hist=""
+  hist_n=0
 else
-  hist="$(git log -p --all --no-color -U0 -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
-    | grep -aInE "$hist_pat" \
-    | head -5 || true)"
+  hist_n="$(git log -p --all --full-history --no-color -U0 \
+      -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
+    | grep -acE "$hist_pat" || true)"
 fi
 if [ "$shallow" = "true" ]; then
   bad "history scan CANNOT RUN: this is a shallow clone."
   note "A key that was committed and then deleted is invisible from here, so"
   note "\"clean\" would be a false statement, not a pass. Re-run with full"
   note "history: fetch-depth: 0 in CI, or 'git fetch --unshallow' locally."
-elif [ -n "$hist" ]; then
-  # COUNT ONLY. `git log -p | grep -n` numbers lines in the DIFF STREAM, so there
-  # is no useful path to print anyway — and a location in history is itself a
-  # search-narrowing locator for a key that is, by definition, already committed.
+elif [ "${hist_n:-0}" -gt 0 ]; then
+  # COUNT ONLY. A location in history is itself a search-narrowing locator for a
+  # key that is, by definition, already committed.
   bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
-  note "$(echo "$hist" | wc -l | tr -d ' ') match(es). Locations deliberately not"
-  note "printed — CI logs are public. Run ./scripts/secret-scan.sh locally to see them."
+  note "${hist_n} match(es). Locations deliberately not printed — CI logs are"
+  note "public. Run ./scripts/secret-scan.sh locally to see them."
 else
   note "history clean for live-key shapes"
 fi
@@ -224,7 +242,12 @@ if [ "$shallow" = "true" ]; then
   hist_bin=0
   note "history not searched — shallow clone (see above)."
 else
-  hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
+  # `--full-history` is a NO-OP here today — this walk takes no pathspec, so
+  # simplification is not on — and it is here so it stays that way. The sweep
+  # above was silently pruning whole merged branches the moment a pathspec was
+  # added to it; this is the same command shape one edit away from the same
+  # trap. Cheap insurance, and the reason is written down rather than assumed.
+  hist_bin="$(git log --all --full-history --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
     | sort -u | grep -icE "$BINDOC" || true)"
 fi
 if [ "${hist_bin:-0}" -gt 0 ]; then
