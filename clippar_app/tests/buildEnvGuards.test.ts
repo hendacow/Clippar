@@ -226,12 +226,30 @@ test('the secret scanner runs in CI over full history, on every branch', () => {
     join(REPO, '.github', 'workflows', 'secret-scan.yml'),
     'utf8',
   );
+  // Comment lines stripped for every assertion in this test, for the reason the
+  // trigger check below already gives: a raw includes() over the whole file is
+  // satisfied by PROSE DESCRIBING a setting as readily as by the setting, so it
+  // keeps passing after someone deletes the line and leaves the paragraph that
+  // explains it.
+  //
+  // Stated precisely, because an over-claimed justification is the exact defect
+  // this repo keeps finding: no comment in either workflow contains
+  // `fetch-depth` or `scripts/secret-scan.sh` as a literal TODAY, so these two
+  // assertions are correct as raw reads right now and this is defensive
+  // consistency, not a live bug. It is defensive against something that has
+  // already happened once here though — ci.yml's checkout comment DOES name
+  // scripts/secret-scan.sh, which is why the duplicate-invocation check further
+  // down had to start stripping comments. Every assertion reading these files
+  // now uses the same rule so the next one cannot be written the fragile way.
+  const stripComments = (s: string) =>
+    s.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  const scanBody = stripComments(scan);
   assert.ok(
-    scan.includes('scripts/secret-scan.sh'),
+    scanBody.includes('scripts/secret-scan.sh'),
     'secret-scan.yml must invoke the secret scanner',
   );
   assert.ok(
-    scan.includes('fetch-depth: 0'),
+    scanBody.includes('fetch-depth: 0'),
     'the secret-scan checkout must be unshallow or it cannot see history',
   );
 
@@ -268,10 +286,9 @@ test('the secret scanner runs in CI over full history, on every branch', () => {
   // explain why that job needs fetch-depth: 0. Matching prose would fail a
   // correct config, which trains people to edit the guard instead of the fault.
   // What must not be there is an INVOCATION, so match a run step.
-  const ci = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8')
-    .split('\n')
-    .filter((l) => !/^\s*#/.test(l))
-    .join('\n');
+  const ci = stripComments(
+    readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8'),
+  );
   assert.ok(
     !/secret-scan\.sh/.test(ci),
     'the scan belongs in secret-scan.yml only — remove the duplicate from ci.yml',
@@ -281,12 +298,14 @@ test('the secret scanner runs in CI over full history, on every branch', () => {
   // directly, and on a shallow checkout that assertion passed while the scanner
   // searched no history at all — green and vacuous. The scanner now refuses to
   // report clean in that state, so this pins the checkout that makes it real.
-  const ciCheckout = readFileSync(
-    join(REPO, '.github', 'workflows', 'ci.yml'),
-    'utf8',
-  );
+  // Reuses `ci` above — the same file, comments already stripped. That checkout
+  // carries a nine-line comment arguing for an unshallow clone; it does not
+  // spell `fetch-depth`, so this would hold as a raw read today. It is one
+  // rewording of that paragraph away from not holding, and re-reading the file
+  // raw when a stripped copy is already in scope is how that reword goes
+  // unnoticed.
   assert.ok(
-    ciCheckout.includes('fetch-depth: 0'),
+    ci.includes('fetch-depth: 0'),
     'the verify job runs the scanner, so its checkout must be unshallow or the scan asserts nothing',
   );
 });
