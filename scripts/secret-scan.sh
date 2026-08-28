@@ -325,13 +325,56 @@ else
   # Keep `grep -a` as well. The two flags fix two different decisions and neither
   # substitutes for the other. And never put `-I` back on the same grep as `-a`:
   # they set the same option, so whichever is last silently wins.
-  hist_all="$(git log -p --all --full-history --diff-merges=cc --text --no-color -U0 \
-    | grep -acE "$hist_pat_rest")"
-  [ $? -gt 1 ] && hist_broken=1
-  hist_self="$(git log -p --all --full-history --diff-merges=cc --text --no-color -U0 \
-      -- . ':(exclude)scripts/secret-scan.sh' \
-    | grep -acE "$self_ref")"
-  [ $? -gt 1 ] && hist_broken=1
+  # PIPESTATUS, not `$?`, and this is not style — `set -o pipefail` is ACTIVELY
+  # WRONG for this pipeline. pipefail yields the RIGHTMOST non-zero status, and
+  # `grep -c` exits 1 for the entirely normal "no match". So when `git log`
+  # fails with 128 and grep then reports no match, the pipeline status is 1, a
+  # `-gt 1` guard does not fire, and the sweep that never ran is reported as
+  # "history clean". Measured, not reasoned: `(exit 128) | grep -acE zzzz`
+  # yields $? = 1 under pipefail.
+  #
+  # Copy the WHOLE array in one assignment. Reading ${PIPESTATUS[0]} into a
+  # variable is itself a command, which resets PIPESTATUS to a single element,
+  # so a later read of [1] is unbound under `set -u`.
+  # Runs the pipeline in THIS shell and writes to files, never inside `$( )`.
+  # PIPESTATUS does not survive command substitution: `out=$(a | b)` is a simple
+  # command to the calling shell, so PIPESTATUS afterwards describes the
+  # ASSIGNMENT and not the inner pipeline. Capturing the count that way made the
+  # guard read a stale single-element array — a false-clean one layer below the
+  # false-clean it was added to prevent. Caught by it firing on a clean repo.
+  hist_err="$(mktemp)"; hist_out="$(mktemp)"
+  hist_sweep() {
+    local pat="$1"; shift
+    git log -p --all --full-history --diff-merges=cc --text --no-color -U0 "$@" 2>"$hist_err" \
+      | grep --binary-files=text -cE "$pat" >"$hist_out"
+    # Copy the WHOLE array in one assignment. Reading ${PIPESTATUS[0]} into a
+    # variable is itself a command, which resets PIPESTATUS to a single element,
+    # so a later read of [1] is unbound under `set -u`.
+    local rcs=("${PIPESTATUS[@]}")
+    # rcs[0] is git log: non-zero means the log could not be read.
+    # rcs[1] is grep: 0 matched, 1 no match, >1 could not run (bad pattern).
+    if [ "${rcs[0]}" -ne 0 ]; then
+      hist_broken=1
+      hist_why="git log failed (rc=${rcs[0]}): $(head -1 "$hist_err")"
+      SWEEP_N=0
+      return
+    fi
+    if [ "${rcs[1]}" -gt 1 ]; then
+      hist_broken=1
+      hist_why="grep rejected the pattern set (rc=${rcs[1]})"
+      SWEEP_N=0
+      return
+    fi
+    SWEEP_N="$(cat "$hist_out" 2>/dev/null || echo 0)"
+  }
+  # Called PLAINLY, never as `$(hist_sweep ...)`. Command substitution forks a
+  # subshell, so `hist_broken=1` set inside one is discarded and the caller sees
+  # a clean zero. The result comes back in SWEEP_N for the same reason.
+  hist_why=""
+  SWEEP_N=0
+  hist_sweep "$hist_pat_rest"; hist_all="$SWEEP_N"
+  hist_sweep "$self_ref" -- . ':(exclude)scripts/secret-scan.sh'; hist_self="$SWEEP_N"
+  rm -f "$hist_err" "$hist_out"
   hist_n=$(( ${hist_all:-0} + ${hist_self:-0} ))
 fi
 if [ "$shallow" = "true" ]; then
@@ -340,10 +383,10 @@ if [ "$shallow" = "true" ]; then
   note "\"clean\" would be a false statement, not a pass. Re-run with full"
   note "history: fetch-depth: 0 in CI, or 'git fetch --unshallow' locally."
 elif [ "$hist_broken" = "1" ]; then
-  bad "history scan CANNOT RUN: a credential pattern failed to compile, or the"
-  note "log could not be read. \"I cannot see history\" and \"history is clean\""
-  note "are different sentences — every CRED_PATTERNS entry must be valid POSIX"
-  note "ERE for plain grep -E, not only for git grep -E."
+  bad "history scan CANNOT RUN — ${hist_why:-reason unknown}"
+  note "\"I cannot see history\" and \"history is clean\" are different sentences."
+  note "Every CRED_PATTERNS entry must be valid POSIX ERE for plain grep -E, not"
+  note "only for git grep -E."
 elif [ "${hist_n:-0}" -gt 0 ]; then
   # COUNT ONLY. A location in history is itself a search-narrowing locator for a
   # key that is, by definition, already committed.
