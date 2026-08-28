@@ -82,16 +82,29 @@ clippar.db-wal
 *.jar
 *.war
 *.tgz
+*.tar
 *.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+*.gz
+*.bz2
+*.xz
+*.zst
 # Binary credential containers — the higher-value half
 *.p12
 *.pfx
 *.jks
 *.keystore
 *.bcfks
+*.kdbx
 *.mobileprovision
 *.cer
 *.der
+# Mobile bundles — they carry signing and provisioning material
+*.apk
+*.aab
+*.ipa
 # Local databases
 *.db
 *.sqlite

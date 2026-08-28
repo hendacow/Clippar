@@ -33,7 +33,8 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # attacker can poll, and that copy outlives deleting the key from the tree.
 # Piping every match through this is the difference between reporting a leak
 # and committing one.
-locs() { cut -d: -f1,2; }
+# (locs(), which trimmed a git-grep hit down to `path:line`, is deliberately
+# gone — nothing in this file prints a location any more. See section 2.)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
@@ -47,8 +48,13 @@ locs() { cut -d: -f1,2; }
 echo "── tracked dotenv files ───────────────────────────────"
 tracked_env="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$' || true)"
 if [ -n "$tracked_env" ]; then
-  bad "dotenv file(s) committed to the repo:"
-  echo "$tracked_env" | while read -r f; do note "$f"; done
+  # COUNT ONLY, same rule as every other sweep in this file. A tracked dotenv
+  # path is a locator for a live credential, and this now runs on every ref into
+  # world-readable CI logs.
+  n_env="$(printf '%s\n' "$tracked_env" | wc -l | tr -d ' ')"
+  bad "${n_env} dotenv file(s) committed to the repo."
+  note "Names deliberately not printed — CI logs are public. Run"
+  note "./scripts/secret-scan.sh locally to list them."
 else
   note "none tracked (only .example files)"
 fi
@@ -79,6 +85,31 @@ CRED_PATTERNS=(
   # The ENCODED form is unaffected — it is caught by the
   # SUPABASE_SERVICE_ROLE_KEY line below.
   '"role"[[:space:]]*:[[:space:]]*"service_role".*"(iss|ref|iat|exp)"|"(iss|ref|iat|exp)".*"role"[[:space:]]*:[[:space:]]*"service_role"'
+  # The ENCODED service-role claim, and this is the one that actually matters.
+  #
+  # The rule above is line-oriented, so it cannot see a decoded payload that was
+  # committed pretty-printed (one claim per line) — the shape jwt.io, `jq` and
+  # every editor's Format Document produce. That is a real gap in it and this
+  # closes the class properly rather than widening the decoded rule, because a
+  # decoded payload is NOT the credential: without the signature it authenticates
+  # nothing. The encoded JWT is the credential, and this matches the credential
+  # itself, so it fires whatever identifier holds it — `SERVICE_KEY`,
+  # `supabaseAdmin`, a bare string argument to createClient(), a value in a .json
+  # — every one of which the SUPABASE_SERVICE_ROLE_KEY rule below misses because
+  # that rule needs the literal variable name.
+  #
+  # Three alternatives because base64 is byte-aligned: `"service_role"` encodes
+  # differently depending on its offset in the payload, which varies with the
+  # project ref. Verified by generating Supabase-shaped tokens across every
+  # alignment: 27/27 service-role keys matched, 0 anon keys matched — the anon
+  # key carries a `role: anon` claim, so the key that is MEANT to be public
+  # cannot trip this. Structurally cannot match prose either, which is the
+  # failure mode the decoded rule had to be anchored for.
+  #
+  # A service-role key bypasses RLS on every table. It is the highest-value
+  # single credential in the project and until this line it was the least
+  # covered.
+  'InNlcnZpY2Vfcm9sZSI|ZXJ2aWNlX3JvbGUi|c2VydmljZV9yb2xl'
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
@@ -88,18 +119,27 @@ CRED_PATTERNS=(
 # matches — and matching prose instead would just train everyone to ignore the
 # check.
 PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
+# COUNT ONLY here too. These sweeps used to print `path:line` via locs(), which
+# is the sharpest locator in the file — it names the file AND the line holding a
+# live credential — and it is now emitted on every ref into world-readable CI
+# logs. Same rule, applied consistently: one inconsistent sweep in a file whose
+# whole argument is consistency is what gets rediscovered next month.
 for pat in "${CRED_PATTERNS[@]}"; do
-  hits="$(git grep -InE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+  hits="$(git grep -IcE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
   if [ -n "$hits" ]; then
-    bad "credential-shaped string in the working tree: /$pat/"
-    echo "$hits" | head -5 | locs | while read -r l; do note "$l"; done
+    n_hit="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
+    bad "credential-shaped string in the working tree, in ${n_hit} file(s)."
+    note "Pattern and locations deliberately not printed — CI logs are public."
+    note "Run ./scripts/secret-scan.sh locally to see them."
   fi
 done
-pem_hits="$(git grep -InE "$PEM_LINE" \
+pem_hits="$(git grep -IcE "$PEM_LINE" \
     -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
-  bad "private-key PEM material in the working tree:"
-  echo "$pem_hits" | head -5 | locs | while read -r l; do note "$l"; done
+  n_pem="$(printf '%s\n' "$pem_hits" | wc -l | tr -d ' ')"
+  bad "private-key PEM material in the working tree, in ${n_pem} file(s)."
+  note "Names deliberately not printed — CI logs are public. Run"
+  note "./scripts/secret-scan.sh locally to list them."
 fi
 
 # A SHALLOW clone cannot answer this question, and it fails silently in the one
@@ -211,12 +251,33 @@ echo "── opaque binary documents ──────────────�
 # Documents and archives, then — the half that matters more — binary credential
 # containers. Keep in sync with the extension list in .gitignore.
 BINDOC='[.](docx?|docm|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|vsix|numbers|pages)$'
-BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz)$|[.]tar[.]gz$'
-BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|mobileprovision|cer|der|sqlite3?|db)$'
+# Archives: `tgz` and `tar.gz` alone left the CHEAPEST instance of this class
+# uncovered. A plain `.tar` needs no compression at all to defeat every text
+# grep here — the NUL padding is enough for git to call it binary — and
+# `keys.sql.gz` is one command away from any database dump.
+BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz|tar|gz|bz2|xz|zst)$|[.]tar[.](gz|bz2|xz|zst)$'
+# `kdbx` is a password database — a pure credential container, higher value than
+# any office format above it. The mobile bundles ship signing and provisioning
+# material.
+BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der|sqlite3?|db)$'
+BINDOC="$BINDOC"'|[.](apk|aab|ipa)$'
 tracked_bin="$(git ls-files | grep -iE "$BINDOC" || true)"
 if [ -n "$tracked_bin" ]; then
-  bad "opaque binary document(s) tracked — credential patterns cannot see inside these:"
-  echo "$tracked_bin" | while read -r f; do note "$f"; done
+  # COUNT ONLY, for exactly the reason the history sweep below already gives,
+  # and this half was the one place in the file breaking its own rule.
+  #
+  # It matters more now than when this check was written for PRs into main: the
+  # scan runs on EVERY ref, including refs that carry an un-rotated credential
+  # inside a binary document. Public-repo Actions logs are readable
+  # unauthenticated at a stable URL and retained ~90 days, so one push to such a
+  # branch would have written the document's exact path — the single locator
+  # every other artefact here deliberately withholds — somewhere far easier to
+  # find than the blob itself. Deleting the branch afterwards does not delete
+  # the log.
+  n_bin="$(printf '%s\n' "$tracked_bin" | wc -l | tr -d ' ')"
+  bad "${n_bin} opaque binary document(s) tracked — credential patterns cannot see inside these."
+  note "Names deliberately not printed — CI logs are public. Run"
+  note "./scripts/secret-scan.sh locally to list them."
 else
   note "none tracked"
 fi

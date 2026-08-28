@@ -250,6 +250,15 @@ test('the secret scanner runs in CI over full history, on every branch', () => {
     /branches:\s*\['\*\*'\]|branches:\s*\[\s*"\*\*"\s*\]/.test(trigger),
     'the scan must run on push to EVERY branch — a branch filter routes around it exactly as a path filter would',
   );
+  // And on every TAG. This is not redundant with the line above, which is the
+  // whole trap: once a `push` trigger carries a `branches` filter at all, GitHub
+  // runs it for branch pushes ONLY and skips tag pushes outright. So
+  // `branches: ['**']` reads as "every ref" and is not — a tag pushed at a commit
+  // that is on no branch publishes the blob while this scan never fires.
+  assert.ok(
+    /tags:\s*\['\*\*'\]|tags:\s*\[\s*"\*\*"\s*\]/.test(trigger),
+    'the scan must run on push of EVERY tag — with a branches filter set, tag pushes are skipped unless tags are listed too',
+  );
 
   // And it must not have been quietly left in ci.yml as well, which would run it
   // twice and let someone "fix" a failure by deleting the wrong copy.
