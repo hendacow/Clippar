@@ -5,10 +5,12 @@ __pycache__/
 .venv/
 .env
 # Match the CLASS, not one name. `.env` on its own is a basename match and
-# covers nothing else — which is why `clippar_app/.env.local` needed its own
-# line, and why `clippar_app/.env.production` (which the committed .example
-# files show carries SUPABASE_SERVICE_ROLE_KEY and STRIPE_SECRET_KEY) was
-# ignored by nothing at all.
+# covers nothing else — which is why `clippar_app/.env.local` used to need its
+# own hand-written line further down, and why `clippar_app/.env.production`
+# (which the committed .example files show carries SUPABASE_SERVICE_ROLE_KEY and
+# STRIPE_SECRET_KEY) was ignored by nothing at all. That hand-written line is
+# now gone: the pattern covers it, and a named entry in a world-readable file is
+# a public index, which is the rule this file sets for itself below.
 #
 # The scan only DETECTS, and only after a push has already made the blob
 # world-readable on a public repo. These rules are the half that PREVENTS, so
@@ -45,7 +47,6 @@ clippar_error.log
 
 # Clippar App
 clippar_app/node_modules/
-clippar_app/.env.local
 clippar_app/.expo/
 clippar_app/dist/
 clippar_app/ios/
