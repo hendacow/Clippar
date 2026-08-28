@@ -157,11 +157,52 @@ Deno.test('one host cannot spell itself into more than one rate-limit bucket', (
   for (const spelling of ['1.2.3.4', '01.2.3.4', '001.2.3.4']) {
     assertEquals(bucketFor(spelling), one, `${spelling} must key the same bucket`);
   }
-  // Same for IPv6 case and zero-padding.
+  // IPv6, and the compression point is the half an earlier version missed:
+  // `::` is a RENDERING choice, so re-emitting wherever the caller put it made
+  // one host into many subjects. `::1` alone has a seven-group zero run.
   const six = bucketFor('2001:db8::1');
-  for (const spelling of ['2001:DB8::1', '2001:0db8::0001', '2001:db8::1']) {
+  for (
+    const spelling of [
+      '2001:DB8::1',
+      '2001:0db8::0001',
+      '2001:db8:0::1',
+      '2001:db8::0:1',
+      '2001:db8:0:0::1',
+      '2001:db8:0:0:0::1',
+      '2001:db8:0:0:0:0:0:1',
+    ]
+  ) {
     assertEquals(bucketFor(spelling), six, `${spelling} must key the same bucket`);
   }
+  const loop = bucketFor('::1');
+  for (const spelling of ['0::1', '0:0::1', '::0:1', '::0:0:1', '0:0:0:0:0:0:0:1']) {
+    assertEquals(bucketFor(spelling), loop, `${spelling} must key the same bucket`);
+  }
+
+  // A v4-mapped address IS that v4 address. Without folding these together, the
+  // v4 canonicalisation is bypassable by spelling the same host through the v6
+  // branch — which would have handed back every bucket the v4 fix removed.
+  const four = bucketFor('1.2.3.4');
+  for (
+    const spelling of [
+      '01.2.3.4',
+      '::ffff:1.2.3.4',
+      '0:0:0:0:0:ffff:1.2.3.4',
+      '::ffff:102:304',
+    ]
+  ) {
+    assertEquals(bucketFor(spelling), four, `${spelling} must key the same bucket`);
+  }
+
+  // A proxy may WRAP the address without changing which host it is. These must
+  // key the host's own bucket, NOT the shared 'unknown' one — an ingress that
+  // appends a source port would otherwise put every visitor on the planet into
+  // a single 120/hour pool on the one endpoint with no login.
+  assertEquals(bucketFor('203.0.113.9:41234'), bucketFor('203.0.113.9'));
+  assertEquals(bucketFor('[2001:db8::1]:443'), six);
+  assertEquals(bucketFor('[2001:db8::1]'), six);
+  assertEquals(bucketFor('fe80::1%eth0'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('fe80::1%25eth0'), bucketFor('fe80::1'));
 
   // Structure, not character class: these were all accepted by the earlier
   // /^[0-9A-Fa-f:.]+$/ test and each one was a free extra bucket.

@@ -26,26 +26,26 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
-# NO SWEEP THAT CAN MATCH A CREDENTIAL PRINTS A PATH OR A MATCHED LINE —
-# sections 1, 2 and 2b all report a COUNT. `git grep` emits
+# NOTHING IN THIS FILE PRINTS A PATH OR A MATCHED LINE. Every sweep reports a
+# COUNT — sections 3 and 4 included, which were the last two exceptions. `git grep` emits
 # "path:line:<the whole matching line>", so echoing its output prints the
 # credential this script just caught, and CI logs on a public repository are
 # world-readable for ~90 days at a pollable URL, so that copy outlives deleting
 # the key from the tree. The file NAME alone is a locator too, which is why the
 # filename gates count as well.
 #
-# SECTIONS 3 AND 4 ARE THE STATED EXCEPTION and still print matching lines,
-# because what they match is a hostname or an import specifier, never key
-# material. That is a property of their PATTERNS, not of the sections, so it has
-# to be maintained: **anything added to CONFIG_FILES or to those patterns that
-# could match a line carrying a secret must move to the count-only form above.**
-# Section 3 greps whole config files that legitimately carry EXPO_PUBLIC_* values,
-# so this is a real constraint rather than a formality.
+# Sections 3 and 4 match hostnames and import specifiers rather than key
+# material, so printing their lines was defensible — but it is a property of
+# their PATTERNS, not of the sections, and section 3 greps whole config files
+# that legitimately carry EXPO_PUBLIC_* values. Since this scan now runs on
+# every branch and tag, a work-in-progress config pointing at a tunnel with a
+# token in the query string would have been copied into a public log. They count
+# like everything else now, so the rule needs no exception to remember.
 #
-# An earlier version of this comment claimed the no-locations rule held for the
-# whole file. It did not, and a blanket claim is exactly what someone adds a new
-# pattern underneath. Run the script locally to see what it found; that output is
-# not public.
+# An earlier version of this comment claimed the rule held everywhere while two
+# sweeps still printed lines. Making the claim true was cheaper than maintaining
+# the caveat. Run the script locally to see what it found; that output is not
+# public.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
@@ -259,11 +259,12 @@ fi
 # key was in a pushed blob, and this sweep printed "history clean for live-key
 # shapes". Deriving it here is what stops the two lists drifting again; the
 # pathspec keeps the pattern definitions above from matching themselves.
-hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
-hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
-# The same alternation MINUS the self-referential pattern, for the pass that
-# scans this file too. Built by filtering the same array, so it cannot drift
-# from CRED_PATTERNS either.
+# ONE alternation, built by filtering the same array so it cannot drift from
+# CRED_PATTERNS. There used to be a second, unfiltered `hist_pat` beside this —
+# dead, since both passes run on hist_pat_rest and self_ref, whose union is the
+# full set. A dead alternation sitting next to two live ones, in the file whose
+# whole argument is "these lists must not drift", is what gets edited by
+# mistake.
 hist_pat_rest=""
 for _p in "${CRED_PATTERNS[@]}"; do
   [ "$_p" = "$self_ref" ] && continue
@@ -524,9 +525,11 @@ for f in "${CONFIG_FILES[@]}"; do
   [ -f "$f" ] || continue
   hits="$(grep -InE "$NONPROD" "$f" || true)"
   if [ -n "$hits" ]; then
-    bad "non-production endpoint in $f:"
+    n_np="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
+    bad "non-production endpoint in $f, on ${n_np} line(s)."
     nonprod_hit=1
-    echo "$hits" | while read -r l; do note "$l"; done
+    note "Lines deliberately not printed — CI logs are public. Run"
+    note "./scripts/secret-scan.sh locally to see them."
   fi
 done
 [ "$nonprod_hit" = "0" ] && note "shipped config references no dev/local host"
@@ -550,8 +553,10 @@ if [ -d clippar_app/supabase/functions ]; then
     | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(//|\*|/\*)' \
     | grep -vE '@[0-9]' || true)"
   if [ -n "$unpinned" ]; then
-    bad "unversioned remote import(s):"
-    echo "$unpinned" | while read -r l; do note "$l"; done
+    n_up="$(printf '%s\n' "$unpinned" | wc -l | tr -d ' ')"
+    bad "unversioned remote import(s): ${n_up} line(s)."
+    note "Lines deliberately not printed — CI logs are public. Run"
+    note "./scripts/secret-scan.sh locally to see them."
   else
     note "all remote imports carry an @version"
   fi

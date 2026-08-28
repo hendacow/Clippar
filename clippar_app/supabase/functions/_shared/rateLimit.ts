@@ -136,12 +136,38 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * accepting, so every spelling of one address collapses onto one bucket.
  *
  * A value that fails falls through to the next header and ultimately to the
- * shared 'unknown' bucket, which is the safe direction: it over-counts a
- * malformed caller rather than handing them a private allowance.
+ * shared 'unknown' bucket. That is the safe direction for JUNK — it over-counts
+ * a malformed caller rather than handing them a private allowance — but it is
+ * NOT safe as the destination for a FORMAT this parser does not handle, because
+ * that case is all-or-nothing across every caller at once rather than per
+ * caller. Hence the wrapper peeling below (port, brackets, zone index) and the
+ * warning in clientIp when a header was present and parsed as nothing.
  */
-export function canonicalIp(v: string): string | null {
-  // 45 = longest possible v6 text form (v4-mapped, e.g.
-  // `0000:...:0000:255.255.255.255`). Cheap bound before any parsing.
+export function canonicalIp(input: string): string | null {
+  // 57 = 45 (longest v6 text form) plus brackets, a colon and a port. Peel the
+  // wrappers first, then apply the real bound.
+  if (input.length === 0 || input.length > 57) return null;
+  let v = input;
+
+  // A proxy may WRAP the address rather than change it: `[v6]:port`, `v4:port`,
+  // or a `%zone` suffix. Strip those instead of rejecting them.
+  //
+  // Rejecting looks safer and is not: every rejected value keys the single
+  // shared 'unknown' bucket, so an ingress that appends a source port — Azure
+  // Front Door does exactly this — would put THE ENTIRE INTERNET into one
+  // 120/hour pool on the share endpoint, and one popular link would 429 every
+  // real visitor. A wrapper is a rendering difference, so it is peeled for the
+  // same reason `::` is expanded below.
+  // `%(?:25)?` and NOT `%25?`: the latter requires a literal `2`, so it strips
+  // the percent-encoded `%25eth0` and leaves the plain `%eth0` — which then
+  // fails to parse and lands in the shared bucket. Caught by a test.
+  v = v.replace(/%(?:25)?[0-9A-Za-z._-]+$/, '');
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(v);
+  if (bracketed) {
+    v = bracketed[1];
+  } else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(v)) {
+    v = v.slice(0, v.lastIndexOf(':'));
+  }
   if (v.length === 0 || v.length > 45) return null;
 
   // ── IPv4 ──
@@ -200,10 +226,40 @@ export function canonicalIp(v: string): string | null {
     return null;
   }
 
-  const body = halves.length === 2
-    ? `${head.join(':')}::${rest.join(':')}`
-    : head.join(':');
-  return mappedV4 ? `${body}${body.endsWith(':') ? '' : ':'}${mappedV4}` : body;
+  // EXPAND to eight groups. NEVER re-emit the caller's `::`.
+  //
+  // Zero-run compression is a RENDERING choice, not part of the address, and
+  // the earlier version copied whichever placement arrived. So `2001:db8::1`,
+  // `2001:db8:0::1`, `2001:db8::0:1`, `2001:db8:0:0::1` and
+  // `2001:db8:0:0:0:0:0:1` were five subjects for one host — and `::1`, with a
+  // seven-group zero run, was a great many more. That is the exact defect this
+  // function exists to close, moved from the v4 branch to the v6 branch, and
+  // the docblock above claimed it was closed. Expanding is unique by
+  // construction, which re-compressing per RFC 5952 is not without care.
+  // 8 groups of 4 plus 7 colons = 39, still inside the 45 bound.
+  const v4Groups = mappedV4
+    ? (() => {
+      const o = mappedV4.split('.').map(Number);
+      return [
+        (((o[0] << 8) | o[1]) >>> 0).toString(16),
+        (((o[2] << 8) | o[3]) >>> 0).toString(16),
+      ];
+    })()
+    : [];
+  const full = halves.length === 2
+    ? head.concat(new Array(8 - total).fill('0'), rest, v4Groups)
+    : head.concat(rest, v4Groups);
+
+  // `::ffff:a.b.c.d` IS a.b.c.d. Fold it onto the v4 form, or the v4
+  // canonicalisation above is bypassable by spelling the same address through
+  // this branch — `1.2.3.4`, `::ffff:1.2.3.4`, `0:0:0:0:0:ffff:1.2.3.4` and
+  // `::ffff:102:304` would otherwise be four subjects for one host.
+  if (full.slice(0, 5).every((g) => g === '0') && full[5] === 'ffff') {
+    const hi = parseInt(full[6], 16);
+    const lo = parseInt(full[7], 16);
+    return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+  }
+  return full.join(':');
 }
 
 /**
@@ -289,7 +345,23 @@ export function clientIp(req: Request): string {
     if (first) return first;
   }
 
-  return canonicalIp(req.headers.get('x-real-ip')?.trim() ?? '') ?? 'unknown';
+  const real = req.headers.get('x-real-ip')?.trim() ?? '';
+  const canon = canonicalIp(real);
+  if (canon) return canon;
+
+  // 'unknown' is ONE bucket for the entire internet, so arriving here matters.
+  // A caller that sent no address header at all is the case it is designed for.
+  // A header that WAS present and parsed as nothing is a misconfiguration —
+  // an ingress emitting a format this function does not handle — and it puts
+  // every visitor into a single shared cap with no error and no log line.
+  // Those two must not look identical, so say which one happened.
+  if (real || req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for')) {
+    console.warn(
+      'clientIp: an address header was present but unparseable — every caller ' +
+        'now shares one rate-limit bucket. Check what the ingress is sending.',
+    );
+  }
+  return 'unknown';
 }
 
 export interface RateLimitDecision {
