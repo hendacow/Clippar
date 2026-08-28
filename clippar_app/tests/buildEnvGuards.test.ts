@@ -569,3 +569,91 @@ test('a credential pattern that cannot compile fails the gate instead of passing
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Two independent binary decisions sit between a credential and this gate, and
+// `grep -a` only fixes one of them. `git log -p` decides binary-ness from the
+// `diff` gitattribute before grep sees a byte and prints "Binary files differ",
+// so without `--text` the history sweep counts nothing. `.gitattributes` is
+// tracked and PR-editable, so the blinding can travel in the same push as the
+// credential — and `*.json binary` or an LFS line does it by accident.
+//
+// The merge case is the sharper one: plain `git log -p` shows NO diff for a
+// merge commit, so a credential typed into a hand-resolved conflict exists in
+// neither parent and is invisible. Not hypothetical here — this branch is itself
+// a hand-resolved merge.
+test('the history sweep sees through a binary marker and into merge resolutions', () => {
+  for (
+    const shape of [
+      { name: 'gitattributes binary marker', attrs: 'notes.txt binary\n', merge: false },
+      { name: 'credential added in a merge resolution', attrs: '', merge: true },
+    ]
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'scan-hist-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    try {
+      git('init', '-q', '.');
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'scripts'));
+      writeFileSync(
+        join(dir, 'scripts', 'secret-scan.sh'),
+        readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(dir, 'a.txt'), 'base\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      const key = `KEY=sk_live_${'A'.repeat(20)}\n`;
+
+      if (shape.merge) {
+        git('checkout', '-q', '-b', 'side');
+        writeFileSync(join(dir, 'b.txt'), 'side\n');
+        git('add', '-A');
+        git('commit', '-qm', 'side');
+        git('checkout', '-q', '-');
+        writeFileSync(join(dir, 'a.txt'), 'base\nmain\n');
+        git('add', '-A');
+        git('commit', '-qm', 'mainline');
+        execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side'], {
+          cwd: dir,
+          stdio: 'pipe',
+        });
+        // Content that exists in NEITHER parent — only in the resolution.
+        writeFileSync(join(dir, 'merged.txt'), key);
+        git('add', '-A');
+        git('commit', '-qm', 'merge');
+      } else {
+        writeFileSync(join(dir, '.gitattributes'), shape.attrs);
+        writeFileSync(join(dir, 'notes.txt'), key);
+        git('add', '-A');
+        git('commit', '-qm', 'plant');
+        git('rm', '-q', 'notes.txt');
+        git('commit', '-qm', 'cleanup');
+      }
+
+      let code = 0;
+      let out = '';
+      try {
+        out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err: any) {
+        code = err.status ?? 1;
+        out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      }
+      assert.notEqual(
+        code,
+        0,
+        `${shape.name}: the gate reported CLEAN. The history sweep needs BOTH\n` +
+          `--text (git log makes its own binary decision before grep) and\n` +
+          `--diff-merges=cc (plain git log -p does not diff merge commits).\n\n${out}`,
+      );
+      assert.match(out, /present in git HISTORY/, `${shape.name}: ${out}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});

@@ -303,10 +303,32 @@ else
   # Same rule as the working-tree sweep: >1 means the grep did not run. With
   # `set -o pipefail` on, a git log failure surfaces here too, so neither can be
   # mistaken for "no matches".
-  hist_all="$(git log -p --all --full-history --no-color -U0 \
+  # `--text` and `--diff-merges=cc` are BOTH load-bearing and neither is
+  # cosmetic. Measured on a purpose-built repo, planted key vs. matches found:
+  #
+  #   without --text ............... 0   with it ... 2
+  #   without --diff-merges=cc ..... 0   with it ... 1
+  #
+  # --text: `git log -p` makes its OWN binary decision from the `diff`
+  # gitattribute, before grep ever sees a byte, and renders the blob as
+  # "Binary files ... differ". `grep -a` cannot help — the bytes never reach it.
+  # `.gitattributes` is a tracked, PR-editable file, so the blinding travels in
+  # the same push as the credential; and a repo that later adds an LFS line or
+  # `*.json binary` blinds this sweep by accident.
+  #
+  # --diff-merges=cc: plain `git log -p` shows NO diff for a merge commit, so
+  # content that exists in neither parent — a credential typed into a
+  # hand-resolved conflict — is invisible to this sweep entirely. That is not a
+  # hypothetical shape in this repository: this very branch is a hand-resolved
+  # merge of two others.
+  #
+  # Keep `grep -a` as well. The two flags fix two different decisions and neither
+  # substitutes for the other. And never put `-I` back on the same grep as `-a`:
+  # they set the same option, so whichever is last silently wins.
+  hist_all="$(git log -p --all --full-history --diff-merges=cc --text --no-color -U0 \
     | grep -acE "$hist_pat_rest")"
   [ $? -gt 1 ] && hist_broken=1
-  hist_self="$(git log -p --all --full-history --no-color -U0 \
+  hist_self="$(git log -p --all --full-history --diff-merges=cc --text --no-color -U0 \
       -- . ':(exclude)scripts/secret-scan.sh' \
     | grep -acE "$self_ref")"
   [ $? -gt 1 ] && hist_broken=1
@@ -427,7 +449,9 @@ else
   # `-z` here too — `git log --name-only` quotes exactly as `ls-files` does, so
   # this half had the same accented-filename bypass as the index half above.
   # With -z the record separator becomes NUL, so paths arrive raw.
-  hist_bin="$(git log --all --full-history --pretty=format: --name-only -z --diff-filter=AMR 2>/dev/null \
+  # `--diff-merges=cc` for the same reason as the credential sweep above: without
+  # it a file first appearing in a hand-resolved merge is named by nothing here.
+  hist_bin="$(git log --all --full-history --diff-merges=cc --pretty=format: --name-only -z --diff-filter=AMR 2>/dev/null \
     | tr '\0' '\n' | sort -u | grep -icE "$BINDOC" || true)"
 fi
 if [ "${hist_bin:-0}" -gt 0 ]; then
