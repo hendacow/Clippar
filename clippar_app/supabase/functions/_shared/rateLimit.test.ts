@@ -212,6 +212,13 @@ Deno.test('one host cannot spell itself into more than one rate-limit bucket', (
   assertEquals(bucketFor('[2001:db8::1]'), six);
   assertEquals(bucketFor('fe80::1%eth0'), bucketFor('fe80::1'));
   assertEquals(bucketFor('fe80::1%25eth0'), bucketFor('fe80::1'));
+  // BRACKETS AND A ZONE TOGETHER. The two wrappers were tested separately and
+  // this combination was not, which is exactly where an ordering bug hid: the
+  // zone pattern is end-anchored, so stripping it before unwrapping is a no-op
+  // on a value ending `]` or `]:443`.
+  assertEquals(bucketFor('[fe80::1%eth0]'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('[fe80::1%eth0]:443'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('[fe80::1%25eth0]:443'), bucketFor('fe80::1'));
 
   // Structure, not character class: these were all accepted by the earlier
   // /^[0-9A-Fa-f:.]+$/ test and each one was a free extra bucket.

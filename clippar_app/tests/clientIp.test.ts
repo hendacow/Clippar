@@ -109,6 +109,13 @@ test('a wrapped address keys its own host, not the shared fallback', async () =>
   // Percent-encoded zone. The strip pattern was once `%25?`, which requires a
   // literal `2` — it handled this one and not the plain form above.
   assert.equal(bucketFor('fe80::1%25eth0'), bucketFor('fe80::1'));
+  // Brackets AND a zone together — each wrapper was covered alone, the pair was
+  // not, and that is precisely where an ordering bug hid. The zone pattern is
+  // end-anchored, so stripping it before unwrapping does nothing to a value
+  // that ends in `]` or `]:443`.
+  assert.equal(bucketFor('[fe80::1%eth0]'), bucketFor('fe80::1'));
+  assert.equal(bucketFor('[fe80::1%eth0]:443'), bucketFor('fe80::1'));
+  assert.equal(bucketFor('[fe80::1%25eth0]:443'), bucketFor('fe80::1'));
 });
 
 test('anything that is not an address shares the fallback bucket', async () => {

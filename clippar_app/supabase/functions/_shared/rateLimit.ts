@@ -158,16 +158,26 @@ export function canonicalIp(input: string): string | null {
   // 120/hour pool on the share endpoint, and one popular link would 429 every
   // real visitor. A wrapper is a rendering difference, so it is peeled for the
   // same reason `::` is expanded below.
-  // `%(?:25)?` and NOT `%25?`: the latter requires a literal `2`, so it strips
-  // the percent-encoded `%25eth0` and leaves the plain `%eth0` — which then
-  // fails to parse and lands in the shared bucket. Caught by a test.
-  v = v.replace(/%(?:25)?[0-9A-Za-z._-]+$/, '');
+  // ORDER MATTERS: unwrap first, strip the zone last.
+  //
+  // The zone pattern is anchored to the end of the string, and a bracketed
+  // address ends in `]` or `]:443` — neither of which the character class can
+  // match. So stripping first is a silent no-op on exactly the inputs that need
+  // it: `[fe80::1%eth0]:443` kept its zone, failed to parse, and landed in the
+  // shared 'unknown' bucket that this peeling exists to keep callers out of.
+  // The earlier version had them the other way round and the tests missed it,
+  // because they covered a zone without brackets and brackets without a zone,
+  // never the two together.
   const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(v);
   if (bracketed) {
     v = bracketed[1];
   } else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(v)) {
     v = v.slice(0, v.lastIndexOf(':'));
   }
+  // `%(?:25)?` and NOT `%25?`: the latter requires a literal `2`, so it strips
+  // the percent-encoded `%25eth0` and leaves the plain `%eth0`. Also caught by
+  // a test rather than by reading.
+  v = v.replace(/%(?:25)?[0-9A-Za-z._-]+$/, '');
   if (v.length === 0 || v.length > 45) return null;
 
   // ── IPv4 ──
