@@ -48,6 +48,48 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # public.
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Sweep-integrity helper. Read this before touching any sweep below.
+# ─────────────────────────────────────────────────────────────────────────────
+# A GREP THAT DID NOT RUN IS NOT A GREP THAT FOUND NOTHING, and getting that
+# distinction right in bash has three separate traps. This file has fallen into
+# all three, twice each, so the rule lives in one place now.
+#
+#   1. `|| true` discards the status outright.
+#   2. `set -o pipefail` gives the RIGHTMOST non-zero status, and `grep -c`
+#      exits 1 for the ordinary "no match" — so a producer failing with 128
+#      followed by a clean grep comes back as 1 and slips past a `-gt 1` guard.
+#      Measured: `(exit 128) | grep -zE zzz | tr a b` yields $? = 1.
+#   3. PIPESTATUS does NOT survive command substitution. `var=$(a | b)` is a
+#      simple command to the caller, so PIPESTATUS afterwards describes the
+#      ASSIGNMENT. Every guarded pipeline therefore writes to a file and is run
+#      in this shell, never inside `$( )`.
+#
+# Copy PIPESTATUS in ONE assignment — reading a single element is itself a
+# command and resets the array.
+SWEEP_TMP="$(mktemp)"
+trap 'rm -f "$SWEEP_TMP"' EXIT
+# $1 names what PRODUCES the input, because the two kinds differ on exit 1:
+#   git   — 1 is a failure. `git ls-files` and `git log` return 0 or they broke.
+#   grep  — 1 is the ordinary "no match" and must NOT be treated as a failure.
+# Getting this wrong the other way is not harmless either: an over-eager guard
+# reports CANNOT RUN on a clean repo, which is a gate that cries wolf, and those
+# get deleted rather than obeyed. (First draft of this helper did exactly that —
+# it flagged the unpinned-import sweep on every repo with no edge functions.)
+# Every LATER stage is a grep, so >1 is the failure signal there.
+sweep_broke() {
+  local producer="$1"; shift
+  case "$producer" in
+    git)  [ "${1:-0}" -ne 0 ] && return 0 ;;
+    grep) [ "${1:-0}" -gt 1 ] && return 0 ;;
+  esac
+  local rc
+  for rc in "$@"; do
+    [ "$rc" -gt 1 ] && return 0
+  done
+  return 1
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
 # ─────────────────────────────────────────────────────────────────────────────
 # `clippar_app/.gitignore` covers `.env*.local` INSIDE THAT DIRECTORY ONLY, and
@@ -70,19 +112,14 @@ echo "── tracked dotenv files ───────────────�
 # are escaped regardless of it. `-z` emits paths NUL-separated and raw, which
 # sidesteps quoting as a category rather than one class of it.
 # Verified both ways. Do not simplify the -z back out.
-tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n')"
-env_st=$?
-# Status, not `|| true`. grep exits 1 for "no match" and >1 for "could not run",
-# and flattening those together is the same false-clean the credential sweep was
-# fixed for two sections down. This gate is the one that would have caught this
-# repository's actual incident, so it is the last one that should be able to
-# report a silent pass.
-if [ "$env_st" -gt 1 ]; then
-  bad "dotenv scan CANNOT RUN (grep exit ${env_st})."
+git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n' > "$SWEEP_TMP"
+env_rcs=("${PIPESTATUS[@]}")
+tracked_env="$(cat "$SWEEP_TMP")"
+if sweep_broke git "${env_rcs[@]}"; then
+  bad "dotenv scan CANNOT RUN (statuses: ${env_rcs[*]})."
   note "A gate that could not run is not a gate that found nothing."
   tracked_env=""
-fi
-if [ -n "$tracked_env" ]; then
+elif [ -n "$tracked_env" ]; then
   # COUNT ONLY, same rule as every other sweep in this file. A tracked dotenv
   # path is a locator for a live credential, and this now runs on every ref into
   # world-readable CI logs.
@@ -478,17 +515,17 @@ BINDOC="$BINDOC"'|[.](p8|p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der
 BINDOC="$BINDOC"'|[.](apk|aab|ipa)$'
 # `-z` for the quoting reason given in full at the dotenv check above: without
 # it a single accented character in the filename walks straight past this gate.
-tracked_bin="$(git ls-files -z | grep -zEi "$BINDOC" | tr '\0' '\n')"
-bin_st=$?
-# Same rule as the dotenv gate above: BINDOC is hand-edited every time an
-# extension is added, so an unbalanced paren here would silently disable the one
-# check that can see a credential inside a binary document.
-if [ "$bin_st" -gt 1 ]; then
-  bad "binary-document scan CANNOT RUN (grep exit ${bin_st})."
+# BINDOC is hand-edited every time an extension is added — the comment above
+# invites it — so an unbalanced paren here would silently disable the one check
+# that can see a credential inside a binary document.
+git ls-files -z | grep -zEi "$BINDOC" | tr '\0' '\n' > "$SWEEP_TMP"
+bin_rcs=("${PIPESTATUS[@]}")
+tracked_bin="$(cat "$SWEEP_TMP")"
+if sweep_broke git "${bin_rcs[@]}"; then
+  bad "binary-document scan CANNOT RUN (statuses: ${bin_rcs[*]})."
   note "BINDOC must be valid POSIX ERE."
   tracked_bin=""
-fi
-if [ -n "$tracked_bin" ]; then
+elif [ -n "$tracked_bin" ]; then
   # COUNT ONLY, for exactly the reason the history sweep below already gives,
   # and this half was the one place in the file breaking its own rule.
   #
@@ -539,11 +576,12 @@ else
   # With -z the record separator becomes NUL, so paths arrive raw.
   # `--diff-merges=cc` for the same reason as the credential sweep above: without
   # it a file first appearing in a hand-resolved merge is named by nothing here.
-  hist_bin="$(git log --all --full-history --diff-merges=cc --pretty=format: --name-only -z --diff-filter=AMR \
-    | tr '\0' '\n' | sort -u | grep -icE "$BINDOC")"
-  hb_st=$?
-  if [ "$hb_st" -gt 1 ]; then
-    bad "binary-document HISTORY scan CANNOT RUN (exit ${hb_st})."
+  git log --all --full-history --diff-merges=cc --pretty=format: --name-only -z --diff-filter=AMR \
+    | tr '\0' '\n' | sort -u | grep -icE "$BINDOC" > "$SWEEP_TMP"
+  hb_rcs=("${PIPESTATUS[@]}")
+  hist_bin="$(cat "$SWEEP_TMP")"
+  if sweep_broke git "${hb_rcs[@]}"; then
+    bad "binary-document HISTORY scan CANNOT RUN (statuses: ${hb_rcs[*]})."
     note "Silence here would read as \"none in history\", which is the one thing"
     note "this section must never say when it could not look."
     hist_bin=0
@@ -574,8 +612,17 @@ NONPROD='localhost|127\.0\.0\.1|ngrok|onrender\.com|punkaoeuityovwljpyag'
 nonprod_hit=0
 for f in "${CONFIG_FILES[@]}"; do
   [ -f "$f" ] || continue
-  hits="$(grep -InE "$NONPROD" "$f" || true)"
-  if [ -n "$hits" ]; then
+  # Single command, so `$?` is the grep's own status and PIPESTATUS is not
+  # needed — but the `|| true` still had to go: a malformed NONPROD would have
+  # printed the affirmative "references no dev/local host", which reads as a
+  # stronger pass than mere silence.
+  hits="$(grep -InE "$NONPROD" "$f")"
+  np_st=$?
+  if [ "$np_st" -gt 1 ]; then
+    bad "non-production endpoint scan CANNOT RUN for $f (grep exit ${np_st})."
+    note "NONPROD must be valid POSIX ERE."
+    nonprod_hit=1
+  elif [ "$np_st" -eq 0 ] && [ -n "$hits" ]; then
     n_np="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
     bad "non-production endpoint in $f, on ${n_np} line(s)."
     nonprod_hit=1
@@ -583,6 +630,8 @@ for f in "${CONFIG_FILES[@]}"; do
     note "./scripts/secret-scan.sh locally to see them."
   fi
 done
+# Same rule: `nonprod_hit` is set on a CANNOT RUN too, so the all-clear cannot
+# print after one.
 [ "$nonprod_hit" = "0" ] && note "shipped config references no dev/local host"
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -599,16 +648,29 @@ if [ -d clippar_app/supabase/functions ]; then
   # Only real import/export specifiers — a comment that quotes a URL (including
   # the one in create-share-link explaining why the import was removed) is prose,
   # not a dependency.
-  unpinned="$(grep -rnE "from[[:space:]]+['\"]https://(deno\.land|esm\.sh)/" \
+  grep -rnE "from[[:space:]]+['\"]https://(deno\.land|esm\.sh)/" \
       clippar_app/supabase/functions --include='*.ts' \
     | grep -vE '^[^:]*:[0-9]+:[[:space:]]*(//|\*|/\*)' \
-    | grep -vE '@[0-9]' || true)"
+    | grep -vE '@[0-9]' > "$SWEEP_TMP"
+  up_rcs=("${PIPESTATUS[@]}")
+  unpinned="$(cat "$SWEEP_TMP")"
+  up_broke=0
+  if sweep_broke grep "${up_rcs[@]}"; then
+    up_broke=1
+    bad "unpinned-import scan CANNOT RUN (statuses: ${up_rcs[*]})."
+    note "A failure here used to print \"all remote imports carry an @version\","
+    note "which reads as a stronger pass than silence would."
+    unpinned=""
+  fi
   if [ -n "$unpinned" ]; then
     n_up="$(printf '%s\n' "$unpinned" | wc -l | tr -d ' ')"
     bad "unversioned remote import(s): ${n_up} line(s)."
     note "Lines deliberately not printed — CI logs are public. Run"
     note "./scripts/secret-scan.sh locally to see them."
-  else
+  elif [ "$up_broke" = "0" ]; then
+    # Only claim the all-clear when the sweep actually ran. Printing it after a
+    # CANNOT RUN in the same section is a self-contradicting log, and the
+    # reassuring half is the one people remember.
     note "all remote imports carry an @version"
   fi
 fi

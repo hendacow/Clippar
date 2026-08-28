@@ -815,3 +815,95 @@ test('a private key added while resolving a merge conflict is caught', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// Every sweep in the scanner must fail loudly when its pattern cannot compile,
+// and — the half that is easy to forget — must NOT cry wolf when nothing is
+// wrong. The first draft of the shared guard did exactly that: it treated a
+// `grep -r` producer's ordinary "no match" (exit 1) as a failure, so it reported
+// CANNOT RUN on any repository with no edge functions. A gate that cries wolf
+// gets deleted rather than obeyed, so both directions are pinned here.
+test('every scanner sweep fails loudly on a broken pattern, and only then', () => {
+  const scanner = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8');
+  const BROKEN = 'a{2,1}'; // invalid POSIX ERE repetition, in both grep engines
+
+  const cases: Array<{ name: string; find: string; replace: string; expectFail: boolean }> = [
+    { name: 'baseline', find: '', replace: '', expectFail: false },
+    {
+      name: 'BINDOC',
+      find: "BINDOC='[.](docx",
+      replace: `BINDOC='[.](${BROKEN}|docx`,
+      expectFail: true,
+    },
+    {
+      name: 'NONPROD',
+      find: "NONPROD='localhost",
+      replace: `NONPROD='${BROKEN}|localhost`,
+      expectFail: true,
+    },
+    {
+      name: 'CRED_PATTERNS',
+      find: 'CRED_PATTERNS=(\n',
+      replace: `CRED_PATTERNS=(\n  'sk_bad_${BROKEN}'\n`,
+      expectFail: true,
+    },
+  ];
+
+  for (const c of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'scan-sweep-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    try {
+      git('init', '-q', '.');
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'scripts'));
+      let body = scanner;
+      if (c.find) {
+        assert.ok(body.includes(c.find), `${c.name}: anchor moved — update this test`);
+        body = body.replace(c.find, c.replace);
+      }
+      writeFileSync(join(dir, 'scripts', 'secret-scan.sh'), body, { mode: 0o755 });
+      // Give the config and edge-function sweeps something to look at, or they
+      // skip and the case proves nothing.
+      mkdirSync(join(dir, 'clippar_app', 'constants'), { recursive: true });
+      mkdirSync(join(dir, 'clippar_app', 'supabase', 'functions'), { recursive: true });
+      writeFileSync(join(dir, 'clippar_app', 'constants', 'config.ts'), 'export const config = {};\n');
+      writeFileSync(
+        join(dir, 'clippar_app', 'supabase', 'functions', 'a.ts'),
+        'import x from "https://esm.sh/y@1";\n',
+      );
+      writeFileSync(join(dir, 'a.txt'), 'base\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+
+      let code = 0;
+      let out = '';
+      try {
+        out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err: any) {
+        code = err.status ?? 1;
+        out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      }
+
+      if (c.expectFail) {
+        assert.notEqual(code, 0, `${c.name}: a pattern that cannot compile was treated as "no matches".\n\n${out}`);
+        assert.match(out, /CANNOT RUN/, `${c.name}: failed without saying it could not run.\n\n${out}`);
+      } else {
+        assert.equal(code, 0, `${c.name}: a clean repository must pass.\n\n${out}`);
+        assert.doesNotMatch(
+          out,
+          /CANNOT RUN/,
+          `${c.name}: the integrity guard fired on a clean repository. A gate that\n` +
+            `cries wolf gets deleted rather than obeyed — check that a grep\n` +
+            `producer's exit 1 ("no match") is not being read as a failure.\n\n${out}`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
