@@ -284,10 +284,16 @@ export function canonicalIp(input: string): string | null {
   // VPS host hands out a /64 free with the instance, and most mobile carriers
   // and residential ISPs delegate /64 or larger per subscriber. Each of those
   // 2^64 addresses is bindable, routes back to the same machine, and arrives at
-  // the gateway as a genuine observed source — so `cf-connecting-ip` is honest,
-  // this function canonicalises it faithfully, and it is still a fresh
-  // `api_rate_limit` row every time. Nothing is forged; the attacker just uses
-  // the next address they already own. Against getSharedReel (120/hour, the one
+  // the gateway as a genuine observed source — so BEHIND THE GATEWAY
+  // `cf-connecting-ip` reports it truthfully, this function canonicalises it
+  // faithfully, and it is still a fresh `api_rate_limit` row every time. Nothing
+  // is forged; the attacker just uses the next address they already own.
+  //
+  // Read that as narrowly as it is written. It says the gateway reports the real
+  // source, which is what makes this cut NECESSARY. It does not say the header
+  // cannot be forged — off the gateway it can, nothing here asserts otherwise,
+  // and that is the separate open decision recorded in clientIp() below. This
+  // cut is not sufficient for that case and does not claim to be. Against getSharedReel (120/hour, the one
   // endpoint with no JWT) and the pre-signup `ip:` bucket in search-courses,
   // that is not a raised cap, it is no cap.
   //
