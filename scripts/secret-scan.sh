@@ -50,7 +50,8 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
 # ─────────────────────────────────────────────────────────────────────────────
-# .gitignore covers `.env*.local`, but Expo's CLI also loads `.env`,
+# `clippar_app/.gitignore` covers `.env*.local` INSIDE THAT DIRECTORY ONLY, and
+# the root file covers the bare `.env`. Expo's CLI also loads `.env`,
 # `.env.<mode>` and `.env.<mode>.local`. So `clippar_app/.env.production` — which
 # per the committed .example files carries SUPABASE_SERVICE_ROLE_KEY and
 # STRIPE_SECRET_KEY — matches no ignore rule at all, and `git add .` publishes
@@ -69,7 +70,18 @@ echo "── tracked dotenv files ───────────────�
 # are escaped regardless of it. `-z` emits paths NUL-separated and raw, which
 # sidesteps quoting as a category rather than one class of it.
 # Verified both ways. Do not simplify the -z back out.
-tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n' || true)"
+tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n')"
+env_st=$?
+# Status, not `|| true`. grep exits 1 for "no match" and >1 for "could not run",
+# and flattening those together is the same false-clean the credential sweep was
+# fixed for two sections down. This gate is the one that would have caught this
+# repository's actual incident, so it is the last one that should be able to
+# report a silent pass.
+if [ "$env_st" -gt 1 ]; then
+  bad "dotenv scan CANNOT RUN (grep exit ${env_st})."
+  note "A gate that could not run is not a gate that found nothing."
+  tracked_env=""
+fi
 if [ -n "$tracked_env" ]; then
   # COUNT ONLY, same rule as every other sweep in this file. A tracked dotenv
   # path is a locator for a live credential, and this now runs on every ref into
@@ -132,13 +144,27 @@ CRED_PATTERNS=(
   # A service-role key bypasses RLS on every table. It is the highest-value
   # single credential in the project and until this line it was the least
   # covered.
+  # The first alternative STOPS AT THE QUOTE'S HIGH NIBBLE — no trailing `I`.
+  # It used to carry one, which reached two bits past the closing quote of
+  # `"service_role"` and so depended on the byte that FOLLOWS it. A payload whose
+  # last claim is the role ends `"service_role"}`, and `}` is 0x7d, whose top
+  # bits change that character from `I` to `J`. Measured across realistic
+  # Supabase-shaped tokens: the trailing form missed 24 of 148, all of them
+  # role-last. My original "27/27 matched" only ever generated tokens with
+  # iat/exp AFTER the role, so it could not see this.
+  #
+  # Precision is unchanged, checked rather than assumed: all three forms
+  # (trailing I, no trailing I, explicit [IJ]) match `service_roles` and
+  # `service_role_admin` identically, because the THIRD alternative already
+  # prefix-matches. Dropping the character costs nothing and covers the gap.
+  #
   # Each alternative has ONE character bracketed so this line does not contain
   # its own match text. `[S]` matches `S`, so the regex is unchanged — but the
   # source no longer holds the literal run, which is what previously forced an
   # `:(exclude)` pathspec onto every sweep and made this the one file where a
   # committed-then-deleted credential was invisible to all of them. Do not
   # "tidy" the brackets away.
-  'InNlcnZpY2Vfcm9sZ[S]I|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
+  'InNlcnZpY2Vfcm9sZ[S]|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
@@ -172,7 +198,7 @@ PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space
 # not. Once this branch is squashed into main the literal leaves main's history
 # and this exclusion can go entirely — that is a real follow-up, not a
 # permanent design.
-self_ref='InNlcnZpY2Vfcm9sZ[S]I|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
+self_ref='InNlcnZpY2Vfcm9sZ[S]|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
 # NO `-I`. It tells git grep to skip every file git CLASSIFIES as binary,
 # whether or not the credential's bytes are plainly in there — and the
 # classification is caller-controllable: one line in `.gitattributes` marking a
@@ -443,7 +469,16 @@ BINDOC="$BINDOC"'|[.](p8|p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der
 BINDOC="$BINDOC"'|[.](apk|aab|ipa)$'
 # `-z` for the quoting reason given in full at the dotenv check above: without
 # it a single accented character in the filename walks straight past this gate.
-tracked_bin="$(git ls-files -z | grep -zEi "$BINDOC" | tr '\0' '\n' || true)"
+tracked_bin="$(git ls-files -z | grep -zEi "$BINDOC" | tr '\0' '\n')"
+bin_st=$?
+# Same rule as the dotenv gate above: BINDOC is hand-edited every time an
+# extension is added, so an unbalanced paren here would silently disable the one
+# check that can see a credential inside a binary document.
+if [ "$bin_st" -gt 1 ]; then
+  bad "binary-document scan CANNOT RUN (grep exit ${bin_st})."
+  note "BINDOC must be valid POSIX ERE."
+  tracked_bin=""
+fi
 if [ -n "$tracked_bin" ]; then
   # COUNT ONLY, for exactly the reason the history sweep below already gives,
   # and this half was the one place in the file breaking its own rule.
@@ -495,8 +530,15 @@ else
   # With -z the record separator becomes NUL, so paths arrive raw.
   # `--diff-merges=cc` for the same reason as the credential sweep above: without
   # it a file first appearing in a hand-resolved merge is named by nothing here.
-  hist_bin="$(git log --all --full-history --diff-merges=cc --pretty=format: --name-only -z --diff-filter=AMR 2>/dev/null \
-    | tr '\0' '\n' | sort -u | grep -icE "$BINDOC" || true)"
+  hist_bin="$(git log --all --full-history --diff-merges=cc --pretty=format: --name-only -z --diff-filter=AMR \
+    | tr '\0' '\n' | sort -u | grep -icE "$BINDOC")"
+  hb_st=$?
+  if [ "$hb_st" -gt 1 ]; then
+    bad "binary-document HISTORY scan CANNOT RUN (exit ${hb_st})."
+    note "Silence here would read as \"none in history\", which is the one thing"
+    note "this section must never say when it could not look."
+    hist_bin=0
+  fi
 fi
 if [ "${hist_bin:-0}" -gt 0 ]; then
   note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."

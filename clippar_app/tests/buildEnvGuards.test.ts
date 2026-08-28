@@ -657,3 +657,71 @@ test('the history sweep sees through a binary marker and into merge resolutions'
     }
   }
 });
+
+// The encoded service-role rule is three base64 alternatives, one per byte
+// alignment. The first used to run two bits PAST the closing quote of the claim,
+// so it depended on the byte that follows — and a payload whose LAST claim is the
+// role ends `"service_role"}`, where `}` (0x7d) flips that character. Measured
+// across realistic tokens, the old form missed 24 of 148, every one of them
+// role-last. The original "27/27 matched" check only ever generated tokens with
+// iat/exp after the role, so it could not see the gap it was verifying.
+test('a service-role key is caught even when the role is the last claim', () => {
+  const b64url = (s: string) =>
+    Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+
+  // Vary the project-ref length so the claim lands on every byte alignment, and
+  // put the role both last and mid-object.
+  for (const refLen of [16, 17, 18]) {
+    for (
+      const payload of [
+        { iss: 'supabase', ref: 'r'.repeat(refLen), iat: 1, exp: 2, role: 'service_role' },
+        { iss: 'supabase', ref: 'r'.repeat(refLen), role: 'service_role', iat: 1, exp: 2 },
+      ]
+    ) {
+      const dir = mkdtempSync(join(tmpdir(), 'scan-jwt-'));
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+      try {
+        git('init', '-q', '.');
+        git('config', 'user.email', 'test@example.invalid');
+        git('config', 'user.name', 'test');
+        mkdirSync(join(dir, 'scripts'));
+        writeFileSync(
+          join(dir, 'scripts', 'secret-scan.sh'),
+          readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+          { mode: 0o755 },
+        );
+        // Under a name no rule recognises, which is the whole point of matching
+        // the encoded credential rather than a variable name.
+        writeFileSync(
+          join(dir, 'admin.ts'),
+          `const supabaseAdmin = createClient(url, "${header}.${b64url(JSON.stringify(payload))}.sig");\n`,
+        );
+        git('add', '-A');
+        git('commit', '-qm', 'plant');
+
+        let code = 0;
+        let out = '';
+        try {
+          out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+            cwd: dir,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+        } catch (err: any) {
+          code = err.status ?? 1;
+          out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+        }
+        assert.notEqual(
+          code,
+          0,
+          `a service-role JWT was reported CLEAN (ref length ${refLen}, role ` +
+            `${Object.keys(payload).at(-1) === 'role' ? 'last' : 'mid-object'}).\n\n${out}`,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
