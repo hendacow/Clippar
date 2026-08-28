@@ -46,7 +46,19 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # it. This checks the thing that actually matters (is it tracked?) rather than
 # trusting the ignore list to be complete.
 echo "── tracked dotenv files ───────────────────────────────"
-tracked_env="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$' || true)"
+# `-z`, and NOT `-c core.quotePath=false`. git does not emit raw paths by
+# default: anything containing a byte >= 0x80, a double-quote or a backslash is
+# C-escaped and WRAPPED IN QUOTES, so `café.env` arrives as `"caf\303\251.env"`
+# — ending in `"` rather than the extension, which every $-anchored regex in
+# this file then misses. One accented character was a complete bypass of this
+# check and of the binary check below, by accident as easily as on purpose.
+#
+# `core.quotePath=false` is NOT sufficient: per git-config(1) it only stops
+# bytes above 0x80 counting as unusual, and quote/backslash/control characters
+# are escaped regardless of it. `-z` emits paths NUL-separated and raw, which
+# sidesteps quoting as a category rather than one class of it.
+# Verified both ways. Do not simplify the -z back out.
+tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n' || true)"
 if [ -n "$tracked_env" ]; then
   # COUNT ONLY, same rule as every other sweep in this file. A tracked dotenv
   # path is a locator for a live credential, and this now runs on every ref into
@@ -261,7 +273,9 @@ BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz|tar|gz|bz2|xz|zst)$|[.]tar[.](gz|bz
 # material.
 BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|kdbx|mobileprovision|cer|der|sqlite3?|db)$'
 BINDOC="$BINDOC"'|[.](apk|aab|ipa)$'
-tracked_bin="$(git ls-files | grep -iE "$BINDOC" || true)"
+# `-z` for the quoting reason given in full at the dotenv check above: without
+# it a single accented character in the filename walks straight past this gate.
+tracked_bin="$(git ls-files -z | grep -zEi "$BINDOC" | tr '\0' '\n' || true)"
 if [ -n "$tracked_bin" ]; then
   # COUNT ONLY, for exactly the reason the history sweep below already gives,
   # and this half was the one place in the file breaking its own rule.
@@ -308,8 +322,11 @@ else
   # above was silently pruning whole merged branches the moment a pathspec was
   # added to it; this is the same command shape one edit away from the same
   # trap. Cheap insurance, and the reason is written down rather than assumed.
-  hist_bin="$(git log --all --full-history --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
-    | sort -u | grep -icE "$BINDOC" || true)"
+  # `-z` here too — `git log --name-only` quotes exactly as `ls-files` does, so
+  # this half had the same accented-filename bypass as the index half above.
+  # With -z the record separator becomes NUL, so paths arrive raw.
+  hist_bin="$(git log --all --full-history --pretty=format: --name-only -z --diff-filter=AMR 2>/dev/null \
+    | tr '\0' '\n' | sort -u | grep -icE "$BINDOC" || true)"
 fi
 if [ "${hist_bin:-0}" -gt 0 ]; then
   note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."

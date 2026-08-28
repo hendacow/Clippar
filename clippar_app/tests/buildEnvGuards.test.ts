@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -341,4 +342,72 @@ test('the secret scanner is green on the current tree', () => {
           `finding. Run 'git fetch --unshallow', or add fetch-depth: 0 to the job.\n\n${out}`
       : out,
   );
+});
+
+// A path git considers "unusual" — a byte >= 0x80, a double-quote, a backslash —
+// is C-escaped and WRAPPED IN QUOTES by ls-files and log --name-only. The path
+// then ends in `"` rather than its extension, so every $-anchored regex in the
+// scanner misses it: one accented character was a complete bypass of both
+// filename gates, as likely by accident (a club or course with an accent in its
+// name) as on purpose.
+//
+// Asserted against a throwaway repo rather than this one, because the property is
+// "the scanner FAILS on a planted file" and this tree is deliberately clean. The
+// checks above only ever prove it stays green, which is the half that cannot
+// catch a scanner that has silently stopped looking.
+test('the secret scanner is not bypassed by a non-ASCII or quoted path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-quote-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+
+    // A dotenv file under an accented directory, and a binary document with an
+    // accented name — one case for each filename gate.
+    mkdirSync(join(dir, 'café'));
+    writeFileSync(join(dir, 'café', '.env'), 'SECRET=1\n');
+    writeFileSync(join(dir, 'kéy.docx'), Buffer.from([0x78, 0x00, 0x79]));
+    git('add', '-A', '-f');
+    git('commit', '-qm', 'plant');
+
+    // Sanity check that the premise still holds: if a future git stops quoting,
+    // this test would pass for the wrong reason and stop guarding anything.
+    assert.match(
+      git('ls-files'),
+      /"/,
+      'premise broken: git no longer quotes unusual paths, so this test proves nothing',
+    );
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `the scanner reported CLEAN with a tracked dotenv file and a tracked binary\n` +
+        `document, both under non-ASCII names. Enumerate paths with 'git ls-files -z'\n` +
+        `(NOT -c core.quotePath=false, which only covers bytes >= 0x80).\n\n${out}`,
+    );
+    assert.match(out, /dotenv file\(s\) committed/, out);
+    assert.match(out, /opaque binary document\(s\) tracked/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
