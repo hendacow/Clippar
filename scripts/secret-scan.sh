@@ -26,15 +26,13 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
-# path:line ONLY — never the matched text. `git grep -In` emits
-# "path:line:<the whole matching line>", so echoing its output verbatim prints
-# the credential this script just caught. CI logs on a public repository are
-# world-readable for ~90 days, so that republishes the secret to a URL an
-# attacker can poll, and that copy outlives deleting the key from the tree.
-# Piping every match through this is the difference between reporting a leak
-# and committing one.
-# (locs(), which trimmed a git-grep hit down to `path:line`, is deliberately
-# gone — nothing in this file prints a location any more. See section 2.)
+# NOTHING IN THIS FILE PRINTS A PATH OR A MATCHED LINE. Every sweep reports a
+# COUNT. `git grep` emits "path:line:<the whole matching line>", so echoing its
+# output prints the credential this script just caught — and CI logs on a public
+# repository are world-readable for ~90 days at a pollable URL, so that copy
+# outlives deleting the key from the tree. The file NAME alone is a locator too,
+# which is why the filename gates count as well. Run the script locally to see
+# what it found; that output is not public.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
@@ -121,7 +119,13 @@ CRED_PATTERNS=(
   # A service-role key bypasses RLS on every table. It is the highest-value
   # single credential in the project and until this line it was the least
   # covered.
-  'InNlcnZpY2Vfcm9sZSI|ZXJ2aWNlX3JvbGUi|c2VydmljZV9yb2xl'
+  # Each alternative has ONE character bracketed so this line does not contain
+  # its own match text. `[S]` matches `S`, so the regex is unchanged — but the
+  # source no longer holds the literal run, which is what previously forced an
+  # `:(exclude)` pathspec onto every sweep and made this the one file where a
+  # committed-then-deleted credential was invisible to all of them. Do not
+  # "tidy" the brackets away.
+  'InNlcnZpY2Vfcm9sZ[S]I|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
@@ -136,8 +140,32 @@ PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space
 # live credential — and it is now emitted on every ref into world-readable CI
 # logs. Same rule, applied consistently: one inconsistent sweep in a file whose
 # whole argument is consistency is what gets rediscovered next month.
+# SELF-EXCLUSION IS PER-PATTERN, NOT BLANKET, and the difference is the whole
+# point. Excluding this file from EVERY pattern made it the one place in the
+# repository where a committed credential was invisible to both sweeps — which
+# is precisely the file someone edits while holding a real key, tuning a rule or
+# pasting a live value to check that it fires.
+#
+# Only one pattern needs the exclusion: the encoded service-role rule, whose
+# match text this file's HISTORY still contains in cleartext (it was committed
+# unbracketed earlier in this branch, and rewriting that history is not allowed
+# here). Every other pattern — Stripe, Resend, RevenueCat, the named
+# service-role key, the PEM rule — now scans this file like any other, in the
+# tree and in history.
+#
+# RESIDUAL, stated rather than papered over: a RAW service-role JWT committed
+# into THIS file, under no recognisable variable name, is still invisible. Every
+# other credential shape, and a service-role key anywhere else in the repo, is
+# not. Once this branch is squashed into main the literal leaves main's history
+# and this exclusion can go entirely — that is a real follow-up, not a
+# permanent design.
+self_ref='InNlcnZpY2Vfcm9sZ[S]I|ZXJ2aWNlX3JvbGU[i]|c2VydmljZV9yb2x[l]'
 for pat in "${CRED_PATTERNS[@]}"; do
-  hits="$(git grep -IcE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+  if [ "$pat" = "$self_ref" ]; then
+    hits="$(git grep -IcE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+  else
+    hits="$(git grep -IcE "$pat" 2>/dev/null || true)"
+  fi
   if [ -n "$hits" ]; then
     n_hit="$(printf '%s\n' "$hits" | wc -l | tr -d ' ')"
     bad "credential-shaped string in the working tree, in ${n_hit} file(s)."
@@ -145,8 +173,9 @@ for pat in "${CRED_PATTERNS[@]}"; do
     note "Run ./scripts/secret-scan.sh locally to see them."
   fi
 done
-pem_hits="$(git grep -IcE "$PEM_LINE" \
-    -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
+# No exclusion: PEM_LINE is anchored to a whole line and this file only ever
+# mentions the header mid-line, inside the pattern definition.
+pem_hits="$(git grep -IcE "$PEM_LINE" 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   n_pem="$(printf '%s\n' "$pem_hits" | wc -l | tr -d ' ')"
   bad "private-key PEM material in the working tree, in ${n_pem} file(s)."
@@ -189,6 +218,15 @@ fi
 # pathspec keeps the pattern definitions above from matching themselves.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
+# The same alternation MINUS the self-referential pattern, for the pass that
+# scans this file too. Built by filtering the same array, so it cannot drift
+# from CRED_PATTERNS either.
+hist_pat_rest=""
+for _p in "${CRED_PATTERNS[@]}"; do
+  [ "$_p" = "$self_ref" ] && continue
+  hist_pat_rest="${hist_pat_rest}${_p}|"
+done
+hist_pat_rest="${hist_pat_rest}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
 # `--full-history` is REQUIRED and is not decoration. Handing `git log` a
 # pathspec — which the exclude above is — switches on default history
 # simplification, and at a merge that is TREESAME to one parent for that
@@ -208,12 +246,22 @@ hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|
 # tally; the old form piped through `head -5` and then counted the truncated
 # result, so any incident with more than five hits reported exactly "5
 # match(es)" — a number that reads as complete and is not.
+#
+# TWO PASSES, for the same reason the working-tree sweep is per-pattern: a
+# blanket exclude made this file the one place a committed-then-deleted
+# credential was invisible. Pass 1 scans EVERYTHING, this file included, for
+# every shape except the self-referential one. Pass 2 scans for that one shape
+# with this file excluded, because its match text is in this file's own history
+# in cleartext and history cannot be rewritten here.
 if [ "$shallow" = "true" ]; then
   hist_n=0
 else
-  hist_n="$(git log -p --all --full-history --no-color -U0 \
+  hist_all="$(git log -p --all --full-history --no-color -U0 2>/dev/null \
+    | grep -acE "$hist_pat_rest" || true)"
+  hist_self="$(git log -p --all --full-history --no-color -U0 \
       -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
-    | grep -acE "$hist_pat" || true)"
+    | grep -acE "$self_ref" || true)"
+  hist_n=$(( ${hist_all:-0} + ${hist_self:-0} ))
 fi
 if [ "$shallow" = "true" ]; then
   bad "history scan CANNOT RUN: this is a shallow clone."

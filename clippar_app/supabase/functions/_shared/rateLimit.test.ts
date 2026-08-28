@@ -14,6 +14,7 @@ import {
   assertEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
+  canonicalIp,
   clientIp,
   consumeRateLimit,
   enforceRateLimit,
@@ -143,6 +144,48 @@ Deno.test('clientIp never returns a value that is not address-shaped', () => {
     clientIp(reqWith({ 'cf-connecting-ip': '::ffff:203.0.113.9' })),
     '::ffff:203.0.113.9',
   );
+});
+
+Deno.test('one host cannot spell itself into more than one rate-limit bucket', () => {
+  // The cap on get-shared-reel is per SUBJECT, so anything that lets one host
+  // render its own address two ways multiplies the cap by two. This needs no
+  // forged ingress — it is not a different address, just a different spelling of
+  // the caller's own, which is why a character-class check ("does it look
+  // addressy?") is not enough and the value has to be CANONICALISED.
+  const bucketFor = (ip: string) => clientIp(reqWith({ 'cf-connecting-ip': ip }));
+  const one = bucketFor('1.2.3.4');
+  for (const spelling of ['1.2.3.4', '01.2.3.4', '001.2.3.4']) {
+    assertEquals(bucketFor(spelling), one, `${spelling} must key the same bucket`);
+  }
+  // Same for IPv6 case and zero-padding.
+  const six = bucketFor('2001:db8::1');
+  for (const spelling of ['2001:DB8::1', '2001:0db8::0001', '2001:db8::1']) {
+    assertEquals(bucketFor(spelling), six, `${spelling} must key the same bucket`);
+  }
+
+  // Structure, not character class: these were all accepted by the earlier
+  // /^[0-9A-Fa-f:.]+$/ test and each one was a free extra bucket.
+  for (
+    const notAnAddress of [
+      'dead',
+      'cafe.babe',
+      '....',
+      '0',
+      '1.2.3.4.',
+      '.1.2.3.4',
+      '256.1.2.3',
+      '1.2.3',
+      'ffffffffffffffffffffffffffffffffffffffff',
+    ]
+  ) {
+    assertEquals(canonicalIp(notAnAddress), null, `${notAnAddress} is not an address`);
+    assertEquals(bucketFor(notAnAddress), 'unknown', `${notAnAddress} must share the fallback bucket`);
+  }
+
+  // Malformed IPv6 must not slip through on the colon branch either.
+  for (const bad of ['2001:db8:::1', '2001:db8::1::2', '2001:zzzz::1', '1:2:3:4:5:6:7:8:9', '12345::1']) {
+    assertEquals(canonicalIp(bad), null, `${bad} is not an address`);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -411,3 +411,60 @@ test('the secret scanner is not bypassed by a non-ASCII or quoted path', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The scanner used to exclude its own source from EVERY sweep, because one
+// pattern contained its own match text in cleartext. That made scripts/
+// secret-scan.sh the single file in the repository where a committed-then-
+// deleted credential was invisible — and it is exactly the file someone edits
+// while holding a real key, tuning a rule or pasting a live value to check that
+// it fires. The exclusion is now per-pattern, so every other shape scans this
+// file like any other.
+test('a credential committed into the scanner itself is not invisible to it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-self-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  const scanner = join(dir, 'scripts', 'secret-scan.sh');
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    const pristine = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8');
+    writeFileSync(scanner, pristine, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    // Plant a live-shaped key inside the scanner, then delete it — the shape of
+    // the incident this whole gate exists for. Split so this test file does not
+    // itself carry a matchable literal.
+    writeFileSync(scanner, `${pristine}\n# TEMP=sk_live_${'A'.repeat(20)}\n`, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'plant');
+    writeFileSync(scanner, pristine, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'delete');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [scanner], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a credential committed into the scanner and deleted next commit was reported\n` +
+        `CLEAN. The ':(exclude)scripts/secret-scan.sh' pathspec must stay scoped to the\n` +
+        `one self-referential pattern, not applied to every sweep.\n\n${out}`,
+    );
+    assert.match(out, /present in git HISTORY/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

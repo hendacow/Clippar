@@ -111,6 +111,102 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
 };
 
 /**
+ * Parse a header value into its ONE canonical address string, or null.
+ *
+ * What this defends is not the trust question the docblock above leaves open — a
+ * forged but well-formed address still buys a fresh bucket, and only the
+ * trusted-ingress decision closes that. What it defends is the rate limit's
+ * KEYSPACE, and through it the `api_rate_limit` table.
+ *
+ * Whatever this returns is passed as `p_subject` to `consume_rate_limit`, and
+ * `api_rate_limit.subject` is TEXT inside the primary key (migration 016). So a
+ * subject the caller can vary at all is a row they can multiply, and — worse — a
+ * bucket they can escape. On `get-shared-reel`, the one endpoint with no JWT, the
+ * cap is per SUBJECT, so anything that lets one host spell itself two ways makes
+ * the cap that many times larger.
+ *
+ * An earlier version of this was a character-class test
+ * (`/^[0-9A-Fa-f:.]+$/`), which bounded the LENGTH and not the shape. It
+ * accepted `dead`, `....`, `0` and 45 characters of arbitrary hex, so the
+ * keyspace stayed effectively unbounded — and it accepted `1.2.3.4`,
+ * `01.2.3.4`, `1.2.3.4.` and `.1.2.3.4` as four different subjects for one
+ * host. That is a 4x (or 120x) cap for anyone who noticed, needing no forged
+ * ingress at all: not a different address, just a different rendering of your
+ * own. This is a real STRUCTURE test, and it CANONICALISES rather than merely
+ * accepting, so every spelling of one address collapses onto one bucket.
+ *
+ * A value that fails falls through to the next header and ultimately to the
+ * shared 'unknown' bucket, which is the safe direction: it over-counts a
+ * malformed caller rather than handing them a private allowance.
+ */
+export function canonicalIp(v: string): string | null {
+  // 45 = longest possible v6 text form (v4-mapped, e.g.
+  // `0000:...:0000:255.255.255.255`). Cheap bound before any parsing.
+  if (v.length === 0 || v.length > 45) return null;
+
+  // ── IPv4 ──
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (v4) {
+    const octets = v4.slice(1).map(Number);
+    if (octets.some((n) => n > 255)) return null;
+    // Rebuilt from the parsed numbers, so `01.2.3.4` and `1.2.3.4` return the
+    // same string rather than being two subjects. Leading zeros are also how
+    // some stacks read an octet as octal, so normalising is safer than
+    // rejecting.
+    return octets.join('.');
+  }
+
+  // ── IPv6 ──
+  // Must contain a colon to be worth trying, and `::` may appear at most once.
+  if (!v.includes(':')) return null;
+  const halves = v.split('::');
+  if (halves.length > 2) return null;
+
+  // A trailing dotted quad (v4-mapped/compatible) counts as two groups. Recurse
+  // through the v4 branch so it is canonicalised by the same rules.
+  let tail = halves[halves.length - 1];
+  let mappedV4 = '';
+  const lastColon = tail.lastIndexOf(':');
+  const maybeV4 = tail.slice(lastColon + 1);
+  if (maybeV4.includes('.')) {
+    const canon4 = canonicalIp(maybeV4);
+    if (!canon4 || canon4.includes(':')) return null;
+    mappedV4 = canon4;
+    tail = tail.slice(0, lastColon + 1);
+    halves[halves.length - 1] = tail.replace(/:$/, '');
+  }
+
+  const parse = (part: string): string[] | null => {
+    if (part === '') return [];
+    const groups = part.split(':');
+    for (const g of groups) {
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(g)) return null;
+    }
+    // Lowercased and zero-stripped so `2001:DB8::1`, `2001:db8::1` and
+    // `2001:0db8::0001` are one subject rather than three.
+    return groups.map((g) => g.replace(/^0+(?=.)/, '').toLowerCase());
+  };
+
+  const head = parse(halves[0]);
+  const rest = halves.length === 2 ? parse(halves[1]) : [];
+  if (head === null || rest === null) return null;
+
+  const mappedGroups = mappedV4 ? 2 : 0;
+  const total = head.length + rest.length + mappedGroups;
+  if (halves.length === 2) {
+    // `::` must stand for at least one omitted group.
+    if (total >= 8) return null;
+  } else if (total !== 8) {
+    return null;
+  }
+
+  const body = halves.length === 2
+    ? `${head.join(':')}::${rest.join(':')}`
+    : head.join(':');
+  return mappedV4 ? `${body}${body.endsWith(':') ? '' : ':'}${mappedV4}` : body;
+}
+
+/**
  * The client's IP, for limits that have no authenticated subject.
  *
  * CAREFUL — and the care is the opposite of the usual advice. The standard rule
@@ -141,37 +237,6 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * Nothing here asserts that precondition at runtime; that is a known open
  * decision, not an oversight.
  */
-/**
- * Does this look like an IP address at all?
- *
- * A SHAPE test, not a validity test, and the distinction is the point. What it
- * defends is not the trust question the docblock above leaves open — a forged
- * but well-formed address still buys a fresh bucket, and only the trusted-ingress
- * decision closes that. What it defends is the DATABASE.
- *
- * Whatever this function returns is passed as `p_subject` to
- * `consume_rate_limit`, and `api_rate_limit.subject` is unbounded TEXT inside
- * the primary key (migration 016). The value came straight off a caller-typed
- * header with nothing between the two, so on `get-shared-reel` — the one
- * endpoint with no JWT — an anonymous caller could write one row per distinct
- * string, of any length they liked, by varying a header. That is storage
- * amplification against our own table, and it is live independently of whether
- * the header can be spoofed past the gateway at all.
- *
- * Deliberately loose (it accepts `999.1.2.3`) because tightening it buys
- * nothing here: the job is to bound the keyspace to something address-shaped and
- * short, not to adjudicate addresses. Every real value — Cloudflare's own
- * `cf-connecting-ip`, a gateway-asserted X-Forwarded-For entry, IPv4 or IPv6 —
- * passes unchanged, so legitimate traffic is keyed exactly as before. A value
- * that fails falls through to the next branch and ultimately to the shared
- * 'unknown' bucket, which is the safe direction: it over-counts a malformed
- * caller rather than handing them a private one.
- */
-function isIpShaped(v: string): boolean {
-  if (v.length === 0 || v.length > 45) return false;
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(v) || /^[0-9A-Fa-f:.]+$/.test(v);
-}
-
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
   // which sets this to a SINGLE address it observed itself, so it needs no
@@ -192,8 +257,8 @@ export function clientIp(req: Request): string {
   //
   // OFF the gateway nothing replaces it either way and it is plainly a
   // caller-typed string, which is why the corollary names this branch first.
-  const cf = req.headers.get('cf-connecting-ip')?.trim();
-  if (cf && isIpShaped(cf)) return cf;
+  const cf = canonicalIp(req.headers.get('cf-connecting-ip')?.trim() ?? '');
+  if (cf) return cf;
 
   // Fallback: the FIRST X-Forwarded-For entry.
   //
@@ -220,11 +285,11 @@ export function clientIp(req: Request): string {
   const xff = req.headers.get('x-forwarded-for');
   if (xff) {
     const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 0 && isIpShaped(parts[0])) return parts[0];
+    const first = parts.length > 0 ? canonicalIp(parts[0]) : null;
+    if (first) return first;
   }
 
-  const real = req.headers.get('x-real-ip')?.trim();
-  return real && isIpShaped(real) ? real : 'unknown';
+  return canonicalIp(req.headers.get('x-real-ip')?.trim() ?? '') ?? 'unknown';
 }
 
 export interface RateLimitDecision {
