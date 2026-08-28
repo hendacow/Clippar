@@ -135,11 +135,11 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
  * own. This is a real STRUCTURE test, and it CANONICALISES rather than merely
  * accepting, so every spelling of one address collapses onto one bucket.
  *
- * For IPv6 it goes one step further and returns the /64 rather than the address,
- * because an IPv6 caller is handed a whole prefix and can vary the low half for
+ * For IPv6 it goes one step further and returns the /48 rather than the address,
+ * because an IPv6 caller is handed a whole prefix and can vary the rest of it for
  * nothing — so canonicalising the spelling alone still leaves the cap
- * unenforceable. The reasoning, and the cost of it, is at the end of the
- * function. IPv4 is returned in full: there, the address IS the host.
+ * unenforceable. The reasoning, including why /64 is not far enough, is at the
+ * end of the function. IPv4 is returned in full: there, the address IS the host.
  *
  * A value that fails falls through to the next header and ultimately to the
  * shared 'unknown' bucket. That is the safe direction for JUNK — it over-counts
@@ -291,16 +291,31 @@ export function canonicalIp(input: string): string | null {
   // endpoint with no JWT) and the pre-signup `ip:` bucket in search-courses,
   // that is not a raised cap, it is no cap.
   //
-  // /64 is the smallest unit an end host is guaranteed to hold ALL of, so it is
-  // the smallest cut that cannot be rotated within. /56 and /48 are the other
-  // defensible cuts if a shared /64 ever proves too coarse; /128 is not one,
-  // because it is the level the caller picks for free.
+  // WHY /48 AND NOT /64. This first cut at /64, on the reasoning that /64 is the
+  // smallest allocation an end host is guaranteed to hold all of, so it is the
+  // smallest cut that cannot be rotated within. That is the right frame for a
+  // LEGITIMATE host and the wrong one for an attacker, who rotates within the
+  // LARGEST allocation they hold, not the smallest — and the sentence above
+  // already said "/64 or larger" without following it anywhere. /56 is an
+  // ordinary residential and business delegation, tunnel brokers hand out a
+  // routed /48 free on request, and a /64 cut leaves those 256x and 65536x:
+  // 30,720 and 7.86M requests an hour against a 120/hour cap, which is still no
+  // cap. /48 is the smallest cut that is not routinely delegated whole to one
+  // subscriber, so it is where rotating starts costing the attacker something.
   //
-  // Costs, stated rather than discovered later: two subscribers behind one
-  // delegated /64 share a 120/hour share-link allowance, and the non-routable
-  // families collapse (`::1` and `::` to one subject, all of `fe80::/64` to
-  // another). Neither reaches a real client on this deployment.
-  return full.slice(0, 4).concat('0', '0', '0', '0').join(':');
+  // Costs, stated rather than discovered later. Subscribers sharing one /48
+  // share a 120/hour share-link allowance — but that is not a new penalty, it is
+  // parity with IPv4, where everyone behind one NAT already shares a bucket and
+  // this limit was sized knowing it ("a dozen mates, several behind one carrier
+  // NAT"). The non-routable families collapse (`::1` with `::`, all of
+  // `fe80::/48` onto one subject), and neither reaches a real client here. So do
+  // the prefixes that carry host identity in their LOW half — Teredo, NAT64 —
+  // which likewise do not arrive as a source address on this deployment.
+  //
+  // If a shared /48 ever does prove too coarse in practice, /56 is the middle
+  // option. /64 is not, for the reason above, and /128 never was — it is the
+  // level the caller picks for free.
+  return full.slice(0, 3).concat('0', '0', '0', '0', '0').join(':');
 }
 
 /**

@@ -224,23 +224,29 @@ Deno.test('one host cannot spell itself into more than one rate-limit bucket', (
 
   // ONE ALLOCATION IS ONE SUBJECT. Everything above is about how a caller
   // SPELLS an address it holds; this is about how many addresses it holds. An
-  // IPv6 host is delegated a whole /64, so the low four groups cost nothing to
-  // vary and every one of them was a fresh bucket — no forged header needed,
+  // IPv6 caller is handed a whole prefix, so the rest of it costs nothing to
+  // vary and every variation was a fresh bucket — no forged header needed,
   // which made the 120/hour cap on the unauthenticated endpoint unenforceable.
+  //
+  // The cut is /48. It was /64 briefly; an attacker rotates within the LARGEST
+  // block they hold, and /56 and /48 are ordinary delegations, so /64 still left
+  // 256x-65536x. The third and fourth cases here are what a /64 cut gets wrong.
   const alloc = bucketFor('2001:db8:1:2::1');
   for (
     const sameHost of [
       '2001:db8:1:2::2',
       '2001:db8:1:2:ffff:ffff:ffff:ffff',
-      '2001:db8:1:2:dead:beef:0:1',
+      '2001:db8:1:99::1',
+      '2001:db8:1:ffff:dead:beef:0:1',
       '[2001:db8:1:2::9]:443',
     ]
   ) {
     assertEquals(bucketFor(sameHost), alloc, `${sameHost} is the same allocation`);
   }
-  // ...and the truncation must not go so far that separate allocations merge,
-  // which would make one noisy /64 able to 429 its neighbours.
-  for (const other of ['2001:db8:1:3::1', '2001:db8:2:2::1', '2001:db9:1:2::1']) {
+  // ...and the cut must not go so far that separate allocations merge, which
+  // would let one noisy neighbour 429 everybody. This is the half that stops
+  // "widen it again" being the answer to every future finding.
+  for (const other of ['2001:db8:2::1', '2001:db9:1:2::1', '2002:db8:1:2::1']) {
     assert(bucketFor(other) !== alloc, `${other} is a different allocation`);
   }
   // IPv4 is untouched: a v4 address is the host, not a prefix.

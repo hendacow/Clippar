@@ -123,26 +123,33 @@ test('one IPv6 allocation is one subject, and two are still two', async () => {
   const bucketFor = (ip: string) => clientIp(req({ 'cf-connecting-ip': ip }));
   // The tests above are all about how a caller SPELLS an address it holds. This
   // one is about how many addresses it holds, which is the larger number: an
-  // IPv6 host is delegated a whole /64 — free with every cloud instance, and
-  // the normal per-subscriber allocation on mobile and residential ISPs — so
-  // the low four groups cost nothing to vary and each was its own bucket.
-  // Against the 120/hour cap on `get-shared-reel`, the one endpoint with no
-  // login, that is not a raised cap but no cap, with no forged header involved.
+  // IPv6 caller is handed a whole prefix, so the rest of it costs nothing to
+  // vary and each variation was its own bucket. Against the 120/hour cap on
+  // `get-shared-reel`, the one endpoint with no login, that is not a raised cap
+  // but no cap, with no forged header involved.
+  //
+  // The cut is /48 — the first three groups. It was /64 for about an hour, on
+  // the reasoning that /64 is the smallest block a host is guaranteed to hold
+  // whole. An attacker rotates within the LARGEST block they hold, though, and
+  // /56 and /48 are ordinary delegations, so /64 still left 256x and 65536x.
+  // The third and fourth cases below are the ones a /64 cut gets wrong.
   const alloc = bucketFor('2001:db8:1:2::1');
   for (
     const sameHost of [
       '2001:db8:1:2::2',
       '2001:db8:1:2:ffff:ffff:ffff:ffff',
-      '2001:db8:1:2:dead:beef:0:1',
+      '2001:db8:1:99::1',
+      '2001:db8:1:ffff:dead:beef:0:1',
       '[2001:db8:1:2::9]:443',
     ]
   ) {
     assert.equal(bucketFor(sameHost), alloc, `${sameHost} is the same allocation`);
   }
 
-  // The other direction matters just as much: truncate too far and one noisy
-  // /64 can 429 its neighbours, so separate allocations must stay separate.
-  for (const other of ['2001:db8:1:3::1', '2001:db8:2:2::1', '2001:db9:1:2::1']) {
+  // The other direction matters just as much, and is the reason not to keep
+  // widening: cut too far and one noisy neighbour can 429 everybody, so
+  // separate allocations must stay separate.
+  for (const other of ['2001:db8:2::1', '2001:db9:1:2::1', '2002:db8:1:2::1']) {
     assert.notEqual(bucketFor(other), alloc, `${other} is a different allocation`);
   }
 

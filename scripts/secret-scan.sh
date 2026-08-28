@@ -428,7 +428,16 @@ else
     # rcs[1] is grep: 0 matched, 1 no match, >1 could not run (bad pattern).
     if [ "${rcs[0]}" -ne 0 ]; then
       hist_broken=1
-      hist_why="git log failed (rc=${rcs[0]}): $(head -1 "$hist_err")"
+      # The RETURN CODE only — never git's own message. This was the last place in
+      # the file that printed a string it did not construct itself, and git's
+      # stderr is path- and ref-bearing by design: "unable to read sha1 file of
+      # PATH", "PATHSPEC is outside repository at ABSPATH". Since this workflow
+      # now runs on every branch and every tag, that lands in a world-readable
+      # log on precisely the run where something is already wrong. Say that it
+      # broke and how, never what it was looking at. Set SECRET_SCAN_VERBOSE
+      # locally — CI never does — to see the message while debugging.
+      hist_why="git log failed (rc=${rcs[0]})"
+      [ -n "${SECRET_SCAN_VERBOSE:-}" ] && hist_why="$hist_why: $(head -1 "$hist_err")"
       SWEEP_N=0
       return
     fi
