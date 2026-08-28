@@ -74,16 +74,18 @@ Deno.serve(async (req: Request) => {
   // This is the only endpoint with no JWT, so there is no user to key on. Share
   // tokens are 128-bit random and were never enumerable, but nothing stopped one
   // host pulling this in a loop, and every call costs a database read plus a
-  // signed-URL mint. Keyed on `cf-connecting-ip`, falling back to the FIRST
-  // X-Forwarded-For entry — see clientIp(): Supabase's gateway overwrites that
-  // header rather than appending to it, so entry [0] is gateway-asserted and
-  // the trailing entries are its own internal hops.
+  // signed-URL mint. Keyed on clientIp(), which prefers `cf-connecting-ip` and
+  // falls back to the FIRST X-Forwarded-For entry — read that function's comment
+  // before changing anything here, because the reasoning is the opposite of the
+  // usual advice and was settled by measurement, not first principles.
   //
-  // "Gateway-asserted" holds only WHILE THE CLOUDFLARE EDGE IS IN FRONT, and
-  // the fallback is reached precisely when the evidence for that edge
-  // (`cf-connecting-ip`) is absent. See the KNOWN LIMIT in clientIp(): off that
-  // ingress this header is caller-writable and this limit is bypassable. That
-  // matters most here — this is the only endpoint with no JWT.
+  // That trust precondition covers EVERY header clientIp() reads, not just
+  // X-Forwarded-For — `cf-connecting-ip` included, and that one is consulted
+  // FIRST, so on this deployment it is what actually keys this limit. Off the
+  // gateway all three of `cf-connecting-ip`, X-Forwarded-For [0] and
+  // `x-real-ip` are plain caller-typed strings, the cheapest bypass is the
+  // first branch rather than the second, and this limit stops limiting with no
+  // error and no log line to show it. Harden the first branch, not this one.
   //
   // Counted before the token is even read, so a flood of malformed requests is
   // limited too.

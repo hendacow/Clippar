@@ -138,12 +138,10 @@ const handler = async (req: Request): Promise<Response> => {
     // Identify the caller before limiting, so a signed-in user gets their own
     // bucket instead of sharing one with everyone behind the same NAT. The
     // onboarding funnel is pre-signup, so a missing/anon token is expected and
-    // falls back to IP — clientIp() prefers `cf-connecting-ip` (set by the
-    // Cloudflare edge, unforgeable) and only then the FIRST X-Forwarded-For
-    // entry, because Supabase's gateway OVERWRITES that header rather than
-    // appending to it. See _shared/rateLimit.ts clientIp() for the measurement
-    // — and for the KNOWN LIMIT: unforgeable is a property of the edge, not of
-    // the header, so off that ingress the fallback is caller-writable.
+    // falls back to IP — clientIp() prefers `cf-connecting-ip` and falls back to
+    // the FIRST X-Forwarded-For entry, because Supabase's gateway overwrites that
+    // header rather than appending to it. See clientIp()'s comment: taking the
+    // last entry keyed every limit on Supabase's own load balancer.
     const token = req.headers.get('Authorization')?.replace('Bearer ', '');
     let subject = `ip:${clientIp(req)}`;
     if (token) {

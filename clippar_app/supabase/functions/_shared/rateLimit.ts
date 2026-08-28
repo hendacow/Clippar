@@ -113,53 +113,54 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
 /**
  * The client's IP, for limits that have no authenticated subject.
  *
- * CAREFUL, and read the body before changing this: the generic advice for
- * X-Forwarded-For — "the client controls entry [0], so take the LAST entry" —
- * is measurably WRONG on this deployment, and the code below deliberately does
- * the opposite. Supabase's gateway OVERWRITES the header instead of appending
- * to it, so entry [0] is gateway-asserted and the trailing entries are its own
- * internal hops; keying on the last entry bucketed every caller by Supabase's
- * own load balancer. The measurement that establishes this is in the body.
+ * CAREFUL — and the care is the opposite of the usual advice. The standard rule
+ * is "never take X-Forwarded-For entry [0], the caller controls it; take the
+ * LAST entry your proxy appended". This docblock used to say exactly that, and
+ * it was wrong *here*, which only a deployment showed: Supabase's gateway
+ * OVERWRITES the header rather than appending to it, so entry [0] is
+ * gateway-asserted and the last entry is Supabase's own load balancer. Keying on
+ * the last entry fragmented one machine's requests across 14 buckets and never
+ * saw the real client at all.
  *
- * This docstring used to assert the generic rule as fact, which is exactly the
- * kind of comment that gets the code "corrected" back into the bug.
+ * So the order of preference below is `cf-connecting-ip`, then entry [0]. **Read
+ * the measurement in the body before changing it** — the general principle will
+ * tell you to invert this, and the general principle does not hold on this
+ * deployment.
  *
- * KNOWN LIMIT, stated so nobody mistakes the fallback for a guarantee: entry
- * [0] is gateway-asserted only BECAUSE the Supabase Cloudflare-fronted gateway
- * is in front, and the trust lives in that ingress, not in the header. The
- * X-Forwarded-For branch is reached only when `cf-connecting-ip` is ABSENT —
- * i.e. exactly when the evidence for that ingress is missing. Anywhere the edge
- * is not in front (`supabase functions serve` exposed for testing, a self-hosted
- * or relocated deployment, a Supabase ingress change) the header is fully
- * caller-writable, and a rotating `X-Forwarded-For` buys a fresh bucket per
- * request — the same unlimited outcome the generic advice warns about, reached
- * through a different door.
+ * The corollary matters too, and it is broader than the X-Forwarded-For branch.
+ * **Every header this function reads is trustworthy only because of that gateway
+ * — `cf-connecting-ip` included, and that one is consulted FIRST.** Off the
+ * gateway — self-hosted, `supabase functions serve`, a custom domain terminating
+ * elsewhere, or any future direct-to-origin route — all three of
+ * `cf-connecting-ip`, X-Forwarded-For `[0]` and `x-real-ip` are plain
+ * caller-supplied strings, and the cheapest bypass is the first branch, not the
+ * second. Anyone hardening only the X-Forwarded-For path would leave the easier
+ * door open. In that state a fresh header value per request keys a fresh bucket
+ * and the cap stops existing, with no error and no log line to show it.
  *
- * The `x-real-ip` fallback below is WEAKER STILL, and leaving it out of this
- * paragraph would be the same mistake this file is being corrected for. It is
- * single-valued, so there is not even a gateway-asserted position to prefer:
- * in those same deployments a caller who sends neither preferred header
- * controls the bucket key outright. BOTH branches are in scope for the
- * trusted-ingress fix described next; neither is a guarantee today.
- *
- * That matters most for `get-shared-reel`, the only unauthenticated endpoint
- * here.
- *
- * NOT fixed in this pass, deliberately. The fix is a behaviour change to rate
- * limiting (gate BOTH fallback branches on an explicit trusted-ingress flag and
- * collapse to one shared bucket otherwise — `x-real-ip` must not be left as an
- * unguarded tail), and its failure mode is self-throttling the whole endpoint
- * if `cf-connecting-ip` ever goes missing in production. Worth landing with an
- * alert on the shared-bucket key appearing at all: if it ever shows up in prod
- * the edge has dropped out, which is worth knowing regardless. That is
- * a decision to take deliberately with the ability to watch it, not a change to
- * fold into a comment-only PR. See reports/cto/2026-08-25.md §5.
+ * Nothing here asserts that precondition at runtime; that is a known open
+ * decision, not an oversight.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
-  // which sets this to a SINGLE address it observed itself. A caller cannot
-  // forge it — anything they send under that name is replaced at the edge — so
-  // it is the most trustworthy value available and needs no parsing.
+  // which sets this to a SINGLE address it observed itself, so it needs no
+  // parsing and is the most trustworthy value on offer.
+  //
+  // **HONEST SCOPE — this branch is NOT covered by the measurement below.** That
+  // measurement spoofed X-Forwarded-For and watched it be discarded; nothing
+  // here has ever spoofed `cf-connecting-ip`. Cloudflare *should* replace an
+  // inbound value of its own header for proxied traffic, and that is the whole
+  // basis for trusting this branch — but it is first-principles reasoning about
+  // this gateway's header handling, which is exactly the reasoning the docblock
+  // above records as having produced an inverted conclusion once already.
+  //
+  // One request settles it: send `cf-connecting-ip: 198.51.100.77` to the dev
+  // project and log what this returns. Real address -> record it here beside the
+  // X-Forwarded-For result and the question is closed. Echoed back -> it is a
+  // live bypass on the hosted deployment, not an off-gateway hypothetical.
+  //
+  // OFF the gateway nothing replaces it either way and it is plainly a
+  // caller-typed string, which is why the corollary names this branch first.
   const cf = req.headers.get('cf-connecting-ip')?.trim();
   if (cf) return cf;
 

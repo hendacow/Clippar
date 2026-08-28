@@ -26,6 +26,15 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 
+# path:line ONLY — never the matched text. `git grep -In` emits
+# "path:line:<the whole matching line>", so echoing its output verbatim prints
+# the credential this script just caught. CI logs on a public repository are
+# world-readable for ~90 days, so that republishes the secret to a URL an
+# attacker can poll, and that copy outlives deleting the key from the tree.
+# Piping every match through this is the difference between reporting a leak
+# and committing one.
+locs() { cut -d: -f1,2; }
+
 # ─────────────────────────────────────────────────────────────────────────────
 # 1. No dotenv file may be TRACKED.
 # ─────────────────────────────────────────────────────────────────────────────
@@ -36,112 +45,12 @@ bad() { printf 'FAIL  %s\n' "$1"; fail=1; }
 # it. This checks the thing that actually matters (is it tracked?) rather than
 # trusting the ignore list to be complete.
 echo "── tracked dotenv files ───────────────────────────────"
-# `-z` rather than plain ls-files: `core.quotePath=false` only stops bytes ABOVE
-# 0x80 counting as unusual. Double-quote, backslash and control characters are
-# C-escaped regardless of it, so `.env".production` still arrives wrapped in
-# quotes, ending in `"` instead of the extension, and every $-anchored regex
-# here misses it. `-z` emits paths NUL-separated and RAW, which sidesteps
-# quoting as a category. Verified. Do not simplify the -z back out.
-tracked_env="$(git ls-files -z | grep -zE '(^|/)\.env($|\.)' | grep -zv '\.example$' | tr '\0' '\n' || true)"
+tracked_env="$(git ls-files | grep -E '(^|/)\.env($|\.)' | grep -v '\.example$' || true)"
 if [ -n "$tracked_env" ]; then
   bad "dotenv file(s) committed to the repo:"
   echo "$tracked_env" | while read -r f; do note "$f"; done
 else
   note "none tracked (only .example files)"
-fi
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 1b. No credential-carrying BINARY document may be tracked.
-# ─────────────────────────────────────────────────────────────────────────────
-# Every pattern check below is a text grep, and `git log -p` prints "Binary
-# files differ" for a document container — so a credential inside one is
-# invisible to all of them, at any pattern strength, and no amount of tuning
-# the patterns changes that. Filename is the only signal available for a
-# container the scanner cannot open, so use it.
-#
-# Deliberately narrow: document containers, ARCHIVES and key-material
-# extensions only — not images/fonts/video — so this stays a rule people trust
-# rather than one they learn to ignore.
-#
-# Archives earn their place: a tarball holding a `.env` defeats every other
-# check in this file. The dotenv rule at §1 matches on path and the archive's
-# path is not a dotenv path; both content sweeps are blind because `git grep`
-# skips binary files and `git log -p` prints only "Binary files differ".
-# `.tar.gz`/`.tar.bz2` need no multi-suffix handling — the bare `gz`/`bz2`
-# alternatives cover them.
-#
-# This list is open-ended by nature and will never be "complete". If a build
-# ever legitimately needs a tracked file with one of these extensions, carve it
-# out by PATH here rather than removing the extension, and say why.
-#
-# Checked in the index AND across every commit reachable from HEAD. The index
-# alone is not enough, and the gap is the same shape as the one that hid the
-# leak: a branch that adds the document in one commit and deletes it in the
-# next has a clean tip index, and the history grep below cannot look inside the
-# blob — so commit-then-delete, the case where rotation is the only remedy,
-# would sail through. `ci.yml` checks out with `fetch-depth: 0`, so the
-# reachable history is really there to scan.
-#
-# Scoped to HEAD, NOT `--all`, and that is deliberate rather than lazy:
-# HEAD-reachable is the scope a PR author can actually act on. A gate that is
-# red on every build for something the current change did not introduce, and
-# cannot remove, is a gate everyone learns to click past.
-echo
-echo "── history completeness ───────────────────────────────"
-# ASSERT the precondition instead of documenting it. Both history sweeps below
-# depend on the clone being complete, and the argument for that used to live in
-# a comment pointing at `ci.yml`'s `fetch-depth: 0` — a value in a different
-# file that any "speed up CI" edit can drop.
-#
-# The failure is silent, which is what makes it serious: a shallow clone does
-# NOT error. `git log -p --all` and `git rev-list --objects HEAD` both succeed,
-# they just traverse almost nothing, so the sweeps come back empty and print
-# "clean". Verified: a --depth=1 clone of a repo with a committed-then-deleted
-# key prints "history clean for live-key shapes" and exits 0. That is a false
-# CLEAN for the exact class — commit-then-delete — where rotation is the only
-# remedy, and it is byte-identical in the CI log to a real pass.
-#
-# Every other workflow in this repo checks out shallow; only ci.yml uses
-# fetch-depth: 0. So this is one edit away at all times, and it is also what a
-# developer gets running the scan in a `git clone --depth` checkout.
-shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || echo unknown)"
-if [ "$shallow" != "false" ]; then
-  bad "shallow or unreadable clone (is-shallow=$shallow) — the history sweeps below CANNOT run"
-  note "check out with fetch-depth: 0 (ci.yml) or re-clone without --depth"
-else
-  note "full clone — history sweeps can see every reachable commit"
-fi
-
-echo
-echo "── tracked credential-carrying binaries ───────────────"
-BINARY_DOC_EXT='\.(docx?|docm|xlsx?|xlsm|pptx?|pptm|odt|ods|odp|rtf|pdf|zip|7z|rar|tar|tgz|gz|bz2|xz|zst|kdbx?|vsix|p8|p12|pfx|der|p7b|p7c|pkcs12|pkcs8|crt|cer|key|asc|gpg|jks|keystore|bcfks|ppk|ovpn|mobileprovision)$'
-tracked_bin="$(git ls-files -z | grep -zEi "$BINARY_DOC_EXT" | tr '\0' '\n' || true)"
-if [ -n "$tracked_bin" ]; then
-  bad "binary document/key file(s) tracked — text scans cannot see inside these:"
-  echo "$tracked_bin" | head -5 | while read -r f; do note "$f"; done
-  note "if this file is genuinely needed, store it outside the repo and link to it"
-else
-  note "none in the working tree"
-fi
-
-# Same rule against reachable history. A blob here is already leaked to anyone
-# who can clone, so deleting it is NOT the fix — it has to be rotated.
-# Errors are NOT swallowed here. `2>/dev/null || true` would make an unreadable
-# object, a corrupt pack or a partial (--filter) clone indistinguishable from a
-# clean result — the same silent-CLEAN shape this section exists to stop.
-if ! rev_out="$(git -c core.quotePath=false rev-list --objects HEAD 2>&1)"; then
-  bad "rev-list failed — binary history sweep did NOT run: $(printf '%s' "$rev_out" | head -1)"
-  rev_out=''
-fi
-hist_bin="$(printf '%s\n' "$rev_out" \
-  | grep -Ei "$BINARY_DOC_EXT" | awk '{ $1=""; sub(/^ /,""); print }' \
-  | sort -u || true)"
-if [ -n "$hist_bin" ]; then
-  bad "binary document/key file(s) in history reachable from HEAD:"
-  echo "$hist_bin" | head -5 | while read -r f; do note "$f"; done
-  note "deleting the file does NOT undo this — treat anything inside it as compromised and rotate it"
-else
-  note "none in history reachable from HEAD"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -158,74 +67,19 @@ CRED_PATTERNS=(
   'whsec_[0-9A-Za-z]{16,}'            # Stripe webhook signing secret
   're_[0-9A-Za-z]{8}_[0-9A-Za-z]{16,}' # Resend API key
   'sk_[0-9A-Za-z]{24,}'               # RevenueCat secret key
-  # ANCHORED to the surrounding JSON, and split so this line cannot match
-  # ITSELF — both halves are load-bearing. Every other pattern here is safe
-  # already: their own text contains `[0-9A-Za-z]{16,}` rather than real
-  # alphanumerics, so they cannot self-match. This one was a bare literal and
-  # could, which forced a `:(exclude)scripts/secret-scan.sh` pathspec onto the
-  # sweeps — and that pathspec was worse than the problem it solved. It made
-  # THIS file the one path in the repo where a credential committed and then
-  # deleted was invisible to BOTH sweeps, and on `git log` a pathspec also
-  # switches on default history simplification (see the history sweep below).
-  #
-  # Anchoring on `"role":` fixes it at the root: a real decoded service-role
-  # JWT payload always carries that prefix, while the bare literal this file
-  # used to contain (still present in its own pre-anchor commits) does not. So
-  # no pathspec is needed anywhere, and neither bypass can come back.
-  #
-  # `[[:space:]]*` is NOT optional decoration — JSON permits whitespace after
-  # the colon, and every way a human actually produces one of these payloads
-  # (jwt.io, `jq`, the Supabase dashboard, a pretty-printed debug log) emits it
-  # pretty-printed, with a space between the colon and the value. Anchoring
-  # without it silently narrowed this pattern to the compact form, which is the
-  # LESS common paste of the two.
-  #
-  # Whitespace is tolerated on BOTH sides of the colon. A first pass at this
-  # only allowed it after, which still missed the space-before-colon form —
-  # a partial fix that looked complete, so check all three shapes if you touch
-  # this: no space, space after, space both sides.
-  #
-  # It also preserves the no-self-match property, because in this line's own
-  # source text `[[:space:]]*` is literal bracket characters rather than
-  # whitespace — so the pathspec stays gone. (Do not write a pretty-printed
-  # example anywhere in this file to illustrate the point: the pattern is doing
-  # its job and will match it. Verified the hard way.)
-  #
-  # The trailing `([,}]|$)` is the same trick PEM_LINE uses below: anchor to the
-  # form real material takes rather than to prose that quotes it. In an actual
-  # decoded payload this key is followed by a comma, a closing brace, or the end
-  # of the line. In a security report describing the pattern it is followed by a
-  # markdown backtick — so the gate stops flagging its own documentation, which
-  # is the thing that "trains everyone to ignore the check".
-  #
-  # This was not a design choice up front. The un-anchored version failed the
-  # build on a report paragraph in this very PR, twice, and the second time the
-  # string was already in a pushed commit message where deleting it does not
-  # help. Do not remove the anchor to "tighten" the pattern.
-  #
-  # KNOWN LIMIT: a single-quoted object literal — a Python or JS dict pasted
-  # from a REPL — is not matched, and was not matched by the bare literal this
-  # replaced either. Folding a `["']` class into this entry is how the escaping
-  # silently breaks; if it is ever wanted, add it as a SEPARATE array entry and
-  # test all shapes.
-  '"role"[[:space:]]*:[[:space:]]*"service_ro''le"[[:space:]]*([,}]|$)'  # decoded service-role JWT payload
+  # Decoded service-role JWT payload. ANCHORED to a payload neighbour on the
+  # same line for the same reason PEM_LINE is anchored: the bare string
+  # `service_role"` matches PROSE, and this repository writes a great deal of
+  # prose about leaked service-role keys — including the sentences in
+  # reports/ that explain this very pattern. Unanchored, it fired three times
+  # across history on documentation and zero times on a credential, which
+  # turns the gate permanently red for a reason nobody can fix, and a gate
+  # that cries wolf gets deleted rather than obeyed. A real decoded Supabase
+  # payload always carries iss/ref/iat/exp beside the role; prose does not.
+  # The ENCODED form is unaffected — it is caught by the
+  # SUPABASE_SERVICE_ROLE_KEY line below.
+  '"role"[[:space:]]*:[[:space:]]*"service_role".*"(iss|ref|iat|exp)"|"(iss|ref|iat|exp)".*"role"[[:space:]]*:[[:space:]]*"service_role"'
   'SUPABASE_SERVICE_ROLE_KEY[=:][[:space:]]*["'"'"']?ey[A-Za-z0-9_-]{20,}'
-  # A service-role JWT matched on its own PAYLOAD, not on the variable name it
-  # happens to be assigned to. The name-anchored entry above only fires for the
-  # single spelling SUPABASE_SERVICE_ROLE_KEY; a key pasted bare into a
-  # backfill script, a fixture, a workflow yaml under some other name, or a
-  # runbook has no name at all. This is the widest-blast-radius credential in
-  # the repo — it bypasses every RLS policy on every table.
-  #
-  # `service_role` base64url-encodes to a different string at each of the three
-  # byte alignments, and which one applies depends on the length of the `ref`
-  # claim ahead of it, so all three are listed. Verified by encoding real
-  # payloads at ref lengths 20/21/22 — one token matched at each.
-  #
-  # Does not self-match: the `eyJ` here is followed by `[A-Za-z0-9_-]{10,}`,
-  # whose leading `[` is not in that class. The ANON key is unaffected and stays
-  # committable — its payload carries the anon role, which encodes differently.
-  'eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]*(c2VydmljZV9yb2xl|cnZpY2Vfcm9s|ZXJ2aWNlX3Jv)'
 )
 # A PEM header is handled separately and ANCHORED to a whole line. This codebase
 # legitimately builds a PEM from a base64 secret at runtime (_shared/apple.ts)
@@ -233,145 +87,150 @@ CRED_PATTERNS=(
 # material always has the header alone on its own line, which is what this
 # matches — and matching prose instead would just train everyone to ignore the
 # check.
-# `[-+ ]{0,2}`, not `[+-]?`: a combined diff (--diff-merges=cc, used by the
-# history sweep) prefixes each line with ONE COLUMN PER PARENT, so a line added
-# in a two-parent merge arrives as `++-----BEGIN` or ` +-----BEGIN`. A single
-# optional column would miss both. Still correct for the working-tree grep:
-# the quantifier backtracks past the real leading dashes.
-PEM_LINE='^[-+ ]{0,2}[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
-# PATH AND LINE ONLY — never the matched text. `git grep -n` emits
-# `path:line:content`, and that content IS the credential. This repo is public
-# and ci.yml runs this script on every PR, so Actions logs here are readable
-# unauthenticated and retained for 90 days. Printing the value would mean the
-# gate WORKING republishes the key to a durable second surface at a stable URL,
-# pre-extracted — worse than the blob it just found, which at least requires
-# cloning and grepping. `cut` keeps a fully actionable locator with no value in
-# it; anyone who needs the value runs this script locally.
+PEM_LINE='^[+-]?[[:space:]]*\-\-\-\-\-BEGIN [A-Z ]*PRIVATE KEY\-\-\-\-\-[[:space:]]*$'
 for pat in "${CRED_PATTERNS[@]}"; do
-  hits="$(git grep -nE "$pat" 2>/dev/null || true)"
+  hits="$(git grep -InE "$pat" -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
   if [ -n "$hits" ]; then
     bad "credential-shaped string in the working tree: /$pat/"
-    echo "$hits" | head -5 | cut -d: -f1,2 | while read -r l; do note "$l"; done
-    note "(locations only — values are not printed; this log is public)"
+    echo "$hits" | head -5 | locs | while read -r l; do note "$l"; done
   fi
 done
-pem_hits="$(git grep -nE "$PEM_LINE" 2>/dev/null || true)"
+pem_hits="$(git grep -InE "$PEM_LINE" \
+    -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null || true)"
 if [ -n "$pem_hits" ]; then
   bad "private-key PEM material in the working tree:"
-  echo "$pem_hits" | head -5 | cut -d: -f1,2 | while read -r l; do note "$l"; done
+  echo "$pem_hits" | head -5 | locs | while read -r l; do note "$l"; done
+fi
+
+# A SHALLOW clone cannot answer this question, and it fails silently in the one
+# direction that matters. `git log --all` on a grafted repo walks the handful of
+# commits it has, finds nothing, and the else-branch below prints "history
+# clean" — byte-identical to a real pass. That is not hypothetical: it is the
+# exact shape of this repository's own incident, where a check reported CLEAN
+# because it never looked at the refs the key was on. "I cannot see history" and
+# "history is clean" are different sentences and the script must not confuse
+# them, so refuse to make the claim instead of making a false one.
+#
+# CI is unshallow (secret-scan.yml pins fetch-depth: 0, and a test pins that),
+# so this guard is for a local run, a fork, or the day someone edits the
+# workflow. Failing is right: an unverifiable gate is not a passing gate.
+shallow="$(git rev-parse --is-shallow-repository 2>/dev/null || true)"
+if [ "$shallow" != "true" ] && [ "$shallow" != "false" ]; then
+  # git < 2.15 has no --is-shallow-repository; the marker file is the same fact.
+  if [ -f "$(git rev-parse --git-dir 2>/dev/null || echo .git)/shallow" ]; then
+    shallow=true
+  else
+    shallow=false
+  fi
 fi
 
 # Same patterns across every commit reachable from any ref. `git log -p` is
 # cheap on a repo this size and is the only way to see a key that was committed
 # and then removed.
-#
-# The history sweep used to carry its OWN hand-written pattern list — a subset
-# of five. Anything added to CRED_PATTERNS after that line was written was
-# checked in the working tree and NOT in history, which is backwards: the tree
-# can be cleaned with a delete, history cannot. At least one shape in
-# CRED_PATTERNS was in exactly that gap, so this sweep could report
-# "history clean" for a credential that had in fact been committed. The
-# alternation is now built FROM the same array so the two cannot drift again.
-#
-# NO PATHSPEC, and that is the whole point — do not re-add one. Passing
-# `git log` a pathspec (even a pure `:(exclude)`) switches on default history
-# simplification: for a merge TREESAME to one parent, git follows ONLY that
-# parent, so every commit reachable just through the side parent falls out of
-# the traversal and its `-p` output never reaches grep. `git merge -s ours` is
-# TREESAME by construction — and "merge the leak branch with -s ours, then let
-# GitHub delete the ref on merge" is a plausible attempt at tidying up a leak.
-# The key would still be in public history and the scan would print "history
-# clean".
-#
-# An earlier version of this file excluded `scripts/secret-scan.sh` here, to
-# stop the pattern definitions matching themselves. That exclusion cost more
-# than it bought twice over: it turned on the simplification above, AND it made
-# this file the one path in the repo where a credential committed and then
-# deleted was invisible to both sweeps. Anchoring the service-role pattern on
-# `"role":"` removed the need for it (see CRED_PATTERNS), so this sweep now
-# traverses everything, this file included. `--full-history` is kept anyway: it
-# costs nothing with no pathspec, and it keeps the merge bypass closed if
-# anyone re-adds one later.
-#
-# `--binary-files=text` is spelled out rather than using `-a`, and it must NOT
-# be shortened back. `-a` (--binary-files=text) and `-I`
-# (--binary-files=without-match) set the SAME grep option, so the last one on
-# the command line wins. This call used to read `grep -aInE`, where the `I`
-# comes after the `a` and therefore silently won:
-#
-#   grep -acE  PNG clippar_logo_green.png   -> 1
-#   grep -aIcE PNG clippar_logo_green.png   -> 0   <- what we were running
-#
-# The trigger is a NUL byte in the stream. (Not an encoding error — a latin-1
-# byte was tested in both C and C.UTF-8 locales on GNU grep 3.11 and did NOT
-# trip binary detection. Verify before believing either claim.)
-#
-# A NUL reaches this stream more easily than it looks, because git's own
-# "is this binary" heuristic only sniffs the FIRST 8000 BYTES of a blob. A file
-# that is ordinary text for 8kB and contains a NUL after that is classified as
-# text by git and inlined in full by `git log -p` — so the NUL lands in grep's
-# input, grep calls the whole stream binary, and `-I` discards ALL of it.
-# `$hist` comes back empty and the else-branch below prints "history clean for
-# live-key shapes". Fail-open, silent, and byte-identical in the CI log to a
-# real pass — the exact failure this gate exists to stop.
-#
-# Reproduced end-to-end in a scratch repo: with a committed-then-deleted key
-# plus one such file, `grep -aIcnE` finds 0 and `--binary-files=text` finds 2. On THIS repo today it is latent, not active (2275 `diff --git` lines under
-# either form), but it is one committed blob away from permanent.
+# The alternation is built FROM CRED_PATTERNS, never hand-written beside it.
+# It used to be its own list of five, and everything added to CRED_PATTERNS
+# after that line was written got checked in the working tree and NOT in
+# history — backwards, because a tree is cleaned with a delete and history is
+# not. The Resend shape on line 68 sat in exactly that gap while a live Resend
+# key was in a pushed blob, and this sweep printed "history clean for live-key
+# shapes". Deriving it here is what stops the two lists drifting again; the
+# pathspec keeps the pattern definitions above from matching themselves.
 hist_pat="$(printf '%s|' "${CRED_PATTERNS[@]}")"
 hist_pat="${hist_pat}APPLE_PRIVATE_KEY[=:][[:space:]]*[\"']?[A-Za-z0-9+/]{100,}|$PEM_LINE"
-# Same no-swallowing rule as the binary sweep above: a git-side failure must go
-# red, not read as clean.
-# COUNT ONLY, for the same public-log reason as the working-tree sweep above,
-# and here there is not even a trade-off: `grep -n` would number lines of a
-# `git log -p` STREAM, so those offsets were never a usable locator anyway. A
-# count says everything the CI reader needs — go run it locally — and leaks
-# nothing. `grep -c` exits 1 when it finds nothing, hence the `|| true`.
-# `--text` is load-bearing, and it is a SECOND binary decision from the one
-# --binary-files=text handles. That flag fixes grep's classification; this one
-# fixes git's. `git log -p` decides binary-ness from the `diff` gitattribute
-# BEFORE grep sees a byte, and `.gitattributes` is a tracked, PR-editable file
-# — so `notes.txt binary` plus commit-then-delete hid a key from this sweep
-# entirely. Verified: without --text the planted key scored 0, with it 2.
-# The pipeline runs in THIS shell, not inside a command substitution, and there
-# is no `|| true` on it. Both details are load-bearing and were got wrong once:
-# `PIPESTATUS` reflects the last foreground pipeline in the CURRENT shell, so a
-# pipeline inside `$( )` cannot report its status back — the parent reads the
-# status of the assignment, which the `|| true` pinned to 0. The guard below was
-# therefore dead code, in the one place whose whole job is to not fail silently.
-# `|| true` also clobbers PIPESTATUS, because it is itself a command.
-#
-# `--diff-merges=cc` shows hunks differing from ALL parents — i.e. content
-# introduced by a hand-resolved merge, which plain `git log -p` does not diff at
-# all (it defaults to --diff-merges=off). This repo has 19 merge commits.
-hist_err="$(mktemp)"; hist_out="$(mktemp)"
-git log -p --all --full-history --diff-merges=cc --text --no-color -U0 2>"$hist_err" \
-  | grep --binary-files=text -cE "$hist_pat" >"$hist_out"
-# Copy the WHOLE array in one go. Reading ${PIPESTATUS[0]} into a variable is
-# itself a command, which resets PIPESTATUS to a single element — so a second
-# read of [1] is unbound under `set -u`. (Caught by that, having just written a
-# comment about getting PIPESTATUS wrong.)
-pipe_rcs=("${PIPESTATUS[@]}")
-log_rc="${pipe_rcs[0]}"
-grep_rc="${pipe_rcs[1]}"
-hist_n="$(cat "$hist_out" 2>/dev/null || echo 0)"
-rm -f "$hist_out"
-if [ "$log_rc" -ne 0 ]; then
-  bad "git log failed (rc=$log_rc) — credential history sweep did NOT run: $(head -1 "$hist_err")"
+if [ "$shallow" = "true" ]; then
+  hist=""
+else
+  hist="$(git log -p --all --no-color -U0 -- . ':(exclude)scripts/secret-scan.sh' 2>/dev/null \
+    | grep -aInE "$hist_pat" \
+    | head -5 || true)"
 fi
-# grep -c exits 1 for "no match" and >1 for a real error (a bad pattern, e.g. an
-# unbalanced bracket added to CRED_PATTERNS). Folding both into `|| true` would
-# let one malformed pattern silently disable the entire sweep.
-if [ "$grep_rc" -gt 1 ]; then
-  bad "grep rejected the pattern set (rc=$grep_rc) — credential history sweep did NOT run"
-fi
-rm -f "$hist_err"
-if [ "${hist_n:-0}" -gt 0 ]; then
-  bad "credential-shaped string present in git HISTORY — ${hist_n} matching line(s)"
-  note "rotation required, not just deletion — the value is already published"
-  note "values are NOT printed here: this log is public. Run ./scripts/secret-scan.sh locally."
+if [ "$shallow" = "true" ]; then
+  bad "history scan CANNOT RUN: this is a shallow clone."
+  note "A key that was committed and then deleted is invisible from here, so"
+  note "\"clean\" would be a false statement, not a pass. Re-run with full"
+  note "history: fetch-depth: 0 in CI, or 'git fetch --unshallow' locally."
+elif [ -n "$hist" ]; then
+  # COUNT ONLY. `git log -p | grep -n` numbers lines in the DIFF STREAM, so there
+  # is no useful path to print anyway — and a location in history is itself a
+  # search-narrowing locator for a key that is, by definition, already committed.
+  bad "credential-shaped string present in git HISTORY (rotation required, not just deletion):"
+  note "$(echo "$hist" | wc -l | tr -d ' ') match(es). Locations deliberately not"
+  note "printed — CI logs are public. Run ./scripts/secret-scan.sh locally to see them."
 else
   note "history clean for live-key shapes"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 2b. No OPAQUE BINARY DOCUMENT may be tracked.
+# ─────────────────────────────────────────────────────────────────────────────
+# This is a FILENAME check on purpose, and the reason matters more than the rule.
+#
+# Every check above greps for credential SHAPES, and they are blind to binary
+# blobs for TWO independent reasons — the second is the broader one and an
+# earlier version of this comment missed it:
+#
+#   1. `git grep -I` (used above) skips every file git considers binary, whether
+#      or not the key's bytes are actually in there. Verified, not assumed: a
+#      plain uncompressed file containing `sk_live_...` next to a NUL byte is
+#      found WITHOUT -I and skipped WITH it.
+#   2. A compressed container (Office, zip, tgz) does not contain the literal
+#      bytes at all, so even an unfiltered grep would miss it.
+#
+# `git log -p` compounds both by rendering any binary blob as
+# "Binary files differ". NO PATTERN ADDED TO CRED_PATTERNS CAN EVER FIRE ON
+# BINARY CONTENT.
+#
+# Reason 1 is why this list must cover credential CONTAINERS — a keystore, a
+# .p12, a SQLite file — and not just documents. Those are the higher-value leak:
+# an Android signing keystore or an APNs certificate is worse than a memo, and
+# the key material genuinely is in the bytes; git just never looks.
+#
+# .gitignore does not close it either: ignore rules are advisory, and `git add -f`,
+# an editor's "commit anyway", or a `git add .` predating the rule all walk past.
+# The only thing pattern-matching cannot miss is whether the blob EXISTS.
+echo
+echo "── opaque binary documents ────────────────────────────"
+# Documents and archives, then — the half that matters more — binary credential
+# containers. Keep in sync with the extension list in .gitignore.
+BINDOC='[.](docx?|docm|xlsx?|xlsm|pptx?|odt|ods|odp|rtf|pdf|vsix|numbers|pages)$'
+BINDOC="$BINDOC"'|[.](zip|7z|rar|jar|war|tgz)$|[.]tar[.]gz$'
+BINDOC="$BINDOC"'|[.](p12|pfx|jks|keystore|bcfks|mobileprovision|cer|der|sqlite3?|db)$'
+tracked_bin="$(git ls-files | grep -iE "$BINDOC" || true)"
+if [ -n "$tracked_bin" ]; then
+  bad "opaque binary document(s) tracked — credential patterns cannot see inside these:"
+  echo "$tracked_bin" | while read -r f; do note "$f"; done
+else
+  note "none tracked"
+fi
+
+# History half is a WARNING, not a failure: a pre-existing blob would otherwise
+# wedge every merge until a purge lands, and a check that blocks everything gets
+# deleted rather than fixed. Flip to `bad` once history is clean.
+#
+# COUNT ONLY — never print the names. CI logs on a public repository are world
+# readable for 90 days, so a check that names the file it is worried about
+# publishes it somewhere easier to find than where it lives. This repo has made
+# that exact mistake before: an earlier version of this script printed the
+# matched line, password included, straight into the build log. Run the script
+# locally to see which files; that output is not public.
+# AMR, not A: `diff.renames` defaults on, so a blob added under a harmless name
+# and later renamed to a matching extension is reported as R and would never be
+# counted — a rename should not be a way around this.
+#
+# Shallow clones: this sweep is as blind as the one above. It says nothing when
+# the count is zero, and silence reads as "none" — so say which it is. The run
+# is already FAILing by this point, but the log should not imply a clean sweep.
+if [ "$shallow" = "true" ]; then
+  hist_bin=0
+  note "history not searched — shallow clone (see above)."
+else
+  hist_bin="$(git log --all --pretty=format: --name-only --diff-filter=AMR 2>/dev/null \
+    | sort -u | grep -icE "$BINDOC" || true)"
+fi
+if [ "${hist_bin:-0}" -gt 0 ]; then
+  note "WARN ${hist_bin} opaque binary document(s) in git HISTORY."
+  note "     Names deliberately not printed — CI logs are public. Run this"
+  note "     script locally to list them. Rotation, not deletion, is the remedy."
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

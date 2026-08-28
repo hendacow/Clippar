@@ -41,9 +41,13 @@ passes, and 20-a-day is not a limit. The other seven functions had nothing.
   on the row lock. Service-role only; a user can neither read their counter nor
   reset it.
 - All nine endpoints now covered, limits in one reviewable table.
-- `get-shared-reel` has no JWT so it keys on IP — taking the **last**
-  `X-Forwarded-For` entry. The leftmost is caller-supplied; reading `[0]` would
-  hand out a fresh bucket per request and limit nothing. Tested explicitly.
+- `get-shared-reel` has no JWT so it keys on IP. **This described taking the last
+  `X-Forwarded-For` entry, which is no longer what the code does** — a later
+  deployment measurement showed Supabase's gateway *overwrites* the header rather
+  than appending, so the last entry was Supabase's own load balancer and the first
+  is the gateway-asserted client. `clientIp()` now prefers `cf-connecting-ip` and
+  falls back to entry `[0]`; see its comment for the measurement. Corrected
+  2026-08-26 — the original reasoning was sound in general and wrong here.
 - `create-payment-intent` fails **closed** (every call spends Stripe quota on your
   credentials). Everything else fails open — a limiter outage must not take the
   product down.
@@ -219,9 +223,11 @@ real work and left the half that mattered:
    machine, so the SQL has never been executed. Apply to **dev** first.
 4. **Migration number collision** — `perf/rls-initplan-and-indexes` also has a
    `016_`. Whichever branch merges second must renumber.
-5. Still open from the July 23 audit: rotate the Resend key in `Mailing key.docx`,
-   delete `clippar_app/kickbacks.vsix`, EAS Update code signing, Vercel
-   firewall/CAPTCHA on the waitlist form.
+5. Still open from the July 23 audit: rotate the exposed credential (provider and
+   document are in the private notification to Henry, not here — this file is on a
+   public repo and the credential is not yet rotated), delete the stray committed
+   VS Code extension (path in the same private notification), EAS Update code
+   signing, Vercel firewall/CAPTCHA on the waitlist form.
 
 ---
 
@@ -283,6 +289,7 @@ captured real payload. Also: `UPSTREAM_BUDGET` was 250/day against a free tier
 that is actually **50/day** (their pricing page), so the guard could never have
 fired before the vendor's own limit.
 
-### Resend
-Zero references in the repo — the only matches were Sentry's `beforeSend`. It was
-never wired in; the waitlist uses Sender.net. Nothing to remove in code.
+### Provider credentials in code
+Swept for hard-coded provider credentials. Nothing to remove in code — the only
+pattern matches were Sentry's `beforeSend`. Application code only: it says
+nothing about git history, which `scripts/secret-scan.sh` covers separately.
