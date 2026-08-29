@@ -281,13 +281,13 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
 
   return (
     <FlowScreen
-      title="Pick up to 5 swings from your camera roll — we'll cut them into one reel."
-      sub="Any clips with a swing in them. We'll find the good parts."
+      title="Make your first Clippar reel."
+      sub="Use up to 5 golf clips, or take the 60-second sample path. No course setup needed."
       footer={
         <>
-          <FlowButton label="Pick your clips" onPress={pickClip} />
+          <FlowButton label="Build from my clips" onPress={pickClip} />
           <Pressable onPress={watchSample} hitSlop={8} style={{ alignSelf: 'center' }}>
-            <Text style={styles.link}>No golf clips yet? Watch a sample</Text>
+            <Text style={styles.link}>Try the 60-second sample instead</Text>
           </Pressable>
         </>
       }

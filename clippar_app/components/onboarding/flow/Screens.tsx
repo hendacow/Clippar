@@ -93,13 +93,13 @@ export function HeroScreen({ onNext, onLogin }: FlowScreenProps) {
       </Rise>
       <View style={{ flex: 1, justifyContent: 'flex-end', gap: 4, paddingBottom: 8 }}>
         <Rise delay={220}>
-          <H1>Your round deserves a highlight reel.</H1>
+          <H1>Turn every round into a reel worth keeping.</H1>
         </Rise>
         <Rise delay={340}>
-          <Sub>Not a scorecard. Not stats. The actual footage of the shots you'll retell.</Sub>
+          <Sub>See the finished result first. Then make your own in under a minute.</Sub>
         </Rise>
         <Rise delay={460} style={{ gap: 12, marginTop: 20 }}>
-          <FlowButton label="Show me" onPress={onNext} />
+          <FlowButton label="Make my first reel" onPress={onNext} />
           <Pressable onPress={onLogin} hitSlop={8} style={{ alignSelf: 'center' }}>
             <Text style={styles.secondaryLink}>I already have an account</Text>
           </Pressable>
@@ -250,7 +250,7 @@ function ClickerBadge() {
 
 export function IntentScreen({ answers, setAnswers, onNext }: FlowScreenProps) {
   return (
-    <FlowScreen title="What's Clippar for, for you?" sub="Pick one — we'll build around it.">
+    <FlowScreen title="What do you want most from your rounds?" sub="One tap — we'll personalise the experience around it.">
       <View style={{ gap: 12, marginTop: 28 }}>
         {intentOptions.map((o, i) => (
           <TapChip
@@ -560,7 +560,7 @@ export function ReelReadyScreen({ ahaOutcome, onNext }: FlowScreenProps) {
           : 'Yours will star your own swings. Imagine this every round.'
       }
       center
-      footer={<FlowButton label="Keep going" onPress={onNext} />}
+      footer={<FlowButton label="Get ready for my real round" onPress={onNext} />}
     >
       <Rise delay={260} style={{ alignItems: 'center', marginTop: 24 }}>
         <View style={styles.revealBadge}>

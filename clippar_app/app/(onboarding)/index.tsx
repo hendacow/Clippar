@@ -1,8 +1,6 @@
 /**
- * 12-screen animated onboarding — host stepper (feat/onboarding-v2).
- * HERO → PROBLEM → HOW-IT-WORKS → INTENT → SHOT → COURSE → HANDICAP → AGE →
- * BUILD/REVEAL → CAMERA-ROLL AHA → REEL READY → PRO GATE → app/paywall
- * (14-day trial).
+ * Fast-to-value onboarding — host stepper.
+ * PROOF → ONE PERSONALISATION → CAMERA-ROLL/SAMPLE AHA → SUCCESS → PRO.
  *
  * One screen mounted at a time (the aha holds video + audio) with a
  * cross-fade between steps and an endowed progress bar (starts at 15%).
@@ -26,14 +24,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import Animated, { FadeIn } from 'react-native-reanimated';
 import {
   HeroScreen,
-  ProblemScreen,
-  HowItWorksScreen,
   IntentScreen,
-  ShotScreen,
-  CourseScreen,
-  HandicapScreen,
-  AgeScreen,
-  BuildRevealScreen,
   ReelReadyScreen,
   ProGateScreen,
   type FlowScreenProps,
@@ -50,18 +41,11 @@ import {
 } from '@/lib/onboardingProfile';
 
 const STEPS = [
-  HeroScreen, // 1 — hero reel
-  ProblemScreen, // 2 — the problem
-  HowItWorksScreen, // 3 — how Clippar works (mount + clicker education)
-  IntentScreen, // 4 — intent
-  ShotScreen, // 5 — the shot you'd hate to forget
-  CourseScreen, // 6 — home course (skippable)
-  HandicapScreen, // 7 — handicap band (skippable)
-  AgeScreen, // 8 — age range (skippable)
-  BuildRevealScreen, // 9 — building → reveal
-  AhaScreen, // 10 — camera-roll reel aha
-  ReelReadyScreen, // 11 — your reel's ready
-  ProGateScreen, // 12 — paywall setup
+  HeroScreen, // 1 — show the finished value first
+  IntentScreen, // 2 — one-tap personalisation
+  AhaScreen, // 3 — make a reel or run the honest sample
+  ReelReadyScreen, // 4 — concise success beat
+  ProGateScreen, // 5 — optional paid handoff
 ] as const;
 
 export default function OnboardingFunnel() {
