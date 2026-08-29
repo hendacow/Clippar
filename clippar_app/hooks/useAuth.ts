@@ -8,6 +8,7 @@ import { supabase } from '@/lib/supabase';
 import { iap } from '@/lib/iap';
 import { linkAppleCredentials } from '@/lib/api';
 import { isInvalidRefreshTokenError } from '@/lib/authSessionLogic';
+import { clearRoundPrefetch } from '@/lib/roundPrefetch';
 
 // Required so the browser-based Google OAuth flow completes cleanly when the
 // system browser hands control back to the app. No-op when not in an auth
@@ -36,6 +37,12 @@ WebBrowser.maybeCompleteAuthSession();
  * would derail every other subscriber to the same event.
  */
 async function resetLocalAccountState(): Promise<void> {
+  // The in-memory round-detail prefetch holds the departing user's round
+  // payloads (GPS + clip paths). Sessions also end HERE without ever passing
+  // through finishSignOut()'s clearAccountLinkedCaches() — remote revoke,
+  // refresh-token failure — so the cache must be scrubbed on the auth event
+  // too, not just on the sign-out button.
+  clearRoundPrefetch();
   try {
     await iap.reset();
   } catch {
