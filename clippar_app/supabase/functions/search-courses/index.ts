@@ -138,8 +138,10 @@ const handler = async (req: Request): Promise<Response> => {
     // Identify the caller before limiting, so a signed-in user gets their own
     // bucket instead of sharing one with everyone behind the same NAT. The
     // onboarding funnel is pre-signup, so a missing/anon token is expected and
-    // falls back to IP — clientIp() reads the LAST X-Forwarded-For entry, the
-    // one our proxy appended, because the leftmost is caller-controlled.
+    // falls back to IP — clientIp() prefers `cf-connecting-ip` and falls back to
+    // the FIRST X-Forwarded-For entry, because Supabase's gateway overwrites that
+    // header rather than appending to it. See clientIp()'s comment: taking the
+    // last entry keyed every limit on Supabase's own load balancer.
     const token = req.headers.get('Authorization')?.replace('Bearer ', '');
     let subject = `ip:${clientIp(req)}`;
     if (token) {

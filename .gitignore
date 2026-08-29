@@ -4,6 +4,20 @@ __pycache__/
 
 .venv/
 .env
+# Match the CLASS, not one name. `.env` on its own is a basename match and
+# covers nothing else — which is why `clippar_app/.env.local` used to need its
+# own hand-written line further down, and why `clippar_app/.env.production`
+# (which the committed .example files show carries SUPABASE_SERVICE_ROLE_KEY and
+# STRIPE_SECRET_KEY) was ignored by nothing at all. That hand-written line is
+# now gone: the pattern covers it, and a named entry in a world-readable file is
+# a public index, which is the rule this file sets for itself below.
+#
+# The scan only DETECTS, and only after a push has already made the blob
+# world-readable on a public repo. These rules are the half that PREVENTS, so
+# they have to cover every shape the scan fails on.
+.env.*
+!.env.example
+!.env.*.example
 service_account.json
 oauth_credentials.json
 drive_token.json
@@ -33,7 +47,6 @@ clippar_error.log
 
 # Clippar App
 clippar_app/node_modules/
-clippar_app/.env.local
 clippar_app/.expo/
 clippar_app/dist/
 clippar_app/ios/
@@ -50,9 +63,64 @@ tmp_flip_run/
 clippar.db-shm
 clippar.db-wal
 
-# Local secret / binary files that must never be committed
-Mailing key.docx
-# Office lock/owner files (e.g. ~$iling key.docx)
-~$*.docx
-# Packaged VS Code extensions (e.g. clippar_app/kickbacks.vsix)
+# Local / binary artefacts that should not be committed.
+#
+# Match by extension only — never add a specific filename here: this file is
+# world-readable and its history stays readable after an edit, so a named entry
+# is a public index.
+#
+# Keep this list in sync with BINDOC in scripts/secret-scan.sh. Anything the
+# scan FAILs on should never have been stageable in the first place — the scan
+# only detects after a push, and on a public repo a pushed blob is already out.
+*.doc
+*.docx
+*.docm
+*.xls
+*.xlsx
+*.xlsm
+*.ppt
+*.pptx
+*.odt
+*.ods
+*.odp
+*.rtf
+*.pdf
+*.numbers
+*.pages
 *.vsix
+# Archives — a compressed container hides its contents from every text scan
+*.zip
+*.7z
+*.rar
+*.jar
+*.war
+*.tgz
+*.tar
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.tar.zst
+*.gz
+*.bz2
+*.xz
+*.zst
+# Binary credential containers — the higher-value half
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.bcfks
+*.kdbx
+*.mobileprovision
+*.cer
+*.der
+# Mobile bundles — they carry signing and provisioning material
+*.apk
+*.aab
+*.ipa
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+# Office lock/owner files
+~$*

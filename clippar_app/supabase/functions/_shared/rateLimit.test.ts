@@ -14,6 +14,7 @@ import {
   assertEquals,
 } from 'https://deno.land/std@0.224.0/assert/mod.ts';
 import {
+  canonicalIp,
   clientIp,
   consumeRateLimit,
   enforceRateLimit,
@@ -44,10 +45,16 @@ function stubClient(handler: (fn: string, args: unknown) => unknown): AnyClient 
 // clientIp — the header-trust question
 // ─────────────────────────────────────────────────────────────────────────────
 
-Deno.test('clientIp prefers cf-connecting-ip, which the gateway sets and a caller cannot forge', () => {
-  // Supabase fronts Edge Functions with Cloudflare. Anything a caller sends
-  // under this name is replaced at the edge, so it needs no parsing and is the
-  // most trustworthy value on offer.
+Deno.test('clientIp PREFERS cf-connecting-ip over X-Forwarded-For (precedence only)', () => {
+  // NAME CHANGED 2026-08-26. This test used to be called "...which the gateway
+  // sets and a caller cannot forge", which claimed a security property it does
+  // not check and structurally cannot: un-forgeability is a fact about what
+  // Cloudflare does to inbound headers, and no unit test can observe that. All
+  // this asserts is PRECEDENCE — given both headers, the first one wins.
+  //
+  // The distinction matters because a test name is read as a guarantee. See the
+  // honest-scope note in clientIp() for the one request that would settle
+  // forgeability.
   const req = reqWith({
     'cf-connecting-ip': '203.0.113.9',
     'x-forwarded-for': 'attacker-supplied, 10.0.0.1',
@@ -93,6 +100,181 @@ Deno.test('clientIp falls back through x-real-ip, then to a constant', () => {
   // Everyone unidentifiable shares one bucket. Stricter than letting an
   // unidentifiable caller through unmetered.
   assertEquals(clientIp(reqWith({})), 'unknown');
+});
+
+Deno.test('clientIp never returns a value that is not address-shaped', () => {
+  // Whatever this returns becomes `api_rate_limit.subject`, which is unbounded
+  // TEXT inside the primary key. Without a shape test an anonymous caller on
+  // get-shared-reel writes one row per distinct header value, of any length —
+  // storage amplification against our own table, and separate from whether the
+  // header can be spoofed past the gateway at all.
+  //
+  // Each of these must fall THROUGH to the shared bucket rather than becoming
+  // one of its own.
+  for (
+    const junk of [
+      'a'.repeat(4096),
+      'not-an-ip',
+      "'; DROP TABLE api_rate_limit; --",
+      '203.0.113.9 <script>',
+      '  ',
+    ]
+  ) {
+    assertEquals(clientIp(reqWith({ 'cf-connecting-ip': junk })), 'unknown');
+    assertEquals(clientIp(reqWith({ 'x-forwarded-for': junk })), 'unknown');
+    assertEquals(clientIp(reqWith({ 'x-real-ip': junk })), 'unknown');
+  }
+
+  // A junk value must not shadow a good one further down the chain — otherwise
+  // the guard would hand every caller sending junk the same bucket as every
+  // caller sending nothing, which is a different bug.
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': 'not-an-ip', 'x-forwarded-for': '203.0.113.9' })),
+    '203.0.113.9',
+  );
+
+  // Real values are ACCEPTED — but IPv6 is no longer returned in the caller's own
+  // spelling, and that is the point rather than a regression. An earlier version
+  // of this block asserted "keyed exactly as before" and returned the input
+  // verbatim, which is precisely what let one host key many buckets.
+  //
+  // What is preserved is BUCKET IDENTITY: one host, one subject. What changes is
+  // the string, so IPv6 and v4-mapped callers get one fresh counter the first
+  // time this deploys — a single reset of an hour-long window, which is why it
+  // is noted here rather than treated as a migration.
+  assertEquals(clientIp(reqWith({ 'cf-connecting-ip': '203.0.113.9' })), '203.0.113.9');
+  // An IPv6 subject is the /64, not the address — see canonicalIp's closing
+  // comment. The low four groups are the half the caller can rotate for free.
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': '2001:db8::8a2e:370:7334' })),
+    '2001:db8:0:0:0:0:0:0',
+  );
+  // ::ffff:a.b.c.d IS a.b.c.d, so it folds onto the v4 form rather than being a
+  // second bucket for the same host.
+  assertEquals(
+    clientIp(reqWith({ 'cf-connecting-ip': '::ffff:203.0.113.9' })),
+    '203.0.113.9',
+  );
+});
+
+Deno.test('one host cannot spell itself into more than one rate-limit bucket', () => {
+  // The cap on get-shared-reel is per SUBJECT, so anything that lets one host
+  // render its own address two ways multiplies the cap by two. This needs no
+  // forged ingress — it is not a different address, just a different spelling of
+  // the caller's own, which is why a character-class check ("does it look
+  // addressy?") is not enough and the value has to be CANONICALISED.
+  const bucketFor = (ip: string) => clientIp(reqWith({ 'cf-connecting-ip': ip }));
+  const one = bucketFor('1.2.3.4');
+  for (const spelling of ['1.2.3.4', '01.2.3.4', '001.2.3.4']) {
+    assertEquals(bucketFor(spelling), one, `${spelling} must key the same bucket`);
+  }
+  // IPv6, and the compression point is the half an earlier version missed:
+  // `::` is a RENDERING choice, so re-emitting wherever the caller put it made
+  // one host into many subjects. `::1` alone has a seven-group zero run.
+  const six = bucketFor('2001:db8::1');
+  for (
+    const spelling of [
+      '2001:DB8::1',
+      '2001:0db8::0001',
+      '2001:db8:0::1',
+      '2001:db8::0:1',
+      '2001:db8:0:0::1',
+      '2001:db8:0:0:0::1',
+      '2001:db8:0:0:0:0:0:1',
+    ]
+  ) {
+    assertEquals(bucketFor(spelling), six, `${spelling} must key the same bucket`);
+  }
+  const loop = bucketFor('::1');
+  for (const spelling of ['0::1', '0:0::1', '::0:1', '::0:0:1', '0:0:0:0:0:0:0:1']) {
+    assertEquals(bucketFor(spelling), loop, `${spelling} must key the same bucket`);
+  }
+
+  // A v4-mapped address IS that v4 address. Without folding these together, the
+  // v4 canonicalisation is bypassable by spelling the same host through the v6
+  // branch — which would have handed back every bucket the v4 fix removed.
+  const four = bucketFor('1.2.3.4');
+  for (
+    const spelling of [
+      '01.2.3.4',
+      '::ffff:1.2.3.4',
+      '0:0:0:0:0:ffff:1.2.3.4',
+      '::ffff:102:304',
+    ]
+  ) {
+    assertEquals(bucketFor(spelling), four, `${spelling} must key the same bucket`);
+  }
+
+  // A proxy may WRAP the address without changing which host it is. These must
+  // key the host's own bucket, NOT the shared 'unknown' one — an ingress that
+  // appends a source port would otherwise put every visitor on the planet into
+  // a single 120/hour pool on the one endpoint with no login.
+  assertEquals(bucketFor('203.0.113.9:41234'), bucketFor('203.0.113.9'));
+  assertEquals(bucketFor('[2001:db8::1]:443'), six);
+  assertEquals(bucketFor('[2001:db8::1]'), six);
+  assertEquals(bucketFor('fe80::1%eth0'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('fe80::1%25eth0'), bucketFor('fe80::1'));
+  // BRACKETS AND A ZONE TOGETHER. The two wrappers were tested separately and
+  // this combination was not, which is exactly where an ordering bug hid: the
+  // zone pattern is end-anchored, so stripping it before unwrapping is a no-op
+  // on a value ending `]` or `]:443`.
+  assertEquals(bucketFor('[fe80::1%eth0]'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('[fe80::1%eth0]:443'), bucketFor('fe80::1'));
+  assertEquals(bucketFor('[fe80::1%25eth0]:443'), bucketFor('fe80::1'));
+
+  // ONE ALLOCATION IS ONE SUBJECT. Everything above is about how a caller
+  // SPELLS an address it holds; this is about how many addresses it holds. An
+  // IPv6 caller is handed a whole prefix, so the rest of it costs nothing to
+  // vary and every variation was a fresh bucket — no forged header needed,
+  // which made the 120/hour cap on the unauthenticated endpoint unenforceable.
+  //
+  // The cut is /48. It was /64 briefly; an attacker rotates within the LARGEST
+  // block they hold, and /56 and /48 are ordinary delegations, so /64 still left
+  // 256x-65536x. The third and fourth cases here are what a /64 cut gets wrong.
+  const alloc = bucketFor('2001:db8:1:2::1');
+  for (
+    const sameHost of [
+      '2001:db8:1:2::2',
+      '2001:db8:1:2:ffff:ffff:ffff:ffff',
+      '2001:db8:1:99::1',
+      '2001:db8:1:ffff:dead:beef:0:1',
+      '[2001:db8:1:2::9]:443',
+    ]
+  ) {
+    assertEquals(bucketFor(sameHost), alloc, `${sameHost} is the same allocation`);
+  }
+  // ...and the cut must not go so far that separate allocations merge, which
+  // would let one noisy neighbour 429 everybody. This is the half that stops
+  // "widen it again" being the answer to every future finding.
+  for (const other of ['2001:db8:2::1', '2001:db9:1:2::1', '2002:db8:1:2::1']) {
+    assert(bucketFor(other) !== alloc, `${other} is a different allocation`);
+  }
+  // IPv4 is untouched: a v4 address is the host, not a prefix.
+  assert(bucketFor('203.0.113.9') !== bucketFor('203.0.113.10'));
+
+  // Structure, not character class: these were all accepted by the earlier
+  // /^[0-9A-Fa-f:.]+$/ test and each one was a free extra bucket.
+  for (
+    const notAnAddress of [
+      'dead',
+      'cafe.babe',
+      '....',
+      '0',
+      '1.2.3.4.',
+      '.1.2.3.4',
+      '256.1.2.3',
+      '1.2.3',
+      'ffffffffffffffffffffffffffffffffffffffff',
+    ]
+  ) {
+    assertEquals(canonicalIp(notAnAddress), null, `${notAnAddress} is not an address`);
+    assertEquals(bucketFor(notAnAddress), 'unknown', `${notAnAddress} must share the fallback bucket`);
+  }
+
+  // Malformed IPv6 must not slip through on the colon branch either.
+  for (const bad of ['2001:db8:::1', '2001:db8::1::2', '2001:zzzz::1', '1:2:3:4:5:6:7:8:9', '12345::1']) {
+    assertEquals(canonicalIp(bad), null, `${bad} is not an address`);
+  }
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

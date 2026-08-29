@@ -103,10 +103,25 @@ export function holeReelDurationMs<T extends ReelClipTiming>(
       // `autoTrimStartMs`/`autoTrimEndMs` are the record of which window
       // actually produced sourceUri, and nothing but a real trim rewrites them
       // (updateClipEditorState only ever touches trim_start_ms/trim_end_ms).
-      // So the width is the file's length exactly while the bounds still ARE
-      // that window; once they diverge, the manual re-trim path is in charge
-      // and it maintains durationMs itself (successfully via sourceOverride,
-      // or by leaving both sourceUri and durationMs untouched on failure).
+      // So the width is the best available ESTIMATE of that file's length while
+      // the bounds still ARE that window; once they diverge, the manual re-trim
+      // path is in charge and it maintains durationMs itself (successfully via
+      // sourceOverride, or by leaving both sourceUri and durationMs untouched
+      // on failure).
+      //
+      // ESTIMATE, not the length — and the difference is not yet measured.
+      // The trim is written by AVAssetExportSession under
+      // AVAssetExportPresetPassthrough (ShotDetectorModule.trimVideoPassthrough),
+      // which copies samples rather than re-encoding and therefore cannot cut
+      // mid-GOP. Neither trim entry point returns the output file's real
+      // duration — both resolve `trimmedUri` plus the REQUESTED bounds — so
+      // nothing in the app ever measures it, and this width is the only number
+      // JS has. Native, meanwhile, reads the real file (fastParseClips sends
+      // 0..-1 for a pre-trimmed clip, so effectiveEndMs IS assetDurationMs).
+      // Any gap between the two makes the reel's timeline and this scorecard's
+      // timeline two independent clocks, and the error accumulates clip by clip.
+      // See reports/cto/2026-08-26.md — mechanism confirmed by reading, size
+      // unmeasured, and it needs one device measurement to settle.
       const boundsMatchTrimFile =
         clip.autoTrimStartMs !== undefined &&
         clip.autoTrimEndMs !== undefined &&

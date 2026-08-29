@@ -2,20 +2,23 @@ import { createClient } from '@supabase/supabase-js';
 import { Platform } from 'react-native';
 import { config } from '@/constants/config';
 
-// Platform-aware storage: SecureStore on native (with AsyncStorage fallback),
-// localStorage on web.
+// Platform-aware storage: SecureStore on native, localStorage on web.
 //
-// Why the fallback: on iOS the Keychain returns `errSecInteractionNotAllowed`
-// when the device is in a state where user interaction isn't allowed (e.g.
-// Face ID prompt pending, locked, or certain racey post-launch windows).
-// expo-secure-store surfaces that as the JS error:
+// Why there is a fallback at all: on iOS the Keychain returns
+// `errSecInteractionNotAllowed` when the device is in a state where user
+// interaction isn't allowed (e.g. Face ID prompt pending, locked, or certain
+// racey post-launch windows). expo-secure-store surfaces that as the JS error:
 //   "Calling the 'getValueWithKeyAsync' function has failed →
 //    Caused by: User interaction is not allowed."
 // When it bubbles up through Supabase's auth-session code path it
 // derails downstream work — most visibly our live record stop chain.
-// AsyncStorage is plain disk, can't throw for the same reason, and is
-// already a dep (Supabase requires it for its @supabase/supabase-js
-// default adapter), so we fall back to it silently and continue.
+//
+// This block used to say the fallback was AsyncStorage. IT IS NOT, and must
+// never become that again: AsyncStorage is unencrypted disk, and the value
+// being written here is the Supabase session including the long-lived refresh
+// token. The fallback is the process-lifetime in-memory mirror documented on
+// `memoryCache` below, which answers a transient Keychain READ failure without
+// anything reaching disk. SecureStore (Keychain) is the sole at-rest store.
 const storageAdapter = Platform.OS === 'web'
   ? {
       getItem: (key: string) => {

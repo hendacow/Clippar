@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -216,22 +217,108 @@ test('the release job does not hand the EAS token to a third-party action', () =
   );
 });
 
-test('the secret scanner runs in CI over full history', () => {
-  const ci = readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
+test('the secret scanner runs in CI over full history, on every branch', () => {
+  // Lives in its own workflow, not ci.yml. ci.yml gates main (typecheck, edge
+  // functions); the scan has to see EVERY ref, because a credential pushed on a
+  // branch with no open PR is world-readable from that moment on a public repo.
+  // This guard used to assert the scan was in ci.yml; that was moved deliberately
+  // and the guard now pins the stronger property rather than the old location.
+  const scan = readFileSync(
+    join(REPO, '.github', 'workflows', 'secret-scan.yml'),
+    'utf8',
+  );
+  // Comment lines stripped for every assertion in this test, for the reason the
+  // trigger check below already gives: a raw includes() over the whole file is
+  // satisfied by PROSE DESCRIBING a setting as readily as by the setting, so it
+  // keeps passing after someone deletes the line and leaves the paragraph that
+  // explains it.
+  //
+  // Stated precisely, because an over-claimed justification is the exact defect
+  // this repo keeps finding: no comment in either workflow contains
+  // `fetch-depth` or `scripts/secret-scan.sh` as a literal TODAY, so these two
+  // assertions are correct as raw reads right now and this is defensive
+  // consistency, not a live bug. It is defensive against something that has
+  // already happened once here though — ci.yml's checkout comment DOES name
+  // scripts/secret-scan.sh, which is why the duplicate-invocation check further
+  // down had to start stripping comments. Every assertion reading these files
+  // now uses the same rule so the next one cannot be written the fragile way.
+  const stripComments = (s: string) =>
+    s.split('\n').filter((l) => !/^\s*#/.test(l)).join('\n');
+  const scanBody = stripComments(scan);
   assert.ok(
-    ci.includes('scripts/secret-scan.sh'),
-    'ci.yml must invoke the secret scanner',
+    scanBody.includes('scripts/secret-scan.sh'),
+    'secret-scan.yml must invoke the secret scanner',
   );
   assert.ok(
-    ci.includes('fetch-depth: 0'),
+    scanBody.includes('fetch-depth: 0'),
     'the secret-scan checkout must be unshallow or it cannot see history',
   );
+
+  // Strip comment lines first: this header explains WHY there is no path filter,
+  // so a naive search for the word matches the prose and fails a passing config.
+  const trigger = scan
+    .slice(0, scan.indexOf('jobs:'))
+    .split('\n')
+    .filter((l) => !/^\s*#/.test(l))
+    .join('\n');
   assert.ok(
-    !/^on:[\s\S]*?paths:/m.test(ci.slice(0, ci.indexOf('jobs:'))),
-    'ci.yml must not filter by path — a path filter lets a commit route around the secret scan',
+    !/paths:/.test(trigger),
+    'secret-scan.yml must not filter by path — a path filter lets a commit route around the scan',
+  );
+  assert.ok(
+    /branches:\s*\['\*\*'\]|branches:\s*\[\s*"\*\*"\s*\]/.test(trigger),
+    'the scan must run on push to EVERY branch — a branch filter routes around it exactly as a path filter would',
+  );
+  // And on every TAG. This is not redundant with the line above, which is the
+  // whole trap: once a `push` trigger carries a `branches` filter at all, GitHub
+  // runs it for branch pushes ONLY and skips tag pushes outright. So
+  // `branches: ['**']` reads as "every ref" and is not — a tag pushed at a commit
+  // that is on no branch publishes the blob while this scan never fires.
+  assert.ok(
+    /tags:\s*\['\*\*'\]|tags:\s*\[\s*"\*\*"\s*\]/.test(trigger),
+    'the scan must run on push of EVERY tag — with a branches filter set, tag pushes are skipped unless tags are listed too',
+  );
+
+  // And it must not have been quietly left in ci.yml as well, which would run it
+  // twice and let someone "fix" a failure by deleting the wrong copy.
+  //
+  // Comment lines stripped here for the same reason as above, and it is not
+  // hypothetical: ci.yml's checkout carries a comment naming this script, to
+  // explain why that job needs fetch-depth: 0. Matching prose would fail a
+  // correct config, which trains people to edit the guard instead of the fault.
+  // What must not be there is an INVOCATION, so match a run step.
+  const ci = stripComments(
+    readFileSync(join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8'),
+  );
+  assert.ok(
+    !/secret-scan\.sh/.test(ci),
+    'the scan belongs in secret-scan.yml only — remove the duplicate from ci.yml',
+  );
+
+  // ci.yml's own checkout must be unshallow too. buildEnvGuards runs the scanner
+  // directly, and on a shallow checkout that assertion passed while the scanner
+  // searched no history at all — green and vacuous. The scanner now refuses to
+  // report clean in that state, so this pins the checkout that makes it real.
+  // Reuses `ci` above — the same file, comments already stripped. That checkout
+  // carries a nine-line comment arguing for an unshallow clone; it does not
+  // spell `fetch-depth`, so this would hold as a raw read today. It is one
+  // rewording of that paragraph away from not holding, and re-reading the file
+  // raw when a stripped copy is already in scope is how that reword goes
+  // unnoticed.
+  assert.ok(
+    ci.includes('fetch-depth: 0'),
+    'the verify job runs the scanner, so its checkout must be unshallow or the scan asserts nothing',
   );
 });
 
+// This asserts the scan passes, and it only means something if the scan could
+// actually run. The scanner FAILs rather than reporting a false clean when it is
+// handed a shallow clone, so a failure here can mean either "there is a finding"
+// or "this checkout has no history" — and those need different responses. The
+// message below names the second so nobody debugs the wrong one.
+//
+// CI gives both the verify job and the scan job fetch-depth: 0. If you are
+// seeing this fail locally, `git fetch --unshallow` first.
 test('the secret scanner is green on the current tree', () => {
   const { code, out } = (() => {
     try {
@@ -247,5 +334,576 @@ test('the secret scanner is green on the current tree', () => {
       return { code: err.status ?? 1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` };
     }
   })();
-  assert.equal(code, 0, out);
+  assert.equal(
+    code,
+    0,
+    out.includes('shallow clone')
+      ? `the scan could not run — this checkout has no history, so this is not a\n` +
+          `finding. Run 'git fetch --unshallow', or add fetch-depth: 0 to the job.\n\n${out}`
+      : out,
+  );
+});
+
+// A path git considers "unusual" — a byte >= 0x80, a double-quote, a backslash —
+// is C-escaped and WRAPPED IN QUOTES by ls-files and log --name-only. The path
+// then ends in `"` rather than its extension, so every $-anchored regex in the
+// scanner misses it: one accented character was a complete bypass of both
+// filename gates, as likely by accident (a club or course with an accent in its
+// name) as on purpose.
+//
+// Asserted against a throwaway repo rather than this one, because the property is
+// "the scanner FAILS on a planted file" and this tree is deliberately clean. The
+// checks above only ever prove it stays green, which is the half that cannot
+// catch a scanner that has silently stopped looking.
+test('the secret scanner is not bypassed by a non-ASCII or quoted path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-quote-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+
+    // A dotenv file under an accented directory, and a binary document with an
+    // accented name — one case for each filename gate.
+    mkdirSync(join(dir, 'café'));
+    writeFileSync(join(dir, 'café', '.env'), 'SECRET=1\n');
+    writeFileSync(join(dir, 'kéy.docx'), Buffer.from([0x78, 0x00, 0x79]));
+    git('add', '-A', '-f');
+    git('commit', '-qm', 'plant');
+
+    // Sanity check that the premise still holds: if a future git stops quoting,
+    // this test would pass for the wrong reason and stop guarding anything.
+    assert.match(
+      git('ls-files'),
+      /"/,
+      'premise broken: git no longer quotes unusual paths, so this test proves nothing',
+    );
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `the scanner reported CLEAN with a tracked dotenv file and a tracked binary\n` +
+        `document, both under non-ASCII names. Enumerate paths with 'git ls-files -z'\n` +
+        `(NOT -c core.quotePath=false, which only covers bytes >= 0x80).\n\n${out}`,
+    );
+    assert.match(out, /dotenv file\(s\) committed/, out);
+    assert.match(out, /opaque binary document\(s\) tracked/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The scanner used to exclude its own source from EVERY sweep, because one
+// pattern contained its own match text in cleartext. That made scripts/
+// secret-scan.sh the single file in the repository where a committed-then-
+// deleted credential was invisible — and it is exactly the file someone edits
+// while holding a real key, tuning a rule or pasting a live value to check that
+// it fires. The exclusion is now per-pattern, so every other shape scans this
+// file like any other.
+test('a credential committed into the scanner itself is not invisible to it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-self-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  const scanner = join(dir, 'scripts', 'secret-scan.sh');
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    const pristine = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8');
+    writeFileSync(scanner, pristine, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    // Plant a live-shaped key inside the scanner, then delete it — the shape of
+    // the incident this whole gate exists for. Split so this test file does not
+    // itself carry a matchable literal.
+    writeFileSync(scanner, `${pristine}\n# TEMP=sk_live_${'A'.repeat(20)}\n`, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'plant');
+    writeFileSync(scanner, pristine, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'delete');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [scanner], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a credential committed into the scanner and deleted next commit was reported\n` +
+        `CLEAN. The ':(exclude)scripts/secret-scan.sh' pathspec must stay scoped to the\n` +
+        `one self-referential pattern, not applied to every sweep.\n\n${out}`,
+    );
+    assert.match(out, /present in git HISTORY/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// `git grep -I` skips every file git CLASSIFIES as binary, and that
+// classification is caller-controllable: one line in .gitattributes marking a
+// path `binary` hides a plaintext credential from the content sweeps, while the
+// bytes stay readable to anyone who clones. The filename gate cannot compensate
+// — it is an extension allowlist, and you cannot enumerate every name someone
+// might use.
+test('a credential hidden behind a .gitattributes binary marker is still caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-attr-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+    // Split so this test file carries no matchable literal of its own.
+    writeFileSync(join(dir, 'notes.dat'), `KEY=sk_live_${'A'.repeat(20)}\n`);
+    writeFileSync(join(dir, '.gitattributes'), 'notes.dat binary\n');
+    git('add', '-A', '-f');
+    git('commit', '-qm', 'plant');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a plaintext credential in a file marked 'binary' in .gitattributes was\n` +
+        `reported CLEAN. The content sweeps must not pass -I to git grep.\n\n${out}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// grep exits 0 for matched, 1 for no match, and >1 for "I could not do it".
+// Flattening those into "no hits" means a rule that fails to compile is silently
+// inactive while the gate reports CLEAN — and since the history alternation is
+// derived from the same array, every pattern is now compiled by two engines that
+// do not accept identical dialects.
+test('a credential pattern that cannot compile fails the gate instead of passing it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-badpat-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    // `a{2,1}` is an invalid repetition in POSIX ERE and stays invalid when
+    // joined into an alternation, unlike an unterminated bracket which a later
+    // `]` in the joined pattern can accidentally close.
+    const broken = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8')
+      .replace('CRED_PATTERNS=(\n', "CRED_PATTERNS=(\n  'sk_bad_a{2,1}'\n");
+    assert.notEqual(
+      broken,
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8'),
+      'could not inject the broken pattern — CRED_PATTERNS declaration moved?',
+    );
+    writeFileSync(join(dir, 'scripts', 'secret-scan.sh'), broken, { mode: 0o755 });
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a pattern that cannot compile was treated as "no matches" and the gate\n` +
+        `reported CLEAN. A grep that did not run is not a grep that found nothing.\n\n${out}`,
+    );
+    assert.match(out, /CANNOT RUN/, out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Two independent binary decisions sit between a credential and this gate, and
+// `grep -a` only fixes one of them. `git log -p` decides binary-ness from the
+// `diff` gitattribute before grep sees a byte and prints "Binary files differ",
+// so without `--text` the history sweep counts nothing. `.gitattributes` is
+// tracked and PR-editable, so the blinding can travel in the same push as the
+// credential — and `*.json binary` or an LFS line does it by accident.
+//
+// The merge case is the sharper one: plain `git log -p` shows NO diff for a
+// merge commit, so a credential typed into a hand-resolved conflict exists in
+// neither parent and is invisible. Not hypothetical here — this branch is itself
+// a hand-resolved merge.
+test('the history sweep sees through a binary marker and into merge resolutions', () => {
+  for (
+    const shape of [
+      { name: 'gitattributes binary marker', attrs: 'notes.txt binary\n', merge: false },
+      { name: 'credential added in a merge resolution', attrs: '', merge: true },
+    ]
+  ) {
+    const dir = mkdtempSync(join(tmpdir(), 'scan-hist-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    try {
+      git('init', '-q', '.');
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'scripts'));
+      writeFileSync(
+        join(dir, 'scripts', 'secret-scan.sh'),
+        readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(dir, 'a.txt'), 'base\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+      const key = `KEY=sk_live_${'A'.repeat(20)}\n`;
+
+      if (shape.merge) {
+        git('checkout', '-q', '-b', 'side');
+        writeFileSync(join(dir, 'b.txt'), 'side\n');
+        git('add', '-A');
+        git('commit', '-qm', 'side');
+        git('checkout', '-q', '-');
+        writeFileSync(join(dir, 'a.txt'), 'base\nmain\n');
+        git('add', '-A');
+        git('commit', '-qm', 'mainline');
+        execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side'], {
+          cwd: dir,
+          stdio: 'pipe',
+        });
+        // Content that exists in NEITHER parent — only in the resolution.
+        writeFileSync(join(dir, 'merged.txt'), key);
+        git('add', '-A');
+        git('commit', '-qm', 'merge');
+      } else {
+        writeFileSync(join(dir, '.gitattributes'), shape.attrs);
+        writeFileSync(join(dir, 'notes.txt'), key);
+        git('add', '-A');
+        git('commit', '-qm', 'plant');
+        git('rm', '-q', 'notes.txt');
+        git('commit', '-qm', 'cleanup');
+      }
+
+      let code = 0;
+      let out = '';
+      try {
+        out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err: any) {
+        code = err.status ?? 1;
+        out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      }
+      assert.notEqual(
+        code,
+        0,
+        `${shape.name}: the gate reported CLEAN. The history sweep needs BOTH\n` +
+          `--text (git log makes its own binary decision before grep) and\n` +
+          `--diff-merges=cc (plain git log -p does not diff merge commits).\n\n${out}`,
+      );
+      assert.match(out, /present in git HISTORY/, `${shape.name}: ${out}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+// The encoded service-role rule is three base64 alternatives, one per byte
+// alignment. The first used to run two bits PAST the closing quote of the claim,
+// so it depended on the byte that follows — and a payload whose LAST claim is the
+// role ends `"service_role"}`, where `}` (0x7d) flips that character. Measured
+// across realistic tokens, the old form missed 24 of 148, every one of them
+// role-last. The original "27/27 matched" check only ever generated tokens with
+// iat/exp after the role, so it could not see the gap it was verifying.
+test('a service-role key is caught even when the role is the last claim', () => {
+  const b64url = (s: string) =>
+    Buffer.from(s).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const header = b64url(JSON.stringify({ alg: 'HS256', typ: 'JWT' }));
+
+  // Vary the project-ref length so the claim lands on every byte alignment, and
+  // put the role both last and mid-object.
+  for (const refLen of [16, 17, 18]) {
+    for (
+      const payload of [
+        { iss: 'supabase', ref: 'r'.repeat(refLen), iat: 1, exp: 2, role: 'service_role' },
+        { iss: 'supabase', ref: 'r'.repeat(refLen), role: 'service_role', iat: 1, exp: 2 },
+      ]
+    ) {
+      const dir = mkdtempSync(join(tmpdir(), 'scan-jwt-'));
+      const git = (...args: string[]) =>
+        execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+      try {
+        git('init', '-q', '.');
+        git('config', 'user.email', 'test@example.invalid');
+        git('config', 'user.name', 'test');
+        mkdirSync(join(dir, 'scripts'));
+        writeFileSync(
+          join(dir, 'scripts', 'secret-scan.sh'),
+          readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+          { mode: 0o755 },
+        );
+        // Under a name no rule recognises, which is the whole point of matching
+        // the encoded credential rather than a variable name.
+        writeFileSync(
+          join(dir, 'admin.ts'),
+          `const supabaseAdmin = createClient(url, "${header}.${b64url(JSON.stringify(payload))}.sig");\n`,
+        );
+        git('add', '-A');
+        git('commit', '-qm', 'plant');
+
+        let code = 0;
+        let out = '';
+        try {
+          out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+            cwd: dir,
+            encoding: 'utf8',
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+        } catch (err: any) {
+          code = err.status ?? 1;
+          out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+        }
+        assert.notEqual(
+          code,
+          0,
+          `a service-role JWT was reported CLEAN (ref length ${refLen}, role ` +
+            `${Object.keys(payload).at(-1) === 'role' ? 'last' : 'mid-object'}).\n\n${out}`,
+        );
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  }
+});
+
+// `--diff-merges=cc` renders a COMBINED diff, which uses one prefix column PER
+// PARENT — so a line added while resolving a conflict arrives as `++-----BEGIN`,
+// not `+-----BEGIN`. The PEM anchor allowed one prefix character, so adding the
+// flag without widening the anchor left the merge case still uncovered. Half a
+// fix here is worse than none: it looks handled.
+//
+// Isolation matters in this test. Adding the key in a merge and then DELETING it
+// in an ordinary commit proves nothing, because the deletion's own `-` prefix
+// matches the narrow anchor — so the key is removed in a second merge, and the
+// test asserts no ordinary commit ever carries a PEM line.
+test('a private key added while resolving a merge conflict is caught', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'scan-pem-'));
+  const git = (...args: string[]) =>
+    execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+  try {
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.invalid');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(dir, 'scripts'));
+    writeFileSync(
+      join(dir, 'scripts', 'secret-scan.sh'),
+      readFileSync(join(REPO, 'scripts', 'secret-scan.sh')),
+      { mode: 0o755 },
+    );
+    writeFileSync(join(dir, 'a.txt'), 'base\n');
+    git('add', '-A');
+    git('commit', '-qm', 'base');
+
+    // Introduce the key ONLY in a merge resolution.
+    git('checkout', '-qb', 'side');
+    writeFileSync(join(dir, 'b.txt'), 'side\n');
+    git('add', '-A');
+    git('commit', '-qm', 'side');
+    git('checkout', '-q', '-');
+    writeFileSync(join(dir, 'a.txt'), 'base\nmain\n');
+    git('add', '-A');
+    git('commit', '-qm', 'mainline');
+    execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side'], { cwd: dir, stdio: 'pipe' });
+    const dashes = '-'.repeat(5);
+    writeFileSync(
+      join(dir, 'key.pem'),
+      `${dashes}BEGIN RSA PRIVATE KEY${dashes}\nMIInotarealkey\n${dashes}END RSA PRIVATE KEY${dashes}\n`,
+    );
+    git('add', '-A');
+    git('commit', '-qm', 'merge introduces the key');
+
+    // Remove it in ANOTHER merge, so no ordinary commit ever shows a PEM line.
+    git('checkout', '-qb', 'side2');
+    writeFileSync(join(dir, 'c.txt'), 'side2\n');
+    git('add', '-A');
+    git('commit', '-qm', 'side2');
+    git('checkout', '-q', '-');
+    execFileSync('git', ['merge', '--no-commit', '--no-ff', 'side2'], { cwd: dir, stdio: 'pipe' });
+    rmSync(join(dir, 'key.pem'));
+    git('add', '-A');
+    git('commit', '-qm', 'merge removes it');
+
+    assert.equal(
+      execFileSync('git', ['log', '-p', '--no-merges', '--text', '--no-color', '-U0'], {
+        cwd: dir,
+        encoding: 'utf8',
+      }).split('\n').filter((l) => /^[+-]-{5}BEGIN/.test(l)).length,
+      0,
+      'test setup is not isolating the merge case — an ordinary commit carries a PEM line',
+    );
+
+    let code = 0;
+    let out = '';
+    try {
+      out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+        cwd: dir,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch (err: any) {
+      code = err.status ?? 1;
+      out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+    }
+    assert.notEqual(
+      code,
+      0,
+      `a private key introduced in a merge resolution was reported CLEAN. A\n` +
+        `combined diff prefixes added lines with one column PER PARENT, so\n` +
+        `PEM_LINE must tolerate two, not one.\n\n${out}`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// Every sweep in the scanner must fail loudly when its pattern cannot compile,
+// and — the half that is easy to forget — must NOT cry wolf when nothing is
+// wrong. The first draft of the shared guard did exactly that: it treated a
+// `grep -r` producer's ordinary "no match" (exit 1) as a failure, so it reported
+// CANNOT RUN on any repository with no edge functions. A gate that cries wolf
+// gets deleted rather than obeyed, so both directions are pinned here.
+test('every scanner sweep fails loudly on a broken pattern, and only then', () => {
+  const scanner = readFileSync(join(REPO, 'scripts', 'secret-scan.sh'), 'utf8');
+  const BROKEN = 'a{2,1}'; // invalid POSIX ERE repetition, in both grep engines
+
+  const cases: Array<{ name: string; find: string; replace: string; expectFail: boolean }> = [
+    { name: 'baseline', find: '', replace: '', expectFail: false },
+    {
+      name: 'BINDOC',
+      find: "BINDOC='[.](docx",
+      replace: `BINDOC='[.](${BROKEN}|docx`,
+      expectFail: true,
+    },
+    {
+      name: 'NONPROD',
+      find: "NONPROD='localhost",
+      replace: `NONPROD='${BROKEN}|localhost`,
+      expectFail: true,
+    },
+    {
+      name: 'CRED_PATTERNS',
+      find: 'CRED_PATTERNS=(\n',
+      replace: `CRED_PATTERNS=(\n  'sk_bad_${BROKEN}'\n`,
+      expectFail: true,
+    },
+  ];
+
+  for (const c of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'scan-sweep-'));
+    const git = (...args: string[]) =>
+      execFileSync('git', args, { cwd: dir, encoding: 'utf8', stdio: 'pipe' });
+    try {
+      git('init', '-q', '.');
+      git('config', 'user.email', 'test@example.invalid');
+      git('config', 'user.name', 'test');
+      mkdirSync(join(dir, 'scripts'));
+      let body = scanner;
+      if (c.find) {
+        assert.ok(body.includes(c.find), `${c.name}: anchor moved — update this test`);
+        body = body.replace(c.find, c.replace);
+      }
+      writeFileSync(join(dir, 'scripts', 'secret-scan.sh'), body, { mode: 0o755 });
+      // Give the config and edge-function sweeps something to look at, or they
+      // skip and the case proves nothing.
+      mkdirSync(join(dir, 'clippar_app', 'constants'), { recursive: true });
+      mkdirSync(join(dir, 'clippar_app', 'supabase', 'functions'), { recursive: true });
+      writeFileSync(join(dir, 'clippar_app', 'constants', 'config.ts'), 'export const config = {};\n');
+      writeFileSync(
+        join(dir, 'clippar_app', 'supabase', 'functions', 'a.ts'),
+        'import x from "https://esm.sh/y@1";\n',
+      );
+      writeFileSync(join(dir, 'a.txt'), 'base\n');
+      git('add', '-A');
+      git('commit', '-qm', 'base');
+
+      let code = 0;
+      let out = '';
+      try {
+        out = execFileSync('bash', [join(dir, 'scripts', 'secret-scan.sh')], {
+          cwd: dir,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'pipe'],
+        });
+      } catch (err: any) {
+        code = err.status ?? 1;
+        out = `${err.stdout ?? ''}${err.stderr ?? ''}`;
+      }
+
+      if (c.expectFail) {
+        assert.notEqual(code, 0, `${c.name}: a pattern that cannot compile was treated as "no matches".\n\n${out}`);
+        assert.match(out, /CANNOT RUN/, `${c.name}: failed without saying it could not run.\n\n${out}`);
+      } else {
+        assert.equal(code, 0, `${c.name}: a clean repository must pass.\n\n${out}`);
+        assert.doesNotMatch(
+          out,
+          /CANNOT RUN/,
+          `${c.name}: the integrity guard fired on a clean repository. A gate that\n` +
+            `cries wolf gets deleted rather than obeyed — check that a grep\n` +
+            `producer's exit 1 ("no match") is not being read as a failure.\n\n${out}`,
+        );
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
 });

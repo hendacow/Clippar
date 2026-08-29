@@ -111,24 +111,271 @@ export const RATE_LIMITS: Record<string, RateLimitRule> = {
 };
 
 /**
+ * Parse a header value into its ONE canonical address string, or null.
+ *
+ * What this defends is not the trust question the docblock above leaves open — a
+ * forged but well-formed address still buys a fresh bucket, and only the
+ * trusted-ingress decision closes that. What it defends is the rate limit's
+ * KEYSPACE, and through it the `api_rate_limit` table.
+ *
+ * Whatever this returns is passed as `p_subject` to `consume_rate_limit`, and
+ * `api_rate_limit.subject` is TEXT inside the primary key (migration 016). So a
+ * subject the caller can vary at all is a row they can multiply, and — worse — a
+ * bucket they can escape. On `get-shared-reel`, the one endpoint with no JWT, the
+ * cap is per SUBJECT, so anything that lets one host spell itself two ways makes
+ * the cap that many times larger.
+ *
+ * An earlier version of this was a character-class test
+ * (`/^[0-9A-Fa-f:.]+$/`), which bounded the LENGTH and not the shape. It
+ * accepted `dead`, `....`, `0` and 45 characters of arbitrary hex, so the
+ * keyspace stayed effectively unbounded — and it accepted `1.2.3.4`,
+ * `01.2.3.4`, `1.2.3.4.` and `.1.2.3.4` as four different subjects for one
+ * host. That is a 4x (or 120x) cap for anyone who noticed, needing no forged
+ * ingress at all: not a different address, just a different rendering of your
+ * own. This is a real STRUCTURE test, and it CANONICALISES rather than merely
+ * accepting, so every spelling of one address collapses onto one bucket.
+ *
+ * For IPv6 it goes one step further and returns the /48 rather than the address,
+ * because an IPv6 caller is handed a whole prefix and can vary the rest of it for
+ * nothing — so canonicalising the spelling alone still leaves the cap
+ * unenforceable. The reasoning, including why /64 is not far enough, is at the
+ * end of the function. IPv4 is returned in full: there, the address IS the host.
+ *
+ * A value that fails falls through to the next header and ultimately to the
+ * shared 'unknown' bucket. That is the safe direction for JUNK — it over-counts
+ * a malformed caller rather than handing them a private allowance — but it is
+ * NOT safe as the destination for a FORMAT this parser does not handle, because
+ * that case is all-or-nothing across every caller at once rather than per
+ * caller. Hence the wrapper peeling below (port, brackets, zone index) and the
+ * warning in clientIp when a header was present and parsed as nothing.
+ */
+export function canonicalIp(input: string): string | null {
+  // 57 = 45 (longest v6 text form) plus brackets, a colon and a port. Peel the
+  // wrappers first, then apply the real bound.
+  if (input.length === 0 || input.length > 57) return null;
+  let v = input;
+
+  // A proxy may WRAP the address rather than change it: `[v6]:port`, `v4:port`,
+  // or a `%zone` suffix. Strip those instead of rejecting them.
+  //
+  // Rejecting looks safer and is not: every rejected value keys the single
+  // shared 'unknown' bucket, so an ingress that appends a source port — Azure
+  // Front Door does exactly this — would put THE ENTIRE INTERNET into one
+  // 120/hour pool on the share endpoint, and one popular link would 429 every
+  // real visitor. A wrapper is a rendering difference, so it is peeled for the
+  // same reason `::` is expanded below.
+  // ORDER MATTERS: unwrap first, strip the zone last.
+  //
+  // The zone pattern is anchored to the end of the string, and a bracketed
+  // address ends in `]` or `]:443` — neither of which the character class can
+  // match. So stripping first is a silent no-op on exactly the inputs that need
+  // it: `[fe80::1%eth0]:443` kept its zone, failed to parse, and landed in the
+  // shared 'unknown' bucket that this peeling exists to keep callers out of.
+  // The earlier version had them the other way round and the tests missed it,
+  // because they covered a zone without brackets and brackets without a zone,
+  // never the two together.
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(v);
+  if (bracketed) {
+    v = bracketed[1];
+  } else if (/^\d{1,3}(\.\d{1,3}){3}:\d+$/.test(v)) {
+    v = v.slice(0, v.lastIndexOf(':'));
+  }
+  // `%(?:25)?` and NOT `%25?`: the latter requires a literal `2`, so it strips
+  // the percent-encoded `%25eth0` and leaves the plain `%eth0`. Also caught by
+  // a test rather than by reading.
+  v = v.replace(/%(?:25)?[0-9A-Za-z._-]+$/, '');
+  if (v.length === 0 || v.length > 45) return null;
+
+  // ── IPv4 ──
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(v);
+  if (v4) {
+    const octets = v4.slice(1).map(Number);
+    if (octets.some((n) => n > 255)) return null;
+    // Rebuilt from the parsed numbers, so `01.2.3.4` and `1.2.3.4` return the
+    // same string rather than being two subjects. Leading zeros are also how
+    // some stacks read an octet as octal, so normalising is safer than
+    // rejecting.
+    return octets.join('.');
+  }
+
+  // ── IPv6 ──
+  // Must contain a colon to be worth trying, and `::` may appear at most once.
+  if (!v.includes(':')) return null;
+  const halves = v.split('::');
+  if (halves.length > 2) return null;
+
+  // A trailing dotted quad (v4-mapped/compatible) counts as two groups. Recurse
+  // through the v4 branch so it is canonicalised by the same rules.
+  let tail = halves[halves.length - 1];
+  let mappedV4 = '';
+  const lastColon = tail.lastIndexOf(':');
+  const maybeV4 = tail.slice(lastColon + 1);
+  if (maybeV4.includes('.')) {
+    const canon4 = canonicalIp(maybeV4);
+    if (!canon4 || canon4.includes(':')) return null;
+    mappedV4 = canon4;
+    tail = tail.slice(0, lastColon + 1);
+    halves[halves.length - 1] = tail.replace(/:$/, '');
+  }
+
+  const parse = (part: string): string[] | null => {
+    if (part === '') return [];
+    const groups = part.split(':');
+    for (const g of groups) {
+      if (!/^[0-9A-Fa-f]{1,4}$/.test(g)) return null;
+    }
+    // Lowercased and zero-stripped so `2001:DB8::1`, `2001:db8::1` and
+    // `2001:0db8::0001` are one subject rather than three.
+    return groups.map((g) => g.replace(/^0+(?=.)/, '').toLowerCase());
+  };
+
+  const head = parse(halves[0]);
+  const rest = halves.length === 2 ? parse(halves[1]) : [];
+  if (head === null || rest === null) return null;
+
+  const mappedGroups = mappedV4 ? 2 : 0;
+  const total = head.length + rest.length + mappedGroups;
+  if (halves.length === 2) {
+    // `::` must stand for at least one omitted group.
+    if (total >= 8) return null;
+  } else if (total !== 8) {
+    return null;
+  }
+
+  // EXPAND to eight groups. NEVER re-emit the caller's `::`.
+  //
+  // Zero-run compression is a RENDERING choice, not part of the address, and
+  // the earlier version copied whichever placement arrived. So `2001:db8::1`,
+  // `2001:db8:0::1`, `2001:db8::0:1`, `2001:db8:0:0::1` and
+  // `2001:db8:0:0:0:0:0:1` were five subjects for one host — and `::1`, with a
+  // seven-group zero run, was a great many more. That is the exact defect this
+  // function exists to close, moved from the v4 branch to the v6 branch, and
+  // the docblock above claimed it was closed. Expanding is unique by
+  // construction, which re-compressing per RFC 5952 is not without care.
+  // 8 groups of 4 plus 7 colons = 39, still inside the 45 bound.
+  const v4Groups = mappedV4
+    ? (() => {
+      const o = mappedV4.split('.').map(Number);
+      return [
+        (((o[0] << 8) | o[1]) >>> 0).toString(16),
+        (((o[2] << 8) | o[3]) >>> 0).toString(16),
+      ];
+    })()
+    : [];
+  const full = halves.length === 2
+    ? head.concat(new Array(8 - total).fill('0'), rest, v4Groups)
+    : head.concat(rest, v4Groups);
+
+  // `::ffff:a.b.c.d` IS a.b.c.d. Fold it onto the v4 form, or the v4
+  // canonicalisation above is bypassable by spelling the same address through
+  // this branch — `1.2.3.4`, `::ffff:1.2.3.4`, `0:0:0:0:0:ffff:1.2.3.4` and
+  // `::ffff:102:304` would otherwise be four subjects for one host.
+  if (full.slice(0, 5).every((g) => g === '0') && full[5] === 'ffff') {
+    const hi = parseInt(full[6], 16);
+    const lo = parseInt(full[7], 16);
+    return [hi >> 8, hi & 255, lo >> 8, lo & 255].join('.');
+  }
+
+  // KEY THE ALLOCATION, NOT THE ADDRESS. Everything above normalises how ONE
+  // address is written; this is the level below it, and it is the difference
+  // between a rate limit and a decoration.
+  //
+  // An IPv6 host is not given an address, it is given a prefix. Every cloud and
+  // VPS host hands out a /64 free with the instance, and most mobile carriers
+  // and residential ISPs delegate /64 or larger per subscriber. Each of those
+  // 2^64 addresses is bindable, routes back to the same machine, and arrives at
+  // the gateway as a genuine observed source — so BEHIND THE GATEWAY
+  // `cf-connecting-ip` reports it truthfully, this function canonicalises it
+  // faithfully, and it is still a fresh `api_rate_limit` row every time. Nothing
+  // is forged; the attacker just uses the next address they already own.
+  //
+  // Read that as narrowly as it is written. It says the gateway reports the real
+  // source, which is what makes this cut NECESSARY. It does not say the header
+  // cannot be forged — off the gateway it can, nothing here asserts otherwise,
+  // and that is the separate open decision recorded in clientIp() below. This
+  // cut is not sufficient for that case and does not claim to be. Against getSharedReel (120/hour, the one
+  // endpoint with no JWT) and the pre-signup `ip:` bucket in search-courses,
+  // that is not a raised cap, it is no cap.
+  //
+  // WHY /48 AND NOT /64. This first cut at /64, on the reasoning that /64 is the
+  // smallest allocation an end host is guaranteed to hold all of, so it is the
+  // smallest cut that cannot be rotated within. That is the right frame for a
+  // LEGITIMATE host and the wrong one for an attacker, who rotates within the
+  // LARGEST allocation they hold, not the smallest — and the sentence above
+  // already said "/64 or larger" without following it anywhere. /56 is an
+  // ordinary residential and business delegation, tunnel brokers hand out a
+  // routed /48 free on request, and a /64 cut leaves those 256x and 65536x:
+  // 30,720 and 7.86M requests an hour against a 120/hour cap, which is still no
+  // cap. /48 is the smallest cut that is not routinely delegated whole to one
+  // subscriber, so it is where rotating starts costing the attacker something.
+  //
+  // Costs, stated rather than discovered later. Subscribers sharing one /48
+  // share a 120/hour share-link allowance — but that is not a new penalty, it is
+  // parity with IPv4, where everyone behind one NAT already shares a bucket and
+  // this limit was sized knowing it ("a dozen mates, several behind one carrier
+  // NAT"). The non-routable families collapse (`::1` with `::`, all of
+  // `fe80::/48` onto one subject), and neither reaches a real client here. So do
+  // the prefixes that carry host identity in their LOW half — Teredo, NAT64 —
+  // which likewise do not arrive as a source address on this deployment.
+  //
+  // If a shared /48 ever does prove too coarse in practice, /56 is the middle
+  // option. /64 is not, for the reason above, and /128 never was — it is the
+  // level the caller picks for free.
+  return full.slice(0, 3).concat('0', '0', '0', '0', '0').join(':');
+}
+
+/**
  * The client's IP, for limits that have no authenticated subject.
  *
- * CAREFUL: X-Forwarded-For is a comma-separated list that grows left-to-right as
- * it crosses proxies, and the CLIENT can put anything it likes in the leftmost
- * position. Taking entry [0] — which is the obvious reading, and what most
- * examples do — means an attacker rotates a header value and gets a fresh bucket
- * per request, i.e. no limit at all.
+ * CAREFUL — and the care is the opposite of the usual advice. The standard rule
+ * is "never take X-Forwarded-For entry [0], the caller controls it; take the
+ * LAST entry your proxy appended". This docblock used to say exactly that, and
+ * it was wrong *here*, which only a deployment showed: Supabase's gateway
+ * OVERWRITES the header rather than appending to it, so entry [0] is
+ * gateway-asserted and the last entry is Supabase's own load balancer. Keying on
+ * the last entry fragmented one machine's requests across 14 buckets and never
+ * saw the real client at all.
  *
- * The last entry is the one appended by the proxy closest to us, which is the
- * peer address it actually observed. That is the only value here we did not let
- * the caller choose.
+ * So the order of preference below is `cf-connecting-ip`, then entry [0]. **Read
+ * the measurement in the body before changing it** — the general principle will
+ * tell you to invert this, and the general principle does not hold on this
+ * deployment.
+ *
+ * The corollary matters too, and it is broader than the X-Forwarded-For branch.
+ * **Every header this function reads is trustworthy only because of that gateway
+ * — `cf-connecting-ip` included, and that one is consulted FIRST.** Off the
+ * gateway — self-hosted, `supabase functions serve`, a custom domain terminating
+ * elsewhere, or any future direct-to-origin route — all three of
+ * `cf-connecting-ip`, X-Forwarded-For `[0]` and `x-real-ip` are plain
+ * caller-supplied strings, and the cheapest bypass is the first branch, not the
+ * second. Anyone hardening only the X-Forwarded-For path would leave the easier
+ * door open. In that state a fresh header value per request keys a fresh bucket
+ * and the cap stops existing, with no error and no log line to show it.
+ *
+ * Nothing here asserts that precondition at runtime; that is a known open
+ * decision, not an oversight.
  */
 export function clientIp(req: Request): string {
   // `cf-connecting-ip` first. Supabase fronts Edge Functions with Cloudflare,
-  // which sets this to a SINGLE address it observed itself. A caller cannot
-  // forge it — anything they send under that name is replaced at the edge — so
-  // it is the most trustworthy value available and needs no parsing.
-  const cf = req.headers.get('cf-connecting-ip')?.trim();
+  // which sets this to a SINGLE address it observed itself, so it needs no
+  // parsing and is the most trustworthy value on offer.
+  //
+  // **HONEST SCOPE — this branch is NOT covered by the measurement below.** That
+  // measurement spoofed X-Forwarded-For and watched it be discarded; nothing
+  // here has ever spoofed `cf-connecting-ip`. Cloudflare *should* replace an
+  // inbound value of its own header for proxied traffic, and that is the whole
+  // basis for trusting this branch — but it is first-principles reasoning about
+  // this gateway's header handling, which is exactly the reasoning the docblock
+  // above records as having produced an inverted conclusion once already.
+  //
+  // One request settles it: send `cf-connecting-ip: 198.51.100.77` to the dev
+  // project and log what this returns. Real address -> record it here beside the
+  // X-Forwarded-For result and the question is closed. Echoed back -> it is a
+  // live bypass on the hosted deployment, not an off-gateway hypothetical.
+  //
+  // OFF the gateway nothing replaces it either way and it is plainly a
+  // caller-typed string, which is why the corollary names this branch first.
+  const cf = canonicalIp(req.headers.get('cf-connecting-ip')?.trim() ?? '');
   if (cf) return cf;
 
   // Fallback: the FIRST X-Forwarded-For entry.
@@ -156,10 +403,27 @@ export function clientIp(req: Request): string {
   const xff = req.headers.get('x-forwarded-for');
   if (xff) {
     const parts = xff.split(',').map((p) => p.trim()).filter(Boolean);
-    if (parts.length > 0) return parts[0];
+    const first = parts.length > 0 ? canonicalIp(parts[0]) : null;
+    if (first) return first;
   }
 
-  return req.headers.get('x-real-ip')?.trim() ?? 'unknown';
+  const real = req.headers.get('x-real-ip')?.trim() ?? '';
+  const canon = canonicalIp(real);
+  if (canon) return canon;
+
+  // 'unknown' is ONE bucket for the entire internet, so arriving here matters.
+  // A caller that sent no address header at all is the case it is designed for.
+  // A header that WAS present and parsed as nothing is a misconfiguration —
+  // an ingress emitting a format this function does not handle — and it puts
+  // every visitor into a single shared cap with no error and no log line.
+  // Those two must not look identical, so say which one happened.
+  if (real || req.headers.get('cf-connecting-ip') || req.headers.get('x-forwarded-for')) {
+    console.warn(
+      'clientIp: an address header was present but unparseable — every caller ' +
+        'now shares one rate-limit bucket. Check what the ingress is sending.',
+    );
+  }
+  return 'unknown';
 }
 
 export interface RateLimitDecision {
