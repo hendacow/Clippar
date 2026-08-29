@@ -34,7 +34,9 @@ const formatAud = (cents: number) =>
 const KITS = {
   standard: {
     name: 'Standard Kit',
-    price: formatAud(config.hardware.standardPriceCents),
+    // Display only. The amount actually charged is resolved server-side in
+    // supabase/functions/create-payment-intent/pricing.ts — keep them in sync.
+    price: config.hardware.standardPriceCents / 100,
     tagline: 'Everything you need to get started',
     items: [
       {
@@ -51,7 +53,7 @@ const KITS = {
   },
   premium: {
     name: 'Premium Kit',
-    price: formatAud(config.hardware.premiumPriceCents),
+    price: config.hardware.premiumPriceCents / 100,
     tagline: 'Standard Kit + wireless charging convenience',
     items: [
       {
@@ -100,17 +102,8 @@ export default function ShopScreen() {
 
     setPurchasing(true);
     try {
-      const amount =
-        selectedKit === 'standard'
-          ? config.hardware.standardPriceCents
-          : config.hardware.premiumPriceCents;
-
-      await initPaymentSheet({
-        amount,
-        currency: config.hardware.currency,
-        productType: selectedKit,
-        label: `Clippar ${selectedKit === 'standard' ? 'Standard' : 'Premium'} Kit`,
-      });
+      // No amount is sent — the server resolves the price from productType.
+      await initPaymentSheet({ productType: selectedKit });
 
       const success = await presentPaymentSheet();
       if (success) {

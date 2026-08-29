@@ -1,0 +1,105 @@
+{% comment %}
+  "Raw footage in. Clean shots out." — ported from the detection demo on
+  clippargolf.com. The reel video is hosted in Shopify Files rather than the
+  theme.
+{% endcomment %}
+
+<div class="section-divider"></div>
+<section class="demo-section">
+  <div class="demo-header">
+    <div class="section-label">{{ section.settings.label }}</div>
+    <h2>{{ section.settings.title_line_1 }}<br>{{ section.settings.title_line_2 }}</h2>
+  </div>
+  <div class="demo-flow">
+    <div class="demo-card">
+      <div class="demo-card-header">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+        <span>raw_footage/</span>
+      </div>
+      <div class="demo-card-body">
+        <ul class="file-list">
+          {%- for block in section.blocks -%}
+            {%- if block.type == 'raw_file' -%}
+              <li {{ block.shopify_attributes }}>
+                <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                {{ block.settings.filename }} <span class="file-size">{{ block.settings.meta }}</span>
+              </li>
+            {%- endif -%}
+          {%- endfor -%}
+        </ul>
+      </div>
+    </div>
+
+    <div class="demo-arrow">
+      <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <path d="M5 12h14M12 5l7 7-7 7"/>
+      </svg>
+    </div>
+
+    <div class="demo-card" style="border-color:rgba(168,230,61,0.3);">
+      <div class="demo-card-header">
+        <div class="dot red"></div><div class="dot yellow"></div><div class="dot green"></div>
+        <span style="color:var(--green)">clippar_output/</span>
+      </div>
+      <div class="demo-card-body">
+        <div class="output-thumb" style="margin-bottom:12px;">
+          <video data-autoplay loop muted playsinline preload="none">
+            <source src="https://cdn.shopify.com/videos/c/vp/038b28b2d38b4acab933ae5ad132944c/038b28b2d38b4acab933ae5ad132944c.HD-1080p-2.5Mbps-90296380.mp4" type="video/mp4">
+          </video>
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;">
+          <span class="output-tag">swing01_ball+audio</span>
+          <span class="output-tag">swing02_ball+audio</span>
+          <span class="output-tag">swing03_audio</span>
+          <span class="output-tag">putt01_vision</span>
+        </div>
+        <ul class="file-list" style="margin-top:12px;">
+          <li style="color:var(--green);">
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            {{ section.settings.output_line_1 }} <span class="file-size">{{ section.settings.output_meta_1 }}</span>
+          </li>
+          <li style="color:var(--green);">
+            <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="1.5"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+            {{ section.settings.output_line_2 }} <span class="file-size">{{ section.settings.output_meta_2 }}</span>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Detection demo",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Section label", "default": "See it in action" },
+    { "type": "text", "id": "title_line_1", "label": "Title — line 1", "default": "Raw footage in." },
+    { "type": "text", "id": "title_line_2", "label": "Title — line 2", "default": "Clean shots out." },
+    { "type": "header", "content": "Output card" },
+    { "type": "text", "id": "output_line_1", "label": "Output line 1", "default": "14 shots detected" },
+    { "type": "text", "id": "output_meta_1", "label": "Output meta 1", "default": "~5s each" },
+    { "type": "text", "id": "output_line_2", "label": "Output line 2", "default": "highlight_reel.mp4" },
+    { "type": "text", "id": "output_meta_2", "label": "Output meta 2", "default": "2:30" }
+  ],
+  "blocks": [
+    {
+      "type": "raw_file",
+      "name": "Raw file",
+      "settings": [
+        { "type": "text", "id": "filename", "label": "Filename", "default": "IMG_3661.mov" },
+        { "type": "text", "id": "meta", "label": "Duration", "default": "42 min" }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "Detection demo",
+      "blocks": [
+        { "type": "raw_file", "settings": { "filename": "IMG_3661.mov", "meta": "42 min" } },
+        { "type": "raw_file", "settings": { "filename": "IMG_3662.mov", "meta": "38 min" } },
+        { "type": "raw_file", "settings": { "filename": "IMG_3663.mov", "meta": "35 min" } }
+      ]
+    }
+  ]
+}
+{% endschema %}

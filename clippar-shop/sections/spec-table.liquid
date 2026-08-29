@@ -1,0 +1,149 @@
+{%- comment -%}
+  Specifications.
+
+  Two jobs. It is the page's trust anchor — a seller who publishes real numbers
+  and real limitations reads as one who has handled the product — and it is the
+  long-tail body copy the page needs, since "5000mAh", "USB-C" and "iOS 15.1"
+  are the terms people actually search when checking whether a thing suits them.
+
+  The limitations row is not an oversight, it is the point. Road-only freight
+  is the thing a buyer discovers on arrival and raises a ticket about. Saying
+  it here costs one sale and saves five refunds.
+{%- endcomment -%}
+
+<section class="specs full-width" id="specs">
+  <div class="specs-inner">
+    <header class="specs-head">
+      {%- if section.settings.label != blank -%}
+        <p class="specs-label">{{ section.settings.label }}</p>
+      {%- endif -%}
+      <h2 class="specs-title">{{ section.settings.title }}</h2>
+    </header>
+
+    <dl class="specs-list">
+      {%- for block in section.blocks -%}
+        <div class="specs-row" {{ block.shopify_attributes }}>
+          <dt>{{ block.settings.name }}</dt>
+          <dd>{{ block.settings.value }}</dd>
+        </div>
+      {%- endfor -%}
+    </dl>
+
+    {%- if section.settings.note != blank -%}
+      <div class="specs-note">{{ section.settings.note }}</div>
+    {%- endif -%}
+  </div>
+</section>
+
+{% stylesheet %}
+  .specs {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg2);
+    padding-block: clamp(72px, 10vw, 120px);
+  }
+
+  .specs-inner { grid-column: 2; }
+
+  .specs-head { margin-block-end: clamp(2rem, 4vw, 3rem); }
+
+  .specs-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin: 0 0 0.75rem;
+  }
+
+  .specs-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5.5vw, 3.5rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0;
+  }
+
+  .specs-list { margin: 0; }
+
+  .specs-row {
+    display: grid;
+    gap: 0.35rem 2rem;
+    padding-block: clamp(0.9rem, 2vw, 1.15rem);
+    border-block-start: 1px solid var(--border);
+  }
+
+  @media (min-width: 760px) {
+    .specs-row { grid-template-columns: minmax(10rem, 16rem) 1fr; align-items: baseline; }
+  }
+
+  .specs-row dt {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+
+  .specs-row dd {
+    margin: 0;
+    font-size: 0.94rem;
+    line-height: 1.65;
+    color: var(--white);
+  }
+
+  .specs-note {
+    margin-block-start: clamp(1.75rem, 4vw, 2.5rem);
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: var(--muted);
+    max-width: 46rem;
+  }
+
+  .specs-note p { margin: 0 0 0.6rem; }
+  .specs-note p:last-child { margin-bottom: 0; }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Spec table",
+  "tag": "section",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Eyebrow", "default": "Detail" },
+    { "type": "text", "id": "title", "label": "Heading", "default": "Specifications" },
+    {
+      "type": "richtext",
+      "id": "note",
+      "label": "Note",
+      "default": "<p>The kit contains a lithium battery, so it ships by road freight within Australia and cannot travel by air.</p>"
+    }
+  ],
+  "blocks": [
+    {
+      "type": "spec",
+      "name": "Spec row",
+      "settings": [
+        { "type": "text", "id": "name", "label": "Label", "default": "Label" },
+        { "type": "text", "id": "value", "label": "Value", "default": "Value" }
+      ]
+    }
+  ],
+  "max_blocks": 16,
+  "presets": [
+    {
+      "name": "Spec table",
+      "blocks": [
+        { "type": "spec", "settings": { "name": "In the box", "value": "Phone mount, Bluetooth clicker, 5,000mAh power bank, retractable badge reel, printed box with moulded insert" } },
+        { "type": "spec", "settings": { "name": "Mount", "value": "Three flexible legs with a spring clamp. Wraps a buggy rail, cart bar or bag top. Grips by phone width, cases included." } },
+        { "type": "spec", "settings": { "name": "Clicker", "value": "Bluetooth remote, roughly 20m range. Rechargeable over USB-C — there is no coin cell to replace." } },
+        { "type": "spec", "settings": { "name": "Power bank", "value": "5,000mAh, slim profile. Attaches directly to the phone." } },
+        { "type": "spec", "settings": { "name": "Badge reel", "value": "Retractable, with a belt clip" } },
+        { "type": "spec", "settings": { "name": "App", "value": "Clippar for iOS, free on the App Store. Requires iOS 15.1 or later. No Android version." } },
+        { "type": "spec", "settings": { "name": "Shipping", "value": "Australia only, by road freight. Contains a lithium battery, so it cannot be sent by air or shipped internationally." } },
+        { "type": "spec", "settings": { "name": "Dispatch", "value": "Pre-order — expected December 2026. Cancel any time before dispatch for a full refund." } }
+      ]
+    }
+  ]
+}
+{% endschema %}

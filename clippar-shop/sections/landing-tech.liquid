@@ -1,0 +1,40 @@
+{% comment %}
+  Tech strip — ported from clippargolf.com. Each pill is a block so the
+  detection stack can be edited without touching code.
+{% endcomment %}
+
+<div class="tech-strip">
+  {%- for block in section.blocks -%}
+    <div class="tech-pill" {{ block.shopify_attributes }}>
+      <div class="tech-dot"></div>{{ block.settings.label }}
+    </div>
+  {%- endfor -%}
+</div>
+
+{% schema %}
+{
+  "name": "Tech strip",
+  "settings": [],
+  "blocks": [
+    {
+      "type": "pill",
+      "name": "Pill",
+      "settings": [
+        { "type": "text", "id": "label", "label": "Label", "default": "YOLOv8 Pose" }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "Tech strip",
+      "blocks": [
+        { "type": "pill", "settings": { "label": "YOLOv8 Pose" } },
+        { "type": "pill", "settings": { "label": "Ball Tracking" } },
+        { "type": "pill", "settings": { "label": "Audio Impact" } },
+        { "type": "pill", "settings": { "label": "17 Keypoints" } },
+        { "type": "pill", "settings": { "label": "1200Hz+ Filter" } }
+      ]
+    }
+  ]
+}
+{% endschema %}

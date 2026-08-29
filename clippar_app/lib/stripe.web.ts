@@ -3,8 +3,6 @@
  */
 
 export async function initPaymentSheet(_params: {
-  amount: number;
-  currency: string;
   productType: 'standard' | 'premium';
 }): Promise<void> {
   throw new Error('Stripe not available on web');

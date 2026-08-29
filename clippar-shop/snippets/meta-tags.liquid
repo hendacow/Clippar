@@ -1,0 +1,208 @@
+{%- comment -%}
+  Head metadata: title, description, Open Graph, Twitter, structured data.
+
+  `charset` and `viewport` are NOT here. They live in layout/theme.liquid, and
+  they used to be declared in both — a second charset declaration after other
+  head content can make the parser restart, and it is a plain duplicate in the
+  markup either way.
+
+  The home page used to ship `<title>Clippar</title>` and no meta description
+  at all, because Shopify falls back to the shop name and the shop name is one
+  word that describes nothing. Both now come from theme settings so they are
+  editable without touching Liquid.
+{%- endcomment -%}
+
+{%- liquid
+  assign seo_title = page_title
+  assign seo_description = page_description
+
+  if request.page_type == 'index'
+    if settings.seo_home_title != blank
+      assign seo_title = settings.seo_home_title
+    endif
+    if settings.seo_home_description != blank
+      assign seo_description = settings.seo_home_description
+    endif
+  endif
+
+  # No page should ever ship without a description. Google writes its own when
+  # one is missing, and it writes worse ones than we do.
+  if seo_description == blank
+    assign seo_description = settings.seo_default_description | default: shop.description
+  endif
+
+  assign og_title = seo_title | default: shop.name
+  assign og_url = canonical_url | default: request.origin
+  assign og_type = 'website'
+
+  if request.page_type == 'product'
+    assign og_type = 'product'
+  elsif request.page_type == 'article'
+    assign og_type = 'article'
+  elsif request.page_type == 'password'
+    assign og_url = request.origin
+  endif
+-%}
+
+<title>
+  {{- seo_title -}}
+  {%- if current_tags %} &ndash; tagged "{{ current_tags | join: ', ' }}"{% endif -%}
+  {%- if current_page != 1 %} &ndash; Page {{ current_page }}{% endif -%}
+  {%- unless seo_title contains shop.name %} &ndash; {{ shop.name }}{% endunless -%}
+</title>
+
+<meta name="description" content="{{ seo_description | escape }}">
+
+<link rel="canonical" href="{{ canonical_url }}">
+
+<meta property="og:site_name" content="{{ shop.name }}">
+<meta property="og:url" content="{{ og_url }}">
+<meta property="og:title" content="{{ og_title | escape }}">
+<meta property="og:type" content="{{ og_type }}">
+<meta property="og:description" content="{{ seo_description | escape }}">
+<meta property="og:locale" content="{{ request.locale.iso_code }}">
+
+{%- if page_image -%}
+  <meta property="og:image" content="http:{{ page_image | image_url }}">
+  <meta property="og:image:secure_url" content="https:{{ page_image | image_url }}">
+  <meta property="og:image:width" content="{{ page_image.width }}">
+  <meta property="og:image:height" content="{{ page_image.height }}">
+  <meta property="og:image:alt" content="{{ page_image.alt | default: og_title | escape }}">
+{%- endif -%}
+
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="{{ og_title | escape }}">
+<meta name="twitter:description" content="{{ seo_description | escape }}">
+
+{%- comment -%}
+  Product structured data.
+
+  Two things are deliberately different from Shopify's `| structured_data`
+  filter, and both matter enough to justify hand-rolling this:
+
+  1. Shopify always emits `InStock` when a variant is purchasable. For a
+     pre-order that is simply false, and Google Merchant Center disapproves a
+     listing whose feed availability disagrees with the landing page. We emit
+     `PreOrder` plus `availabilityStarts` when pre-order mode is on.
+
+  2. `priceValidUntil` is absent from Shopify's output. Google's own docs say a
+     listing "may not display" once that date is in the past — so omitting it is
+     safe today and the date itself is the thing that needs watching. It is a
+     theme setting with a reminder in its help text.
+
+  Still gated on `shop_launched`: while the shop is shut, advertising an Offer
+  for something nobody can buy invites exactly the merchant-listing checks we
+  cannot yet satisfy.
+
+  No `aggregateRating` — there are no reviews. The Rich Results Test will warn
+  about `offers` without a rating; that warning is cosmetic. Inventing a rating
+  to silence it is prohibited by Google's July 2026 review guidelines and is
+  misleading conduct under the ACL besides.
+{%- endcomment -%}
+{%- if settings.shop_launched and request.page_type == 'product' -%}
+  {%- assign pv = product.selected_or_first_available_variant -%}
+  {%- assign availability = 'https://schema.org/InStock' -%}
+  {%- unless pv.available -%}
+    {%- assign availability = 'https://schema.org/OutOfStock' -%}
+  {%- endunless -%}
+  {%- if settings.preorder_mode -%}
+    {%- assign availability = 'https://schema.org/PreOrder' -%}
+  {%- endif -%}
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Product",
+      "@id": "{{ request.origin }}{{ product.url }}#product",
+      "name": {{ product.title | json }},
+      "description": {{ product.description | strip_html | truncate: 500 | json }},
+      "url": "{{ request.origin }}{{ product.url }}",
+      {% if product.featured_media -%}
+      "image": [
+        {%- for media in product.media limit: 5 -%}
+          "https:{{ media | image_url: width: 1600 }}"{%- unless forloop.last -%},{%- endunless -%}
+        {%- endfor -%}
+      ],
+      {%- endif %}
+      {% if pv.sku != blank -%}"sku": {{ pv.sku | json }},{%- endif %}
+      "brand": { "@type": "Brand", "name": {{ shop.name | json }} },
+      "offers": {
+        "@type": "Offer",
+        "url": "{{ request.origin }}{{ product.url }}",
+        "priceCurrency": {{ cart.currency.iso_code | json }},
+        "price": "{{ pv.price | divided_by: 100.0 }}",
+        {% if settings.price_valid_until != blank -%}
+        "priceValidUntil": {{ settings.price_valid_until | json }},
+        {%- endif %}
+        {% if settings.preorder_mode and settings.preorder_availability_date != blank -%}
+        "availabilityStarts": {{ settings.preorder_availability_date | json }},
+        {%- endif %}
+        "availability": "{{ availability }}",
+        "itemCondition": "https://schema.org/NewCondition",
+        "seller": { "@type": "Organization", "@id": "{{ request.origin }}/#organization" }
+      }
+    }
+  </script>
+
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        { "@type": "ListItem", "position": 1, "name": "Home", "item": "{{ request.origin }}/" },
+        { "@type": "ListItem", "position": 2, "name": {{ product.title | json }}, "item": "{{ request.origin }}{{ product.url }}" }
+      ]
+    }
+  </script>
+
+  <meta property="og:price:amount" content="{{ pv.price | money_without_currency | strip_html }}">
+  <meta property="og:price:currency" content="{{ cart.currency.iso_code }}">
+  <meta property="product:availability" content="{% if settings.preorder_mode %}preorder{% elsif pv.available %}in stock{% else %}out of stock{% endif %}">
+{%- endif -%}
+
+{%- comment -%}
+  Site identity, carried over from the clippargolf.com marketing site that the
+  apex cutover replaced. Organization and WebSite claim nothing commercial, so
+  unlike the product markup above they stay on while the shop is closed. The
+  old site's SoftwareApplication entry is deliberately not carried over —
+  Google wants offers or ratings on one, and we have neither to give it.
+{%- endcomment -%}
+{%- liquid
+  # The store's admin description is just "Clippar", which describes nothing,
+  # so fall back to the sentence the marketing site used. A real description
+  # entered in the admin wins.
+  assign org_description = shop.description
+  if org_description == blank or org_description == shop.name
+    assign org_description = 'AI that automatically clips every golf shot from your round footage into a cinematic highlight reel.'
+  endif
+-%}
+<script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "{{ request.origin }}/#organization",
+        "name": {{ shop.name | json }},
+        "legalName": "Clippar Pty Ltd",
+        "url": "{{ request.origin }}/",
+        "logo": "https:{{ 'clippar-logo-square.png' | asset_url }}",
+        "description": {{ org_description | json }},
+        "areaServed": "AU",
+        "contactPoint": {
+          "@type": "ContactPoint",
+          "contactType": "customer support",
+          "url": "{{ request.origin }}/pages/contact"
+        }
+      },
+      {
+        "@type": "WebSite",
+        "@id": "{{ request.origin }}/#website",
+        "url": "{{ request.origin }}/",
+        "name": {{ shop.name | json }},
+        "publisher": { "@id": "{{ request.origin }}/#organization" },
+        "inLanguage": "{{ request.locale.iso_code }}"
+      }
+    ]
+  }
+</script>

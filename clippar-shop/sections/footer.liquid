@@ -1,0 +1,93 @@
+{% comment %}
+  Clippar footer. Matches clippargolf.com — centred wordmark over a single
+  copyright line — plus optional policy links and payment icons, which a
+  storefront needs and the marketing site doesn't. Layout comes from the
+  <footer> and .logo rules in assets/clippar.css.
+
+  clippargolf.com printed a contact email beside the copyright. That setting is
+  deliberately gone: no email address is published anywhere on the storefront,
+  and reaching us goes through /pages/contact, which is in the footer menu.
+{% endcomment %}
+
+<footer>
+  <div class="logo">{{ section.settings.wordmark | default: shop.name }}</div>
+
+  <p>&copy; {{ 'now' | date: '%Y' }} {{ shop.name }}</p>
+
+  {% if section.settings.menu != blank %}
+    <div class="footer-links">
+      {% for link in section.settings.menu.links %}
+        <a href="{{ link.url }}">{{ link.title }}</a>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {% if section.settings.show_payment_icons %}
+    <div class="footer-payment">
+      {% for type in shop.enabled_payment_types %}
+        {{ type | payment_type_svg_tag }}
+      {% endfor %}
+    </div>
+  {% endif %}
+</footer>
+
+{% stylesheet %}
+  .footer-links {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 1.25rem;
+    margin-top: 1rem;
+  }
+
+  .footer-links a {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    text-decoration: none;
+  }
+
+  .footer-links a:hover {
+    color: var(--green);
+  }
+
+  .footer-payment {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-top: 1.25rem;
+  }
+
+  .footer-payment svg {
+    height: 1.5rem;
+    width: auto;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "t:general.footer",
+  "settings": [
+    {
+      "type": "text",
+      "id": "wordmark",
+      "label": "Wordmark",
+      "default": "CLIPPAR"
+    },
+    {
+      "type": "link_list",
+      "id": "menu",
+      "label": "t:labels.menu"
+    },
+    {
+      "type": "checkbox",
+      "id": "show_payment_icons",
+      "label": "t:labels.show_payment_icons",
+      "default": true
+    }
+  ]
+}
+{% endschema %}

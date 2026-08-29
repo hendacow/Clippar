@@ -1,0 +1,90 @@
+{% comment %}
+  Cart placeholder for the pre-launch storefront.
+
+  The kit isn't on sale yet and the Shop is deliberately hidden, so a working
+  cart at /cart would promise a checkout that doesn't exist. Anyone who lands
+  here — a stale link, a crawler, the header cart icon — gets pointed at the
+  waitlist instead.
+
+  TO RESTORE THE REAL CART: set the "main" section in templates/cart.json back
+  to "type": "cart". sections/cart.liquid is untouched and still works; this
+  section can then be deleted or left in place unused.
+
+  The button target is the hero waitlist form, which snippets/waitlist-form.liquid
+  wraps in #waitlist-form-section. routes.root_url rather than a bare "/" so the
+  link survives a locale or subfolder prefix.
+{% endcomment %}
+
+{%- liquid
+  assign heading = section.settings.heading | default: 'The shop is not open yet.'
+  assign body = section.settings.body | default: 'The Mount Kit goes on sale when the app launches. Nothing to check out in the meantime.'
+  assign cta_label = section.settings.cta_label | default: 'JOIN THE WAITLIST'
+  assign note = section.settings.note | default: 'Founding member pricing for early signups. No spam, unsubscribe anytime.'
+-%}
+
+<div class="cart-soon">
+  <div class="form-wrap">
+    <div class="form-card">
+      <h2>{{ heading }}</h2>
+      <p>{{ body }}</p>
+      <a class="btn-submit" href="{{ routes.root_url }}#waitlist-form-section">{{ cta_label }}</a>
+      <p class="form-note">{{ note }}</p>
+    </div>
+  </div>
+</div>
+
+{% stylesheet %}
+  /* The section renders inside the theme's CSS grid, where an item defaults to
+     min-width:auto and refuses to shrink below its content — the same overflow
+     that bit the legal pages and the contact form on a phone. */
+  .cart-soon {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: min(560px, 100%);
+    margin: 0 auto;
+    padding: 64px 20px 80px;
+  }
+
+  /* .form-wrap carries a 56px top margin for its place under the hero videos;
+     here the section padding already does that job. */
+  .cart-soon .form-wrap { margin-top: 0; }
+
+  /* .btn-submit in clippar.css is written for <button>. */
+  .cart-soon .btn-submit {
+    display: block;
+    text-align: center;
+    text-decoration: none;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Cart — coming soon",
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "The shop is not open yet."
+    },
+    {
+      "type": "textarea",
+      "id": "body",
+      "label": "Body",
+      "default": "The Mount Kit goes on sale when the app launches. Nothing to check out in the meantime."
+    },
+    {
+      "type": "text",
+      "id": "cta_label",
+      "label": "Button label",
+      "default": "JOIN THE WAITLIST"
+    },
+    {
+      "type": "text",
+      "id": "note",
+      "label": "Note under button",
+      "default": "Founding member pricing for early signups. No spam, unsubscribe anytime."
+    }
+  ]
+}
+{% endschema %}

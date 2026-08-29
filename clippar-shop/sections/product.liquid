@@ -1,0 +1,530 @@
+{% comment %}
+  Clippar product page. Two-column on desktop — media left, buy panel right —
+  using the same tokens as the landing page so it reads as one site.
+
+  The variant picker is hidden when the product has only a default variant,
+  which is the case for the single boxed kit; it appears automatically if
+  variants are added later.
+
+  https://shopify.dev/docs/storefronts/themes/architecture/templates/product
+{% endcomment %}
+
+{%- assign current_variant = product.selected_or_first_available_variant -%}
+
+<div class="pdp full-width">
+  <div class="pdp-grid">
+    <div class="pdp-media">
+      {%- if product.media.size > 0 -%}
+        {%- for media in product.media -%}
+          <div class="pdp-media-item">
+            {%- if media.media_type == 'image' -%}
+              <img
+                src="{{ media | image_url: width: 1400 }}"
+                alt="{{ media.alt | escape }}"
+                width="{{ media.width }}"
+                height="{{ media.height }}"
+                loading="{% if forloop.first %}eager{% else %}lazy{% endif %}"
+                sizes="(min-width: 900px) 50vw, 100vw"
+                srcset="
+                  {{ media | image_url: width: 600 }} 600w,
+                  {{ media | image_url: width: 900 }} 900w,
+                  {{ media | image_url: width: 1400 }} 1400w
+                "
+              >
+            {%- elsif media.media_type == 'video' -%}
+              {{ media | video_tag: image_size: '1400x', controls: true, muted: true, loop: true }}
+            {%- endif -%}
+          </div>
+        {%- endfor -%}
+      {%- else -%}
+        <div class="pdp-media-empty">
+          <span>No product images yet</span>
+        </div>
+      {%- endif -%}
+    </div>
+
+    <div class="pdp-panel">
+      {%- if section.settings.eyebrow != blank -%}
+        <p class="pdp-eyebrow">{{ section.settings.eyebrow }}</p>
+      {%- endif -%}
+
+      <h1 class="pdp-title">{{ product.title }}</h1>
+
+      <div class="pdp-price">
+        {{ current_variant.price | money }}
+        {%- comment -%}
+          The strike-through is deliberately behind a setting that defaults to
+          OFF, and it is not an aesthetic preference.
+
+          A "was $109, now $99" is a representation that the kit was genuinely
+          offered at $109 for a reasonable period beforehand. It never has been
+          — it has never been sold at any price. Showing it on day one would be
+          a false saving under ACL s18 / s29(1)(i), which is a pattern the ACCC
+          has actively pursued. Henry settled this on 24 Aug: $99, shown alone.
+
+          Turn this on only once $109 has actually been the selling price for a
+          real period. See decisions/2026-08-24-take-preorders-on-the-kit.md.
+        {%- endcomment -%}
+        {%- if section.settings.show_compare_at and current_variant.compare_at_price > current_variant.price -%}
+          <s class="pdp-compare">{{ current_variant.compare_at_price | money }}</s>
+        {%- endif -%}
+      </div>
+
+      {%- comment -%}
+        Pre-order disclosure.
+
+        This sits above the fold, as rendered text, outside any accordion, and
+        that placement is load-bearing three times over:
+
+        - Google Merchant Center requires the expected shipping date to be
+          visible on the landing page for anything marked `preorder`, or the
+          listing is disapproved.
+        - The ACCC requires clear information about "the likely timing of
+          production and delivery" before taking payment.
+        - It is the single biggest objection a buyer has when handing over $99
+          for a thing that does not exist yet.
+
+        The cancel-any-time promise is what makes a soft month honest. Suppliers
+        have quoted nothing, so the date is a forecast; rather than dress it up,
+        we say so and carry the risk ourselves.
+      {%- endcomment -%}
+      {%- if settings.preorder_mode -%}
+        <div class="pdp-preorder">
+          <p class="pdp-preorder-head">Pre-order &middot; ships {{ settings.preorder_dispatch_label }}</p>
+          <p>
+            You're charged today and we email you tracking the day it ships.
+            <strong>Cancel any time before dispatch for a full refund</strong> — no
+            questions, no form to fill in.
+          </p>
+          <p class="pdp-preorder-plain">
+            We're a new company making our first production run. If that date moves,
+            you'll hear it from us before you hear it anywhere else.
+          </p>
+        </div>
+      {%- endif -%}
+
+      <div class="pdp-form">
+
+        {%- form 'product', product -%}
+          {%- unless product.has_only_default_variant -%}
+            <div class="pdp-field">
+              <label for="pdp-variant">Option</label>
+              <select id="pdp-variant" name="id">
+                {%- for variant in product.variants -%}
+                  <option
+                    value="{{ variant.id }}"
+                    {% if variant == current_variant %}selected{% endif %}
+                    {% unless variant.available %}disabled{% endunless %}
+                  >
+                    {{ variant.title }} — {{ variant.price | money }}
+                    {%- unless variant.available %} (sold out){% endunless -%}
+                  </option>
+                {%- endfor -%}
+              </select>
+            </div>
+          {%- else -%}
+            <input type="hidden" name="id" value="{{ current_variant.id }}">
+          {%- endunless -%}
+
+          <div class="pdp-field">
+            <label for="pdp-qty">Quantity</label>
+            <input id="pdp-qty" type="number" name="quantity" min="1" value="1" inputmode="numeric">
+          </div>
+
+          {%- comment -%}
+            Compatibility gate. The kit is useless without an iPhone, and the
+            reels it exists to produce need Pro on top — both are disclosed in
+            section 3 of the Mount Kit Terms, but nobody reads clause 3 of a
+            document linked from the footer. A buyer who could not reasonably
+            have known is entitled to a refund under the consumer guarantees
+            whatever the terms say, so the disclosure has to sit here, at the
+            point of decision.
+
+            The checkbox is deliberately an acknowledgement rather than a
+            notice: it stops the sale instead of curing it afterwards, and it
+            costs a genuine buyer one second.
+
+            It gates the dynamic checkout button as well as add-to-cart —
+            "Buy it now" skips the cart entirely, so the cart-page notice would
+            never be seen by those buyers.
+          {%- endcomment -%}
+          <div class="pdp-compat">
+            <p class="pdp-compat-head">Before you buy</p>
+            <p>
+              <strong>Requires an iPhone running iOS {{ section.settings.min_ios }} or later.</strong>
+              There is no Android app — the mount will hold an Android phone, but
+              nothing will clip your shots.
+            </p>
+            <p>
+              Recording and trimming are free. <strong>Automatic highlight reels need
+              Clippar Pro</strong> ({{ section.settings.pro_price }}, free trial).
+            </p>
+            <p class="pdp-compat-link">
+              Full detail in the <a href="/pages/mount-kit-terms-of-sale">Mount Kit Terms of Sale</a>.
+            </p>
+          </div>
+
+          {%- if current_variant.available -%}
+            <label class="pdp-ack" for="pdp-compat-ack">
+              <input type="checkbox" id="pdp-compat-ack">
+              <span>I have an iPhone running iOS {{ section.settings.min_ios }} or later.</span>
+            </label>
+
+            <button class="btn-submit pdp-add" type="submit" id="pdp-add-btn" disabled>
+              {{ section.settings.add_label }}
+            </button>
+            <div id="pdp-dynamic-checkout" class="pdp-dynamic-disabled">
+              {{ form | payment_button }}
+            </div>
+          {%- else -%}
+            <button class="btn-submit pdp-add" type="button" disabled>Sold out</button>
+          {%- endif -%}
+        {%- endform -%}
+
+        {%- if section.settings.note != blank -%}
+          <p class="form-note">{{ section.settings.note }}</p>
+        {%- endif -%}
+      </div>
+
+      {%- if section.blocks.size > 0 -%}
+        <ul class="pdp-points">
+          {%- for block in section.blocks -%}
+            <li {{ block.shopify_attributes }}>{{ block.settings.text }}</li>
+          {%- endfor -%}
+        </ul>
+      {%- endif -%}
+
+      <div class="pdp-description">
+        {{ product.description }}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% stylesheet %}
+  .pdp {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    /* body:not(.template-index) already reserves --nav-h; clearing the fixed
+       nav a second time here left a large empty band above the title. */
+    padding-block: clamp(32px, 6vw, 56px) clamp(64px, 8vw, 96px);
+  }
+
+  .pdp-grid {
+    grid-column: 2;
+    display: grid;
+    gap: clamp(2rem, 5vw, 4rem);
+  }
+
+  @media (min-width: 900px) {
+    .pdp-grid {
+      grid-template-columns: 1fr 1fr;
+      align-items: start;
+    }
+
+    .pdp-panel {
+      position: sticky;
+      top: 6rem;
+    }
+  }
+
+  .pdp-media {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .pdp-media-item img,
+  .pdp-media-item video {
+    width: 100%;
+    height: auto;
+    border-radius: 1rem;
+    border: 1px solid var(--border);
+    background: var(--bg2);
+  }
+
+  .pdp-media-empty {
+    aspect-ratio: 4 / 3;
+    display: grid;
+    place-items: center;
+    border: 1px dashed var(--border);
+    border-radius: 1rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+  }
+
+  .pdp-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin-block-end: 0.75rem;
+  }
+
+  .pdp-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.5rem, 6vw, 4rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0;
+  }
+
+  /* The pre-order notice is the loudest thing in the panel after the price,
+     on purpose. It answers "when do I get it" before the buyer has to ask. */
+  .pdp-preorder {
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    margin-block-end: 1.25rem;
+    background: rgba(168, 230, 61, 0.08);
+  }
+
+  .pdp-preorder p {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--white);
+    margin: 0 0 0.55rem 0;
+  }
+
+  .pdp-preorder p:last-child { margin-bottom: 0; }
+
+  .pdp-preorder-head {
+    font-family: var(--font-mono);
+    font-size: 0.68rem !important;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--green) !important;
+  }
+
+  .pdp-preorder-plain { color: var(--muted) !important; font-size: 0.83rem !important; }
+
+  .pdp-compat {
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    margin-bottom: 1.1rem;
+    background: rgba(168, 230, 61, 0.06);
+  }
+
+  .pdp-compat p {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--white);
+    margin: 0 0 0.55rem 0;
+  }
+
+  .pdp-compat p:last-child { margin-bottom: 0; }
+
+  .pdp-compat-head {
+    font-family: var(--font-mono);
+    font-size: 0.68rem !important;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--green) !important;
+  }
+
+  .pdp-compat-link { font-size: 0.8rem !important; color: var(--muted) !important; }
+  .pdp-compat-link a { color: var(--muted); }
+
+  .pdp-ack {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.6rem;
+    margin-bottom: 1rem;
+    font-size: 0.88rem;
+    line-height: 1.5;
+    color: var(--white);
+    cursor: pointer;
+  }
+
+  .pdp-ack input { margin-top: 0.2rem; width: 1rem; height: 1rem; accent-color: var(--green); flex: none; }
+
+  /* Pointer-events rather than a disabled attribute: the dynamic checkout
+     button is Shopify's own markup and cannot be disabled from here. */
+  .pdp-dynamic-disabled { opacity: 0.4; pointer-events: none; }
+
+  .pdp-price {
+    font-family: var(--font-mono);
+    font-size: 1.35rem;
+    color: var(--green);
+    margin-block: 1rem 2rem;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+  }
+
+  .pdp-compare {
+    color: var(--muted);
+    font-size: 1rem;
+  }
+
+  .pdp-form {
+    position: relative;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    padding: clamp(1.25rem, 3vw, 1.75rem);
+  }
+
+  .pdp-field {
+    margin-block-end: 1rem;
+  }
+
+  .pdp-field label {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-block-end: 0.4rem;
+  }
+
+  .pdp-field select,
+  .pdp-field input {
+    width: 100%;
+    background: var(--bg);
+    color: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    padding: 0.75rem 0.9rem;
+    font-family: var(--font-body);
+  }
+
+  .pdp-field input:focus-visible,
+  .pdp-field select:focus-visible {
+    outline: 2px solid var(--green);
+    outline-offset: 1px;
+  }
+
+  .pdp-add {
+    width: 100%;
+    margin-block-start: 0.5rem;
+  }
+
+  .pdp-add[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+
+  .pdp-form .shopify-payment-button {
+    margin-block-start: 0.75rem;
+  }
+
+  .pdp-points {
+    list-style: none;
+    margin: 2rem 0 0;
+    padding: 0;
+    display: grid;
+    gap: 0.6rem;
+  }
+
+  .pdp-points li {
+    position: relative;
+    padding-inline-start: 1.4rem;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .pdp-points li::before {
+    content: '';
+    position: absolute;
+    inset-inline-start: 0;
+    top: 0.55em;
+    width: 0.45rem;
+    height: 0.45rem;
+    border-radius: 50%;
+    background: var(--green);
+  }
+
+  .pdp-description {
+    margin-block-start: 2.5rem;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .pdp-description h3 {
+    font-family: var(--font-display);
+    font-size: 1.5rem;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin-block: 1.75rem 0.75rem;
+  }
+
+  .pdp-description ul {
+    padding-inline-start: 1.1rem;
+    display: grid;
+    gap: 0.5rem;
+  }
+
+  .pdp-description strong {
+    color: var(--white);
+    font-weight: 500;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "t:general.product",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "AI-powered golf recording system"
+    },
+    {
+      "type": "text",
+      "id": "min_ios",
+      "label": "Minimum iOS version",
+      "info": "Must match the app's deployment target. Currently 15.1.",
+      "default": "15.1"
+    },
+    {
+      "type": "text",
+      "id": "pro_price",
+      "label": "Pro pricing line",
+      "default": "A$14.99/month or A$99.99/year"
+    },
+    {
+      "type": "checkbox",
+      "id": "show_compare_at",
+      "label": "Show the struck-through compare-at price",
+      "info": "Leave OFF until the kit has genuinely sold at the higher price for a real period. A was/now comparison on a product that has never been sold is a false saving under Australian Consumer Law, and the ACCC has pursued exactly this. Settled by Henry 24 Aug: $99 shown alone.",
+      "default": false
+    },
+    {
+      "type": "text",
+      "id": "add_label",
+      "label": "Add to cart label",
+      "default": "ADD TO CART"
+    },
+    {
+      "type": "text",
+      "id": "note",
+      "label": "Note under buttons",
+      "default": "30-day satisfaction guarantee. Requires the free Clippar app for iOS."
+    }
+  ],
+  "blocks": [
+    {
+      "type": "point",
+      "name": "Selling point",
+      "settings": [
+        {
+          "type": "text",
+          "id": "text",
+          "label": "Text",
+          "default": "12-month clicker battery life"
+        }
+      ]
+    }
+  ],
+  "disabled_on": {
+    "groups": ["header", "footer"]
+  }
+}
+{% endschema %}

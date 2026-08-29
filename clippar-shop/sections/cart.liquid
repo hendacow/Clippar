@@ -1,0 +1,356 @@
+{%- comment -%}
+  The cart.
+
+  This was Shopify's untouched skeleton — a bare `<h1>`, an unstyled `<table>`
+  and a raw submit button on a black background. It had never been designed,
+  because until now the cart template pointed at `cart-coming-soon` and nobody
+  ever reached this file. The moment the shop opens it is the last screen
+  before someone hands over $99, and it looked broken.
+
+  Rebuilt on the same tokens as the rest of the site. Three things it now does
+  that the skeleton did not:
+
+  1. **Repeats the dispatch date.** Google wants it on the landing page, but
+     the buyer's memory of it fades between the product page and checkout, and
+     Visa's dispute rules treat the published ship date as the merchant's
+     defence. It costs one line to say it again here.
+  2. **Keeps the iPhone requirement in front of them.** The product page has
+     the acknowledgement checkbox that actually gates the sale; this is the
+     backstop for anyone who arrived via a direct cart link.
+  3. **Has a real empty state.** An empty cart used to render as a lone
+     heading over a blank page, which reads as an error rather than an
+     absence.
+
+  https://shopify.dev/docs/storefronts/themes/architecture/templates/cart
+{%- endcomment -%}
+
+<section class="cart-page full-width">
+  <div class="cart-inner">
+    <h1 class="cart-title">{{ 'cart.title' | t }}</h1>
+
+    {%- if cart.item_count == 0 -%}
+      <div class="cart-empty">
+        <p class="cart-empty-lead">Nothing in here yet.</p>
+        <p>
+          The Clippar Golf Kit is everything you need to film a round — mount,
+          clicker, power bank and the rest, in one box.
+        </p>
+        <a class="cart-empty-link" href="{{ routes.root_url }}">Back to the kit</a>
+      </div>
+    {%- else -%}
+
+      {%- if settings.preorder_mode -%}
+        <div class="cart-notice">
+          <p class="cart-notice-head">Pre-order &middot; ships {{ settings.preorder_dispatch_label }}</p>
+          <p>
+            You're charged today and we email you tracking the day it ships.
+            <strong>Cancel any time before dispatch for a full refund.</strong>
+          </p>
+        </div>
+      {%- endif -%}
+
+      <div class="cart-compat">
+        <p>
+          <strong>Requires an iPhone running iOS 15.1 or later.</strong> There is no
+          Android app — the mount will hold an Android phone, but nothing will clip
+          your shots.
+        </p>
+        <p class="cart-compat-link">
+          <a href="/pages/mount-kit-terms-of-sale">Mount Kit Terms of Sale</a>
+        </p>
+      </div>
+
+      <form action="{{ routes.cart_url }}" method="post" novalidate>
+        <ul class="cart-items">
+          {%- for item in cart.items -%}
+            <li class="cart-item">
+              <a class="cart-item-media" href="{{ item.url }}" tabindex="-1" aria-hidden="true">
+                {%- if item.image -%}
+                  <img
+                    src="{{ item.image | image_url: width: 320 }}"
+                    alt=""
+                    width="160"
+                    height="160"
+                    loading="lazy"
+                  >
+                {%- endif -%}
+              </a>
+
+              <div class="cart-item-body">
+                <a class="cart-item-title" href="{{ item.url }}">{{ item.product.title }}</a>
+                {%- unless item.product.has_only_default_variant -%}
+                  <p class="cart-item-variant">{{ item.variant.title }}</p>
+                {%- endunless -%}
+                <p class="cart-item-price">{{ item.final_price | money }}</p>
+
+                <div class="cart-item-controls">
+                  <label class="cart-qty">
+                    <span>Qty</span>
+                    <input
+                      type="number"
+                      name="updates[]"
+                      value="{{ item.quantity }}"
+                      min="0"
+                      inputmode="numeric"
+                      aria-label="Quantity for {{ item.product.title | escape }}"
+                    >
+                  </label>
+                  <a class="cart-remove" href="{{ item.url_to_remove }}">Remove</a>
+                </div>
+              </div>
+
+              <p class="cart-item-line">{{ item.final_line_price | money }}</p>
+            </li>
+          {%- endfor -%}
+        </ul>
+
+        <div class="cart-foot">
+          <button class="cart-update" type="submit" name="update">Update cart</button>
+
+          <div class="cart-totals">
+            <div class="cart-subtotal">
+              <span>Subtotal</span>
+              <strong>{{ cart.total_price | money }}</strong>
+            </div>
+            <p class="cart-ship-note">
+              Shipping is calculated at checkout. Australia only — the kit contains a
+              lithium battery, so it travels by road freight.
+            </p>
+            <button class="btn-submit cart-checkout" type="submit" name="checkout">
+              {{ 'cart.checkout' | t }}
+            </button>
+          </div>
+        </div>
+      </form>
+    {%- endif -%}
+  </div>
+</section>
+
+{% stylesheet %}
+  .cart-page {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    /* body:not(.template-index) already reserves --nav-h, so this only needs
+       breathing room — clearing the nav again cost ~180px of dead space. */
+    padding-block: clamp(32px, 6vw, 56px) clamp(64px, 8vw, 96px);
+    min-height: 60vh;
+  }
+
+  .cart-inner { grid-column: 2; }
+
+  .cart-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.5rem, 7vw, 4.5rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0 0 clamp(1.5rem, 4vw, 2.5rem);
+  }
+
+  /* --- empty state --- */
+  .cart-empty { max-width: 34rem; color: var(--muted); }
+  .cart-empty p { margin: 0 0 0.9rem; line-height: 1.7; }
+  .cart-empty-lead { font-size: 1.1rem; color: var(--white); }
+  .cart-empty-link {
+    display: inline-block;
+    margin-block-start: 0.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+
+  /* --- notices --- */
+  .cart-notice,
+  .cart-compat {
+    border: 1px solid var(--green);
+    border-radius: 10px;
+    background: rgba(168, 230, 61, 0.07);
+    padding: 1rem 1.1rem;
+    margin: 0 0 1rem;
+    max-width: 44rem;
+  }
+
+  .cart-notice p,
+  .cart-compat p {
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--white);
+    margin: 0 0 0.5rem;
+  }
+
+  .cart-notice p:last-child,
+  .cart-compat p:last-child { margin-bottom: 0; }
+
+  .cart-notice-head {
+    font-family: var(--font-mono);
+    font-size: 0.68rem !important;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--green) !important;
+  }
+
+  .cart-compat { background: rgba(168, 230, 61, 0.04); }
+  .cart-compat-link { font-size: 0.8rem !important; }
+  .cart-compat-link a { color: var(--muted); }
+
+  /* --- line items --- */
+  .cart-items {
+    list-style: none;
+    margin: clamp(1.5rem, 4vw, 2.5rem) 0 0;
+    padding: 0;
+  }
+
+  .cart-item {
+    display: grid;
+    grid-template-columns: 72px 1fr;
+    gap: 1rem;
+    padding-block: 1.25rem;
+    border-block-start: 1px solid var(--border);
+    align-items: start;
+  }
+
+  .cart-item-media {
+    display: block;
+    border-radius: 0.6rem;
+    overflow: hidden;
+    background: var(--bg2);
+    aspect-ratio: 1;
+  }
+
+  .cart-item-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .cart-item-title {
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 1rem;
+    color: var(--white);
+    text-decoration: none;
+    line-height: 1.35;
+  }
+
+  .cart-item-variant,
+  .cart-item-price {
+    font-family: var(--font-mono);
+    font-size: 0.78rem;
+    color: var(--muted);
+    margin: 0.35rem 0 0;
+  }
+
+  .cart-item-controls {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-block-start: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .cart-qty { display: flex; align-items: center; gap: 0.5rem; }
+
+  .cart-qty span {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .cart-qty input {
+    width: 4rem;
+    background: var(--bg);
+    color: var(--white);
+    border: 1px solid var(--border);
+    border-radius: 0.4rem;
+    padding: 0.45rem 0.55rem;
+    font-family: var(--font-body);
+  }
+
+  .cart-qty input:focus-visible { outline: 2px solid var(--green); outline-offset: 1px; }
+
+  .cart-remove {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .cart-remove:hover { color: var(--green); }
+
+  /* Line total sits under the body on mobile, in its own column on desktop. */
+  .cart-item-line {
+    grid-column: 2;
+    margin: 0;
+    font-family: var(--font-mono);
+    font-size: 0.95rem;
+    color: var(--white);
+  }
+
+  @media (min-width: 700px) {
+    .cart-item {
+      grid-template-columns: 96px 1fr auto;
+      gap: 1.5rem;
+      align-items: center;
+    }
+    .cart-item-line { grid-column: auto; text-align: right; }
+  }
+
+  /* --- foot --- */
+  .cart-foot {
+    display: grid;
+    gap: 1.5rem;
+    margin-block-start: clamp(1.5rem, 4vw, 2.5rem);
+    padding-block-start: 1.5rem;
+    border-block-start: 1px solid var(--border);
+  }
+
+  @media (min-width: 700px) {
+    .cart-foot { grid-template-columns: 1fr minmax(18rem, 24rem); align-items: start; }
+  }
+
+  .cart-update {
+    justify-self: start;
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 0.5rem;
+    color: var(--muted);
+    font-family: var(--font-mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    padding: 0.7rem 1.1rem;
+    cursor: pointer;
+  }
+
+  .cart-update:hover { color: var(--white); border-color: var(--green); }
+
+  .cart-subtotal {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 1rem;
+    font-family: var(--font-mono);
+    color: var(--white);
+    font-size: 1.05rem;
+  }
+
+  .cart-subtotal strong { color: var(--green); font-size: 1.35rem; }
+
+  .cart-ship-note {
+    margin: 0.6rem 0 1rem;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    color: var(--muted);
+  }
+
+  .cart-checkout { width: 100%; }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "t:general.cart",
+  "settings": []
+}
+{% endschema %}

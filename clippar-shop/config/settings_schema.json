@@ -1,0 +1,186 @@
+[
+  {
+    "name": "theme_info",
+    "theme_name": "Clippar",
+    "theme_version": "0.1.0",
+    "theme_author": "Clippar",
+    "theme_documentation_url": "https://help.shopify.com/manual/online-store/themes",
+    "theme_support_url": "https://support.shopify.com/"
+  },
+  {
+    "name": "Shop",
+    "settings": [
+      {
+        "type": "checkbox",
+        "id": "shop_launched",
+        "label": "Shop launched",
+        "info": "Off until checkout is open. While off, product pages emit no Product or Offer structured data, so Google is never told a listing is buyable when it is not. Turn on together with the header's Show cart link.",
+        "default": false
+      },
+      {
+        "type": "header",
+        "content": "Pre-order"
+      },
+      {
+        "type": "checkbox",
+        "id": "preorder_mode",
+        "label": "Selling as a pre-order",
+        "info": "Emits availability: PreOrder in structured data instead of InStock, and shows the dispatch notice on the product page. Shopify's own markup always says InStock, which would be wrong here and can get the listing disapproved in Google Merchant Center.",
+        "default": true
+      },
+      {
+        "type": "text",
+        "id": "preorder_dispatch_label",
+        "label": "Dispatch window (human)",
+        "info": "Shown to customers, e.g. \"December 2026\". Google requires the expected shipping date to be visible as text on the page.",
+        "default": "December 2026"
+      },
+      {
+        "type": "text",
+        "id": "preorder_availability_date",
+        "label": "Dispatch date (machine)",
+        "info": "ISO 8601 with Brisbane offset, e.g. 2026-12-01T00:00+1000. Must not be more than a year ahead. Keep it consistent with the window above.",
+        "default": "2026-12-01T00:00+1000"
+      },
+      {
+        "type": "text",
+        "id": "price_valid_until",
+        "label": "Price valid until",
+        "info": "YYYY-MM-DD. If this date passes, Google may stop showing the listing entirely. Roll it forward before it expires.",
+        "default": "2026-12-31"
+      },
+      {
+        "type": "header",
+        "content": "Search engines"
+      },
+      {
+        "type": "text",
+        "id": "seo_home_title",
+        "label": "Home page title",
+        "info": "Aim for 60 characters including the \" – Clippar\" that Shopify appends. Leave blank to fall back to the shop name, which is just \"Clippar\" and ranks for nothing.",
+        "default": "Auto-Record & Edit Your Golf Round | Free iOS App"
+      },
+      {
+        "type": "textarea",
+        "id": "seo_home_description",
+        "label": "Home page meta description",
+        "info": "150-158 characters. Without this the home page ships no description at all and Google writes its own.",
+        "default": "Clip your phone to your golf bag and tap the clicker before each shot. Clippar's free iOS app finds every swing and edits your round into a highlight reel."
+      },
+      {
+        "type": "textarea",
+        "id": "seo_default_description",
+        "label": "Fallback meta description",
+        "info": "Used on any page with no description of its own, so no page ever ships without one.",
+        "default": "Clippar records and edits your golf round automatically. Clip your phone to your bag, tap the clicker, and walk off with a highlight reel."
+      }
+    ]
+  },
+  {
+    "name": "t:general.typography",
+    "settings": [
+      {
+        "type": "header",
+        "content": "t:general.fonts"
+      },
+      {
+        "type": "font_picker",
+        "id": "type_primary_font",
+        "default": "work_sans_n4",
+        "label": "t:general.primary"
+      }
+    ]
+  },
+  {
+    "name": "t:general.layout",
+    "settings": [
+      {
+        "type": "select",
+        "id": "max_page_width",
+        "label": "t:labels.page_width",
+        "options": [
+          {
+            "value": "90rem",
+            "label": "t:options.page_width.narrow"
+          },
+          {
+            "value": "110rem",
+            "label": "t:options.page_width.wide"
+          }
+        ],
+        "default": "90rem"
+      },
+      {
+        "type": "range",
+        "id": "min_page_margin",
+        "min": 10,
+        "max": 100,
+        "step": 1,
+        "unit": "px",
+        "label": "t:labels.page_margin",
+        "default": 20
+      }
+    ]
+  },
+  {
+    "name": "t:general.colors",
+    "settings": [
+      {
+        "type": "color",
+        "id": "background_color",
+        "default": "#07100a",
+        "label": "t:labels.background"
+      },
+      {
+        "type": "color",
+        "id": "foreground_color",
+        "default": "#f0f4ee",
+        "label": "t:labels.foreground"
+      },
+      {
+        "type": "header",
+        "content": "Clippar brand"
+      },
+      {
+        "type": "color",
+        "id": "accent_color",
+        "default": "#a8e63d",
+        "label": "Accent"
+      },
+      {
+        "type": "color",
+        "id": "accent_dim_color",
+        "default": "#6fa828",
+        "label": "Accent (dim)"
+      },
+      {
+        "type": "color",
+        "id": "surface_color",
+        "default": "#0d1a10",
+        "label": "Surface"
+      },
+      {
+        "type": "color",
+        "id": "surface_raised_color",
+        "default": "#111f14",
+        "label": "Surface (raised)"
+      },
+      {
+        "type": "color",
+        "id": "muted_color",
+        "default": "#7a9178",
+        "label": "Muted text"
+      },
+      {
+        "type": "range",
+        "id": "input_corner_radius",
+        "min": 0,
+        "max": 10,
+        "step": 1,
+        "unit": "px",
+        "label": "t:labels.input_corner_radius",
+        "default": 4
+      }
+    ]
+  }
+]

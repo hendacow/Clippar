@@ -1,0 +1,402 @@
+{%- comment -%}
+  App showcase — 3D phone mockups that drift as you scroll.
+
+  Three deliberate implementation choices, because the obvious versions of this
+  are all bad:
+
+  1. **The 3D is CSS, not a rendered image.** A perspective transform on a real
+     <img> stays crisp at every screen density, weighs nothing extra, and can be
+     re-shot by swapping a PNG. Pre-rendered 3D mockups (Rotato and friends) bake
+     the angle and the resolution in, and every future screenshot means going
+     back to the tool.
+
+  2. **The parallax uses `animation-timeline: view()`** — native scroll-driven
+     animation, which the browser runs off the main thread. The usual approach,
+     a scroll listener writing transforms, runs on the main thread and janks on
+     exactly the mid-range Android and older iPhones our buyers actually hold.
+     Browsers without it get the layout with no motion, which is fine.
+
+  3. **No scroll-jacking, and `prefers-reduced-motion` kills all of it.** Motion
+     here is decoration; the page has to read perfectly with none of it. Anyone
+     who has asked their OS for less movement gets a clean static layout, not a
+     degraded one.
+
+  The device frame is drawn in CSS — bezel, rounded corners, screen inset — so
+  the source images can be plain screenshots straight off a phone.
+{%- endcomment -%}
+
+{%- assign motion = section.settings.motion -%}
+
+<section class="showcase full-width{% if section.settings.tone == 'dark' %} showcase--dark{% endif %}">
+  <div class="showcase-inner">
+    <header class="showcase-head">
+      {%- if section.settings.label != blank -%}
+        <p class="showcase-label">{{ section.settings.label }}</p>
+      {%- endif -%}
+      <h2 class="showcase-title">{{ section.settings.title }}</h2>
+      {%- if section.settings.intro != blank -%}
+        <div class="showcase-intro">{{ section.settings.intro }}</div>
+      {%- endif -%}
+    </header>
+
+    <div class="showcase-rail" data-motion="{{ motion }}">
+      {%- for block in section.blocks -%}
+        {%- comment -%}
+          Depth alternates 1/2/3 across the blocks so adjacent phones travel at
+          visibly different rates. Uniform parallax reads as the whole section
+          sliding, which looks like a rendering fault rather than depth.
+        {%- endcomment -%}
+        {%- assign depth = forloop.index0 | modulo: 3 | plus: 1 -%}
+        <figure
+          class="device device--d{{ depth }}"
+          data-depth="{{ depth }}"
+          {{ block.shopify_attributes }}
+        >
+          <div class="device-frame">
+            <div class="device-notch" aria-hidden="true"></div>
+            {%- comment -%}
+              Two image sources, on purpose.
+
+              `image` is the theme-editor picker and always wins — it is how
+              Henry swaps a screenshot without touching code. But a picker
+              stores a Shopify file reference, which cannot be written into a
+              JSON template, so shipping working defaults needs a second route:
+              `asset_name`, a plain filename in assets/. That lets the section
+              arrive populated instead of arriving as six empty boxes nobody
+              gets around to filling.
+            {%- endcomment -%}
+            <div class="device-screen">
+              {%- if block.settings.image != blank -%}
+                <img
+                  src="{{ block.settings.image | image_url: width: 640 }}"
+                  alt="{{ block.settings.image.alt | default: block.settings.caption | escape }}"
+                  width="320"
+                  height="693"
+                  loading="lazy"
+                  decoding="async"
+                  sizes="(min-width: 900px) 22vw, 60vw"
+                  srcset="
+                    {{ block.settings.image | image_url: width: 320 }} 320w,
+                    {{ block.settings.image | image_url: width: 640 }} 640w
+                  "
+                >
+              {%- elsif block.settings.asset_name != blank -%}
+                {%- comment -%}
+                  The `w` descriptors below are MEASURED widths, not the numbers
+                  handed to asset_img_url, and the difference is the whole point.
+
+                  `asset_img_url: 'NxN'` fits the image inside an N-by-N box, so
+                  on a tall portrait screenshot the HEIGHT binds and the width
+                  lands far short of N. Measured against the live CDN for a
+                  640x1387 source:
+
+                      _320x  -> 295x640        _640x  -> 295x640
+                      _720x  -> 640x1387       _1024x -> 640x1387
+
+                  Declaring that first one as "640w" told the browser a 295px
+                  image was 640px wide, so it confidently chose the small file
+                  for a 2x display and the screens rendered soft. Honest
+                  descriptors let it pick correctly.
+                {%- endcomment -%}
+                <img
+                  src="{{ block.settings.asset_name | asset_img_url: '720x' }}"
+                  alt="{{ block.settings.alt | default: block.settings.caption | escape }}"
+                  width="640"
+                  height="1387"
+                  loading="lazy"
+                  decoding="async"
+                  sizes="(min-width: 900px) 22vw, 45vw"
+                  srcset="
+                    {{ block.settings.asset_name | asset_img_url: '640x' }} 295w,
+                    {{ block.settings.asset_name | asset_img_url: '720x' }} 640w
+                  "
+                >
+              {%- else -%}
+                <span class="device-placeholder" aria-hidden="true">{{ forloop.index }}</span>
+              {%- endif -%}
+            </div>
+          </div>
+
+          {%- if block.settings.caption != blank or block.settings.feature != blank -%}
+            <figcaption class="device-cap">
+              {%- if block.settings.feature != blank -%}
+                <span class="device-feature">{{ block.settings.feature }}</span>
+              {%- endif -%}
+              {%- if block.settings.caption != blank -%}
+                <span class="device-caption">{{ block.settings.caption }}</span>
+              {%- endif -%}
+            </figcaption>
+          {%- endif -%}
+        </figure>
+      {%- endfor -%}
+    </div>
+  </div>
+</section>
+
+{% stylesheet %}
+  .showcase {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    padding-block: clamp(72px, 10vw, 128px);
+    overflow: clip; /* parallax can push a phone past the edge; never scroll the page sideways */
+  }
+
+  .showcase--dark { background: var(--bg2); }
+  .showcase-inner { grid-column: 2; }
+
+  .showcase-head {
+    max-width: 46rem;
+    margin-block-end: clamp(2.5rem, 6vw, 4.5rem);
+  }
+
+  .showcase-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin: 0 0 0.75rem;
+  }
+
+  .showcase-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5.5vw, 3.5rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0;
+  }
+
+  .showcase-intro {
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1.7;
+    margin-block-start: 1rem;
+  }
+
+  .showcase-intro p { margin: 0; }
+
+  /* --- the rail --------------------------------------------------------- */
+
+  /* Two columns on a phone, not one.
+     `auto-fit` with a 12rem minimum collapsed to a single column at 375px,
+     which stacked four full-height mockups into a 3,260px section — about four
+     screens of scrolling to get past one idea. Explicit columns instead. */
+  .showcase-rail {
+    display: grid;
+    gap: clamp(1.25rem, 4vw, 3rem);
+    grid-template-columns: repeat(2, 1fr);
+    /* The shared perspective origin is what makes the phones read as one
+       scene rather than as several separately-tilted pictures. */
+    perspective: 1600px;
+    perspective-origin: 50% 40%;
+  }
+
+  @media (min-width: 900px) {
+    .showcase-rail { grid-template-columns: repeat(4, 1fr); align-items: start; }
+  }
+
+  /* --- the device ------------------------------------------------------- */
+
+  .device {
+    margin: 0;
+    transform-style: preserve-3d;
+    will-change: transform;
+  }
+
+  .device-frame {
+    position: relative;
+    border-radius: 2rem;
+    padding: 0.5rem;
+    background: linear-gradient(160deg, #2a2f2b 0%, #12160f 55%, #23282a 100%);
+    box-shadow:
+      0 1px 0 rgba(255, 255, 255, 0.14) inset,
+      0 30px 60px -20px rgba(0, 0, 0, 0.85),
+      0 8px 20px -8px rgba(0, 0, 0, 0.6);
+    transform: rotateY(var(--ry, -14deg)) rotateX(var(--rx, 5deg));
+    transition: transform 350ms ease-out;
+  }
+
+  /* Mirror the tilt across the rail so the set converges on the centre
+     instead of all leaning the same way like a row of dominoes. */
+  .device:nth-child(even) .device-frame { --ry: 14deg; }
+
+  .device:hover .device-frame,
+  .device:focus-within .device-frame { --ry: 0deg; --rx: 0deg; }
+
+  .device-notch {
+    position: absolute;
+    top: 0.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 32%;
+    height: 0.85rem;
+    background: #0a0d08;
+    border-radius: 0 0 0.6rem 0.6rem;
+    z-index: 2;
+  }
+
+  .device-screen {
+    position: relative;
+    border-radius: 1.6rem;
+    overflow: hidden;
+    background: var(--bg);
+    aspect-ratio: 886 / 1920;
+    display: grid;
+    place-items: center;
+  }
+
+  .device-screen img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .device-placeholder {
+    font-family: var(--font-display);
+    font-size: 2.5rem;
+    color: var(--border);
+  }
+
+  .device-cap {
+    margin-block-start: 1.15rem;
+    display: grid;
+    gap: 0.3rem;
+  }
+
+  .device-feature {
+    font-family: var(--font-mono);
+    font-size: 0.66rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+
+  .device-caption {
+    font-size: 0.88rem;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+
+  /* --- motion ----------------------------------------------------------- */
+
+  /* Native scroll-driven parallax. Off the main thread, so it cannot jank the
+     way a scroll listener does. Browsers without support simply get no motion. */
+  @supports (animation-timeline: view()) {
+    .showcase-rail[data-motion="parallax"] .device,
+    .showcase-rail[data-motion="both"] .device {
+      animation: device-drift linear both;
+      animation-timeline: view();
+      animation-range: entry 0% exit 100%;
+    }
+
+    .device--d1 { --drift: 26px; }
+    .device--d2 { --drift: 52px; }
+    .device--d3 { --drift: 14px; }
+
+    @keyframes device-drift {
+      from { translate: 0 var(--drift); }
+      to   { translate: 0 calc(var(--drift) * -1); }
+    }
+  }
+
+  /* A slow idle float, so the phones are alive even before you scroll. */
+  .showcase-rail[data-motion="float"] .device-frame,
+  .showcase-rail[data-motion="both"] .device-frame {
+    animation: device-float 7s ease-in-out infinite alternate;
+  }
+
+  .showcase-rail .device:nth-child(2) .device-frame { animation-delay: -2.3s; }
+  .showcase-rail .device:nth-child(3) .device-frame { animation-delay: -4.1s; }
+  .showcase-rail .device:nth-child(4) .device-frame { animation-delay: -1.2s; }
+
+  @keyframes device-float {
+    from { transform: rotateY(var(--ry, -14deg)) rotateX(var(--rx, 5deg)) translateY(-6px); }
+    to   { transform: rotateY(var(--ry, -14deg)) rotateX(var(--rx, 5deg)) translateY(6px); }
+  }
+
+  /* Decoration only. Asked for less motion, get none — and get a flat, honest
+     layout rather than a broken-looking one. */
+  @media (prefers-reduced-motion: reduce) {
+    .showcase-rail .device,
+    .showcase-rail .device-frame {
+      animation: none !important;
+      transition: none !important;
+    }
+    .device-frame { transform: none; }
+  }
+
+  /* Below ~700px the tilt costs legibility on an already-small screenshot,
+     so the phones stand square and only the drift remains. */
+  @media (max-width: 700px) {
+    .device-frame { --ry: 0deg; --rx: 0deg; }
+    .showcase-rail { perspective: none; }
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "App showcase",
+  "tag": "section",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Eyebrow", "default": "The app" },
+    { "type": "text", "id": "title", "label": "Heading", "default": "It does the editing" },
+    {
+      "type": "richtext",
+      "id": "intro",
+      "label": "Intro",
+      "default": "<p>Free on the App Store, and it works whether or not you ever buy the kit.</p>"
+    },
+    {
+      "type": "select",
+      "id": "motion",
+      "label": "Motion",
+      "options": [
+        { "value": "none", "label": "Static" },
+        { "value": "float", "label": "Gentle float" },
+        { "value": "parallax", "label": "Parallax on scroll" },
+        { "value": "both", "label": "Float and parallax" }
+      ],
+      "default": "both",
+      "info": "Anyone whose device asks for reduced motion gets a static layout regardless. Parallax uses native scroll-driven animation, so it runs off the main thread and will not stutter."
+    },
+    {
+      "type": "select",
+      "id": "tone",
+      "label": "Background",
+      "options": [
+        { "value": "light", "label": "Base" },
+        { "value": "dark", "label": "Raised" }
+      ],
+      "default": "dark"
+    }
+  ],
+  "blocks": [
+    {
+      "type": "screen",
+      "name": "App screen",
+      "settings": [
+        { "type": "image_picker", "id": "image", "label": "Screenshot", "info": "A plain phone screenshot. The device frame is drawn in CSS around it. Overrides the asset filename below." },
+        { "type": "text", "id": "asset_name", "label": "…or a theme asset filename", "info": "e.g. clippar-app-live-recording.png, uploaded to the theme's assets. Used only when no screenshot is picked above." },
+        { "type": "text", "id": "alt", "label": "Alt text", "info": "Describe the screen and what it is doing. Only used with the asset filename; a picked image carries its own." },
+        { "type": "text", "id": "feature", "label": "Feature label", "default": "Feature" },
+        { "type": "text", "id": "caption", "label": "Caption", "default": "What this screen does." }
+      ]
+    }
+  ],
+  "max_blocks": 6,
+  "presets": [
+    {
+      "name": "App showcase",
+      "blocks": [
+        { "type": "screen", "settings": { "feature": "Live recording", "caption": "Pick your course, set the scorecard, and start. The clicker does the rest." } },
+        { "type": "screen", "settings": { "feature": "Shot detection", "caption": "Finds the swing inside each recording and throws away the walk-up." } },
+        { "type": "screen", "settings": { "feature": "The reel", "caption": "Every shot, trimmed and in order, before you reach the car park." } },
+        { "type": "screen", "settings": { "feature": "Your rounds", "caption": "Filter by course, hole or date. No scrolling the camera roll." } }
+      ]
+    }
+  ]
+}
+{% endschema %}

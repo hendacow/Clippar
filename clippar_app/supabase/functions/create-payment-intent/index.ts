@@ -1,11 +1,6 @@
-import Stripe from 'https://esm.sh/stripe@14.25.0?target=deno';
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.110.8';
-import { enforceRateLimits, RATE_LIMITS } from '../_shared/rateLimit.ts';
-import {
-  PRICE_CURRENCY,
-  resolvePriceCents,
-  resolveProductType,
-} from './pricing.ts';
+import Stripe from 'https://esm.sh/stripe@14?target=deno';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { CURRENCY, resolvePriceCents } from './pricing.ts';
 
 const stripe = new Stripe(Deno.env.get('STRIPE_SECRET_KEY')!, {
   apiVersion: '2024-04-10',
@@ -16,9 +11,11 @@ const supabase = createClient(
   Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
 );
 
-// Price table and the allowlist lookup live in ./pricing.ts — see the comment
-// there for why the table has a null prototype and why the lookup is an
-// own-property test rather than `table[key] === undefined`.
+Deno.serve(async (req: Request) => {
+  try {
+    // NOTE: any `amount` in the request body is deliberately ignored. The price
+    // is resolved server-side from product_type so the client cannot set it.
+    const { product_type } = await req.json();
 
 const handler = async (req: Request): Promise<Response> => {
   try {
@@ -44,46 +41,29 @@ const handler = async (req: Request): Promise<Response> => {
       });
     }
 
-    // Every call here reaches Stripe's API on our credentials. Unmetered, a
-    // scripted account can burn our Stripe rate limit and litter the dashboard
-    // with abandoned intents. Fails CLOSED (see RATE_LIMITS.createPaymentIntent):
-    // if the limiter is down, refusing checkout beats an unmetered flood.
-    const limited = await enforceRateLimits(
-      supabase,
-      RATE_LIMITS.createPaymentIntent,
-      user.id,
-      { 'Content-Type': 'application/json' },
-    );
-    if (limited) return limited;
-
-    const body = await req.json().catch(() => null);
-    if (body === null || typeof body !== 'object') {
-      return new Response(JSON.stringify({ error: 'Invalid request body' }), {
-        status: 400,
-        headers: { 'Content-Type': 'application/json' },
-      });
-    }
-    const product_type = (body as Record<string, unknown>).product_type;
-
-    // Resolve the price from the server-side catalog, ignoring any
-    // client-supplied amount/currency. Unknown products are rejected.
-    const resolvedType = resolveProductType(product_type);
-    const amount = resolvePriceCents(product_type);
-    if (amount === null) {
+    // Resolve the price server-side. Unknown product types are rejected rather
+    // than defaulted, so a typo can never silently charge the wrong amount.
+    let amount: number;
+    try {
+      amount = resolvePriceCents(product_type);
+    } catch (err) {
       return new Response(
-        JSON.stringify({ error: 'Unknown product' }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
+        JSON.stringify({ error: (err as Error).message }),
+        {
+          status: 400,
+          headers: { 'Content-Type': 'application/json' },
+        }
       );
     }
 
     // Create PaymentIntent
     const paymentIntent = await stripe.paymentIntents.create({
       amount,
-      currency: PRICE_CURRENCY,
+      currency: CURRENCY,
       metadata: {
         user_id: user.id,
         user_email: user.email ?? '',
-        product_type: resolvedType,
+        product_type,
       },
     });
 

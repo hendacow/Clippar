@@ -1,0 +1,122 @@
+{%- comment -%}
+  A single block of prose that answers one question properly.
+
+  Two jobs on this site, and both come straight out of what the good hardware
+  pages do:
+
+  1. **Promote the objection to a heading.** Arccos runs sections literally
+     titled "DO I NEED SENSORS ON MY CLUBS?" — the thing the buyer is already
+     thinking, set as the headline, answered in plain words. Ours is "the app
+     is free, so what am I paying for?", and burying that in an FAQ treats it
+     as an edge case when it is the whole decision.
+
+  2. **A founder note.** With no reviews, no press and no rating widget, the
+     substitute for social proof is a person putting their name to it. Playdate
+     ("The Idea", "Who Made It?") and Bellroy ("From the designer") both do
+     this; for a one-person company it is the cheapest credibility available
+     and the only kind that is entirely true.
+
+  Deliberately no icons and no three-up grid — an icon row makes a physical
+  product look like software.
+{%- endcomment -%}
+
+<section class="stmt full-width{% if section.settings.tone == 'dark' %} stmt--dark{% endif %}">
+  <div class="stmt-inner">
+    {%- if section.settings.label != blank -%}
+      <p class="stmt-label">{{ section.settings.label }}</p>
+    {%- endif -%}
+
+    <h2 class="stmt-title">{{ section.settings.title }}</h2>
+
+    <div class="stmt-body">{{ section.settings.body }}</div>
+
+    {%- if section.settings.signature != blank -%}
+      <p class="stmt-signature">{{ section.settings.signature }}</p>
+    {%- endif -%}
+  </div>
+</section>
+
+{% stylesheet %}
+  .stmt {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    padding-block: clamp(72px, 10vw, 120px);
+  }
+
+  .stmt--dark { background: var(--bg2); }
+
+  /* Left aligned and measure-limited. Centred body copy is the sales-page
+     tell, and this section's whole job is to not sound like a sales page. */
+  .stmt-inner {
+    grid-column: 2;
+    max-width: 42rem;
+  }
+
+  .stmt-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin: 0 0 0.75rem;
+  }
+
+  .stmt-title {
+    font-family: var(--font-display);
+    font-size: clamp(2rem, 5vw, 3rem);
+    line-height: 1;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0 0 1.25rem;
+  }
+
+  .stmt-body {
+    font-size: 1rem;
+    line-height: 1.75;
+    color: var(--muted);
+  }
+
+  .stmt-body p { margin: 0 0 1rem; }
+  .stmt-body p:last-child { margin-bottom: 0; }
+  .stmt-body strong { color: var(--white); font-weight: 500; }
+  .stmt-body a { color: var(--green); }
+
+  .stmt-signature {
+    margin-block-start: 1.5rem;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--green);
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Statement",
+  "tag": "section",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Eyebrow" },
+    { "type": "text", "id": "title", "label": "Heading", "default": "Heading" },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Body",
+      "default": "<p>Body copy.</p>"
+    },
+    { "type": "text", "id": "signature", "label": "Signature", "info": "Optional. Use for a founder note." },
+    {
+      "type": "select",
+      "id": "tone",
+      "label": "Background",
+      "options": [
+        { "value": "light", "label": "Base" },
+        { "value": "dark", "label": "Raised" }
+      ],
+      "default": "light"
+    }
+  ],
+  "presets": [{ "name": "Statement" }]
+}
+{% endschema %}

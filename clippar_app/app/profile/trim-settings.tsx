@@ -55,29 +55,19 @@ export default function TrimSettingsScreen() {
     })();
   }, []);
 
-  // Save settings on change.
-  //
-  // `window: TRIM_WINDOW_MARKER` is not decoration — it is the flag both readers
-  // gate on. Drop it and every control here goes silently dead again.
-  const save = useCallback(
-    async (next: { preRollMs: number; postRollMs: number }) => {
-      await setSetting(
-        'trim_settings',
-        JSON.stringify({ ...next, window: TRIM_WINDOW_MARKER })
-      );
-    },
-    []
-  );
-
-  const applyWindow = useCallback(
-    (next: { preRollMs: number; postRollMs: number }) => {
-      Haptics.selectionAsync();
-      setPreRollMs(next.preRollMs);
-      setPostRollMs(next.postRollMs);
-      void save(next);
-    },
-    [save]
-  );
+  // Save settings on change
+  const save = useCallback(async (updates: Record<string, any>) => {
+    const current = {
+      autoTrimEnabled,
+      preRollMs,
+      postRollMs,
+      ...updates,
+      // Marker so the trim hooks honor this override as a full-swing window
+      // (otherwise the override is ignored to avoid shadowing the default window).
+      window: 'fullSwing',
+    };
+    await setSetting('trim_settings', JSON.stringify(current));
+  }, [autoTrimEnabled, preRollMs, postRollMs]);
 
   const totalDuration = (preRollMs + postRollMs) / 1000;
 

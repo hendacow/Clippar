@@ -1,0 +1,212 @@
+{% comment %}
+  Contact form — the single public route for reaching Clippar.
+
+  No email address appears anywhere on the storefront. Every place in the
+  policies that used to print one now links here instead, so the address is
+  never published, scraped, or stuck in a customer's sent items.
+
+  Uses Shopify's native {% form 'contact' %}, which posts to /contact and
+  delivers to the store's sender address configured in Settings → Notifications.
+  That address stays server-side.
+
+  Two things matter about the markup:
+
+    * The success and error states live INSIDE the form block —
+      form.posted_successfully? and form.errors are only in scope there.
+    * Nothing calls preventDefault on the valid path. Shopify injects its
+      spam-protection token during the native submit; intercepting it silently
+      breaks every real submission with "Missing CAPTCHA token".
+
+  Any contact[Some Label] field is carried into the notification email as a
+  labelled line, which is how the enquiry type, order number and free-text
+  topic reach the inbox without any custom backend.
+
+  Progressive enhancement: the conditional fields render visible, and
+  clippar.js hides them on load. With JS off the form still works — the
+  customer just sees two extra optional fields.
+{% endcomment %}
+
+{%- liquid
+  assign heading = section.settings.heading | default: 'Contact us'
+  assign body = section.settings.body | default: 'Tell us what you need and a human will answer.'
+-%}
+
+<div class="contact-page">
+  <div class="form-wrap">
+    <div class="form-card contact-card">
+      <h1>{{ heading }}</h1>
+      <p>{{ body }}</p>
+      <div class="form-error" id="contact-error"></div>
+
+      {%- form 'contact', id: 'contact-form', class: 'contact-form' -%}
+        {%- if form.posted_successfully? -%}
+          <div class="success-state" id="contact-success" style="display:block;">
+            <div class="tick">
+              <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#a8e63d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M20 6L9 17l-5-5"/>
+              </svg>
+            </div>
+            <h3>Message sent.</h3>
+            <p>We aim to reply within 2 business days. Safety issues are treated as urgent.</p>
+          </div>
+        {%- else -%}
+          {%- if form.errors -%}
+            <div class="form-error" style="display:block;">
+              {{ form.errors.messages['form'] | default: 'Something went wrong. Please try again.' }}
+            </div>
+          {%- endif -%}
+
+          <div class="form-group">
+            <label for="c-name">Your name</label>
+            <input type="text" id="c-name" name="contact[name]" placeholder="Tiger" required autocomplete="name">
+          </div>
+
+          <div class="form-group">
+            <label for="c-email">Email address</label>
+            <input type="email" id="c-email" name="contact[email]" placeholder="you@gmail.com" required autocomplete="email">
+          </div>
+
+          <div class="form-group">
+            <label for="c-topic">What's this about?</label>
+            <select id="c-topic" name="contact[Enquiry type]" required>
+              <option value="" disabled selected>Select a topic</option>
+              <option value="App support">App support — something isn't working</option>
+              <option value="Order or delivery">Order or delivery</option>
+              <option value="Return, refund or fault">Return, refund or faulty item</option>
+              <option value="Safety issue (URGENT)">Safety issue with the Mount Kit (urgent)</option>
+              <option value="Account, billing or subscription">Account, billing or subscription</option>
+              <option value="Privacy or data request">Privacy or data request</option>
+              <option value="Press, partnerships or business">Press, partnerships or business</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+
+          {%- comment -%}
+            Shown by clippar.js only for Other. Optional either way — a customer
+            who picks Other and leaves it blank still gets through.
+          {%- endcomment -%}
+          <div class="form-group" id="c-other-group">
+            <label for="c-other">Tell us the topic</label>
+            <input type="text" id="c-other" name="contact[Other topic]" placeholder="In a few words">
+          </div>
+
+          {%- comment -%}
+            The refund and shipping policies both ask customers to quote an order
+            number. Shown by clippar.js for the order-related topics, so the
+            policies have somewhere to point.
+          {%- endcomment -%}
+          <div class="form-group" id="c-order-group">
+            <label for="c-order">Order number <span class="optional">optional</span></label>
+            <input type="text" id="c-order" name="contact[Order number]" placeholder="#1001">
+          </div>
+
+          <div class="form-group">
+            <label for="c-body">Message</label>
+            <textarea id="c-body" name="contact[body]" rows="6" placeholder="As much or as little detail as you like." required></textarea>
+          </div>
+
+          {%- comment -%}
+            Honeypot. Positioned off-screen rather than display:none, which is
+            trivial for a bot to detect. Named "Comments" because form-spam
+            scripts that blanket-fill every input will take it, while browser
+            autofill has no reason to touch it — a false positive here would
+            silently swallow a real customer's message.
+
+            Not a cure. The bot that reached us picked its fields deliberately,
+            so the timing check in clippar.js is the one more likely to catch
+            this particular operator.
+          {%- endcomment -%}
+          <div class="hp-field" aria-hidden="true">
+            <label for="c-hp">Leave this field empty</label>
+            <input type="text" id="c-hp" name="contact[Comments]" tabindex="-1" autocomplete="off">
+          </div>
+
+          <button class="btn-submit" type="submit" id="c-submit">SEND MESSAGE</button>
+        {%- endif -%}
+      {%- endform -%}
+
+      <p class="form-note">We aim to reply within 2 business days. For a privacy request we'll respond within 30 days and won't charge you.</p>
+    </div>
+  </div>
+</div>
+
+{% stylesheet %}
+  /* The section renders inside the theme's CSS grid, where an item defaults to
+     min-width:auto and refuses to shrink below its content — the same overflow
+     that bit the legal pages on a phone. */
+  .contact-page {
+    box-sizing: border-box;
+    min-width: 0;
+    max-width: min(560px, 100%);
+    margin: 0 auto;
+    padding: 64px 20px 80px;
+  }
+
+  .contact-card h1 {
+    font-family: var(--font-mono);
+    font-size: 22px;
+    letter-spacing: 0.02em;
+    margin-bottom: 10px;
+  }
+
+  /* Matches .form-group input/select in clippar.css — kept here because the
+     shared sheet has no textarea rule. */
+  .contact-card textarea {
+    width: 100%;
+    padding: 13px 14px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 8px;
+    color: var(--white);
+    font-family: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    resize: vertical;
+  }
+
+  .contact-card textarea::placeholder { color: rgba(255, 255, 255, 0.2); }
+
+  .contact-card textarea:focus {
+    outline: none;
+    border-color: var(--green);
+  }
+
+  /* Off-screen rather than display:none or visibility:hidden, both of which a
+     bot can cheaply test for before deciding whether to fill a field. */
+  .hp-field {
+    position: absolute;
+    left: -9999px;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+
+  .contact-card .optional {
+    font-family: var(--font-mono);
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-left: 6px;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Contact form",
+  "settings": [
+    {
+      "type": "text",
+      "id": "heading",
+      "label": "Heading",
+      "default": "Contact us"
+    },
+    {
+      "type": "text",
+      "id": "body",
+      "label": "Intro",
+      "default": "Tell us what you need and a human will answer."
+    }
+  ]
+}
+{% endschema %}

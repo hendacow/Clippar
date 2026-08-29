@@ -1,0 +1,188 @@
+{%- comment -%}
+  FAQ.
+
+  Deliberately NOT marked up as FAQPage. Google deprecated the FAQ rich result
+  on 7 May 2026 and removed the documentation entirely in June; the schema type
+  is still valid but produces nothing, so shipping it would be engineering time
+  spent on a feature that no longer exists.
+
+  The content still earns its place — it is where AI Overviews and featured
+  snippets read from, and it is the long-tail body copy a page with 355 words
+  badly needs. So: real headings, real prose, no markup theatre.
+
+  Answers are open by default rather than hidden behind an accordion. Google
+  requires the dispatch date to be visible text on a pre-order landing page,
+  and an answer nobody expands is an answer nobody reads.
+{%- endcomment -%}
+
+<section class="faq full-width" id="faq">
+  <div class="faq-inner">
+    <header class="faq-head">
+      {%- if section.settings.label != blank -%}
+        <p class="faq-label">{{ section.settings.label }}</p>
+      {%- endif -%}
+      <h2 class="faq-title">{{ section.settings.title }}</h2>
+    </header>
+
+    <div class="faq-list">
+      {%- for block in section.blocks -%}
+        <div class="faq-item" {{ block.shopify_attributes }}>
+          <h3 class="faq-q">{{ block.settings.question }}</h3>
+          <div class="faq-a">{{ block.settings.answer }}</div>
+        </div>
+      {%- endfor -%}
+    </div>
+  </div>
+</section>
+
+{% stylesheet %}
+  .faq {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    padding-block: clamp(72px, 10vw, 120px);
+  }
+
+  .faq-inner { grid-column: 2; }
+
+  .faq-head { margin-block-end: clamp(2rem, 4vw, 3rem); }
+
+  .faq-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin: 0 0 0.75rem;
+  }
+
+  .faq-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5.5vw, 3.5rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0;
+  }
+
+  .faq-list {
+    display: grid;
+    gap: clamp(1.5rem, 3vw, 2.25rem);
+  }
+
+  @media (min-width: 900px) {
+    .faq-list {
+      grid-template-columns: repeat(2, 1fr);
+      column-gap: clamp(2rem, 5vw, 4rem);
+    }
+  }
+
+  .faq-item {
+    border-block-start: 1px solid var(--border);
+    padding-block-start: clamp(1rem, 2vw, 1.35rem);
+  }
+
+  .faq-q {
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 1.02rem;
+    line-height: 1.4;
+    color: var(--white);
+    margin: 0 0 0.6rem;
+  }
+
+  .faq-a {
+    font-size: 0.92rem;
+    line-height: 1.7;
+    color: var(--muted);
+  }
+
+  .faq-a p { margin: 0 0 0.7rem; }
+  .faq-a p:last-child { margin-bottom: 0; }
+  .faq-a a { color: var(--green); }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "FAQ",
+  "tag": "section",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Eyebrow", "default": "Questions" },
+    { "type": "text", "id": "title", "label": "Heading", "default": "Before you order" }
+  ],
+  "blocks": [
+    {
+      "type": "qa",
+      "name": "Question",
+      "settings": [
+        { "type": "text", "id": "question", "label": "Question", "default": "Question?" },
+        { "type": "richtext", "id": "answer", "label": "Answer", "default": "<p>Answer.</p>" }
+      ]
+    }
+  ],
+  "max_blocks": 16,
+  "presets": [
+    {
+      "name": "FAQ",
+      "blocks": [
+        {
+          "type": "qa",
+          "settings": {
+            "question": "When will my kit ship?",
+            "answer": "<p>We're aiming to dispatch in <strong>December 2026</strong>. This is our first production run, so that is a genuine forecast rather than a date we can already guarantee — and if it moves, we'll email you before you find out any other way.</p><p>You can cancel any time before your kit is dispatched and get every cent back.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "Why am I paying now for something that ships later?",
+            "answer": "<p>Fair question. Pre-orders are what let a one-person company commit to a production run at all — we need to know how many to make before we can make any.</p><p>What you get in return is the launch price and a place in the first run. What you risk is nothing, because you can cancel for a full refund right up until it ships.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "Do I need an iPhone?",
+            "answer": "<p><strong>Yes.</strong> Clippar is iOS only. There is no Android app, and there isn't one coming soon enough to promise you a date.</p><p>The mount will physically hold an Android phone, but nothing will detect or clip your shots. If you're on Android, please don't buy this yet.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "Is the app free?",
+            "answer": "<p>Recording, shot detection, trimming, previewing and saving to your camera roll are all free, permanently, with no account limits.</p><p>Clippar Pro is a paid subscription and it adds one thing: cloud backup, so your rounds survive a lost or replaced phone. You never need it to use the kit.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "Will it fit my bag or buggy?",
+            "answer": "<p>The mount has three bendable legs with a spring clamp, so it wraps a buggy rail, a cart bar or the top of a carry bag rather than needing a specific fitting.</p><p>It grips the phone by width, so a case is fine. If it won't fit whatever you're using, send it back.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "How does the clicker work?",
+            "answer": "<p>It pairs to your phone over Bluetooth and lives on your belt loop on the badge reel. One press starts recording before your shot, one press stops it after.</p><p>Two presses move you to the next hole. Three add a penalty stroke to your card. You never take the phone off the bag.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "Where do you ship, and what does it cost?",
+            "answer": "<p>Australia only for now. The kit contains a lithium battery, which means it travels by road freight and cannot go by air — so allow a few business days after dispatch, and we can't currently ship it overseas.</p>"
+          }
+        },
+        {
+          "type": "qa",
+          "settings": {
+            "question": "What if I change my mind?",
+            "answer": "<p>Before dispatch: cancel for a full refund, no reason needed.</p><p>After it arrives: you have the rights every Australian buyer has under the Australian Consumer Law, and nothing in our terms takes those away. If it's faulty or it isn't what we described, we'll sort it out.</p>"
+          }
+        }
+      ]
+    }
+  ]
+}
+{% endschema %}

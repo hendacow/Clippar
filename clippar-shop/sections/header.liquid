@@ -1,0 +1,184 @@
+{% comment %}
+  Clippar nav. Matches clippargolf.com — wordmark left, nothing else — with a
+  cart link on the right, which the marketing site has no need for.
+  Layout comes from the <nav> and .logo rules in assets/clippar.css.
+
+  The cart link is hidden while the shop is pre-launch: it led to
+  sections/cart-coming-soon.liquid, so it offered a cart that cannot be filled.
+  Tick "Show cart link" in the theme editor to bring it back on launch day,
+  at the same time as restoring templates/cart.json.
+{% endcomment %}
+
+{%- comment -%}
+  Logo height drives the nav height, rather than the two being set separately
+  and drifting apart.
+
+  `--nav-h` is declared in assets/clippar.css as a hardcoded 77px — the measured
+  height of a 48px logo plus its 14px padding — and everything that has to clear
+  the fixed nav reads it: page padding-top, anchor scroll-margin. Growing the
+  logo without recomputing it would slide content up underneath the nav, which
+  is a silent bug rather than an obvious one.
+
+  So the header emits both from one number. This <style> sits in the body, after
+  clippar.css in document order, so it wins at equal specificity.
+
+  The stacked mark is 645x420 (1.54:1), and at the old 48px the word "GOLF"
+  rendered about 4px tall and was effectively illegible.
+{%- endcomment -%}
+{%- liquid
+  assign logo_h = section.settings.logo_height | default: 72
+  assign pad_y = 14
+  assign nav_h = logo_h | plus: pad_y | plus: pad_y
+  assign logo_h_mob = logo_h | times: 0.82 | round
+  assign pad_y_mob = 12
+  assign nav_h_mob = logo_h_mob | plus: pad_y_mob | plus: pad_y_mob
+-%}
+<style>
+  :root { --nav-h: {{ nav_h }}px; --logo-h: {{ logo_h }}px; --nav-pad-y: {{ pad_y }}px; }
+  @media (max-width: 700px) {
+    :root { --nav-h: {{ nav_h_mob }}px; --logo-h: {{ logo_h_mob }}px; --nav-pad-y: {{ pad_y_mob }}px; }
+  }
+  nav {
+    padding-top: calc(var(--nav-pad-y) + env(safe-area-inset-top, 0px));
+    padding-bottom: var(--nav-pad-y);
+  }
+</style>
+
+<nav>
+  <div style="display:flex;align-items:center;">
+    <a href="{{ routes.root_url }}" class="logo nav-wordmark" aria-label="Clippar Golf">
+      <img
+        class="nav-logo-img"
+        src="{{ 'clippar-logo-stacked.png' | asset_img_url: '600x' }}"
+        alt="Clippar Golf"
+        width="{{ logo_h | times: 1.536 | round }}"
+        height="{{ logo_h }}"
+      >
+    </a>
+  </div>
+
+  <div class="nav-actions">
+    {% for link in section.settings.menu.links %}
+      <a class="nav-link" href="{{ link.url }}">{{ link.title }}</a>
+    {% endfor %}
+
+    {% if section.settings.show_cart %}
+      <a class="nav-cart" href="{{ routes.cart_url }}">
+        Cart
+        {% if cart.item_count > 0 %}
+          <span class="nav-cart-count">{{ cart.item_count }}</span>
+        {% endif %}
+      </a>
+    {% endif %}
+  </div>
+</nav>
+
+{% stylesheet %}
+  .nav-wordmark {
+    text-decoration: none;
+    color: inherit;
+    /* The anchor now wraps an image; kill the inherited text line box so the
+       nav keeps its 77px height (--nav-h in clippar.css depends on it). */
+    line-height: 0;
+    display: inline-flex;
+    align-items: center;
+  }
+
+  /* Constrain by height, not width. The stacked mark is 645x420 (1.54:1).
+     Height comes from --logo-h, which the section sets alongside --nav-h so
+     the nav can never be a different size than the thing inside it. */
+  .nav-logo-img {
+    display: block;
+    height: var(--logo-h, 72px);
+    width: auto;
+  }
+
+  /*
+   * clippar.css centres the <nav> contents, because the marketing site has
+   * nothing in there but the wordmark. Keep that centring and float the store
+   * actions to the right rather than letting them butt up against the logo.
+   */
+  .nav-actions {
+    position: absolute;
+    right: 48px;
+    top: 50%;
+    transform: translateY(-50%);
+    display: flex;
+    align-items: center;
+    gap: 1.25rem;
+  }
+
+  @media (max-width: 700px) {
+    .nav-actions {
+      right: 20px;
+    }
+  }
+
+  .nav-link,
+  .nav-cart {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--white);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .nav-link:hover,
+  .nav-cart:hover {
+    color: var(--green);
+  }
+
+  .nav-cart-count {
+    background: var(--green);
+    color: var(--bg);
+    border-radius: 999px;
+    min-width: 1.25rem;
+    height: 1.25rem;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.7rem;
+    padding: 0 0.35rem;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "t:general.header",
+  "settings": [
+    {
+      "type": "text",
+      "id": "wordmark",
+      "label": "Wordmark",
+      "default": "CLIPPAR"
+    },
+    {
+      "type": "range",
+      "id": "logo_height",
+      "label": "Logo height",
+      "unit": "px",
+      "min": 40,
+      "max": 120,
+      "step": 4,
+      "default": 72,
+      "info": "The nav height follows this automatically, so content below can never end up hidden underneath it. Mobile scales to about 82% of this. At the old 48px the word GOLF was roughly 4px tall and unreadable."
+    },
+    {
+      "type": "link_list",
+      "id": "menu",
+      "label": "t:labels.menu"
+    },
+    {
+      "type": "checkbox",
+      "id": "show_cart",
+      "label": "Show cart link",
+      "info": "Off until the shop launches — the cart cannot be filled yet.",
+      "default": false
+    }
+  ]
+}
+{% endschema %}

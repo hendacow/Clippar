@@ -23,8 +23,6 @@ try {
  * Clippar box ships to the buyer.
  */
 export async function initPaymentSheet(params: {
-  amount: number;
-  currency: string;
   productType: 'standard' | 'premium';
   label: string;
 }) {
@@ -32,12 +30,12 @@ export async function initPaymentSheet(params: {
     throw new Error('Stripe not available — requires a development build');
   }
 
+  // The price is NOT sent from the client. create-payment-intent resolves it
+  // from product_type against its own table, so a tampered app cannot set it.
   const { data, error } = await supabase.functions.invoke(
     'create-payment-intent',
     {
       body: {
-        amount: params.amount,
-        currency: params.currency,
         product_type: params.productType,
       },
     }

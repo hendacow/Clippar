@@ -1,0 +1,276 @@
+{% comment %}
+  "Click. Swing. Clip." — ported from the how-it-works section on
+  clippargolf.com, which runs this as a video carousel.
+
+  24 Aug 2026: the three step clips are back, re-encoded from the pre-Shopify
+  site's clippar-web/public/landing_assets/steps/*.mp4 (which were HDR/10-bit
+  and up to 19MB — the original reason this went static). Re-encoded to 8-bit
+  480px-wide muted clips, 244KB-1.2MB each. Autoplay is opt-in via
+  data-autoplay, same pattern as the hero and detection-demo videos, so these
+  do not fight the browser's own preload heuristics.
+{% endcomment %}
+
+<div class="hiw full-width">
+  <div class="hiw-inner">
+    {%- if section.settings.label != blank -%}
+      <p class="hiw-label">{{ section.settings.label }}</p>
+    {%- endif -%}
+
+    {%- if section.settings.title != blank -%}
+      <h2 class="hiw-title">{{ section.settings.title }}</h2>
+    {%- endif -%}
+
+    <ol class="hiw-steps">
+      {%- for block in section.blocks -%}
+        <li class="hiw-step" {{ block.shopify_attributes }}>
+          {%- if block.settings.video != blank -%}
+            <div class="hiw-step-frame">
+              <video
+                class="hiw-step-video"
+                data-autoplay loop muted playsinline preload="none"
+                poster="{{ block.settings.poster | asset_img_url: '480x' }}"
+                width="480" height="854"
+              >
+                <source src="{{ block.settings.video | asset_url }}" type="video/mp4">
+              </video>
+            </div>
+          {%- endif -%}
+          <span class="hiw-step-num">{{ forloop.index | prepend: '0' | slice: -2, 2 }}</span>
+          <h3 class="hiw-step-title">{{ block.settings.heading }}</h3>
+          <div class="hiw-step-body">{{ block.settings.body }}</div>
+        </li>
+      {%- endfor -%}
+    </ol>
+  </div>
+</div>
+
+{% stylesheet %}
+  .hiw {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg);
+    padding-block: clamp(64px, 9vw, 112px);
+  }
+
+  .hiw-inner {
+    grid-column: 2;
+  }
+
+  .hiw-label {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-block-end: 0.75rem;
+  }
+
+  .hiw-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5vw, 3.5rem);
+    line-height: 0.96;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0 0 clamp(2.5rem, 5vw, 4rem);
+  }
+
+  .hiw-steps {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+    gap: clamp(1.5rem, 3vw, 2.5rem);
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .hiw-step {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    padding: clamp(1.5rem, 3vw, 2rem);
+  }
+
+  /* Centred in its card, not left-aligned — a portrait clip pinned to the left
+     edge of a wide card reads as a mistake. */
+  .hiw-step-frame {
+    aspect-ratio: 480 / 854;
+    max-width: 12rem;
+    margin: 0 auto 1.25rem;
+    border-radius: 0.65rem;
+    overflow: hidden;
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+
+  .hiw-step-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  .hiw-step-num {
+    display: block;
+    font-family: var(--font-mono);
+    font-size: 0.8rem;
+    letter-spacing: 0.12em;
+    color: var(--green);
+    margin-block-end: 1rem;
+  }
+
+  .hiw-step-title {
+    font-family: var(--font-display);
+    font-size: clamp(1.75rem, 3vw, 2.25rem);
+    line-height: 1;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0 0 0.75rem;
+  }
+
+  .hiw-step-body {
+    color: var(--muted);
+    line-height: 1.6;
+  }
+
+  .hiw-step-body strong {
+    color: var(--green);
+    font-weight: 500;
+  }
+
+  /* --- mobile: a swipeable carousel rather than a tall stack -----------------
+     Three full-height cards stacked vertically is a lot of scrolling for what
+     is really one three-beat idea. On a phone these become a horizontal
+     scroll-snap carousel instead.
+
+     Pure CSS — scroll-snap, no JavaScript and no library. It keeps working
+     with JS disabled, it is keyboard- and screen-reader-navigable because the
+     cards are still an ordered list in source order, and it costs nothing.
+
+     Cards are 82% wide so the next one always peeks in at the edge. That peek
+     IS the affordance — it is what tells a thumb there is more to the right,
+     without needing dots or arrows to explain it. */
+  @media (max-width: 749px) {
+    .hiw-steps {
+      grid-template-columns: none;
+      grid-auto-flow: column;
+      grid-auto-columns: 82%;
+      gap: 0.85rem;
+      overflow-x: auto;
+      overscroll-behavior-x: contain;
+      scroll-snap-type: x mandatory;
+      scroll-padding-inline: 0;
+      /* Bleed to the viewport edges so a card can sit flush while scrolling,
+         then pad the ends back in so the first and last still align to the
+         page's text column. */
+      margin-inline: calc(50% - 50vw);
+      padding-inline: calc(50vw - 50% + 0.1rem);
+      padding-block-end: 0.5rem;
+      scrollbar-width: none;
+    }
+
+    .hiw-steps::-webkit-scrollbar { display: none; }
+
+    .hiw-step {
+      scroll-snap-align: center;
+      scroll-snap-stop: always;
+    }
+
+    /* More room for the clip now each card has the screen to itself. */
+    .hiw-step-frame {
+      max-width: 9.5rem;
+    }
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "How it works",
+  "settings": [
+    {
+      "type": "text",
+      "id": "label",
+      "label": "Section label",
+      "default": "How it works"
+    },
+    {
+      "type": "text",
+      "id": "title",
+      "label": "Section title",
+      "default": "Click. Swing. Clip."
+    }
+  ],
+  "blocks": [
+    {
+      "type": "step",
+      "name": "Step",
+      "settings": [
+        {
+          "type": "text",
+          "id": "heading",
+          "label": "Heading",
+          "default": "Click."
+        },
+        {
+          "type": "richtext",
+          "id": "body",
+          "label": "Body",
+          "default": "<p>Describe this step.</p>"
+        },
+        {
+          "type": "header",
+          "content": "Clip"
+        },
+        {
+          "type": "paragraph",
+          "content": "Filename of an mp4 already uploaded to the theme's assets. Leave blank to render text only."
+        },
+        {
+          "type": "text",
+          "id": "video",
+          "label": "Video filename"
+        },
+        {
+          "type": "text",
+          "id": "poster",
+          "label": "Poster filename",
+          "info": "A still frame shown before the video loads."
+        }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "How it works",
+      "blocks": [
+        {
+          "type": "step",
+          "settings": {
+            "heading": "Click.",
+            "body": "<p><strong>Click your phone mount</strong> onto your buggy or bag. Place your phone in the holder. Tighten it, angle it how you like.</p>",
+            "video": "clippar-step1-click.mp4",
+            "poster": "clippar-step1-click-poster.jpg"
+          }
+        },
+        {
+          "type": "step",
+          "settings": {
+            "heading": "Swing.",
+            "body": "<p>Press the <strong>Bluetooth clicker</strong> on your belt before you walk up to the ball. Take your shot and pose for the camera. Your swing is captured automatically.</p>",
+            "video": "clippar-step2-swing.mp4",
+            "poster": "clippar-step2-swing-poster.jpg"
+          }
+        },
+        {
+          "type": "step",
+          "settings": {
+            "heading": "Clip.",
+            "body": "<p>Our AI <strong>trims each clip</strong> to the perfect moment — using your pose, ball flight and impact. Walk off with a 5-minute highlight reel of your entire round.</p>",
+            "video": "clippar-step3-clip.mp4",
+            "poster": "clippar-step3-clip-poster.jpg"
+          }
+        }
+      ]
+    }
+  ]
+}
+{% endschema %}

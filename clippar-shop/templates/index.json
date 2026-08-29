@@ -1,0 +1,404 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "sections": {
+    "landing_hero": {
+      "type": "landing-hero",
+      "settings": {
+        "eyebrow": "Golf video, reimagined",
+        "title_line_1": "Every shot.",
+        "title_line_2": "Remembered.",
+        "subtitle": "<p>Clip your phone to your golf bag. Tap the clicker before and after each shot. Clippar finds the swing, trims the walking, and hands you <strong>your round already edited</strong>.</p>",
+        "cta_mode": "product",
+        "cta_product": "clippar-golf-kit",
+        "cta_heading": "Pre-order the kit",
+        "cta_body": "The mount, the clicker, the power bank and the rest — one box, one price. Ships December 2026.",
+        "cta_label": "PRE-ORDER",
+        "cta_note": "Cancel any time before dispatch for a full refund. Requires an iPhone.",
+        "badge_text": "Pre-orders open — first production run"
+      }
+    },
+    "how_it_works": {
+      "type": "how-it-works",
+      "settings": {
+        "label": "How it works",
+        "title": "Click. Swing. Clip."
+      },
+      "blocks": {
+        "step_1": {
+          "type": "step",
+          "settings": {
+            "heading": "Click.",
+            "body": "<p><strong>Click your phone mount</strong> onto your buggy or bag. Place your phone in the holder. Tighten it, angle it how you like.</p>",
+            "video": "clippar-step1-click.mp4",
+            "poster": "clippar-step1-click-poster.jpg"
+          }
+        },
+        "step_2": {
+          "type": "step",
+          "settings": {
+            "heading": "Swing.",
+            "body": "<p>Press the <strong>Bluetooth clicker</strong> on your belt before you walk up to the ball. Take your shot and pose for the camera. Your swing is captured automatically.</p>",
+            "video": "clippar-step2-swing.mp4",
+            "poster": "clippar-step2-swing-poster.jpg"
+          }
+        },
+        "step_3": {
+          "type": "step",
+          "settings": {
+            "heading": "Clip.",
+            "body": "<p>Our AI <strong>trims each clip</strong> to the perfect moment — using your pose, ball flight and impact. Walk off with a 5-minute highlight reel of your entire round.</p>",
+            "video": "clippar-step3-clip.mp4",
+            "poster": "clippar-step3-clip-poster.jpg"
+          }
+        }
+      },
+      "block_order": [
+        "step_1",
+        "step_2",
+        "step_3"
+      ]
+    },
+    "detection_demo": {
+      "type": "landing-demo",
+      "settings": {},
+      "blocks": {
+        "raw_1": {
+          "type": "raw_file",
+          "settings": {
+            "filename": "IMG_3661.mov",
+            "meta": "42 min"
+          }
+        },
+        "raw_2": {
+          "type": "raw_file",
+          "settings": {
+            "filename": "IMG_3662.mov",
+            "meta": "38 min"
+          }
+        },
+        "raw_3": {
+          "type": "raw_file",
+          "settings": {
+            "filename": "IMG_3663.mov",
+            "meta": "35 min"
+          }
+        }
+      },
+      "block_order": [
+        "raw_1",
+        "raw_2",
+        "raw_3"
+      ]
+    }
+    ,
+    "tech_strip": {
+      "type": "landing-tech",
+      "settings": {},
+      "blocks": {
+        "pill_1": {
+          "type": "pill",
+          "settings": {
+            "label": "YOLOv8 Pose"
+          }
+        },
+        "pill_2": {
+          "type": "pill",
+          "settings": {
+            "label": "Ball Tracking"
+          }
+        },
+        "pill_3": {
+          "type": "pill",
+          "settings": {
+            "label": "Audio Impact"
+          }
+        },
+        "pill_4": {
+          "type": "pill",
+          "settings": {
+            "label": "17 Keypoints"
+          }
+        },
+        "pill_5": {
+          "type": "pill",
+          "settings": {
+            "label": "1200Hz+ Filter"
+          }
+        }
+      },
+      "block_order": [
+        "pill_1",
+        "pill_2",
+        "pill_3",
+        "pill_4",
+        "pill_5"
+      ]
+    },
+    "library": {
+      "type": "landing-library",
+      "settings": {},
+      "blocks": {
+        "folder_1": {
+          "type": "folder",
+          "settings": {
+            "variant": "birdies",
+            "label": "Birdies & eagles",
+            "count": "14 shots"
+          }
+        },
+        "folder_2": {
+          "type": "folder",
+          "settings": {
+            "variant": "best",
+            "label": "Best rounds",
+            "count": "8 rounds"
+          }
+        },
+        "folder_3": {
+          "type": "folder",
+          "settings": {
+            "variant": "worst",
+            "label": "The disasters",
+            "count": "23 shots"
+          }
+        },
+        "folder_4": {
+          "type": "folder",
+          "settings": {
+            "variant": "recent",
+            "label": "Last 30 days",
+            "count": "6 rounds"
+          }
+        }
+      },
+      "block_order": [
+        "folder_1",
+        "folder_2",
+        "folder_3",
+        "folder_4"
+      ]
+    },
+    "faq": {
+      "type": "faq",
+      "settings": {
+        "label": "Questions",
+        "title": "The obvious ones"
+      },
+      "blocks": {
+        "q1": {
+          "type": "qa",
+          "settings": {
+            "question": "Do I need the kit to use Clippar?",
+            "answer": "<p>No. The app is free and it works with any phone mount you already own, or propped against your bag if you're feeling brave.</p><p>The kit exists because the fiddly parts — something that actually grips a buggy rail, a clicker you don't have to hold, and a battery that survives eighteen holes of filming — are the difference between doing this once and doing it every week.</p>"
+          }
+        },
+        "q2": {
+          "type": "qa",
+          "settings": {
+            "question": "Do I need an iPhone?",
+            "answer": "<p><strong>Yes.</strong> Clippar is iOS only and there's no Android version yet. The mount will hold an Android phone quite happily, but nothing will detect or clip your shots.</p>"
+          }
+        },
+        "q3": {
+          "type": "qa",
+          "settings": {
+            "question": "Is this a swing coach?",
+            "answer": "<p>No, and it isn't trying to be. It makes no claim about your technique and it won't tell you what you did wrong.</p><p>It films the shot that already happened and gives you the footage. What you do with that is your business.</p>"
+          }
+        },
+        "q4": {
+          "type": "qa",
+          "settings": {
+            "question": "When does the kit ship?",
+            "answer": "<p>December 2026 is the target for the first production run. You can cancel any time before dispatch for a full refund — if the date moves, you'll hear it from us first.</p>"
+          }
+        },
+        "q5": {
+          "type": "qa",
+          "settings": {
+            "question": "Does it slow the group down?",
+            "answer": "<p>It shouldn't. The phone stays on the bag and the clicker stays on your belt, so filming a shot is one press before and one press after.</p><p>There's nothing to set up on each tee and nothing to pack away between holes.</p>"
+          }
+        },
+        "q6": {
+          "type": "qa",
+          "settings": {
+            "question": "What does it cost to keep using?",
+            "answer": "<p>Nothing. Recording, shot detection, trimming and saving to your camera roll are free forever.</p><p>Clippar Pro is optional and adds cloud backup so your rounds survive a lost phone. You never need it.</p>"
+          }
+        }
+      },
+      "block_order": [
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+        "q5",
+        "q6"
+      ]
+    },
+    "closing_cta": {
+      "type": "landing-cta",
+      "settings": {
+        "cta_mode": "product",
+        "cta_product": "clippar-golf-kit",
+        "body": "One box. Everything you need to film a round.\nShips December 2026 — cancel any time before then.",
+        "cta_label": "PRE-ORDER THE KIT"
+      }
+    },
+    "why_free": {
+      "type": "statement",
+      "settings": {
+        "label": "The obvious question",
+        "title": "The app is free. So what am I paying for?",
+        "body": "<p>Fair. You can download Clippar today, prop your phone against your bag, and it will find your swings and trim them for nothing. That is not a trial and it does not expire.</p><p>What you are buying is the difference between doing that once and doing it every Saturday. <strong>A mount that actually grips a buggy rail</strong> over eighteen holes of corrugations. <strong>A clicker on your belt</strong>, so you are not walking back to your bag between shots. <strong>A battery</strong>, because filming is the thing that flattens a phone by the fifteenth.</p><p>None of it is exotic. It is just the specific set of things you would otherwise buy separately, from three different places, over about a month — and one of them would be wrong.</p>",
+        "tone": "dark"
+      }
+    },
+    "feature_pin": {
+      "type": "feature-pin",
+      "settings": {
+        "label": "The free app",
+        "title": "How Clippar <em>films and edits</em> your round",
+        "intro": "<p>Free on the App Store, and it works on its own — you don't need the kit to use it.</p>",
+        "tone": "dark"
+      },
+      "blocks": {
+        "sc1": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-live-recording-mounted-phone.png",
+            "alt": "Clippar recording a golfer from a phone mounted on a buggy rail",
+            "feature": "Film your round",
+            "caption": "Pick how you're capturing it, and start.",
+            "points": "Live recording, or import clips you already shot\nSearch the course, set your scorecard\nA light tells you it's recording — toggle it off if you'd rather be discreet\nThe app scores as you play\nAdd a penalty without taking the phone off the bag"
+          }
+        },
+        "sc2": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-shot-detection-pose-trim.png",
+            "alt": "Clippar detecting a golfer's swing pose and trimming the shot",
+            "feature": "Shot detection",
+            "caption": "It finds the swing inside each recording and drops the rest.",
+            "points": "On-device detection of the impact point\nEvery shot in the round, found automatically\nSkips the walk-up and the walk-away\nPutts kept full length, so nothing is cut from the green"
+          }
+        },
+        "sc3": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-reel-editor-twelve-clips-trimmed.png",
+            "alt": "Clippar's reel editor showing twelve trimmed golf clips arranged by hole",
+            "feature": "Auto-editing",
+            "caption": "Trimmed and assembled before you reach the car park.",
+            "points": "Auto-trims every shot into one reel\nClips land between two and nine seconds\nPreview any shot, then extend or shorten it\nTrim by hand if the detection missed\nDelete the ones you'd rather forget"
+          }
+        },
+        "sc4": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-round-detail-reel-with-scorecard.png",
+            "alt": "A finished Clippar reel playing with the round's scorecard overlaid",
+            "feature": "Sharing",
+            "caption": "Out in one tap, with the score on the footage.",
+            "points": "Export the whole round, or just your best holes\nShare a single shot to the group chat\nInstagram, Facebook, any social app\nSave straight to your camera roll\nOverlay the scorecard on the reel"
+          }
+        },
+        "sc5": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-home-latest-reel-and-stats.png",
+            "alt": "Clippar home screen showing the latest round's reel and round statistics",
+            "feature": "Your library",
+            "caption": "Every round kept, and findable.",
+            "points": "All your rounds on the home screen\nFilter by course, hole, date or best holes\nOpen a round and see every shot in it\nSee how you've played over time\nNo scrolling the camera roll to find one drive"
+          }
+        }
+      },
+      "block_order": [
+        "sc1",
+        "sc2",
+        "sc3",
+        "sc4",
+        "sc5"
+      ]
+    },
+    "kit_pin": {
+      "type": "kit-pin",
+      "settings": {
+        "label": "The kit",
+        "title": "Four things. One job each.",
+        "intro": "<p>A$99, one time. Everything you need to record hands-free, nothing you don't.</p>",
+        "tone": "light"
+      },
+      "blocks": {
+        "item_1": {
+          "type": "item",
+          "settings": {
+            "alt": "The Clippar mount clamped to the top of a golf bag, holding a phone",
+            "asset_name": "clippar-kit-mount-photo.jpg",
+            "feature": "The mount",
+            "caption": "Clamps to your bag or buggy and stays there for the round.",
+            "points": "Grips a bag frame, buggy handle or cart rail\nFits any phone, with or without a case\nAdjustable angle, wraps on tight\nLeave it clipped on — no pulling your phone out to score"
+          }
+        },
+        "item_2": {
+          "type": "item",
+          "settings": {
+            "alt": "The Clippar Bluetooth clicker, a two-button pocket remote",
+            "asset_name": "clippar-kit-clicker.jpg",
+            "feature": "The clicker",
+            "caption": "One click starts recording. Click again to stop.",
+            "points": "Start and stop recording without touching your phone\nDouble-click to move to the next hole\nTriple-click flags a penalty stroke\nUSB-C rechargeable, not a coin cell — 20m range"
+          }
+        },
+        "item_3": {
+          "type": "item",
+          "settings": {
+            "alt": "The badge reel that clips the clicker to a belt loop",
+            "asset_name": "clippar-kit-badge-reel.jpg",
+            "feature": "The badge reel",
+            "caption": "Clips the clicker to your belt loop.",
+            "points": "Keeps the clicker within reach on every shot\nStops it getting lost in a bag pocket"
+          }
+        },
+        "item_4": {
+          "type": "item",
+          "settings": {
+            "alt": "The 5,000mAh power bank included in the kit",
+            "asset_name": "clippar-kit-power-bank.jpg",
+            "feature": "The power bank",
+            "caption": "A 5,000mAh top-up for your phone, mid-round.",
+            "points": "Attaches directly to your phone\nSlim enough for a bag pocket\nWorks as an everyday power bank off the course, too"
+          }
+        }
+      },
+      "block_order": [
+        "item_1",
+        "item_2",
+        "item_3",
+        "item_4"
+      ]
+    }
+  },
+  "order": [
+    "landing_hero",
+    "how_it_works",
+    "feature_pin",
+    "kit_pin",
+    "detection_demo",
+    "why_free",
+    "tech_strip",
+    "library",
+    "faq",
+    "closing_cta"
+  ]
+}

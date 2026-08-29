@@ -1,0 +1,148 @@
+/*
+ * Accessibility and mobile-input corrections.
+ *
+ * Every rule here fixes something found by an actual review of the preview at
+ * 375x812, not a checklist. Loaded last so it wins without !important where it
+ * can, and the few !important uses are marked with why.
+ */
+
+/* ---------------------------------------------------------------------------
+ * 1. iOS Safari zooms the whole page when a focused input is under 16px.
+ *
+ * Every field on the site was 15px, and the contact textarea 14px, so tapping
+ * any of them zoomed the page and left the user pinching back out mid-form.
+ * 16px is the threshold, not a preference.
+ * ------------------------------------------------------------------------- */
+input,
+select,
+textarea,
+.form-group input,
+.form-group select,
+.form-group textarea {
+  font-size: 16px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 2. Focus was invisible on form fields.
+ *
+ * The outline was suppressed and nothing replaced it — focused and unfocused
+ * computed styles were byte-identical. Buttons and links kept the UA ring, so
+ * this was only the fields, which is exactly where a keyboard user most needs
+ * to know where they are.
+ *
+ * :focus-visible rather than :focus so a mouse click does not draw a ring.
+ * ------------------------------------------------------------------------- */
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+button:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--green, #a8e63d);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 3. Links inside Shopify's policy pages were unstyled browser blue.
+ *
+ * `{{ policy.body }}` is Shopify's own HTML and the theme's link colour never
+ * reached it: #0000EE on the #07100A background measures 2.05:1, against a
+ * 4.5:1 requirement. Visited links would have been #551A8B, which is worse.
+ * The brand lime measures 11.6:1 on the same background.
+ * ------------------------------------------------------------------------- */
+.policy a,
+.rte a,
+.shopify-policy__body a,
+main a:not([class]) {
+  color: var(--green, #a8e63d);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.policy a:visited,
+.rte a:visited,
+.shopify-policy__body a:visited,
+main a:not([class]):visited {
+  color: var(--green, #a8e63d);
+}
+
+/* ---------------------------------------------------------------------------
+ * 4. Tap targets.
+ *
+ * Measured at 375px: the nav Cart link was 34.6x19.2 and every footer link was
+ * ~19px tall, against a 44px minimum. The footer links were also close enough
+ * together that a mis-tap was likely.
+ *
+ * Padding rather than height, so the text stays where the design puts it and
+ * only the hit area grows.
+ * ------------------------------------------------------------------------- */
+.nav-cart,
+.nav-link {
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  padding-inline: 10px;
+}
+
+.footer-links a,
+footer a {
+  display: inline-block;
+  padding-block: 13px;
+  min-height: 44px;
+  box-sizing: border-box;
+}
+
+.cart-empty-link {
+  padding-block: 12px;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---------------------------------------------------------------------------
+ * 5. Type that was too small to read.
+ *
+ * The hero's phone labels were 8px sitting directly on moving video with no
+ * scrim, so their contrast changed frame to frame and could not be measured or
+ * relied on. Form labels were 10px. A text-shadow gives the overlaid labels a
+ * floor regardless of what is behind them at that instant.
+ * ------------------------------------------------------------------------- */
+.phone-label .tag,
+.detection-badge {
+  font-size: 11px;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.9);
+}
+
+.form-group label {
+  font-size: 12px;
+}
+
+/* ---------------------------------------------------------------------------
+ * 6. Reduced motion — the catch-all.
+ *
+ * assets/motion.css disables the animations it introduces, but the theme was
+ * ported with its own: fadeUp on six hero elements, and two INFINITE ones
+ * (.dot-pulse and the scroll arrow). WCAG 2.2.2 requires a way to stop anything
+ * moving for more than five seconds, so an infinite pulse fails outright.
+ *
+ * !important is justified here: this has to beat animation shorthands declared
+ * anywhere in the theme, including ones added later by someone who has not read
+ * this file. Video playback is stopped separately in assets/media.js — CSS
+ * cannot pause a video.
+ * ------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
+  /* These exist only to move. With motion off they are noise, not information. */
+  .dot-pulse {
+    display: none !important;
+  }
+}

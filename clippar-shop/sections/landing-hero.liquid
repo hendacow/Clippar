@@ -1,0 +1,305 @@
+{% comment %}
+  Faithful port of the hero from clippargolf.com.
+
+  Markup is kept byte-identical to the source where possible, including
+  element IDs (phone-1/2/3, waitlist-form, etc.) because assets/clippar.js —
+  extracted verbatim from the same page — binds to those exact IDs.
+
+  The compact hero clips are theme assets so the preview can be swapped and
+  versioned with the rest of the storefront. Larger long-form marketing clips
+  still belong in Shopify Files.
+{% endcomment %}
+
+{%- comment -%}
+  A `product` setting defined in a JSON template arrives as a handle string
+  rather than a product object, so calling .url/.price on it silently yields
+  nothing. Resolve through all_products when that's the case; the theme editor
+  hands back a real object, which already has .url.
+{%- endcomment -%}
+{%- assign cta_product = section.settings.cta_product -%}
+{%- unless cta_product.url -%}
+  {%- assign cta_product = all_products[section.settings.cta_product] -%}
+{%- endunless -%}
+
+<section class="hero">
+  <div class="hero-eyebrow">{{ section.settings.eyebrow }}</div>
+  <h1>{{ section.settings.title_line_1 }}<br><span>{{ section.settings.title_line_2 }}</span></h1>
+  <p class="hero-sub">{{ section.settings.subtitle }}</p>
+
+  <div class="phone-showcase" id="phone-carousel">
+    {%- assign hero_clip_1 = 'clippar-hero-ai-detects.mp4' -%}
+    <div class="phone-frame pos-left" id="phone-1">
+      <video
+        data-autoplay loop muted playsinline preload="none"
+        poster="{% if section.settings.hero_poster_1 != blank %}{{ section.settings.hero_poster_1 | image_url: width: 640 }}{% else %}{{ 'clippar-hero-ai-detects-poster.jpg' | asset_url }}{% endif %}"
+      >
+        <source src="{{ hero_clip_1 | asset_url }}" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">AI detects</span>
+        <span class="desc">Automatic editing</span>
+      </div>
+      <div class="detection-badge">AI</div>
+    </div>
+    {%- comment -%}
+      The featured centre phone carries the kit in use, not an app screen.
+
+      The other two show what the app sees. This one shows the mount clamped to
+      a buggy, the Clippar recording UI live on the phone, and a real drive being
+      hit behind it — which is the one thing the whole page was missing. Nothing
+      else on the site is a photograph of the product doing its job.
+
+      It is a theme asset rather than a Shopify Files URL so it can be swapped by
+      dropping in a new file, and so it is versioned with the theme. 8 seconds,
+      480x1040, 586KB. It is cropped to the frame's own aspect so
+      `object-fit: cover` has nothing further to trim.
+    {%- endcomment -%}
+    {%- assign hero_clip = section.settings.hero_video_2 | default: 'clippar-kit-on-buggy-filming-a-drive.mp4' -%}
+    <div class="phone-frame pos-center featured" id="phone-2">
+      <video
+        data-autoplay loop muted playsinline preload="metadata"
+        poster="{% if section.settings.hero_poster_2 != blank %}{{ section.settings.hero_poster_2 | image_url: width: 640 }}{% else %}{{ 'clippar-kit-on-buggy-filming-a-drive-poster.jpg' | asset_url }}{% endif %}"
+      >
+        <source src="{{ hero_clip | asset_url }}" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">{{ section.settings.phone_2_tag | default: 'Record on course' }}</span>
+        <span class="desc">{{ section.settings.phone_2_desc | default: 'Completely hands free' }}</span>
+      </div>
+      <div class="detection-badge">{{ section.settings.phone_2_badge | default: 'REC' }}</div>
+    </div>
+    {%- assign hero_clip_3 = 'clippar-hero-post-highlights.mp4' -%}
+    <div class="phone-frame pos-right" id="phone-3">
+      <video
+        data-autoplay loop muted playsinline preload="none"
+        poster="{% if section.settings.hero_poster_3 != blank %}{{ section.settings.hero_poster_3 | image_url: width: 640 }}{% else %}{{ 'clippar-hero-post-highlights-poster.jpg' | asset_url }}{% endif %}"
+      >
+        <source src="{{ hero_clip_3 | asset_url }}" type="video/mp4">
+      </video>
+      <div class="phone-label">
+        <span class="tag">Post your highlights</span>
+        <span class="desc">One tap export to socials</span>
+      </div>
+      <div class="detection-badge">EXPORT</div>
+    </div>
+  </div>
+
+  {%- comment -%}
+    clippargolf.com puts the waitlist form here, not a buy button. `cta_mode`
+    keeps both: `waitlist` matches the live marketing site (the default, so the
+    apex cutover is like-for-like), `product` is the storefront framing for once
+    the app has launched and the waitlist funnel is retired.
+  {%- endcomment -%}
+  {%- case section.settings.cta_mode -%}
+    {%- when 'waitlist' -%}
+      {%- render 'waitlist-form',
+        heading: section.settings.cta_heading,
+        body: section.settings.cta_body,
+        note: section.settings.cta_note
+      -%}
+    {%- when 'product' -%}
+      {%- if cta_product.url != blank -%}
+        <div class="form-wrap">
+          <div class="form-card">
+            <h2>{{ section.settings.cta_heading }}</h2>
+            <p>{{ section.settings.cta_body }}</p>
+            <a class="btn-submit" href="{{ cta_product.url }}" style="display:block;text-align:center;text-decoration:none;">
+              {{ section.settings.cta_label }} — {{ cta_product.price | money }}
+            </a>
+            <p class="form-note">{{ section.settings.cta_note }}</p>
+          </div>
+        </div>
+      {%- else -%}
+        {%- comment -%}
+          Buy mode is selected but the product could not be resolved — it is
+          still in Draft, or the handle changed. `all_products` only returns
+          published products, so this used to render nothing at all and the
+          hero lost its call to action with no visible sign anything was wrong.
+
+          Falling back to the waitlist keeps the funnel alive. But it MUST NOT
+          keep the buy-mode wording: those settings say "Pre-order the kit" and
+          "Cancel any time before dispatch for a full refund", and this form
+          takes an email address and no money. Promising a refund on a payment
+          that never happens is a misrepresentation, and it is exactly the kind
+          that reads as deliberate rather than careless.
+
+          So the fallback carries its own honest copy, and the fields exist as
+          settings so the wording is editable without touching Liquid.
+        {%- endcomment -%}
+        {%- render 'waitlist-form',
+          heading: section.settings.fallback_heading,
+          body: section.settings.fallback_body,
+          note: section.settings.fallback_note
+        -%}
+      {%- endif -%}
+  {%- endcase -%}
+
+  {%- comment -%}
+    The badge only claims pre-orders are open when something is genuinely
+    buyable. Otherwise it says what is actually true. The pulsing dot is
+    reserved for the same condition — a live-status pulse next to "join the
+    waitlist" implies real-time activity and scarcity that does not exist.
+  {%- endcomment -%}
+  {%- liquid
+    assign badge = section.settings.badge_text
+    assign live = false
+    if section.settings.cta_mode == 'product' and cta_product.url != blank
+      assign live = true
+    endif
+    unless live
+      assign badge = section.settings.fallback_badge_text | default: badge
+    endunless
+  -%}
+  {%- if badge != blank -%}
+    <div class="count-badge">
+      {%- if live -%}<div class="dot-pulse"></div>{%- endif -%}
+      <span>{{ badge }}</span>
+    </div>
+  {%- endif -%}
+</section>
+
+{% schema %}
+{
+  "name": "Landing hero",
+  "settings": [
+    {
+      "type": "text",
+      "id": "eyebrow",
+      "label": "Eyebrow",
+      "default": "Golf video, reimagined"
+    },
+    {
+      "type": "text",
+      "id": "title_line_1",
+      "label": "Headline — line 1",
+      "default": "Every shot."
+    },
+    {
+      "type": "text",
+      "id": "title_line_2",
+      "label": "Headline — line 2 (accent)",
+      "default": "Remembered."
+    },
+    {
+      "type": "richtext",
+      "id": "subtitle",
+      "label": "Subtitle",
+      "default": "<p>Tap before each shot. Tap after. Our AI clips, trims, and assembles your <strong>cinematic highlight reel</strong> — automatically tagged and ready to share.</p>"
+    },
+    {
+      "type": "header",
+      "content": "Video posters"
+    },
+    {
+      "type": "paragraph",
+      "content": "A poster paints instantly; a video cannot. Without one the hero's largest paint waits on a video download, which is the main thing holding mobile LCP back. Upload a still frame from each clip."
+    },
+    { "type": "image_picker", "id": "hero_poster_1", "label": "Left phone poster" },
+    { "type": "image_picker", "id": "hero_poster_2", "label": "Centre phone poster", "info": "Leave blank to use the poster shipped with the centre clip." },
+    { "type": "image_picker", "id": "hero_poster_3", "label": "Right phone poster" },
+    {
+      "type": "header",
+      "content": "Centre phone — the kit in use"
+    },
+    {
+      "type": "paragraph",
+      "content": "The centre phone shows the kit working rather than an app screen. To swap the clip, upload an mp4 to the theme's assets and put its filename here. Crop it to roughly 480x1040 — the frame is 886:1920, and anything wider gets trimmed to fit."
+    },
+    { "type": "text", "id": "hero_video_2", "label": "Clip filename", "default": "clippar-kit-on-buggy-filming-a-drive.mp4" },
+    { "type": "text", "id": "phone_2_tag", "label": "Label", "default": "Record on course" },
+    { "type": "text", "id": "phone_2_desc", "label": "Sub-label", "default": "Completely hands free" },
+    { "type": "text", "id": "phone_2_badge", "label": "Badge", "default": "REC" },
+    {
+      "type": "header",
+      "content": "Call to action"
+    },
+    {
+      "type": "select",
+      "id": "cta_mode",
+      "label": "CTA card",
+      "options": [
+        { "value": "waitlist", "label": "Waitlist form (matches clippargolf.com)" },
+        { "value": "product", "label": "Buy the kit" },
+        { "value": "none", "label": "Hidden" }
+      ],
+      "default": "waitlist"
+    },
+    {
+      "type": "product",
+      "id": "cta_product",
+      "label": "Product (buy mode only)"
+    },
+    {
+      "type": "text",
+      "id": "cta_heading",
+      "label": "Heading",
+      "default": "Join the waitlist"
+    },
+    {
+      "type": "text",
+      "id": "cta_body",
+      "label": "Body",
+      "default": "Get founding member pricing and be first to know when we launch."
+    },
+    {
+      "type": "text",
+      "id": "cta_label",
+      "label": "Button label (buy mode only)",
+      "default": "BUY NOW"
+    },
+    {
+      "type": "text",
+      "id": "cta_note",
+      "label": "Note under button",
+      "default": "No spam. Unsubscribe anytime. Founding member pricing locked in for early signups."
+    },
+    {
+      "type": "header",
+      "content": "Fallback — when nothing is buyable"
+    },
+    {
+      "type": "paragraph",
+      "content": "Shown in Buy mode when the product is still a draft or its handle changed, so the hero never loses its call to action. This copy must NOT promise a purchase, a price or a refund — the fallback collects an email and takes no money."
+    },
+    {
+      "type": "text",
+      "id": "fallback_heading",
+      "label": "Heading",
+      "default": "Join the waitlist"
+    },
+    {
+      "type": "text",
+      "id": "fallback_body",
+      "label": "Body",
+      "default": "The kit isn't on sale yet. Leave your email and we'll tell you the day it is."
+    },
+    {
+      "type": "text",
+      "id": "fallback_note",
+      "label": "Note under button",
+      "default": "No spam, and we'll only email you about the kit. Unsubscribe any time."
+    },
+    {
+      "type": "text",
+      "id": "fallback_badge_text",
+      "label": "Badge",
+      "default": "Not on sale yet — waitlist open"
+    },
+    {
+      "type": "header",
+      "content": "Badge"
+    },
+    {
+      "type": "text",
+      "id": "badge_text",
+      "label": "Badge text",
+      "default": "Waitlist open — spots filling fast"
+    }
+  ],
+  "presets": [
+    {
+      "name": "Landing hero"
+    }
+  ]
+}
+{% endschema %}

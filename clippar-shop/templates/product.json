@@ -1,0 +1,411 @@
+/*
+ * ------------------------------------------------------------
+ * IMPORTANT: The contents of this file are auto-generated.
+ *
+ * This file may be updated by the Shopify admin theme editor
+ * or related systems. Please exercise caution as any changes
+ * made to this file may be overwritten.
+ * ------------------------------------------------------------
+ */
+{
+  "sections": {
+    "main": {
+      "type": "product",
+      "settings": {
+        "eyebrow": "Film your round. Keep the good bits.",
+        "note": "Cancel any time before dispatch for a full refund. Requires the free Clippar app for iPhone."
+      },
+      "blocks": {
+        "point_1": {
+          "type": "point",
+          "settings": {
+            "text": "Rechargeable clicker — USB-C, no coin cells to replace"
+          }
+        },
+        "point_2": {
+          "type": "point",
+          "settings": {
+            "text": "Clamps to any golf buggy rail, cart bar or bag top"
+          }
+        },
+        "point_3": {
+          "type": "point",
+          "settings": {
+            "text": "5,000mAh power bank — filming is what flattens a phone"
+          }
+        },
+        "point_5": {
+          "type": "point",
+          "settings": {
+            "text": "The app is free — recording, detection and trimming, permanently"
+          }
+        }
+      },
+      "block_order": [
+        "point_1",
+        "point_2",
+        "point_3",
+        "point_5"
+      ]
+    }
+    ,
+    "how_it_works": {
+      "type": "how-it-works",
+      "settings": {
+        "label": "How it works",
+        "title": "Click. Swing. Clip."
+      },
+      "blocks": {
+        "step_1": {
+          "type": "step",
+          "settings": {
+            "heading": "Click.",
+            "body": "<p><strong>Clamp the mount</strong> to your buggy or the top of your bag, drop your phone in and angle it however you like. It stays there for the whole round.</p>",
+            "video": "clippar-step1-click.mp4",
+            "poster": "clippar-step1-click-poster.jpg"
+          }
+        },
+        "step_2": {
+          "type": "step",
+          "settings": {
+            "heading": "Swing.",
+            "body": "<p><strong>Press the clicker on your belt</strong> before you walk up to the ball, and again once you've hit it. That's the entire interaction — the phone never comes off the bag.</p>",
+            "video": "clippar-step2-swing.mp4",
+            "poster": "clippar-step2-swing-poster.jpg"
+          }
+        },
+        "step_3": {
+          "type": "step",
+          "settings": {
+            "heading": "Clip.",
+            "body": "<p>The app finds the swing inside each recording and <strong>trims it to just the shot</strong>, throwing away the walk-up and the walk-away. You finish the round with the round already edited.</p>",
+            "video": "clippar-step3-clip.mp4",
+            "poster": "clippar-step3-clip-poster.jpg"
+          }
+        }
+      },
+      "block_order": [
+        "step_1",
+        "step_2",
+        "step_3"
+      ]
+    },
+    "specs": {
+      "type": "spec-table",
+      "settings": {
+        "label": "Detail",
+        "title": "Specifications",
+        "note": "<p>The kit contains a lithium battery, so it ships by road freight within Australia and cannot travel by air or go overseas.</p>"
+      },
+      "blocks": {
+        "s1": {
+          "type": "spec",
+          "settings": {
+            "name": "In the box",
+            "value": "Phone mount, Bluetooth clicker, 5,000mAh power bank, retractable badge reel, printed box with moulded insert"
+          }
+        },
+        "s2": {
+          "type": "spec",
+          "settings": {
+            "name": "Mount",
+            "value": "Three flexible legs with a spring clamp. Wraps a buggy rail, cart bar or bag top. Grips by phone width, cases included."
+          }
+        },
+        "s3": {
+          "type": "spec",
+          "settings": {
+            "name": "Clicker",
+            "value": "Bluetooth remote, roughly 20m range. Rechargeable over USB-C — there is no coin cell to replace."
+          }
+        },
+        "s4": {
+          "type": "spec",
+          "settings": {
+            "name": "Power bank",
+            "value": "5,000mAh, slim profile. Attaches directly to the phone."
+          }
+        },
+        "s6": {
+          "type": "spec",
+          "settings": {
+            "name": "Badge reel",
+            "value": "Retractable, with a belt clip"
+          }
+        },
+        "s7": {
+          "type": "spec",
+          "settings": {
+            "name": "App",
+            "value": "Clippar for iOS, free on the App Store. Requires iOS 15.1 or later. No Android version."
+          }
+        },
+        "s8": {
+          "type": "spec",
+          "settings": {
+            "name": "Shipping",
+            "value": "Australia only, by road freight. Contains a lithium battery, so it cannot be sent by air or shipped internationally."
+          }
+        },
+        "s9": {
+          "type": "spec",
+          "settings": {
+            "name": "Dispatch",
+            "value": "Pre-order — expected December 2026. Cancel any time before dispatch for a full refund."
+          }
+        }
+      },
+      "block_order": [
+        "s1",
+        "s2",
+        "s3",
+        "s4",
+        "s6",
+        "s7",
+        "s8",
+        "s9"
+      ]
+    },
+    "faq": {
+      "type": "faq",
+      "settings": {
+        "label": "Questions",
+        "title": "Before you order"
+      },
+      "blocks": {
+        "q1": {
+          "type": "qa",
+          "settings": {
+            "question": "When will my kit ship?",
+            "answer": "<p>We're aiming to dispatch in <strong>December 2026</strong>. This is our first production run, so that is a genuine forecast rather than a date we can already guarantee — and if it moves, we'll email you before you find out any other way.</p><p>You can cancel any time before your kit is dispatched and get every cent back.</p>"
+          }
+        },
+        "q2": {
+          "type": "qa",
+          "settings": {
+            "question": "Why am I paying now for something that ships later?",
+            "answer": "<p>Fair question. Pre-orders are what let a one-person company commit to a production run at all — we need to know how many to make before we can make any.</p><p>What you get in return is the launch price and a place in the first run. What you risk is nothing, because you can cancel for a full refund right up until it ships.</p>"
+          }
+        },
+        "q3": {
+          "type": "qa",
+          "settings": {
+            "question": "Do I need an iPhone?",
+            "answer": "<p><strong>Yes.</strong> Clippar is iOS only. There is no Android app, and there isn't one coming soon enough to promise you a date.</p><p>The mount will physically hold an Android phone, but nothing will detect or clip your shots. If you're on Android, please don't buy this yet.</p>"
+          }
+        },
+        "q4": {
+          "type": "qa",
+          "settings": {
+            "question": "Is the app free?",
+            "answer": "<p>Recording, shot detection, trimming, previewing and saving to your camera roll are all free, permanently, with no account limits.</p><p>Clippar Pro is a paid subscription and it adds one thing: cloud backup, so your rounds survive a lost or replaced phone. You never need it to use the kit.</p>"
+          }
+        },
+        "q5": {
+          "type": "qa",
+          "settings": {
+            "question": "Will it fit my bag or buggy?",
+            "answer": "<p>The mount has three bendable legs with a spring clamp, so it wraps a buggy rail, a cart bar or the top of a carry bag rather than needing a specific fitting.</p><p>It grips the phone by width, so a case is fine. If it won't fit whatever you're using, send it back.</p>"
+          }
+        },
+        "q6": {
+          "type": "qa",
+          "settings": {
+            "question": "How does the clicker work?",
+            "answer": "<p>It pairs to your phone over Bluetooth and lives on your belt loop on the badge reel. One press starts recording before your shot, one press stops it after.</p><p>Two presses move you to the next hole. Three add a penalty stroke to your card. You never take the phone off the bag.</p>"
+          }
+        },
+        "q7": {
+          "type": "qa",
+          "settings": {
+            "question": "Where do you ship, and what does it cost?",
+            "answer": "<p>Australia only for now. The kit contains a lithium battery, which means it travels by road freight and cannot go by air — so allow a few business days after dispatch, and we can't currently ship it overseas.</p>"
+          }
+        },
+        "q8": {
+          "type": "qa",
+          "settings": {
+            "question": "What if I change my mind?",
+            "answer": "<p>Before dispatch: cancel for a full refund, no reason needed.</p><p>After it arrives: you have the rights every Australian buyer has under the Australian Consumer Law, and nothing in our terms takes those away. If it's faulty or it isn't what we described, we'll sort it out.</p>"
+          }
+        }
+      },
+      "block_order": [
+        "q1",
+        "q2",
+        "q3",
+        "q4",
+        "q5",
+        "q6",
+        "q7",
+        "q8"
+      ]
+    },
+    "closing_cta": {
+      "type": "landing-cta",
+      "settings": {
+        "label": "Still deciding?",
+        "title_line_1": "Stop losing your",
+        "title_line_2": "best shots.",
+        "body": "Everything you need to record every round, in one box.",
+        "cta_product": "clippar-golf-kit",
+        "cta_label": "ADD TO CART"
+      }
+    },
+    "why_free": {
+      "type": "statement",
+      "settings": {
+        "label": "The obvious question",
+        "title": "The app is free. So what am I paying for?",
+        "body": "<p>Fair. You can download Clippar today, prop your phone against your bag, and it will find your swings and trim them for nothing. That is not a trial and it does not expire.</p><p>What you are buying is the difference between doing that once and doing it every Saturday. <strong>A mount that actually grips a buggy rail</strong> over eighteen holes of corrugations. <strong>A clicker on your belt</strong>, so you are not walking back to your bag between shots. <strong>A battery</strong>, because filming is the thing that flattens a phone by the fifteenth.</p><p>None of it is exotic. It is just the specific set of things you would otherwise buy separately, from three different places, over about a month — and one of them would be wrong.</p>",
+        "tone": "dark"
+      }
+    },
+    "founder": {
+      "type": "statement",
+      "settings": {
+        "label": "Who's behind this",
+        "title": "It's one bloke in Brisbane",
+        "body": "<p>I built Clippar because I kept finishing rounds with nothing to show for them. The good shots happen, everyone agrees they happened, and then they are gone.</p><p>There is no warehouse and no support team — it is me. That is worth knowing before you pre-order, because it means the December date is an honest forecast rather than a logistics department's promise, and if it moves you will hear it from me directly.</p><p>It also means you can cancel any time before your kit ships and get everything back, no form and no argument. I would rather refund you than have you wait on something you have stopped wanting.</p>",
+        "signature": "Henry Coward — founder, Clippar Pty Ltd",
+        "tone": "light"
+      }
+    },
+    "feature_pin": {
+      "type": "feature-pin",
+      "settings": {
+        "label": "The free app",
+        "title": "How Clippar <em>films and edits</em> your round",
+        "intro": "<p>Free on the App Store, and it works on its own — you don't need the kit to use it.</p>",
+        "tone": "dark"
+      },
+      "blocks": {
+        "sc1": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-live-recording-mounted-phone.png",
+            "alt": "Clippar recording a golfer from a phone mounted on a buggy rail",
+            "feature": "Film your round",
+            "caption": "Pick how you're capturing it, and start.",
+            "points": "Live recording, or import clips you already shot\nSearch the course, set your scorecard\nA light tells you it's recording — toggle it off if you'd rather be discreet\nThe app scores as you play\nAdd a penalty without taking the phone off the bag"
+          }
+        },
+        "sc2": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-shot-detection-pose-trim.png",
+            "alt": "Clippar detecting a golfer's swing pose and trimming the shot",
+            "feature": "Shot detection",
+            "caption": "It finds the swing inside each recording and drops the rest.",
+            "points": "On-device detection of the impact point\nEvery shot in the round, found automatically\nSkips the walk-up and the walk-away\nPutts kept full length, so nothing is cut from the green"
+          }
+        },
+        "sc3": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-reel-editor-twelve-clips-trimmed.png",
+            "alt": "Clippar's reel editor showing twelve trimmed golf clips arranged by hole",
+            "feature": "Auto-editing",
+            "caption": "Trimmed and assembled before you reach the car park.",
+            "points": "Auto-trims every shot into one reel\nClips land between two and nine seconds\nPreview any shot, then extend or shorten it\nTrim by hand if the detection missed\nDelete the ones you'd rather forget"
+          }
+        },
+        "sc4": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-round-detail-reel-with-scorecard.png",
+            "alt": "A finished Clippar reel playing with the round's scorecard overlaid",
+            "feature": "Sharing",
+            "caption": "Out in one tap, with the score on the footage.",
+            "points": "Export the whole round, or just your best holes\nShare a single shot to the group chat\nInstagram, Facebook, any social app\nSave straight to your camera roll\nOverlay the scorecard on the reel"
+          }
+        },
+        "sc5": {
+          "type": "scene",
+          "settings": {
+            "asset_name": "clippar-app-home-latest-reel-and-stats.png",
+            "alt": "Clippar home screen showing the latest round's reel and round statistics",
+            "feature": "Your library",
+            "caption": "Every round kept, and findable.",
+            "points": "All your rounds on the home screen\nFilter by course, hole, date or best holes\nOpen a round and see every shot in it\nSee how you've played over time\nNo scrolling the camera roll to find one drive"
+          }
+        }
+      },
+      "block_order": [
+        "sc1",
+        "sc2",
+        "sc3",
+        "sc4",
+        "sc5"
+      ]
+    },
+    "kit_pin": {
+      "type": "kit-pin",
+      "settings": {
+        "label": "The kit",
+        "title": "Four things. One job each.",
+        "intro": "<p>A$99, one time. Everything you need to record hands-free, nothing you don't.</p>",
+        "tone": "light"
+      },
+      "blocks": {
+        "item_1": {
+          "type": "item",
+          "settings": {
+            "alt": "The Clippar mount clamped to the top of a golf bag, holding a phone",
+            "asset_name": "clippar-kit-mount-photo.jpg",
+            "feature": "The mount",
+            "caption": "Clamps to your bag or buggy and stays there for the round.",
+            "points": "Grips a bag frame, buggy handle or cart rail\nFits any phone, with or without a case\nAdjustable angle, wraps on tight\nLeave it clipped on — no pulling your phone out to score"
+          }
+        },
+        "item_2": {
+          "type": "item",
+          "settings": {
+            "alt": "The Clippar Bluetooth clicker, a two-button pocket remote",
+            "asset_name": "clippar-kit-clicker.jpg",
+            "feature": "The clicker",
+            "caption": "One click starts recording. Click again to stop.",
+            "points": "Start and stop recording without touching your phone\nDouble-click to move to the next hole\nTriple-click flags a penalty stroke\nUSB-C rechargeable, not a coin cell — 20m range"
+          }
+        },
+        "item_3": {
+          "type": "item",
+          "settings": {
+            "alt": "The badge reel that clips the clicker to a belt loop",
+            "asset_name": "clippar-kit-badge-reel.jpg",
+            "feature": "The badge reel",
+            "caption": "Clips the clicker to your belt loop.",
+            "points": "Keeps the clicker within reach on every shot\nStops it getting lost in a bag pocket"
+          }
+        },
+        "item_4": {
+          "type": "item",
+          "settings": {
+            "alt": "The 5,000mAh power bank included in the kit",
+            "asset_name": "clippar-kit-power-bank.jpg",
+            "feature": "The power bank",
+            "caption": "A 5,000mAh top-up for your phone, mid-round.",
+            "points": "Attaches directly to your phone\nSlim enough for a bag pocket\nWorks as an everyday power bank off the course, too"
+          }
+        }
+      },
+      "block_order": [
+        "item_1",
+        "item_2",
+        "item_3",
+        "item_4"
+      ]
+    }
+  },
+  "order": [
+    "main",
+    "why_free",
+    "feature_pin",
+    "kit_pin",
+    "how_it_works",
+    "specs",
+    "founder",
+    "faq",
+    "closing_cta"
+  ]
+}

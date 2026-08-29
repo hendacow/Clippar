@@ -1,0 +1,75 @@
+{% comment %}
+  "Every round. Forever." — library section ported from clippargolf.com.
+  Folder colour comes from the block's class (birdies/best/worst/recent),
+  which is styled in assets/clippar.css.
+{% endcomment %}
+
+<div class="section-divider"></div>
+<section class="library-section">
+  <div class="library-visual">
+    <div class="folder-stack">
+      {%- for block in section.blocks -%}
+        <div class="folder {{ block.settings.variant }}" {{ block.shopify_attributes }}>
+          <div class="folder-icon"></div>
+          <span class="folder-label">{{ block.settings.label }}</span>
+          <span class="folder-count">{{ block.settings.count }}</span>
+        </div>
+      {%- endfor -%}
+    </div>
+  </div>
+  <div class="library-text">
+    <div class="section-label">{{ section.settings.label }}</div>
+    <h2>{{ section.settings.title_line_1 }}<br>{{ section.settings.title_line_2 }}</h2>
+    {{ section.settings.body }}
+  </div>
+</section>
+
+{% schema %}
+{
+  "name": "Library",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Section label", "default": "Your golf library" },
+    { "type": "text", "id": "title_line_1", "label": "Title — line 1", "default": "Every round." },
+    { "type": "text", "id": "title_line_2", "label": "Title — line 2", "default": "Forever." },
+    {
+      "type": "richtext",
+      "id": "body",
+      "label": "Body",
+      "default": "<p>Clippar builds a permanent library of your game. Filter by your best scores, your worst holes, your birdies folder, or any date. Your whole golfing history, in one place.</p><p>Six months from now you'll scroll back and actually see where your game was at. Not just a number on a scorecard — the actual shots.</p>"
+    }
+  ],
+  "blocks": [
+    {
+      "type": "folder",
+      "name": "Folder",
+      "settings": [
+        {
+          "type": "select",
+          "id": "variant",
+          "label": "Colour",
+          "options": [
+            { "value": "birdies", "label": "Birdies" },
+            { "value": "best", "label": "Best" },
+            { "value": "worst", "label": "Worst" },
+            { "value": "recent", "label": "Recent" }
+          ],
+          "default": "birdies"
+        },
+        { "type": "text", "id": "label", "label": "Label", "default": "Birdies & eagles" },
+        { "type": "text", "id": "count", "label": "Count", "default": "14 shots" }
+      ]
+    }
+  ],
+  "presets": [
+    {
+      "name": "Library",
+      "blocks": [
+        { "type": "folder", "settings": { "variant": "birdies", "label": "Birdies & eagles", "count": "14 shots" } },
+        { "type": "folder", "settings": { "variant": "best", "label": "Best rounds", "count": "8 rounds" } },
+        { "type": "folder", "settings": { "variant": "worst", "label": "The disasters", "count": "23 shots" } },
+        { "type": "folder", "settings": { "variant": "recent", "label": "Last 30 days", "count": "6 rounds" } }
+      ]
+    }
+  ]
+}
+{% endschema %}

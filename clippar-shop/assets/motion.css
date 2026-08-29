@@ -1,0 +1,97 @@
+/*
+ * Scroll motion.
+ *
+ * Every animation here is scroll-driven via `animation-timeline: view()`, which
+ * the browser runs off the main thread. The common alternative — a scroll
+ * listener writing inline transforms — runs on the main thread and stutters on
+ * exactly the mid-range phones our buyers actually hold.
+ *
+ * Three rules this file keeps to, because the failure modes are worse than the
+ * feature:
+ *
+ *   1. Nothing above the fold animates. Animating the hero delays the largest
+ *      paint and is the single most common way a site with motion ends up
+ *      slower than one without.
+ *   2. Every effect starts from a *visible* state and moves a short distance.
+ *      Starting at opacity 0 means a browser without support, or a stylesheet
+ *      that fails to load, shows a blank page. Content must never depend on
+ *      an animation having run.
+ *   3. `prefers-reduced-motion: reduce` turns all of it off. This is decoration.
+ *
+ * The whole file is inside @supports, so unsupported browsers get the finished
+ * layout with no motion rather than anything half-applied.
+ */
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    /* --- section headings ------------------------------------------------ */
+
+    .kit-head,
+    .faq-head,
+    .specs-head,
+    .showcase-head,
+    .stmt-inner {
+      animation: rise-in linear both;
+      animation-timeline: view();
+      /* Finishes by the time the element is 35% up the viewport, so it is
+         settled and readable well before it reaches the centre. */
+      animation-range: entry 0% cover 35%;
+    }
+
+    /* --- staggered content ------------------------------------------------ */
+
+    /* Tiles and rows drift up slightly as their section arrives. The stagger
+       comes from range offsets rather than delays: a delay is time-based and
+       desynchronises from the scroll, an offset stays locked to it however
+       fast the user flicks. */
+    .kit-item {
+      animation: rise-in linear both;
+      animation-timeline: view();
+      animation-range: entry 0% cover 30%;
+    }
+
+    .kit-item:nth-child(3n + 2) { animation-range: entry 4% cover 34%; }
+    .kit-item:nth-child(3n + 3) { animation-range: entry 8% cover 38%; }
+
+    .specs-row,
+    .faq-item {
+      animation: rise-in-sm linear both;
+      animation-timeline: view();
+      animation-range: entry 0% cover 28%;
+    }
+
+    /* --- keyframes -------------------------------------------------------- */
+
+    /* Note the starting opacity is 0.35, not 0. Text that begins fully
+       transparent is unreadable if anything interrupts the animation, and it
+       reads as a flash of missing content on a fast scroll. */
+    @keyframes rise-in {
+      from { opacity: 0.35; translate: 0 26px; }
+      to   { opacity: 1;    translate: 0 0; }
+    }
+
+    @keyframes rise-in-sm {
+      from { opacity: 0.5; translate: 0 12px; }
+      to   { opacity: 1;   translate: 0 0; }
+    }
+  }
+}
+
+/*
+ * Belt and braces: if a browser ever supports the timeline but mishandles the
+ * reduced-motion query above, this kills every animation this file introduces.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .kit-head,
+  .faq-head,
+  .specs-head,
+  .showcase-head,
+  .stmt-inner,
+  .kit-item,
+  .specs-row,
+  .faq-item {
+    animation: none !important;
+    opacity: 1 !important;
+    translate: none !important;
+  }
+}

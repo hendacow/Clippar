@@ -1,0 +1,244 @@
+{%- comment -%}
+  "What's in the box."
+
+  The hardest thing about this product is that it is six items sold as one, and
+  six items sold as one is exactly what a cheap no-name bundle looks like. The
+  fix is to give every item its own line, its own job, and its own number —
+  a numbered set reads as a designed kit, an unnumbered pile reads as padding.
+
+  So each item states the job it does, not the part it is. "Holds the phone
+  steady on a moving buggy" is a reason to want it; "flexible tripod mount" is
+  a thing in a box.
+
+  Images are blocks so Henry can drop real shots in without touching Liquid.
+  Until then each tile renders a numbered placeholder rather than collapsing,
+  so the layout can be judged before the photography exists.
+{%- endcomment -%}
+
+<section class="kit full-width" id="whats-in-the-box">
+  <div class="kit-inner">
+    <header class="kit-head">
+      {%- if section.settings.label != blank -%}
+        <p class="kit-label">{{ section.settings.label }}</p>
+      {%- endif -%}
+      <h2 class="kit-title">{{ section.settings.title }}</h2>
+      {%- if section.settings.intro != blank -%}
+        <div class="kit-intro">{{ section.settings.intro }}</div>
+      {%- endif -%}
+    </header>
+
+    <ol class="kit-grid">
+      {%- for block in section.blocks -%}
+        <li class="kit-item" {{ block.shopify_attributes }}>
+          <div class="kit-media">
+            {%- if block.settings.image != blank -%}
+              <img
+                src="{{ block.settings.image | image_url: width: 720 }}"
+                alt="{{ block.settings.image.alt | default: block.settings.name | escape }}"
+                width="{{ block.settings.image.width }}"
+                height="{{ block.settings.image.height }}"
+                loading="lazy"
+                sizes="(min-width: 900px) 30vw, 45vw"
+                srcset="
+                  {{ block.settings.image | image_url: width: 360 }} 360w,
+                  {{ block.settings.image | image_url: width: 720 }} 720w
+                "
+              >
+            {%- else -%}
+              <span class="kit-placeholder" aria-hidden="true">{{ forloop.index }}</span>
+            {%- endif -%}
+          </div>
+          <p class="kit-index">{{ forloop.index | prepend: '0' | slice: -2, 2 }}</p>
+          <h3 class="kit-name">{{ block.settings.name }}</h3>
+          <p class="kit-job">{{ block.settings.job }}</p>
+        </li>
+      {%- endfor -%}
+    </ol>
+
+    {%- if section.settings.footnote != blank -%}
+      <p class="kit-footnote">{{ section.settings.footnote }}</p>
+    {%- endif -%}
+  </div>
+</section>
+
+{% stylesheet %}
+  .kit {
+    display: grid;
+    grid-template-columns: var(--content-grid);
+    background: var(--bg2);
+    padding-block: clamp(72px, 10vw, 120px);
+  }
+
+  .kit-inner { grid-column: 2; }
+
+  .kit-head { max-width: 46rem; margin-block-end: clamp(2.5rem, 5vw, 4rem); }
+
+  .kit-label {
+    font-family: var(--font-mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--green);
+    margin: 0 0 0.75rem;
+  }
+
+  .kit-title {
+    font-family: var(--font-display);
+    font-size: clamp(2.25rem, 5.5vw, 3.5rem);
+    line-height: 0.95;
+    letter-spacing: 0.02em;
+    color: var(--white);
+    margin: 0;
+  }
+
+  .kit-intro {
+    color: var(--muted);
+    font-size: 1rem;
+    line-height: 1.7;
+    margin-block-start: 1rem;
+  }
+
+  .kit-intro p { margin: 0; }
+
+  .kit-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: clamp(1.25rem, 3vw, 2rem);
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  }
+
+  .kit-item {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 1rem;
+    padding: clamp(1rem, 2vw, 1.35rem);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .kit-media {
+    aspect-ratio: 4 / 3;
+    border-radius: 0.75rem;
+    overflow: hidden;
+    background: var(--bg3, var(--bg));
+    display: grid;
+    place-items: center;
+    margin-block-end: 1rem;
+  }
+
+  .kit-media img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  /* A numbered placeholder rather than an empty box: the grid can be judged
+     for rhythm and balance before any photography exists. */
+  .kit-placeholder {
+    font-family: var(--font-display);
+    font-size: 2.5rem;
+    color: var(--border);
+    letter-spacing: 0.04em;
+  }
+
+  .kit-index {
+    font-family: var(--font-mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    color: var(--green);
+    margin: 0 0 0.4rem;
+  }
+
+  .kit-name {
+    font-family: var(--font-body);
+    font-weight: 500;
+    font-size: 1rem;
+    line-height: 1.35;
+    color: var(--white);
+    margin: 0 0 0.4rem;
+  }
+
+  .kit-job {
+    font-size: 0.88rem;
+    line-height: 1.6;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  .kit-footnote {
+    margin-block-start: clamp(1.75rem, 4vw, 2.5rem);
+    font-size: 0.85rem;
+    line-height: 1.7;
+    color: var(--muted);
+    max-width: 44rem;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Kit contents",
+  "tag": "section",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Eyebrow", "default": "The kit" },
+    { "type": "text", "id": "title", "label": "Heading", "default": "What's in the box" },
+    {
+      "type": "richtext",
+      "id": "intro",
+      "label": "Intro",
+      "default": "<p>Six things, one box, one price. Everything you need to film a round and nothing you'll have to go back out and buy.</p>"
+    },
+    {
+      "type": "richtext",
+      "id": "footnote",
+      "label": "Footnote",
+      "info": "Mention packaging here, never as a numbered item. A parts list that includes the box, the manual or the warranty reads as padding — it is the single fastest way to make a kit look like a cheap bundle.",
+      "default": "<p>It all arrives in a printed box with a moulded slot for each part and the setup printed on the lid, which is also where the kit lives between rounds.</p>"
+    }
+  ],
+  "blocks": [
+    {
+      "type": "item",
+      "name": "Kit item",
+      "settings": [
+        { "type": "image_picker", "id": "image", "label": "Photo" },
+        { "type": "text", "id": "name", "label": "Name", "default": "Kit item" },
+        { "type": "text", "id": "job", "label": "What it does", "default": "The job this part does." }
+      ]
+    }
+  ],
+  "max_blocks": 8,
+  "presets": [
+    {
+      "name": "Kit contents",
+      "blocks": [
+        {
+          "type": "item",
+          "settings": {
+            "name": "Flexible tripod phone mount",
+            "job": "Three bendy legs and a spring clamp. Wraps a buggy rail or the top of your bag and stays put over eighteen holes of bumps."
+          }
+        },
+        {
+          "type": "item",
+          "settings": {
+            "name": "Bluetooth clicker",
+            "job": "Lives on your belt. One press starts recording, one stops it, two skips to the next hole. Rechargeable over USB-C, so there is no coin cell to hunt for."
+          }
+        },
+        {
+          "type": "item",
+          "settings": {
+            "name": "5,000mAh power bank",
+            "job": "Filming is the thing that flattens a phone. Slim enough for a bag pocket, and it attaches directly to your phone."
+          }
+        },
+        {
+          "type": "item",
+          "settings": {
+            "name": "Retractable badge reel",
+            "job": "Clips the clicker to a belt loop and pulls back on its own. It is there so you do not leave a small black object on a fairway."
+          }
+        }
+      ]
+    }
+  ]
+}
+{% endschema %}

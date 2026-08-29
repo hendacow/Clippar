@@ -1,0 +1,115 @@
+{% comment %}
+  Closing CTA — ported from clippargolf.com. The source version pushes to the
+  waitlist; here it links to the product, since on a storefront the kit is
+  buyable. Copy is editable if you want the waitlist framing back.
+{% endcomment %}
+
+<div class="section-divider"></div>
+<section style="padding:80px 24px;text-align:center;">
+  <div class="section-label">{{ section.settings.label }}</div>
+  <h2 style="font-family:var(--font-display);font-size:clamp(42px,7vw,72px);line-height:0.95;letter-spacing:0.02em;margin-bottom:24px;">
+    {{ section.settings.title_line_1 }}<br><span style="color:var(--green);">{{ section.settings.title_line_2 }}</span>
+  </h2>
+  {%- comment -%}
+    Same handle-vs-object resolution as landing-hero: a `product` setting in a
+    JSON template comes through as a handle string.
+  {%- endcomment -%}
+  {%- assign cta_product = section.settings.cta_product -%}
+  {%- unless cta_product.url -%}
+    {%- assign cta_product = all_products[section.settings.cta_product] -%}
+  {%- endunless -%}
+
+  {%- comment -%}
+    Three states, and the copy has to follow the state rather than being fixed.
+
+    `all_products` returns only PUBLISHED products, so while the kit sits in
+    Draft the lookup yields nothing. This used to render no button at all; then
+    it fell back to the waitlist anchor but kept saying "PRE-ORDER THE KIT" and
+    "cancel any time before dispatch" above a form that takes an email and no
+    money. Promising a refund on a payment that cannot happen is worse than
+    showing no button.
+
+    So when there is nothing buyable, the button, the body and the destination
+    all change together.
+  {%- endcomment -%}
+  {%- liquid
+    assign body = section.settings.body
+    assign label = section.settings.cta_label
+
+    if section.settings.cta_mode == 'waitlist'
+      assign cta_href = '#waitlist-form-section'
+      assign body = section.settings.fallback_body | default: body
+      assign label = section.settings.fallback_label | default: label
+    elsif cta_product.url != blank
+      assign cta_href = cta_product.url
+    else
+      assign cta_href = '#waitlist-form-section'
+      assign body = section.settings.fallback_body | default: body
+      assign label = section.settings.fallback_label | default: label
+    endif
+  -%}
+
+  <p style="font-size:16px;color:var(--muted);max-width:440px;margin:0 auto 28px;line-height:1.7;">
+    {{ body }}
+  </p>
+
+  {%- if cta_href != blank -%}
+    <a
+      class="cta-repeat-btn"
+      href="{{ cta_href }}"
+      style="display:inline-block;background:var(--green);color:#07100a;font-family:var(--font-display);font-size:20px;letter-spacing:0.08em;padding:15px 40px;border-radius:8px;text-decoration:none;transition:background 0.2s;"
+    >
+      {{ label }}
+    </a>
+  {%- endif -%}
+</section>
+
+{% stylesheet %}
+  .cta-repeat-btn:hover {
+    background: #c0f04f !important;
+  }
+{% endstylesheet %}
+
+{% schema %}
+{
+  "name": "Closing CTA",
+  "settings": [
+    { "type": "text", "id": "label", "label": "Section label", "default": "Ready?" },
+    { "type": "text", "id": "title_line_1", "label": "Title — line 1", "default": "Stop losing your" },
+    { "type": "text", "id": "title_line_2", "label": "Title — line 2 (accent)", "default": "best shots." },
+    {
+      "type": "textarea",
+      "id": "body",
+      "label": "Body",
+      "default": "Join the waitlist. Get founding member pricing.\nBe the first to know when we launch."
+    },
+    {
+      "type": "select",
+      "id": "cta_mode",
+      "label": "Button target",
+      "options": [
+        { "value": "waitlist", "label": "Jump to waitlist form (matches clippargolf.com)" },
+        { "value": "product", "label": "Product page" }
+      ],
+      "default": "waitlist"
+    },
+    { "type": "product", "id": "cta_product", "label": "Product (product mode only)" },
+    { "type": "text", "id": "cta_label", "label": "Button label", "default": "PRE-ORDER THE KIT" },
+    {
+      "type": "header",
+      "content": "Fallback — when nothing is buyable"
+    },
+    {
+      "type": "paragraph",
+      "content": "Used when the product is a draft or its handle changed. Must not promise a purchase, a price or a refund — the fallback points at an email form and takes no money."
+    },
+    { "type": "text", "id": "fallback_label", "label": "Button label", "default": "JOIN THE WAITLIST" },
+    { "type": "textarea", "id": "fallback_body", "label": "Body", "default": "The kit isn't on sale yet. Leave your email and we'll tell you the day it is." }
+  ],
+  "presets": [
+    {
+      "name": "Closing CTA"
+    }
+  ]
+}
+{% endschema %}

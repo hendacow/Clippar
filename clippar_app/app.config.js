@@ -236,15 +236,13 @@ module.exports = () => ({
       [
         'expo-location',
         {
+          // v1 uses foreground location only (nearby-course search in
+          // components/record/CourseSearch.tsx via hooks/useLocation.ts, which
+          // calls requestForegroundPermissionsAsync). No background/Always use,
+          // so declare When-In-Use only — declaring "Always" without using it
+          // is an App Review rejection risk.
           locationWhenInUsePermission:
-            'Clippar uses your location to match each shot to the right hole and measure shot distances on the course.',
-          // Clippar only reads location while you are actively recording a round
-          // (foreground): useLocation.ts calls requestForegroundPermissionsAsync
-          // and watchPositionAsync — never the background variants. Passing
-          // `false` deletes the unused "Always" Info.plist keys so the app does
-          // not request location access it never uses (an App Review red flag).
-          locationAlwaysAndWhenInUsePermission: false,
-          locationAlwaysPermission: false,
+            'Clippar uses your location to find nearby golf courses',
         },
       ],
       [

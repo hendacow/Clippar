@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="{{ request.locale.iso_code }}">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    {% comment %}
+      Brand webfonts. Bebas Neue / DM Sans / DM Mono are not in Shopify's font
+      library, so they load from Google Fonts to match clippargolf.com exactly.
+    {% endcomment %}
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;1,9..40,300&family=DM+Mono:wght@400;500&display=swap"
+    >
+
+    {% # Inlined CSS Variables %}
+    {% render 'css-variables' %}
+
+    {% comment %}
+      Font preloading:
+      1. Preconnect to font CDN for faster connection
+      2. Preload only the critical font variant (base weight)
+      3. Additional variants load on-demand via @font-face
+    {% endcomment %}
+    {% unless settings.type_primary_font.system? %}
+      <link rel="preconnect" href="https://fonts.shopifycdn.com" crossorigin>
+
+      {% comment %} Preload the base font variant for initial page render {% endcomment %}
+      {{ settings.type_primary_font | font_url | preload_tag: as: 'font', crossorigin: 'anonymous' }}
+    {% endunless %}
+
+    {% # Load and preload the critical CSS %}
+    {{ 'critical.css' | asset_url | stylesheet_tag: preload: true }}
+
+    {% comment %}
+      Ported wholesale from clippargolf.com so the storefront matches the
+      marketing site exactly. Loaded after critical.css so its :root tokens
+      and component styles win over Skeleton's defaults.
+    {% endcomment %}
+    {{ 'clippar.css' | asset_url | stylesheet_tag }}
+
+    {%- comment -%}
+      Scroll motion. Loaded last so it can reference the component classes the
+      sections define, and deliberately non-blocking-ish in effect: every rule
+      inside is decoration, so a slow or failed load costs appearance and never
+      content.
+    {%- endcomment -%}
+    {{ 'motion.css' | asset_url | stylesheet_tag }}
+
+    {%- comment -%}
+      Accessibility and mobile-input corrections. Loaded last so it wins over
+      both the ported clippar.css and anything a section declares.
+    {%- endcomment -%}
+    {{ 'a11y.css' | asset_url | stylesheet_tag }}
+
+    {% comment %}
+      Favicon. The theme has no favicon setting, so the app icon is shipped as a
+      theme asset and sized down by the CDN rather than serving the 1024px
+      original to every page.
+    {% endcomment %}
+    <link rel="icon" type="image/png" sizes="96x96" href="{{ 'favicon-app-icon.png' | asset_img_url: '96x96' }}">
+    <link rel="icon" type="image/png" sizes="192x192" href="{{ 'favicon-app-icon.png' | asset_img_url: '192x192' }}">
+    <link rel="apple-touch-icon" sizes="180x180" href="{{ 'favicon-app-icon.png' | asset_img_url: '180x180' }}">
+
+    {% # Social, title, etc. %}
+    {% render 'meta-tags' %}
+
+    {{ content_for_header }}
+  </head>
+
+  {% comment %}
+    The template name drives one rule in clippar.css: every template except the
+    landing page reserves the fixed nav's height as body padding, because only
+    .hero carries its own offset.
+  {% endcomment %}
+  <body class="template-{{ template.name }}">
+    {% sections 'header-group' %}
+
+    {{ content_for_layout }}
+
+    {% sections 'footer-group' %}
+
+    {% comment %}
+      Behaviour ported from clippargolf.com — phone carousel, step carousel,
+      scroll reveals, waitlist validation. Binds to element IDs in the
+      landing-* sections, so those IDs must not be renamed.
+    {% endcomment %}
+    <script src="{{ 'clippar.js' | asset_url }}" defer></script>
+
+  </body>
+</html>

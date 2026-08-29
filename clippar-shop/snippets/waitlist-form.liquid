@@ -1,0 +1,163 @@
+{% comment %}
+  Waitlist form — restores the block that clippargolf.com renders inside the
+  hero, and that the initial port dropped because it POSTed to /api/submit on
+  Vercel (no equivalent on a storefront).
+
+  Capture path is now Shopify-native: `{% form 'customer' %}` creates a customer
+  with email-marketing consent and posts to /contact. Nothing here holds a
+  Sender API token — Sender's Shopify app syncs those customers into the
+  waitlist group, so the secret stays server-side where it belongs.
+
+  Markup, IDs and copy are kept identical to the source page so assets/clippar.css
+  applies unchanged and assets/clippar.js can bind to the same element IDs.
+
+  Frequency rides along as a customer tag (`plays-weekly` etc.) because the
+  customer form has no arbitrary-field storage. Tag writes via contact[tags]
+  need confirming against the live store — see MIGRATION.md.
+
+  Accepts:
+    heading, body, note — copy overrides. All optional.
+{% endcomment %}
+
+{%- liquid
+  assign heading = heading | default: 'Join the waitlist'
+  assign body = body | default: 'Get founding member pricing and be first to know when we launch.'
+  assign note = note | default: 'No spam. Unsubscribe anytime. Founding member pricing locked in for early signups.'
+-%}
+
+<div class="form-wrap" id="waitlist-form-section">
+  <div class="form-card">
+    <h2>{{ heading }}</h2>
+    <p>{{ body }}</p>
+    <div class="form-error" id="form-error"></div>
+
+    {%- comment -%}
+      Success and error states live INSIDE the form block: `form.posted_successfully?`
+      and `form.errors` are only in scope between {% form %} and {% endform %}.
+    {%- endcomment -%}
+    {%- form 'customer', id: 'waitlist-form', class: 'waitlist-form' -%}
+      {%- if form.posted_successfully? -%}
+        {%- comment -%}
+          Post-submit state. This is not a thank-you line any more — it is the
+          beta invitation, and it is the only place it appears (no new page, no
+          email). Henry's reasoning, so nobody "improves" it later: the risk
+          with beta testers is a bad first impression, and the fix for that is
+          setting expectations, not hiding rough edges. A tester who was warned
+          forgives a crash; one who was not leaves a one-star review that sits
+          on a brand-new App Store listing forever. **Do not trim, hedge or
+          soften the "what to be aware of" list.**
+        {%- endcomment -%}
+        <div class="success-state beta-invite" id="success" style="display:block;">
+          <div class="tick">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#a8e63d" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 6L9 17l-5-5"/>
+            </svg>
+          </div>
+          <h3>You're on the list.</h3>
+
+          <p class="beta-lede">Want to try the app while you wait?</p>
+
+          {%- comment -%}
+            Three lines, big, no preamble. Henry rewrote this himself on the
+            night of 25 Aug after seeing the longer two-column version: he
+            wanted it simple enough to read off a phone in a few seconds, with
+            the "it's a beta, expect bugs" warning first rather than buried
+            under a pitch. Keep the warning in line one, and keep it to three.
+          {%- endcomment -%}
+          <ul class="beta-points">
+            <li>This is V1 beta. Expect bugs and UI issues — we're fixing them fast.</li>
+            <li>We just want feedback right now. There aren't many of us, so yours changes what gets built.</li>
+            <li>Testers get a free kit to try on course, before anyone can buy one.</li>
+          </ul>
+
+          {%- comment -%}
+            A real anchor, not a button with a JS handler. On iOS an
+            apps.apple.com link hands straight to the App Store app, and it
+            still works with JS off or if the tag POST below fails. The click
+            handler in clippar.js piggybacks the tagging on top; it never
+            blocks the navigation.
+          {%- endcomment -%}
+          <a class="btn-submit beta-cta"
+             id="beta-cta"
+             href="https://apps.apple.com/au/app/clippar-golf-highlights/id6788301452?ct=sd26-waitlist&amp;mt=8"
+             target="_blank"
+             rel="noopener">Try the beta on the App Store</a>
+        </div>
+      {%- else -%}
+        {%- if form.errors -%}
+          <div class="form-error" style="display:block;">
+            {{ form.errors.messages['form'] | default: 'Something went wrong. Please try again.' }}
+          </div>
+        {%- endif -%}
+
+        {%- comment -%}
+          Marks this submission as a waitlist signup rather than a checkout-created
+          customer, and carries the play-frequency answer. clippar.js rewrites the
+          tag list before the native submit; without JS the customer still lands
+          tagged, just without the frequency.
+        {%- endcomment -%}
+        <input type="hidden" name="contact[tags]" id="f-tags" value="waitlist">
+
+        <div class="form-group">
+          <label for="f-name">Your name</label>
+          <input type="text" id="f-name" name="contact[first_name]" placeholder="Tiger" required autocomplete="name">
+        </div>
+        <div class="form-group">
+          <label for="f-email">Email address</label>
+          <input type="email" id="f-email" name="contact[email]" placeholder="you@gmail.com" required autocomplete="email">
+        </div>
+        <div class="form-group">
+          <label for="f-frequency">How often do you play?</label>
+          {%- comment -%}
+            `name` matters more than it looks. Without it the browser never puts
+            this field in the submission, so every answer was being thrown away
+            — while `required` still forced each signup to pick one. All of the
+            friction, none of the data. The naming follows the contact form's
+            `contact[Enquiry type]` convention so it lands as a labelled
+            attribute on the Shopify customer.
+          {%- endcomment -%}
+          <select id="f-frequency" name="contact[Play frequency]" required>
+            <option value="" disabled selected>Select frequency</option>
+            <option value="weekly">Every week</option>
+            <option value="fortnightly">Fortnightly</option>
+            <option value="monthly">Once a month</option>
+            <option value="occasional">Occasional</option>
+          </select>
+        </div>
+        <button class="btn-submit" type="submit" id="btn-submit">SECURE MY SPOT</button>
+      {%- endif -%}
+    {%- endform -%}
+
+    {%- comment -%}
+      "Who clicked through to the beta", not "how many clicks".
+
+      The only way to write to a customer record from the storefront is the
+      customer form, and Shopify's spam protection (see the bootstrap in every
+      page's <head>) is wired to a **submit event listener on document**. So:
+
+        * `form.submit()` fires no submit event -> no hCaptcha token ->
+          `400 Missing CAPTCHA token`. Same trap as gotcha #1 in the shopify
+          brief, just reached from the other direction.
+        * `form.requestSubmit()` does fire one, so the token gets attached.
+        * `data-shopify-captcha="true"` makes the bootstrap bind this form at
+          DOMContentLoaded instead of at click time, so the token is already
+          sitting in the form when the visitor taps through.
+
+      It posts into a hidden iframe so the tab stays on the success panel and
+      the App Store link is free to open. clippar.js fills in the email (from
+      `form.email` if Shopify hands it back, otherwise from what the visitor
+      typed a moment ago, kept in sessionStorage) and re-sends the whole tag
+      list, so the tagging is correct whether Shopify merges tags or replaces
+      them. If there is no email to attribute the click to it does not fire at
+      all — a counter that cannot name a person is not what was asked for.
+    {%- endcomment -%}
+    <iframe name="beta-tag-sink" id="beta-tag-sink" title="" aria-hidden="true" tabindex="-1"
+            style="display:none;width:0;height:0;border:0;"></iframe>
+    {%- form 'customer', id: 'beta-tag-form', class: 'beta-tag-form', target: 'beta-tag-sink', data-shopify-captcha: 'true' -%}
+      <input type="hidden" name="contact[email]" id="beta-tag-email" value="{{ form.email }}">
+      <input type="hidden" name="contact[tags]" id="beta-tag-tags" value="waitlist, beta-clicked">
+    {%- endform -%}
+
+    <p class="form-note">{{ note }}</p>
+  </div>
+</div>
