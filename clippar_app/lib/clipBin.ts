@@ -154,9 +154,31 @@ function isValidEntry(v: unknown): v is BinnedClip {
   return e.fileUris.every((u) => typeof u === 'string' && u.startsWith('file://'));
 }
 
-async function readBinAt(key: string): Promise<BinnedClip[]> {
+/**
+ * `null` means THE ROW COULD NOT BE READ — never "the bin is empty".
+ *
+ * The lenient reader below was written for a CORRUPT bin, and the trade in its
+ * comment is about corruption: losing an unreadable recovery list beats
+ * refusing to delete. **It silently covered a transient read failure too**, and
+ * there the trade was never considered — `getSetting` is a bare
+ * `getDatabase()` + `getFirstAsync` with no catch of its own, so a busy
+ * database rejects. `deleteClipToBin` then wrote `[newEntry]` back over a bin
+ * holding up to MAX_ENTRIES valid records **whose clip rows it had already
+ * deleted**, orphaning their video files with nothing left naming them.
+ *
+ * Same split as `readRegistryStrict` in lib/training.ts, and the same reason a
+ * read failure and an unreadable blob are different answers: nobody could read
+ * a corrupt row either way, so overwriting it destroys nothing recoverable,
+ * while refusing forever would wedge deletion permanently.
+ */
+async function readBinAtStrict(key: string): Promise<BinnedClip[] | null> {
+  let raw: string | null;
   try {
-    const raw = await getSetting(key);
+    raw = await getSetting(key);
+  } catch {
+    return null;
+  }
+  try {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
@@ -169,6 +191,14 @@ async function readBinAt(key: string): Promise<BinnedClip[]> {
     // worse, and the clip rows themselves are unaffected either way.
     return [];
   }
+}
+
+/**
+ * The lenient view. Correct for callers that only LOOK UP an entry — a failed
+ * read there means "not found", which they already handle without writing.
+ */
+async function readBinAt(key: string): Promise<BinnedClip[]> {
+  return (await readBinAtStrict(key)) ?? [];
 }
 
 async function writeBinAt(key: string, entries: BinnedClip[]): Promise<void> {
@@ -344,6 +374,15 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // mid-job account change now fails the gate instead of splitting it — the
     // delete is refused and retried, never redirected.
     if (!round || round.user_id !== userId) return null;
+    // Read the bin BEFORE the row leaves SQLite, and refuse if it cannot be
+    // read — the same rule as the `if (!userId) return null` guard above, for
+    // the same reason: with no readable bin there is nowhere to record
+    // recovery, and the write below would replace up to MAX_ENTRIES valid
+    // entries with this one, orphaning the files of clips already deleted.
+    // Refusing leaves the clip in place, which is a visible no-op the user can
+    // retry rather than a silent loss of someone's recoverable shots.
+    const existing = await readBinAtStrict(key);
+    if (existing === null) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
     // Stamped from the row too, so `listBinnedClips(roundId)` cannot be made
@@ -354,7 +393,7 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
       deletedAt: new Date().toISOString(),
       roundId: typeof row.round_id === 'string' ? row.round_id : ownerRoundId,
     };
-    const entries = [entry, ...(await readBinAt(key))];
+    const entries = [entry, ...existing];
     const kept = entries.slice(0, MAX_ENTRIES);
     const evicted = entries.slice(MAX_ENTRIES);
     try {

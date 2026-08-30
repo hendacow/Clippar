@@ -251,11 +251,18 @@ test('the pre-scoping device-wide bin is drained, not orphaned', () => {
   // Sixth assertion tonight watching the shape of the code rather than the
   // property. The property is stronger now: every mutation drains, and the
   // drain is authorised by the SAME id that keys the job.
+  //
+  // ...and it happened AGAIN: this pinned the literal string `await readBinAt(`,
+  // so splitting the reader into a strict variant made indexOf return -1 and the
+  // comparison vacuously false against correct code. Tenth tonight. Matched on
+  // either reader now, and the read is REQUIRED to exist rather than inferred.
   for (const fn of ['deleteClipToBin', 'restoreClipFromBin', 'purgeClipFromBin', 'purgeAllBinnedClips']) {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
     assert.match(body, /await drainLegacyBin\(userId\)/, `${fn} must drain the legacy bin, bound to its own resolution`);
+    const read = body.match(/await readBinAt(?:Strict)?\(/);
+    assert.notEqual(read, null, `${fn} must read its own bin`);
     assert.ok(
-      body.indexOf('await drainLegacyBin(userId)') < body.indexOf('await readBinAt('),
+      body.indexOf('await drainLegacyBin(userId)') < read!.index!,
       `${fn} must drain before reading its own bin`
     );
   }
