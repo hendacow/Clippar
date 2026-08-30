@@ -196,6 +196,32 @@ test('the legacy drain destroys only the signed-in account’s own entries', () 
   assert.doesNotMatch(body, /legacyDrained/, 'no latch: later accounts still need their drain');
 });
 
+// restoreLocalClip interpolates Object.keys(row) into INSERT ... unescaped,
+// justified by a docstring saying the keys "come from the row the database
+// itself handed us". This module broke that invariant by persisting the row as
+// JSON in local_settings, so the keys now come from JSON.parse.
+test('bin entries are validated where the JSON blob re-enters', () => {
+  assert.match(bin, /function isValidEntry/, 'the trust boundary needs a shape check');
+  const read = bin.match(/async function readBinAt[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(read, /parsed\.filter\(isValidEntry\)/, 'readBinAt must validate, not cast');
+  assert.doesNotMatch(read, /as BinnedClip\[\]/, 'a cast is not a shape check');
+
+  const validator = bin.match(/function isValidEntry[\s\S]*?\n}/)?.[0] ?? '';
+  // Column names reach SQL as identifiers, so they get an identifier check.
+  assert.match(bin, /const SQL_IDENTIFIER = \/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*\$\//);
+  assert.match(validator, /SQL_IDENTIFIER\.test\(c\)/);
+  // fileUris reach a file delete, so the file:// prefix is re-checked.
+  assert.match(validator, /startsWith\('file:\/\/'\)/);
+
+  // purgeEntry is the unlink side of the same boundary.
+  const purge = bin.match(/async function purgeEntry[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(purge, /startsWith\('file:\/\/'\)/, 'the unlink must re-check the prefix too');
+
+  // The legacy drain reads the same shape and also feeds purgeEntry.
+  const drain = bin.match(/async function drainLegacyBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(drain, /isValidEntry\(entry\)/);
+});
+
 // deleteLocalClip is `DELETE FROM local_clips WHERE id = ?` with no ownership
 // predicate and clip ids are small sequential integers, so callers gating it
 // upstream is a property of today's call sites, not of the function.

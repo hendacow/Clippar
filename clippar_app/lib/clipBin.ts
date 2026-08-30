@@ -105,12 +105,53 @@ export interface BinnedClip {
  *
  * So every queued job resolves the key ONCE and threads it through.
  */
+/**
+ * A bin entry is only trustworthy if it still looks like one after a round
+ * trip through JSON — and this module is what put a JSON round trip in the
+ * middle of it.
+ *
+ * `restoreLocalClip` interpolates `Object.keys(row)` into
+ * `INSERT INTO local_clips (...)` unescaped, and its docstring justifies that
+ * as safe because "column names come from the row the database itself handed
+ * us". That was true when the row came straight from a `SELECT *`. It stopped
+ * being true when the bin started persisting the row as text in
+ * `local_settings`: the keys now come from `JSON.parse`, so a key like
+ * `id) VALUES (1); DROP TABLE local_rounds; --` would be spliced in as an
+ * identifier. Writing that blob needs sandbox access, at which point the
+ * attacker can write the database directly — so this is not an exploit path
+ * so much as an invariant this feature quietly broke and nothing recorded.
+ *
+ * Column names are checked against the SQL identifier SHAPE rather than an
+ * allow-list of known columns: `local_clips` has picked up 25 columns through
+ * `ALTER TABLE` migrations, so a hardcoded list would drift and start
+ * silently refusing valid restores. The shape check is what closes the
+ * injection; an unknown-but-well-formed column just fails at INSERT.
+ *
+ * `fileUris` is re-checked for the `file://` prefix that `deleteLocalClip`
+ * applied on the way IN, because `purgeEntry` unlinks them on the way out and
+ * was not re-applying it.
+ */
+const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function isValidEntry(v: unknown): v is BinnedClip {
+  if (!v || typeof v !== 'object') return false;
+  const e = v as BinnedClip;
+  if (typeof e.roundId !== 'string') return false;
+  if (!e.row || typeof e.row !== 'object' || typeof e.row.id !== 'number') return false;
+  if (!Object.keys(e.row).every((c) => SQL_IDENTIFIER.test(c))) return false;
+  if (!Array.isArray(e.fileUris)) return false;
+  return e.fileUris.every((u) => typeof u === 'string' && u.startsWith('file://'));
+}
+
 async function readBinAt(key: string): Promise<BinnedClip[]> {
   try {
     const raw = await getSetting(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as BinnedClip[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    // Drop malformed entries rather than the whole list: one bad entry must
+    // not cost the golfer every other recoverable clip.
+    return parsed.filter(isValidEntry);
   } catch {
     // A corrupt bin must never block a delete or wedge the editor. Losing the
     // recovery list is bad; refusing to delete because we cannot read it is
@@ -179,8 +220,14 @@ async function drainLegacyBin(): Promise<void> {
     }
     const mine: BinnedClip[] = [];
     const others: BinnedClip[] = [];
-    for (const entry of parsed as BinnedClip[]) {
-      const owned = await getLocalRound(entry?.roundId ?? '').catch(() => null);
+    for (const entry of parsed) {
+      // Same trust boundary as readBinAt — these entries feed purgeEntry.
+      // A malformed entry is neither purged nor written back: it cannot be
+      // trusted to name a file we should unlink, and carrying it forward
+      // would keep an unreadable blob alive for the life of the install. Any
+      // real files it pinned are caught by wipeLocalUserData's clips/ sweep.
+      if (!isValidEntry(entry)) continue;
+      const owned = await getLocalRound(entry.roundId).catch(() => null);
       (owned ? mine : others).push(entry);
     }
     if (mine.length === 0) return;
@@ -266,6 +313,10 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
     // Tracer bookkeeping failing must not strand the video files on disk.
   }
   for (const uri of entry.fileUris ?? []) {
+    // Re-check the prefix deleteLocalClip applied on the way IN. This is the
+    // unlink side of the same trust boundary isValidEntry guards: entries
+    // reach here from a JSON blob, and this hands them to a file delete.
+    if (typeof uri !== 'string' || !uri.startsWith('file://')) continue;
     try {
       await deleteFile(uri);
     } catch {
