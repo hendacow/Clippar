@@ -152,6 +152,23 @@ export async function wipeLocalUserData(): Promise<void> {
     console.warn('[localWipe] registry scrub failed', err);
   }
 
+  // The onboarding and sales answers — ACCOUNT_LINKED_SETTING_KEYS above, which
+  // this file's own docstring calls "ANSWERS ABOUT A PERSON rather than app
+  // state". Sign-out clears them via clearAccountLinkedCaches(), but account
+  // deletion does not route through finishSignOut(), and clearLocalDatabase
+  // deliberately drops only three named keys — so nothing on this path reached
+  // them. They outlived the account permanently (a deleted account never signs
+  // in again to prune them) and pre-filled the next golfer's onboarding with
+  // the previous one's home course, handicap and age range.
+  //
+  // Unlike the two registries above, these keys carry NO owner, so this clears
+  // them for whoever wrote them rather than partitioning. That is deliberate
+  // and is the same trade clearAccountLinkedCaches already makes on every
+  // sign-out: they cost nothing to re-enter, which is exactly why blanket
+  // clearing is right here and wrong for the registries — those name rounds and
+  // pin video files.
+  await clearAccountLinkedCaches();
+
   try {
     await clearLocalDatabase();
   } catch (err) {

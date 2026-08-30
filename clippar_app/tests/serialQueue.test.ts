@@ -589,3 +589,46 @@ test('every ownership gate binds the row owner back to its own resolution', () =
   const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
   assert.match(del, /round\.user_id !== userId/, 'deleteClipToBin keeps its binding');
 });
+
+// Account deletion is the STRONGER promise than sign-out, so anything sign-out
+// clears must also be cleared here. ACCOUNT_LINKED_SETTING_KEYS is the set this
+// file itself calls "ANSWERS ABOUT A PERSON rather than app state" — home
+// course, handicap, age range, most memorable shot — written unscoped and read
+// straight back. clearAccountLinkedCaches had exactly one caller, the sign-out
+// button; the deletion path does not route through it, and clearLocalDatabase
+// drops only three named keys. So they survived account deletion permanently
+// and pre-filled the next golfer's onboarding. Pre-existing and live on main.
+test('account deletion clears the personal answers, not just the media', () => {
+  const wipeSrc = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
+  const body = wipeSrc.match(/export async function wipeLocalUserData[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'wipeLocalUserData should still exist');
+  assert.match(
+    body,
+    /await clearAccountLinkedCaches\(\)/,
+    'the erasure path must clear what the weaker sign-out path already clears'
+  );
+  // Anchored on the `await …()` CALL form, not the bare name — the comment
+  // above these lines names both functions in prose, so an indexOf on the name
+  // alone measures where the explanation sits rather than where the call does.
+  // That exact mistake is documented on the ordering assertion further up this
+  // file, and I nearly repeated it here.
+  assert.ok(
+    body.indexOf('await clearAccountLinkedCaches()') < body.indexOf('await clearLocalDatabase()'),
+    'clear the keys while the database is still open'
+  );
+});
+
+// The blanket clear is correct for THESE keys and wrong for the registries, and
+// the difference is what each one names. Pin it, because "blanket delete of a
+// device-wide key" is the mistake this branch made twice.
+test('blanket clearing is scoped to the ownerless preference keys only', () => {
+  const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  const tutorial = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
+  for (const [name, src, fn] of [
+    ['training', training, 'forgetTrainingSessionsFor'],
+    ['tutorial', tutorial, 'forgetCreatedRoundsFor'],
+  ] as const) {
+    const body = src.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.match(body, /\.filter\(/, `${name}: registries must partition — they name rounds and pin video files`);
+  }
+});
