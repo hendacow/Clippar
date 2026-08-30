@@ -129,18 +129,16 @@ export interface TrainingSessionRef {
    * Who recorded it. `null` = an entry written before the stamp existed:
    * never listed, never played.
    *
-   * `ownsRound` alone is not enough, because its single input —
-   * `local_rounds.user_id` — is reassignable by another account's sign-in.
-   * `saveLocalRound` writes a NULL owner when the session momentarily cannot
-   * be resolved AND re-arms `legacyRoundsClaimed`, so the next account to do
-   * any scoped read adopts every unowned round on the handset
-   * (`shouldClaimLegacyRows` is just "signed in and not yet claimed"). On a
-   * shared phone that hands A's practice session to B, and `ownsRound` then
-   * answers true — B sees the real per-club counts and can watch A's swings.
+   * **Ownership needs BOTH this stamp and the row.** `local_rounds.user_id`
+   * alone is not sufficient: it is reassignable by another account's sign-in,
+   * so a scoped read is not proof of ownership on a shared handset.
+   * `lib/tutorialRound.ts` does the same thing with its created-id registry,
+   * for the same reason. **Do not drop either half.**
    *
-   * So ownership needs BOTH the stamp and the row, which is what
-   * `lib/tutorialRound.ts` already does with its created-id registry, and for
-   * this exact reason.
+   * Mechanism deliberately not spelled out here — this file is public and the
+   * underlying problem is unfixed and live. See finding 23 in
+   * `org/cto/SECURITY-2026-08-30-unfixed.md` in the private company-brain repo
+   * before changing this or the claim path it defends against.
    */
   userId: string | null;
 }

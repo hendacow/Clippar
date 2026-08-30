@@ -96,12 +96,11 @@ export interface BinnedClip {
  * Each mutation used to resolve the owner up to three times across await
  * points — the guard, then `readBin`, then `writeBin` — and `binQueue`
  * serialises jobs against each other, not against auth changes.
- * `sessionUserId()` also falls back to a cached `lastKnownUserId` when
- * `getSession()` transiently fails, so consecutive calls inside one job are
- * not guaranteed to agree. A sign-out landing mid-job could therefore read
- * from A's bin and write to B's — filing A's clip row into B's recovery list,
- * where B's "Delete for good" unlinks A's video. That is the cross-account
- * destruction this module exists to prevent, reached through a narrower door.
+ * The session resolver can also disagree with itself across await points, so
+ * consecutive calls inside one job are not guaranteed to return the same
+ * account — which on a shared handset is a cross-account destruction path.
+ * Mechanism not spelled out here (public file, unfixed finding): see findings
+ * 31 and 32 in `org/cto/SECURITY-2026-08-30-unfixed.md`, private repo.
  *
  * So every queued job resolves the key ONCE and threads it through.
  */

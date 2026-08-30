@@ -210,26 +210,20 @@ async function sessionUserId(): Promise<string | null> {
  * Callers must fail closed on null: one shared key is exactly the cross-account
  * leak `lib/localScope.ts` exists to prevent.
  *
- * ⚠️ **This CAN return a departed account's id, and null is not the only
- * failure mode.** An earlier version of this docstring said it "returns null
- * when no session resolves". That was false, and it is the sentence I wrote
- * before building four destructive gates on top of it.
+ * ⚠️ **NOT SAFE AS AN OWNERSHIP GATE ON ITS OWN.** This can resolve to an
+ * account other than the one currently signed in, so failing closed on null is
+ * necessary and NOT sufficient — null is not the only failure mode. An earlier
+ * version of this docstring claimed otherwise, and that was the sentence I
+ * wrote before building four destructive gates on top of it.
  *
- * `sessionUserId()` returns the module-global `lastKnownUserId` on BOTH failure
- * branches — `if (error)` and the `catch`. That global is assigned in exactly
- * one place (on a *successful* getSession) and **nothing clears it on
- * sign-out**: useAuth's SIGNED_OUT branch resets RevenueCat and the round
- * prefetch and touches nothing here, and sign-in goes through GoTrue rather
- * than through this function. So after A signs out and B signs in, a transient
- * getSession failure under B resolves to **A**, and a gate comparing two such
- * answers sees them agree — on the wrong account.
+ * **Do not build a new destructive gate on this function**, and do not change
+ * it, without first reading finding 32 in `org/cto/SECURITY-2026-08-30-unfixed.md`
+ * in the private company-brain repo. The fix is known and written up there.
+ * Do not pair any change with resetting `legacyRoundsClaimed` — that re-arms a
+ * separate problem, also written up there.
  *
- * Failing closed on null is therefore necessary and NOT sufficient. Do not
- * build a new ownership gate on this without reading the escalation: the fix
- * is a strict variant that never serves the cache, plus invalidation at
- * SIGNED_OUT, and it is deliberately out of scope here as authentication code.
- * (Do not pair that with resetting `legacyRoundsClaimed` — that re-arms the
- * NULL-owner backfill on the next sign-in, which is a separate escalation.)
+ * (Detail deliberately kept out of this file: it is public, and the finding is
+ * unfixed and live in shipped code. Same rule as the report — see finding 44.)
  */
 export async function currentSessionUserId(): Promise<string | null> {
   return sessionUserId();
