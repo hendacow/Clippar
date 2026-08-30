@@ -9,12 +9,13 @@
  * its REAL state on it — hole advancement, penalties, shot counts are the
  * production code paths — with exactly one seam: video where the camera is.
  *
- * Cleanup is idempotent by construction: rounds are found by the sentinel
- * course name, and sweepTutorialRounds() runs at every authed app start, so
- * a crash mid-tutorial leaves at worst one launch's worth of clutter in the
+ * Cleanup is idempotent by construction: rounds are found by an owner-stamped
+ * id registry this module writes (NOT by course name — see CREATED_KEY for why
+ * that was unsafe), and sweepTutorialRounds() runs at every authed app start,
+ * so a crash mid-tutorial leaves at worst one launch's worth of clutter in the
  * user's OWN account before the sweep removes it.
  */
-import { getSetting, setSetting, saveLocalRound, deleteLocalRound, getClipsForRound, getLocalRound, saveLocalClip } from '@/lib/storage';
+import { getSetting, setSetting, saveLocalRound, deleteLocalRound, getClipsForRound, getLocalRound, saveLocalClip, currentSessionUserId } from '@/lib/storage';
 import { createRound, deleteRound } from '@/lib/api';
 import { persistAsset } from '@/lib/media';
 
@@ -41,20 +42,54 @@ const ACTIVE_KEY = 'tutorial.active_round';
  */
 const CREATED_KEY = 'tutorial.created_round_ids';
 
-async function readCreatedIds(): Promise<string[]> {
+/**
+ * Entries carry their owner, because `local_settings` is device-wide.
+ *
+ * One handset, one `clippar.db`, and sign-out does not wipe it — so a bare
+ * list of ids accumulates rounds from every account that has used the phone.
+ * `getLocalRound` is scoped and fails closed, so under account B a round
+ * belonging to A reads as `null`, which the sweep treats as "already gone
+ * locally" and proceeds — but `deleteLocalRound` is NOT scoped: it deletes by
+ * round_id alone and unlinks every clip file it finds. B finishing the
+ * tutorial would therefore delete A's tutorial round and its files.
+ *
+ * Bounded (tutorial rounds hold bundled demo clips) and the old active-round
+ * key had the same shape, but it is worth closing precisely because this
+ * registry is now the only record a sweep works from.
+ */
+interface CreatedTutorialRound {
+  id: string;
+  /** Who created it. `null` = a legacy bare-string entry: never swept. */
+  userId: string | null;
+}
+
+async function readCreatedIds(): Promise<CreatedTutorialRound[]> {
   try {
     const raw = await getSetting(CREATED_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((v): CreatedTutorialRound[] => {
+      // Tolerate the previous `string[]` shape on upgrade. Such an entry has
+      // no known owner, so it is kept but never swept — leaving one tutorial
+      // round uncollected beats deleting someone else's.
+      if (typeof v === 'string') return [{ id: v, userId: null }];
+      if (v && typeof v === 'object') {
+        const e = v as { id?: unknown; userId?: unknown };
+        if (typeof e.id === 'string') {
+          return [{ id: e.id, userId: typeof e.userId === 'string' ? e.userId : null }];
+        }
+      }
+      return [];
+    });
   } catch {
     return [];
   }
 }
 
-async function writeCreatedIds(ids: string[]): Promise<void> {
+async function writeCreatedIds(entries: CreatedTutorialRound[]): Promise<void> {
   try {
-    await setSetting(CREATED_KEY, ids.length ? JSON.stringify(ids) : null);
+    await setSetting(CREATED_KEY, entries.length ? JSON.stringify(entries) : null);
   } catch {}
 }
 
@@ -84,8 +119,10 @@ export async function getActiveTutorialRoundId(): Promise<string | null> {
 export async function createTutorialRound(): Promise<string> {
   const round = await createRound({ course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   if (!round) throw new Error('Failed to create tutorial round');
-  // Registered before anything else can fail, so the sweep can always find it.
-  await writeCreatedIds([...(await readCreatedIds()), round.id]);
+  // Registered before anything else can fail, so the sweep can always find it,
+  // stamped with the account that created it so no other account sweeps it.
+  const owner = await currentSessionUserId().catch(() => null);
+  await writeCreatedIds([...(await readCreatedIds()), { id: round.id, userId: owner }]);
   await saveLocalRound({ id: round.id, course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   await setSetting(ACTIVE_KEY, round.id);
   await setTutorialPending(false);
@@ -153,12 +190,19 @@ export async function endTutorial(): Promise<void> {
 export async function sweepTutorialRounds(): Promise<number> {
   let swept = 0;
   try {
+    const me = await currentSessionUserId().catch(() => null);
     const active = await getActiveTutorialRoundId();
     const created = await readCreatedIds();
-    const candidates = new Set<string>(created);
-    // The active key is written immediately after the registry, so this only
-    // matters if the registry write was the one that failed.
-    if (active) candidates.add(active);
+    // Only this account's rounds are ever candidates. The active-round key is
+    // device-wide too and carries no owner, so it is NOT added here: an id
+    // that reached it without reaching the registry would be unattributable,
+    // and sweeping an unattributable id is the whole hole. createTutorialRound
+    // writes the registry BEFORE the active key, so this costs nothing except
+    // in the double-failure case, where the cost is one uncollected round.
+    if (!me) return 0;
+    const candidates = new Set<string>(
+      created.filter((e) => e.userId === me).map((e) => e.id)
+    );
 
     const sweptIds = new Set<string>();
     for (const id of candidates) {
@@ -194,8 +238,10 @@ export async function sweepTutorialRounds(): Promise<number> {
 
     // Drop only what was fully cleaned, so the registry does not grow for the
     // life of the install. Anything skipped or partly failed stays, so it is
-    // retried rather than silently forgotten.
-    await writeCreatedIds(created.filter((id) => !sweptIds.has(id)));
+    // retried rather than silently forgotten — and entries owned by OTHER
+    // accounts are preserved untouched, so their rounds are still swept the
+    // next time those accounts sign in.
+    await writeCreatedIds(created.filter((e) => !sweptIds.has(e.id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
   return swept;

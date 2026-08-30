@@ -48,6 +48,44 @@ test('swept ids are dropped from the registry', () => {
   assert.match(sweep, /writeCreatedIds\(/);
 });
 
+// local_settings is device-wide, so a bare id list accumulates rounds from
+// every account that has used the handset. getLocalRound is scoped and fails
+// closed, so under account B a round of A's reads as null — which the sweep
+// treats as "already gone locally" and proceeds. deleteLocalRound is NOT
+// scoped: it deletes by round_id alone and unlinks every clip file it finds.
+test('registry entries carry their owner and only the owner sweeps them', () => {
+  assert.match(
+    tutorial,
+    /interface CreatedTutorialRound[\s\S]*?userId: string \| null/,
+    'entries must record who created them'
+  );
+  assert.match(
+    sweep,
+    /created\.filter\(\(e\) => e\.userId === me\)/,
+    'only the signed-in account’s rounds may be candidates'
+  );
+  assert.match(sweep, /if \(!me\) return 0;/, 'no session must sweep nothing');
+  assert.match(
+    tutorial,
+    /export async function createTutorialRound[\s\S]*?userId: owner/,
+    'creation must stamp the owner'
+  );
+});
+
+test('another account’s entries survive a sweep, and legacy entries are never swept', () => {
+  // Preserved so A's round is still collected next time A signs in.
+  assert.match(sweep, /created\.filter\(\(e\) => !sweptIds\.has\(e\.id\)\)/);
+  // The previous string[] shape has no known owner; keep it, never sweep it.
+  assert.match(tutorial, /typeof v === 'string'\) return \[\{ id: v, userId: null \}\]/);
+});
+
+// The device-wide active-round key carries no owner, so it must not be a
+// candidate — an id that reached it without reaching the registry cannot be
+// attributed to anyone.
+test('the unattributable active-round key is not a sweep candidate', () => {
+  assert.doesNotMatch(sweep, /candidates\.add\(active\)/);
+});
+
 // Removing the orphan scan made the registry the ONLY record of a tutorial
 // round, so retiring an id after a failed delete strands that round forever:
 // deleteRound is a network call that throws, and being offline at app start is
