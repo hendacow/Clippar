@@ -77,15 +77,37 @@ test('live capture is gated too, not just the import path', () => {
   assert.match(record, /if \(owned === false\)/, 'an unowned session must not render the camera');
   // The verdict must not outlive the id it was made for: expo-router updates
   // params in place, so a second deep link re-renders rather than remounting.
+  //
+  // Resetting it from an effect is not enough — effects run after the render
+  // commits, so one painted frame carried the previous round's `true` against
+  // the new, unverified id, and the camera binding above read it. The verdict
+  // therefore carries the id it was computed for and `owned` is derived during
+  // render, which invalidates a stale answer in the same commit as the new id.
+  assert.doesNotMatch(
+    record,
+    /setOwned\(/,
+    'a verdict held in plain state can be read one render before its reset lands'
+  );
+  assert.match(
+    record,
+    /setVerdict\(\{ roundId, owned: ok \}\)/,
+    'the stored verdict must be stamped with the id it was computed for'
+  );
+  assert.match(
+    record,
+    /const owned: boolean \| null = !roundId\s*\?\s*false\s*:\s*verdict\?\.roundId === roundId\s*\?\s*verdict\.owned\s*:\s*null;/,
+    'owned must be derived in render from a verdict matching the CURRENT roundId'
+  );
   const effect = record.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[roundId\]\);/)?.[0] ?? '';
-  assert.match(effect, /setOwned\(null\);/, 'the check must reset before re-resolving');
   // The permission prompt must sit behind the check too — effects run after
   // the first render, so gating the hydrate effect on roundId alone fired the
   // OS camera prompt for a round nothing had verified.
   assert.match(record, /if \(!roundId \|\| owned !== true\) return;/, 'hydrate must wait for ownership');
   assert.match(record, /\}, \[roundId, owned\]\);/, 'and re-run when it resolves');
-  assert.ok(
-    effect.indexOf('setOwned(null);') < effect.indexOf('ownsTrainingRound('),
-    'the reset must precede the new check, or the stale verdict arms the camera'
+  assert.match(effect, /ownsTrainingRound\(roundId\)/, 'the ownership effect should still exist');
+  assert.doesNotMatch(
+    effect,
+    /setVerdict\((?!\{ roundId,)/,
+    'every write from this effect must stamp the id, including the catch path'
   );
 });

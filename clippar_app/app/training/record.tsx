@@ -50,24 +50,28 @@ export default function TrainingRecordScreen() {
   // like a fresh session rather than an error.
   //
   // null = still checking, false = not ours.
-  const [owned, setOwned] = useState<boolean | null>(null);
+  //
+  // The verdict carries the id it was computed for, and `owned` is DERIVED
+  // during render rather than reset from an effect. expo-router updates params
+  // in place on a mounted screen, so a second deep link to this route
+  // re-renders rather than remounting — and an effect that resets the verdict
+  // runs after that render has already committed. That left one painted frame
+  // in which `roundId` was the new, unverified id while the answer still read
+  // true from the previous round: the camera binding below and both render
+  // gates all passed. Deriving it closes the window instead of shrinking it —
+  // a new id invalidates the old answer in the same commit that introduces it.
+  const [verdict, setVerdict] = useState<{ roundId: string; owned: boolean } | null>(null);
+  const owned: boolean | null = !roundId
+    ? false
+    : verdict?.roundId === roundId
+      ? verdict.owned
+      : null;
   useEffect(() => {
-    // Reset FIRST. Without this the verdict for the previous round survives
-    // the async re-check, and `useCamera` is rebuilt with the new, unverified
-    // id while `owned` still reads true — so the render gates pass and the
-    // camera stays armed against a round nothing has checked. expo-router
-    // updates params in place on a mounted screen, so a second deep link to
-    // this route re-renders rather than remounting: exactly the path this gate
-    // exists for was the one it did not cover.
-    setOwned(null);
-    if (!roundId) {
-      setOwned(false);
-      return;
-    }
+    if (!roundId) return;
     let alive = true;
     ownsTrainingRound(roundId)
-      .then((ok) => alive && setOwned(ok))
-      .catch(() => alive && setOwned(false));
+      .then((ok) => alive && setVerdict({ roundId, owned: ok }))
+      .catch(() => alive && setVerdict({ roundId, owned: false }));
     return () => {
       alive = false;
     };
