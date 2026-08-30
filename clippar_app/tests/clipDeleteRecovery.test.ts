@@ -134,3 +134,45 @@ test('listBinnedClips shows nothing when the account cannot be resolved', () => 
   assert.match(body, /if \(!userId\) return \[\];/, 'no session must list nothing');
   assert.doesNotMatch(body, /readBin\(\)/, 'binKey() alone is the unbound resolution this replaced');
 });
+
+// The writer must refuse an UNREADABLE bin rather than overwrite it, and must
+// refuse before the clip row leaves SQLite.
+//
+// getSetting is a bare getDatabase() + getFirstAsync with no catch, so it
+// rejects on a busy database. The lenient reader turns that into [], and
+// deleteLocalClip runs first — so writeBinAt(key, [entry]) would replace up to
+// MAX_ENTRIES valid records whose rows are already deleted, orphaning their
+// files with nothing left naming them.
+//
+// This assertion exists because reverting the fix left the suite GREEN. The
+// same property is pinned for both registries; I did not carry it to the third
+// reader while fixing them.
+test('deleteClipToBin refuses an unreadable bin, before the row is deleted', () => {
+  const bin = readFileSync(join(root, 'lib/clipBin.ts'), 'utf8');
+  const body = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'deleteClipToBin should still exist');
+  assert.match(body, /readBinAtStrict\(/, 'the writer must use the reader that can say "unreadable"');
+  assert.doesNotMatch(
+    body,
+    /await readBinAt\(/,
+    'the lenient reader turns a failed read into [], which this function then persists'
+  );
+  assert.match(body, /if \(existing === null\) return null;/, 'an unreadable bin must refuse the delete');
+  assert.ok(
+    body.indexOf('if (existing === null) return null;') < body.indexOf('await deleteLocalClip('),
+    'refuse BEFORE the row leaves SQLite, or the clip is lost with nowhere to record recovery'
+  );
+});
+
+// The lenient reader stays correct for callers that only LOOK UP an entry: a
+// failed read there means "not found", which they handle without writing.
+test('the lenient bin reader is derived from the strict one, not a second copy', () => {
+  const bin = readFileSync(join(root, 'lib/clipBin.ts'), 'utf8');
+  const lenient = bin.match(/async function readBinAt\(key: string\)[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(lenient, '', 'readBinAt should still exist');
+  assert.match(
+    lenient,
+    /readBinAtStrict\(key\)\) \?\? \[\]/,
+    'one implementation, so the per-entry validation cannot drift between them'
+  );
+});
