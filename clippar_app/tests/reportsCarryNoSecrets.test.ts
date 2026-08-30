@@ -32,17 +32,31 @@ const repoRoot = join(import.meta.dirname, '..', '..');
  */
 const NON_SECRET_DEFAULTS = new Set(['true', 'false', 'none', 'null', 'development', 'production']);
 
-/** Literal defaults in `os.getenv("NAME", "literal")` / `os.environ.get(...)`. */
-function fallbackLiteralsInAppPy(): string[] {
-  let source: string;
+/** `os.getenv("NAME", "literal")` / `os.environ.get(...)`, closing paren required. */
+const STRICT_FALLBACK =
+  /os\.(?:getenv|environ\.get)\(\s*["'][A-Z_]*(?:KEY|PASSWORD|SECRET|TOKEN)["']\s*,\s*["']([^"']+)["']\s*\)/g;
+
+/**
+ * Deliberately looser than STRICT_FALLBACK: no `os.` prefix, no closing paren,
+ * flexible spacing. Same semantics, weaker syntax — so if this finds a
+ * credential-shaped default and the strict pattern does not, the strict
+ * pattern has drifted rather than the credentials having been removed.
+ */
+const LOOSE_FALLBACK =
+  /(?:getenv|environ\s*\.\s*get)\s*\(\s*["'][A-Z_]*(?:KEY|PASSWORD|SECRET|TOKEN)["']\s*,\s*["']([^"']+)["']/g;
+
+function appPySource(): string | null {
   try {
-    source = readFileSync(join(repoRoot, 'app.py'), 'utf8');
+    return readFileSync(join(repoRoot, 'app.py'), 'utf8');
   } catch {
-    return []; // Service removed — nothing to keep out of the reports.
+    return null; // Service removed — nothing to keep out of the reports.
   }
-  const pattern = /os\.(?:getenv|environ\.get)\(\s*["'][A-Z_]*(?:KEY|PASSWORD|SECRET|TOKEN)["']\s*,\s*["']([^"']+)["']\s*\)/g;
+}
+
+function fallbackLiterals(source: string | null, pattern: RegExp): string[] {
+  if (source == null) return [];
   const found = new Set<string>();
-  for (const match of source.matchAll(pattern)) {
+  for (const match of source.matchAll(new RegExp(pattern.source, 'g'))) {
     const literal = match[1];
     if (!literal) continue;
     // A length floor stops ordinary words ("true", "dev") matching half the
@@ -55,6 +69,11 @@ function fallbackLiteralsInAppPy(): string[] {
     found.add(literal);
   }
   return [...found];
+}
+
+/** Literal defaults in `os.getenv("NAME", "literal")` / `os.environ.get(...)`. */
+function fallbackLiteralsInAppPy(): string[] {
+  return fallbackLiterals(appPySource(), STRICT_FALLBACK);
 }
 
 function markdownFilesUnder(dir: string): string[] {
@@ -83,13 +102,25 @@ function markdownFilesUnder(dir: string): string[] {
 }
 
 test('app.py fallback credentials are discoverable, so this test has teeth', () => {
-  // If this ever returns nothing, the check above silently passes on any
-  // report. Either the fallbacks were fixed (good — then delete this file) or
-  // the pattern drifted (bad). Either way, notice rather than pass quietly.
-  const literals = fallbackLiteralsInAppPy();
+  // With no literals the check below passes vacuously on any report, and there
+  // are two ways to get there. The extraction pattern drifted — bad, and the
+  // reason this test exists. Or finding 5 was remediated and the fallbacks are
+  // gone — good, and it must NOT go red for it: the earlier version asserted
+  // `literals.length > 0` outright, so whoever switched app.py to required env
+  // vars broke `npm run verify` and had to delete a test file in the same
+  // commit to get green. A security test that punishes the security fix is a
+  // security fix that gets deferred.
+  //
+  // The loose pattern tells the two apart. It is strictly weaker syntax with
+  // identical filters, so it still matches a reformatted call that the strict
+  // one misses — but it matches nothing once the defaults are actually gone.
+  const source = appPySource();
+  if (source == null) return; // service removed
+  if (fallbackLiterals(source, LOOSE_FALLBACK).length === 0) return; // remediated
+
   assert.ok(
-    literals.length > 0,
-    'no fallback credentials found in app.py — if they were removed, drop this test'
+    fallbackLiteralsInAppPy().length > 0,
+    'app.py still has credential-shaped getenv defaults but none were extracted — the extraction pattern has drifted'
   );
 });
 
