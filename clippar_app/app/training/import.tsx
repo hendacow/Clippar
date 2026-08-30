@@ -7,14 +7,14 @@
  * the editor auto-trims them through the same detection pass when review
  * opens, so imported shots get swing-centred like everything else.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, Pressable, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { ChevronLeft, FolderOpen } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
-import { CLUBS, importShotsToSession, type TrainingClub } from '@/lib/training';
+import { CLUBS, importShotsToSession, ownsTrainingRound, type TrainingClub } from '@/lib/training';
 
 const ImagePicker = (() => {
   try {
@@ -30,8 +30,36 @@ export default function TrainingImportScreen() {
   const [club, setClub] = useState<TrainingClub>(CLUBS[7]); // 7 iron default, same as capture
   const [busy, setBusy] = useState(false);
 
+  // Same gate, and the same shape, as app/training/record.tsx. `roundId` comes
+  // from the URL and app.config.js registers a scheme, so this route is
+  // externally reachable — and `pick()` opens the OS photo library, which is a
+  // privacy prompt that must not fire for a round nothing has checked. That is
+  // exactly the mistake fixed on the capture screen; this is its sibling, and
+  // it did not get the fix at the time.
+  //
+  // The verdict carries the id it was computed for and `owned` is derived in
+  // render, so an in-place param change invalidates the old answer in the same
+  // commit that introduces the new id.
+  const [verdict, setVerdict] = useState<{ roundId: string; owned: boolean } | null>(null);
+  const owned: boolean | null = !roundId
+    ? false
+    : verdict?.roundId === roundId
+      ? verdict.owned
+      : null;
+  useEffect(() => {
+    if (!roundId) return;
+    let alive = true;
+    ownsTrainingRound(roundId)
+      .then((ok) => alive && setVerdict({ roundId, owned: ok }))
+      .catch(() => alive && setVerdict({ roundId, owned: false }));
+    return () => {
+      alive = false;
+    };
+  }, [roundId]);
+
   const pick = useCallback(async () => {
-    if (!ImagePicker || !roundId || busy) return;
+    // Ownership decides BEFORE the photo library opens, not after.
+    if (!ImagePicker || !roundId || owned !== true || busy) return;
     setBusy(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
@@ -70,6 +98,19 @@ export default function TrainingImportScreen() {
         club.holeNumber,
         result.assets.map((a) => ({ uri: a.uri, durationMs: a.duration }))
       );
+      // A refusal is not a success. `importShotsToSession` fails closed — it
+      // returns 0 both for a round this account does not own AND for a
+      // transient session failure — and reporting either as "0 shots imported"
+      // with a success haptic told a golfer their own import had worked when
+      // it had silently not.
+      if (saved === 0) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+        Alert.alert(
+          'Nothing imported',
+          'Those videos could not be added to this practice session. Try again in a moment.'
+        );
+        return;
+      }
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       Alert.alert(
         `${saved} shot${saved === 1 ? '' : 's'} imported`,
@@ -85,7 +126,7 @@ export default function TrainingImportScreen() {
     } finally {
       setBusy(false);
     }
-  }, [roundId, club, busy]);
+  }, [roundId, club, busy, owned]);
 
   return (
     <>

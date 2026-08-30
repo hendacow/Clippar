@@ -53,6 +53,34 @@ test('every training read and write gates on ownership', () => {
   }
 });
 
+// The capture screen got the deep-link gate; its sibling did not. Both take
+// roundId from the URL, and import.tsx opens the OS photo library — the same
+// privacy prompt the capture fix moved behind the check.
+test('the import screen is gated too, not just capture', () => {
+  const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  assert.match(imp, /ownsTrainingRound/, 'the import screen must check ownership');
+  assert.match(
+    imp,
+    /const owned: boolean \| null = !roundId\s*\?\s*false\s*:\s*verdict\?\.roundId === roundId/,
+    'derived in render, same shape as record.tsx — a stale verdict must not survive a param change'
+  );
+  assert.match(
+    imp,
+    /if \(!ImagePicker \|\| !roundId \|\| owned !== true \|\| busy\) return;/,
+    'the photo library must not open for a round nothing has verified'
+  );
+  // importShotsToSession fails closed and returns 0 for BOTH "not yours" and
+  // "no session". Reporting that as a success told a golfer their own import
+  // had worked when it had not.
+  assert.match(imp, /if \(saved === 0\) \{/, 'a refused or failed import must not report success');
+  const pick = imp.match(/const pick = useCallback[\s\S]*?\}, \[roundId, club, busy, owned\]\);/)?.[0] ?? '';
+  assert.notEqual(pick, '', 'pick must re-run when the ownership verdict resolves');
+  assert.ok(
+    pick.indexOf('owned !== true') < pick.indexOf('launchImageLibraryAsync'),
+    'the ownership check must precede the picker, not follow it'
+  );
+});
+
 test('the session list only offers the signed-in account’s own sessions', () => {
   const body = training.match(/export async function listTrainingSessions[\s\S]*?\n}/)?.[0] ?? '';
   assert.match(body, /await ownsRound\(s\.roundId\)/);
