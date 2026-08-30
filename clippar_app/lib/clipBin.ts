@@ -443,6 +443,34 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
     // Re-check the prefix deleteLocalClip applied on the way IN. This is the
     // unlink side of the same trust boundary isValidEntry guards: entries
     // reach here from a JSON blob, and this hands them to a file delete.
+    //
+    // ⚠️ KNOWN GAP, and the requirements are written here because three
+    // independent proposals have now derived the wrong predicate from the
+    // gap alone. This is a SCHEME test, not a CONTAINMENT one — see finding 35
+    // in the report. Whoever closes it:
+    //
+    //   1. Contain against the app CONTAINER (the parent of documentDirectory),
+    //      NOT against documentDirectory + cacheDirectory. `lib/clipPaths.ts`
+    //      documents `/tmp/` (NSTemporaryDirectory) as a legitimate home for a
+    //      stored clip URI, and Documents/, Library/Caches/ and tmp/ are all
+    //      siblings under the container. A two-root predicate skips those
+    //      unlinks, so "Delete for good" reports success with the video still
+    //      on disk — the failure that is invisible until someone hands the
+    //      phone on. That module also argues against enumerating subpaths at
+    //      all, having been burned once by a list that missed the camera
+    //      directory.
+    //   2. decodeURI first (so `%2e%2e` cannot slip past), refuse on a decode
+    //      throw, and reject `%00` on the raw string.
+    //   3. NEVER build it on `new URL` — React Native's is a string shim that
+    //      does no path resolution, so it accepts the traversal it targets
+    //      (finding 85). And NOT `isPurgeableAppPath`: it is an inclusion test
+    //      and answers a different question.
+    //   4. THIS SINK ONLY. Do not tighten `isValidEntry` in the same change:
+    //      it runs on READ, so a stricter predicate there drops entries and
+    //      orphans the files they pin, which is finding 34. They land together
+    //      or not at all (finding 70).
+    //   5. One device confirmation: "Delete for good" must still unlink a clip
+    //      whose file_uri is a pre-migration cache or tmp path.
     if (typeof uri !== 'string' || !uri.startsWith('file://')) continue;
     try {
       await deleteFile(uri);
