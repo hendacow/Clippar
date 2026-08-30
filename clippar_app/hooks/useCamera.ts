@@ -284,6 +284,14 @@ export function useCamera({
     const isPractice = practiceRef.current;
     const gen = ++recordingGenRef.current;
 
+    // Did the clip row actually reach SQLite before anything threw? The catch
+    // below spans ~500 lines, most of them AFTER saveLocalClip — detection,
+    // the Photos mirror, the upload enqueue. Without this we told the golfer
+    // "This shot was not saved" for failures that happened long after it was
+    // saved, sending him to look for a clip that was sitting in his round the
+    // whole time. Reported from hole 12 on 30 Aug 2026.
+    let savedClipId: number | null = null;
+
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
       isRecordingRef.current = true;
@@ -533,6 +541,7 @@ export function useCamera({
           trim_start_ms: 0,
           trim_end_ms: -1,
         });
+        savedClipId = clipId ?? null;
 
         // Run the SAME native detect+trim pipeline as imports in background.
         // This produces a trimmed passthrough file, persists boundaries relative
@@ -812,11 +821,28 @@ export function useCamera({
         // Surface the failure — previously every recordAsync rejection
         // (backgrounding, phone call, disk full, session teardown) was
         // console-only and the user discovered missing shots in the editor.
+        //
+        // The copy used to end by pointing at the free space on the phone,
+        // which was wrong on
+        // two counts and cost a real diagnosis on 30 Aug. It is a GUESS at a
+        // cause we are not measuring — the actual error is right here in
+        // `error` and we were throwing it away. And startRecording has
+        // already run a real free-disk check (MIN_FREE_DISK_MB) before the
+        // clip began, with its own specific alert naming the megabytes free,
+        // so by the time this fires storage is the one cause the app has
+        // already ruled out. It also read to the golfer as iCloud storage,
+        // which is a different thing again.
+        //
+        // So: say what actually failed, and say whether the shot survived.
         if (!isPractice) {
           Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error).catch(() => {});
+          const reason =
+            error instanceof Error && error.message ? error.message : String(error ?? 'unknown error');
           Alert.alert(
-            'Recording failed',
-            'This shot was not saved. If this keeps happening, check your free storage and avoid locking or leaving the app while recording.'
+            savedClipId ? 'Saved, but something went wrong' : 'Recording failed',
+            savedClipId
+              ? `This shot IS saved — it will be in your round. Something after the save failed: ${reason}`
+              : `This shot was not saved: ${reason}\n\nLeaving the app or switching tabs while a clip is still saving will do this.`
           );
         }
       }
