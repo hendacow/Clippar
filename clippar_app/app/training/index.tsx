@@ -11,7 +11,7 @@ import { View, Text, ScrollView, Pressable, Alert, ActivityIndicator } from 'rea
 import { router, Stack, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
-import { Play, ListVideo, Plus, ChevronLeft } from 'lucide-react-native';
+import { Play, ListVideo, Plus, ChevronLeft, FolderOpen } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import {
   CLUBS,
@@ -86,6 +86,27 @@ export default function TrainingHubScreen() {
     }
   }, [starting]);
 
+  // Import goes into today's session, creating one if the day is fresh —
+  // "film at the range or import from Photos" are two doors into the same
+  // session, not two kinds of session.
+  const handleImport = useCallback(async () => {
+    if (starting) return;
+    const todaySession = rows?.find((r) => dateLabel(r.startedAt) === 'Today');
+    if (todaySession) {
+      router.push(`/training/import?roundId=${todaySession.roundId}`);
+      return;
+    }
+    setStarting(true);
+    try {
+      const id = await startTrainingSession();
+      router.push(`/training/import?roundId=${id}`);
+    } catch {
+      Alert.alert('Could not start', 'Check your connection and try again.');
+    } finally {
+      setStarting(false);
+    }
+  }, [starting, rows]);
+
   const today = rows?.find((r) => dateLabel(r.startedAt) === 'Today');
   const visible = (rows ?? []).filter((r) => {
     if (filterHole == null) return true;
@@ -124,6 +145,28 @@ export default function TrainingHubScreen() {
             {starting ? <ActivityIndicator color="#fff" /> : <Plus size={22} color="#fff" strokeWidth={2.6} />}
             <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
               {today ? 'Start another session' : 'Start practice session'}
+            </Text>
+          </Pressable>
+
+          <Pressable
+            onPress={handleImport}
+            disabled={starting}
+            style={({ pressed }) => ({
+              borderRadius: theme.radius.lg,
+              padding: 16,
+              backgroundColor: theme.colors.surface,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 10,
+              opacity: pressed || starting ? 0.85 : 1,
+              marginBottom: 12,
+            })}
+          >
+            <FolderOpen size={18} color={theme.colors.primary} />
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}>
+              Import shots from Photos
             </Text>
           </Pressable>
 

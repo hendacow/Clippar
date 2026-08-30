@@ -151,31 +151,88 @@ export async function trainingShotCounts(roundId: string): Promise<Map<number, n
 }
 
 // ---------------------------------------------------------------------------
-// ASMR playback interval
+// ASMR playback — per-shot play length
 // ---------------------------------------------------------------------------
+//
+// Henry's correction, 30 Aug: "it's how long each vid is". The rhythm of the
+// ASMR cut comes from every shot playing for the SAME chosen length — not
+// from a silence between clips. The first build got this wrong (a gap
+// between full-length clips); the knob below is the play length per shot.
+// When a clip is longer than the chosen length, the player shows a window
+// centred on the clip's middle — auto-trim already centres the swing, so the
+// middle of the trimmed clip IS the strike.
 
-const INTERVAL_KEY = 'training.playback_interval_ms';
+const PLAY_LENGTH_KEY = 'training.play_length_ms';
 
-/** The gap between shots in back-to-back playback. */
-export const INTERVAL_OPTIONS_MS = [500, 1000, 2000, 3000] as const;
-const DEFAULT_INTERVAL_MS = 1000;
+export const PLAY_LENGTH_OPTIONS_MS = [500, 1000, 2000, 3000] as const;
+const DEFAULT_PLAY_LENGTH_MS = 1000;
 
-export async function getPlaybackIntervalMs(): Promise<number> {
+export async function getPlayLengthMs(): Promise<number> {
   try {
-    const raw = await getSetting(INTERVAL_KEY);
+    const raw = await getSetting(PLAY_LENGTH_KEY);
     const n = raw ? parseInt(raw, 10) : NaN;
-    return (INTERVAL_OPTIONS_MS as readonly number[]).includes(n) ? n : DEFAULT_INTERVAL_MS;
+    return (PLAY_LENGTH_OPTIONS_MS as readonly number[]).includes(n) ? n : DEFAULT_PLAY_LENGTH_MS;
   } catch {
-    return DEFAULT_INTERVAL_MS;
+    return DEFAULT_PLAY_LENGTH_MS;
   }
 }
 
-export async function setPlaybackIntervalMs(ms: number): Promise<void> {
+export async function setPlayLengthMs(ms: number): Promise<void> {
   try {
-    await setSetting(INTERVAL_KEY, String(ms));
+    await setSetting(PLAY_LENGTH_KEY, String(ms));
   } catch {}
 }
 
-export function intervalLabel(ms: number): string {
-  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms / 1000}s`.replace('0.', '.');
+export function playLengthLabel(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms / 1000}s`;
+}
+
+// ---------------------------------------------------------------------------
+// Importing existing videos into a session
+// ---------------------------------------------------------------------------
+
+/**
+ * Save already-picked videos into a session under one club. Files are copied
+ * into documentDirectory/clips/ first (persistAsset) — picker URIs are
+ * temporary and evaporate under storage pressure, which is the same lesson
+ * app/round/import.tsx already carries.
+ *
+ * Clips are saved needs_trim=1 / auto_trimmed=0, exactly the shape live
+ * recording uses before detection: the editor's processAllUntrimmed pass
+ * auto-trims them through the SAME detectAndTrim path the moment review is
+ * opened, so imported range shots get swing-centred just like filmed ones.
+ */
+export async function importShotsToSession(
+  roundId: string,
+  clubHole: number,
+  assets: { uri: string; durationMs?: number | null }[]
+): Promise<number> {
+  const { persistAsset } = require('@/lib/media') as typeof import('@/lib/media');
+  const existing = await getClipsForRound(roundId);
+  let shot = existing.filter((c) => c.hole_number === clubHole).length;
+  let saved = 0;
+  for (const asset of assets) {
+    shot += 1;
+    const filename = `imported_${roundId}_h${clubHole}_s${shot}_${Date.now()}.mp4`;
+    let uri = asset.uri;
+    try {
+      uri = await persistAsset(asset.uri, filename);
+    } catch {
+      // Fall back to the picker URI rather than dropping the shot — worst
+      // case the editor's file-missing handling reports it honestly later.
+    }
+    const { saveLocalClip } = require('@/lib/storage') as typeof import('@/lib/storage');
+    await saveLocalClip({
+      round_id: roundId,
+      hole_number: clubHole,
+      shot_number: shot,
+      file_uri: uri,
+      original_file_uri: uri,
+      duration_seconds: asset.durationMs ? asset.durationMs / 1000 : undefined,
+      needs_trim: 1,
+      auto_trimmed: 0,
+    });
+    saved += 1;
+  }
+  return saved;
 }

@@ -53,22 +53,60 @@ test('delete last shot is recoverable, not destructive', () => {
   assert.match(record, /style: 'cancel'/);
 });
 
-// The ASMR contract: configurable gap, tap to pause, pause cancels a pending
-// advance (otherwise pausing during the gap still jumps to the next shot).
-test('playback waits the chosen interval between shots', () => {
-  assert.match(training, /INTERVAL_OPTIONS_MS = \[500, 1000, 2000, 3000\]/);
-  assert.match(play, /setTimeout\(/);
-  assert.match(play, /intervalMs/);
+// The ASMR contract, as corrected by Henry on 30 Aug: the knob is HOW LONG
+// EACH SHOT PLAYS — uniform duration is the rhythm, there is no gap. The
+// first build had full-length clips separated by a silence; these tests
+// exist so nobody rebuilds that reading.
+test('the playback knob is per-shot play length, not a gap between clips', () => {
+  assert.match(training, /PLAY_LENGTH_OPTIONS_MS = \[500, 1000, 2000, 3000\]/);
+  assert.doesNotMatch(training, /INTERVAL_OPTIONS_MS/);
+  assert.match(play, /per shot/);
 });
 
-test('pausing cancels a pending between-shots advance', () => {
+test('long clips play a window centred on the middle, sized by the player, not SQLite', () => {
+  assert.match(play, /dur \/ 2 - L \/ 2/);
+  // duration_seconds records the REQUESTED trim width, not the produced
+  // file — the reel-scorecard lesson. The window must come from the player.
+  assert.match(play, /player\.duration/);
+  const loadBlock = play.match(/replaceAsync[\s\S]{0,700}/)?.[0] ?? '';
+  assert.doesNotMatch(loadBlock, /durationSeconds/);
+});
+
+test('short clips advance on natural end instead of freezing out the window', () => {
+  assert.match(play, /playToEnd/);
+});
+
+test('pausing cancels the window timer and resuming keeps only the REMAINING time', () => {
   const body = play.match(/const togglePause = useCallback\(([\s\S]*?)\n  \}, /)?.[1] ?? '';
-  assert.match(body, /clearTimeout\(gapTimer\.current\)/);
+  assert.match(body, /clearTimeout\(windowTimer\.current\)/);
+  assert.match(body, /- elapsedMs/);
 });
 
-test('the interval choice persists across sessions', () => {
-  assert.match(training, /training\.playback_interval_ms/);
-  assert.match(play, /setPlaybackIntervalMs/);
+test('the play length persists across sessions', () => {
+  assert.match(training, /training\.play_length_ms/);
+  assert.match(play, /setPlayLengthMs/);
+});
+
+// The second capture path: import from Photos into the same session shape.
+test('imported shots enter the same pipeline as filmed ones', () => {
+  assert.match(training, /importShotsToSession/);
+  assert.match(training, /needs_trim: 1/);
+  assert.match(training, /persistAsset/);
+});
+
+test('import is reachable from the hub and assigns a club at import time', () => {
+  const hubNow = readFileSync(join(root, 'app/training/index.tsx'), 'utf8');
+  const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  assert.match(hubNow, /\/training\/import\?roundId=/);
+  assert.match(imp, /importShotsToSession/);
+  assert.match(imp, /allowsMultipleSelection: true/);
+  assert.match(imp, /club\.holeNumber/);
+});
+
+test('in training mode the editor moves clips between ALL clubs, labelled as clubs', () => {
+  const ed = readFileSync(join(root, 'app/round/editor.tsx'), 'utf8');
+  assert.match(ed, /isTraining \? 'Move to club' : 'Move to hole'/);
+  assert.match(ed, /CLUBS\.map\(\(c\) => \(\{ holeNumber: c\.holeNumber, label: c\.short \}\)\)/);
 });
 
 // Review reuses the editor, whose per-hole export IS per-club export here —

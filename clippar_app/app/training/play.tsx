@@ -1,14 +1,22 @@
 /**
- * ASMR playback — a practice session as one continuous, satisfying stream.
+ * ASMR playback — a practice session as one continuous, rhythmic stream.
  *
- * Every (optionally club-filtered) shot plays back-to-back with a chosen gap
- * between them — 0.5s / 1s / 2s / 3s, persisted via lib/training. Tap the
- * video to pause; tap again to resume. "Open this shot" drops into the editor
- * in training mode for trimming/export of the clip on screen.
+ * Every (optionally club-filtered) shot plays for the SAME chosen length —
+ * 0.5s / 1s / 2s / 3s per shot, persisted via lib/training — then the next
+ * begins immediately. Uniform duration is the rhythm; there is no gap.
+ * (The first build had this backwards: full-length clips separated by a
+ * silence. Henry's correction, 30 Aug: the knob is how long each vid is.)
  *
- * One player, sources swapped with replaceAsync — mounting a fresh player per
- * clip re-runs the AVPlayer setup on every shot and stutters exactly where
- * this screen must not (the whole point is rhythm).
+ * When a clip runs longer than the chosen length the player shows a window
+ * centred on the clip's middle. Auto-trim already centres the swing, so the
+ * middle of a trimmed clip is the strike itself.
+ *
+ * Tap the video to pause on a shot; tap again to resume. "Edit" drops into
+ * the editor in training mode for trimming/export.
+ *
+ * One player, sources swapped with replaceAsync — a fresh player per clip
+ * re-runs AVPlayer setup on every shot and stutters exactly where this
+ * screen must not.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, Pressable, Platform, ActivityIndicator, ScrollView } from 'react-native';
@@ -19,10 +27,10 @@ import { X, Pause, Play, SkipForward, SkipBack, Scissors } from 'lucide-react-na
 import { theme } from '@/constants/theme';
 import {
   clubForHole,
-  getPlaybackIntervalMs,
-  setPlaybackIntervalMs,
-  INTERVAL_OPTIONS_MS,
-  intervalLabel,
+  getPlayLengthMs,
+  setPlayLengthMs,
+  PLAY_LENGTH_OPTIONS_MS,
+  playLengthLabel,
   listTrainingClips,
   type TrainingClip,
 } from '@/lib/training';
@@ -37,16 +45,21 @@ export default function TrainingPlayScreen() {
   const [clips, setClips] = useState<TrainingClip[] | null>(null);
   const [index, setIndex] = useState(0);
   const [paused, setPaused] = useState(false);
-  const [intervalMs, setIntervalMs] = useState(1000);
+  const [playLengthMs, setPlayLengthMsState] = useState(1000);
   const [finished, setFinished] = useState(false);
 
-  // The between-shots gap timer. Ref'd so pause can cancel a pending advance
-  // — otherwise pausing during the gap still jumps to the next shot.
-  const gapTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The per-shot window timer. Pausing must cancel it (and resume must
+  // restart it with the REMAINING time) or a pause still advances mid-gaze.
+  const windowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const windowStartSec = useRef(0);
   const indexRef = useRef(index);
   indexRef.current = index;
   const pausedRef = useRef(paused);
   pausedRef.current = paused;
+  const playLengthRef = useRef(playLengthMs);
+  playLengthRef.current = playLengthMs;
+  const clipsRef = useRef(clips);
+  clipsRef.current = clips;
 
   useEffect(() => {
     const clubHole = club ? parseInt(club, 10) : undefined;
@@ -54,7 +67,7 @@ export default function TrainingPlayScreen() {
     listTrainingClips(roundId, Number.isNaN(clubHole as number) ? undefined : clubHole)
       .then(setClips)
       .catch(() => setClips([]));
-    getPlaybackIntervalMs().then(setIntervalMs).catch(() => {});
+    getPlayLengthMs().then(setPlayLengthMsState).catch(() => {});
   }, [roundId, club]);
 
   const current = clips?.[index] ?? null;
@@ -71,44 +84,70 @@ export default function TrainingPlayScreen() {
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const player = useVideoPlayer(current?.fileUri ?? null, (p) => {
     p.loop = false;
-    p.play();
   });
 
-  // Swap sources when the index moves. replaceAsync keeps the same native
-  // player alive, which is what keeps the stream smooth.
+  const advance = useCallback(() => {
+    const list = clipsRef.current;
+    if (!list) return;
+    const next = indexRef.current + 1;
+    if (next >= list.length) {
+      setFinished(true);
+      player.pause();
+      return;
+    }
+    setIndex(next);
+  }, [player]);
+
+  const armWindowTimer = useCallback(
+    (ms: number) => {
+      if (windowTimer.current) clearTimeout(windowTimer.current);
+      windowTimer.current = setTimeout(() => {
+        if (!pausedRef.current) advance();
+      }, Math.max(100, ms));
+    },
+    [advance]
+  );
+
+  // Load each clip: seek to a window centred on the middle, play, and arm
+  // the timer that ends the window. duration comes from the PLAYER once the
+  // source is loaded — never from duration_seconds in SQLite, which records
+  // the REQUESTED trim width, not the produced file (the reel-scorecard
+  // lesson, reports/cto/2026-08-27.md §1.1).
   useEffect(() => {
     if (!current) return;
     let cancelled = false;
     (async () => {
       try {
         await player.replaceAsync(current.fileUri);
-        if (!cancelled && !pausedRef.current) player.play();
+        if (cancelled) return;
+        const L = playLengthRef.current / 1000;
+        const dur = Number.isFinite(player.duration) ? player.duration : 0;
+        const start = dur > L ? Math.max(0, dur / 2 - L / 2) : 0;
+        windowStartSec.current = start;
+        player.currentTime = start;
+        if (!pausedRef.current) {
+          player.play();
+          armWindowTimer(playLengthRef.current);
+        }
       } catch {}
     })();
     return () => {
       cancelled = true;
+      if (windowTimer.current) clearTimeout(windowTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [current?.id]);
 
-  // Advance on natural end, after the chosen gap.
+  // A clip shorter than the window ends naturally before the timer — advance
+  // then too, so short clips don't hang as freeze-frames.
   useEffect(() => {
     const sub = player.addListener('playToEnd', () => {
-      if (pausedRef.current || !clips) return;
-      const next = indexRef.current + 1;
-      if (next >= clips.length) {
-        setFinished(true);
-        return;
-      }
-      gapTimer.current = setTimeout(() => {
-        if (!pausedRef.current) setIndex(next);
-      }, intervalMs);
+      if (pausedRef.current) return;
+      if (windowTimer.current) clearTimeout(windowTimer.current);
+      advance();
     });
-    return () => {
-      sub.remove();
-      if (gapTimer.current) clearTimeout(gapTimer.current);
-    };
-  }, [player, clips, intervalMs]);
+    return () => sub.remove();
+  }, [player, advance]);
 
   const togglePause = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
@@ -116,33 +155,34 @@ export default function TrainingPlayScreen() {
       const next = !p;
       if (next) {
         player.pause();
-        if (gapTimer.current) clearTimeout(gapTimer.current);
+        if (windowTimer.current) clearTimeout(windowTimer.current);
+      } else if (finished) {
+        setFinished(false);
+        setIndex(0);
       } else {
-        if (finished) {
-          setFinished(false);
-          setIndex(0);
-        } else {
-          player.play();
-        }
+        // Resume with the REMAINING window, not a fresh one.
+        const elapsedMs = Math.max(0, (player.currentTime - windowStartSec.current) * 1000);
+        player.play();
+        armWindowTimer(playLengthRef.current - elapsedMs);
       }
       return next;
     });
-  }, [player, finished]);
+  }, [player, finished, armWindowTimer]);
 
   const skip = useCallback(
     (dir: 1 | -1) => {
       if (!clips) return;
-      if (gapTimer.current) clearTimeout(gapTimer.current);
+      if (windowTimer.current) clearTimeout(windowTimer.current);
       setFinished(false);
       setIndex((i) => Math.min(clips.length - 1, Math.max(0, i + dir)));
     },
     [clips]
   );
 
-  const chooseInterval = useCallback((ms: number) => {
+  const choosePlayLength = useCallback((ms: number) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-    setIntervalMs(ms);
-    void setPlaybackIntervalMs(ms);
+    setPlayLengthMsState(ms);
+    void setPlayLengthMs(ms);
   }, []);
 
   const openInEditor = useCallback(() => {
@@ -196,21 +236,21 @@ export default function TrainingPlayScreen() {
           </Pressable>
         </View>
 
-        {/* Bottom: interval picker + transport */}
+        {/* Bottom: per-shot length picker + transport */}
         <View style={{ position: 'absolute', bottom: insets.bottom + 16, left: 0, right: 0, gap: 14 }}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 8 }}>
-            {INTERVAL_OPTIONS_MS.map((ms) => (
+            {PLAY_LENGTH_OPTIONS_MS.map((ms) => (
               <Pressable
                 key={ms}
-                onPress={() => chooseInterval(ms)}
+                onPress={() => choosePlayLength(ms)}
                 style={{
                   paddingHorizontal: 14, paddingVertical: 7, borderRadius: 16,
-                  backgroundColor: intervalMs === ms ? '#fff' : 'rgba(0,0,0,0.55)',
+                  backgroundColor: playLengthMs === ms ? '#fff' : 'rgba(0,0,0,0.55)',
                   borderWidth: 1, borderColor: 'rgba(255,255,255,0.3)',
                 }}
               >
-                <Text style={{ color: intervalMs === ms ? '#000' : '#fff', fontSize: 13, fontWeight: '700' }}>
-                  {intervalLabel(ms)} gap
+                <Text style={{ color: playLengthMs === ms ? '#000' : '#fff', fontSize: 13, fontWeight: '700' }}>
+                  {playLengthLabel(ms)} per shot
                 </Text>
               </Pressable>
             ))}

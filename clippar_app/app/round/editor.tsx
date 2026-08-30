@@ -24,7 +24,7 @@ import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
-import { trainingHoleLabel } from '@/lib/training';
+import { trainingHoleLabel, CLUBS } from '@/lib/training';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
 import { markReelFresh } from '@/lib/storage';
@@ -1934,7 +1934,7 @@ export default function EditorScreen() {
                     marginBottom: 8,
                   }}
                 >
-                  Move to hole
+                  {isTraining ? 'Move to club' : 'Move to hole'}
                 </Text>
                 <ScrollView
                   horizontal
@@ -1942,7 +1942,14 @@ export default function EditorScreen() {
                   style={{ marginBottom: 18 }}
                   contentContainerStyle={{ gap: 8, paddingRight: 8 }}
                 >
-                  {state.holes
+                  {/* Training: offer EVERY club, not just ones with clips —
+                      moveClipToHole creates the target section if missing,
+                      and re-filing a bulk import is exactly when the target
+                      club has nothing in it yet. */}
+                  {(isTraining
+                    ? CLUBS.map((c) => ({ holeNumber: c.holeNumber, label: c.short }))
+                    : state.holes.map((h) => ({ holeNumber: h.holeNumber, label: String(h.holeNumber) }))
+                  )
                     .filter((h) => h.holeNumber !== movingClip.holeNumber)
                     .map((h) => (
                       <Pressable
@@ -1964,7 +1971,7 @@ export default function EditorScreen() {
                         }}
                       >
                         <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700' }}>
-                          {h.holeNumber}
+                          {h.label}
                         </Text>
                       </Pressable>
                     ))}
