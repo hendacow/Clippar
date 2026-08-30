@@ -167,22 +167,42 @@ test('no report quotes a fallback credential instead of citing its line', () => 
  * restates the thing it is protecting has become the leak.
  */
 
-/** The module-scope session cache in lib/storage.ts, by name, read from source. */
-function sessionCacheIdentifier(): string | null {
+/**
+ * The module-scope session cache in lib/storage.ts, by name, read from source.
+ *
+ * Returns every declaration of that shape, not the first. The first version of
+ * this used `String.match` without `/g`, which returns match one and ignores
+ * the rest — so a second `let x: string | null = null;` added ABOVE the cache
+ * would silently redirect the guard to the wrong identifier while this test
+ * went on passing. The write-up claimed it "fails loudly rather than vacuously
+ * if the declaration moves"; that covered the declaration DISAPPEARING and not
+ * the derivation becoming AMBIGUOUS, which is the failure that leaks.
+ *
+ * Same shape as everything else this review kept finding: a guard that reads
+ * stronger than it is. Worth spelling out because it was in the control added
+ * to stop exactly that.
+ */
+function sessionCacheIdentifiers(): string[] {
   const storage = readFileSync(join(repoRoot, 'clippar_app/lib/storage.ts'), 'utf8');
-  const decl = storage.match(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/m);
-  return decl?.[1] ?? null;
+  return [...storage.matchAll(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/gm)].map(
+    (m) => m[1]
+  );
 }
 
 test('the session cache is named only where it is defined, not explained elsewhere', () => {
-  const name = sessionCacheIdentifier();
-  // Fail loudly rather than passing vacuously if the declaration moves or is
-  // fixed away — a redaction test that silently stops testing is worse than none.
-  assert.notEqual(
-    name,
-    null,
-    'could not derive the session cache identifier from lib/storage.ts — if finding 32 is fixed and it is gone, delete this test deliberately'
+  const names = sessionCacheIdentifiers();
+  // Fail loudly rather than passing vacuously, in BOTH directions: zero
+  // declarations means the derivation broke or the finding was fixed away, and
+  // more than one means the derivation is ambiguous and may be guarding the
+  // wrong name. A redaction test that silently stops testing is worse than none.
+  assert.equal(
+    names.length,
+    1,
+    names.length === 0
+      ? 'could not derive the session cache identifier from lib/storage.ts — if finding 32 is fixed and it is gone, delete this test deliberately'
+      : `the derivation is ambiguous: ${names.length} declarations match, so this test may be guarding the wrong identifier. Narrow the pattern or name the cache explicitly here.`
   );
+  const name = names[0];
 
   // storage.ts is where it lives; the private tracker is where it is explained.
   const HOME = 'clippar_app/lib/storage.ts';
@@ -193,7 +213,7 @@ test('the session cache is named only where it is defined, not explained elsewhe
   const offenders = files
     .map((file) => file.slice(repoRoot.length + 1))
     .filter((rel) => rel !== HOME)
-    .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name!));
+    .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name));
 
   assert.deepEqual(
     offenders,
