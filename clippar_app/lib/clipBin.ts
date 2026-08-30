@@ -16,7 +16,7 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, getLocalClipRound, type LocalClipRow } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 import { createSerialQueue } from '@/lib/serialQueue';
 
@@ -261,16 +261,33 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // rely on the rollback below.
     const key = await binKey();
     if (!key) return null;
-    // And the round has to be ours. `deleteLocalClip` is
-    // `DELETE FROM local_clips WHERE id = ?` with no ownership predicate, and
-    // clip ids are small sequential integers — so this is the destructive
-    // primitive, and every caller gating it upstream is a property of today's
-    // call sites rather than of the function. Same argument lib/training.ts
-    // makes: the gate belongs at the data layer, not in the screens.
-    if (!(await getLocalRound(roundId).catch(() => null))) return null;
+    // Ownership is decided by the CLIP'S OWN round, never by the caller's.
+    //
+    // The first version of this gate checked `roundId` and then deleted
+    // `clipId` — two independent arguments with nothing binding them, so an
+    // owned round id paired with any other clip id passed. `deleteLocalClip`
+    // is `DELETE FROM local_clips WHERE id = ?` with no ownership predicate,
+    // and `local_clips.id` is AUTOINCREMENT in the one database every account
+    // on the handset shares, so another account's ids are small sequential
+    // integers rather than secrets. That gate read as protection and provided
+    // none — worse than having none, because it invited trust.
+    //
+    // `getLocalClipRound` reads the round off the clip, so the caller's
+    // argument cannot widen what this deletes. Fails closed on a missing clip
+    // or an unowned round.
+    const ownerRoundId = await getLocalClipRound(clipId).catch(() => null);
+    if (!ownerRoundId) return null;
+    if (!(await getLocalRound(ownerRoundId).catch(() => null))) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
-    const entry: BinnedClip = { row, fileUris, deletedAt: new Date().toISOString(), roundId };
+    // Stamped from the row too, so `listBinnedClips(roundId)` cannot be made
+    // to filter on a value the caller invented.
+    const entry: BinnedClip = {
+      row,
+      fileUris,
+      deletedAt: new Date().toISOString(),
+      roundId: typeof row.round_id === 'string' ? row.round_id : ownerRoundId,
+    };
     const entries = [entry, ...(await readBinAt(key))];
     const kept = entries.slice(0, MAX_ENTRIES);
     const evicted = entries.slice(MAX_ENTRIES);

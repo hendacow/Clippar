@@ -20,7 +20,7 @@
  * for the same reason: nothing schema-shaped runs on a device already holding
  * real rounds.
  */
-import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound, getLocalRound } from '@/lib/storage';
+import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound, getLocalRound, currentSessionUserId } from '@/lib/storage';
 import { createRound } from '@/lib/api';
 
 /**
@@ -38,12 +38,24 @@ import { createRound } from '@/lib/api';
  *
  * So the gate lives HERE, at the data layer, rather than in one screen —
  * `getLocalRound` is scoped through `ownedRoundsClause` and fails closed, so a
- * round belonging to anybody else reads as null. That also handles registry
- * entries written before this check existed: ownership is decided by the
- * database, not by what the settings blob happens to say.
+ * round belonging to anybody else reads as null.
+ *
+ * BOTH conditions are required, not just the row. `local_rounds.user_id` is a
+ * single input that another account's sign-in can reassign — see
+ * `TrainingSessionRef.userId` for the NULL-owner backfill chain — so the
+ * registry stamp has to agree as well. Every training read and write goes
+ * through here, so they all inherit it rather than each screen remembering to
+ * ask twice.
  */
 async function ownsRound(roundId: string): Promise<boolean> {
   try {
+    const me = await currentSessionUserId().catch(() => null);
+    if (!me) return false;
+    const ref = (await readRegistry()).find((s) => s.roundId === roundId);
+    // A round with no registry entry is not a practice session at all, and an
+    // entry stamped to somebody else — or to nobody, from before the stamp
+    // existed — is never ours.
+    if (!ref || ref.userId !== me) return false;
     return (await getLocalRound(roundId)) != null;
   } catch {
     return false;
@@ -113,6 +125,24 @@ export interface TrainingSessionRef {
   roundId: string;
   /** ISO timestamp of session start — the date the history screen filters by. */
   startedAt: string;
+  /**
+   * Who recorded it. `null` = an entry written before the stamp existed:
+   * never listed, never played.
+   *
+   * `ownsRound` alone is not enough, because its single input —
+   * `local_rounds.user_id` — is reassignable by another account's sign-in.
+   * `saveLocalRound` writes a NULL owner when the session momentarily cannot
+   * be resolved AND re-arms `legacyRoundsClaimed`, so the next account to do
+   * any scoped read adopts every unowned round on the handset
+   * (`shouldClaimLegacyRows` is just "signed in and not yet claimed"). On a
+   * shared phone that hands A's practice session to B, and `ownsRound` then
+   * answers true — B sees the real per-club counts and can watch A's swings.
+   *
+   * So ownership needs BOTH the stamp and the row, which is what
+   * `lib/tutorialRound.ts` already does with its created-id registry, and for
+   * this exact reason.
+   */
+  userId: string | null;
 }
 
 async function readRegistry(): Promise<TrainingSessionRef[]> {
@@ -128,10 +158,14 @@ async function readRegistry(): Promise<TrainingSessionRef[]> {
 
 /** Newest first, and only the signed-in account's own sessions. */
 export async function listTrainingSessions(): Promise<TrainingSessionRef[]> {
+  // Fails closed, then requires BOTH gates — see TrainingSessionRef.userId.
+  const me = await currentSessionUserId().catch(() => null);
+  if (!me) return [];
   const all = await readRegistry();
   const owned: TrainingSessionRef[] = [];
   for (const s of all) {
-    if (await ownsRound(s.roundId)) owned.push(s);
+    if (s.userId !== me) continue; // cheap stamp check first...
+    if (await ownsRound(s.roundId)) owned.push(s); // ...ownsRound re-checks both
   }
   return owned.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
 }
@@ -153,7 +187,8 @@ export async function startTrainingSession(): Promise<string> {
   // registry, so 'finished' costs nothing and closes that footgun.
   await updateLocalRound(round.id, { status: 'finished', finished_at: new Date().toISOString() });
   const entries = await readRegistry();
-  entries.push({ roundId: round.id, startedAt: new Date().toISOString() });
+  const owner = await currentSessionUserId().catch(() => null);
+  entries.push({ roundId: round.id, startedAt: new Date().toISOString(), userId: owner });
   await setSetting(TRAINING_REGISTRY_KEY, JSON.stringify(entries));
   return round.id;
 }

@@ -223,10 +223,23 @@ export async function sweepTutorialRounds(): Promise<number> {
       // server with nothing left to retry it. Both are safe to repeat —
       // deleting rows that are already gone is a no-op — so a failure just
       // means the next launch tries again.
-      const localOk = await deleteLocalRound(id).then(
-        () => true,
-        () => false
-      );
+      // The local delete runs ONLY against a row the scoped read handed back.
+      // `getLocalRound` returns null for two different things — "already gone"
+      // and "belongs to another account" — and `deleteLocalRound` is not
+      // ownership-scoped: it deletes by round_id alone and unlinks every clip
+      // file it finds. Treating null as permission discards the one signal
+      // that says "not yours". The registry stamp makes that hard to reach,
+      // but `createTutorialRound` resolves the owner in a SEPARATE call after
+      // `createRound`, so a session change between the two can stamp one
+      // account's round with another's id — and then this would be the only
+      // thing left. Null counts as success so the id can still retire once the
+      // remote delete lands.
+      const localOk = row
+        ? await deleteLocalRound(id).then(
+            () => true,
+            () => false
+          )
+        : true;
       const remoteOk = await deleteRound(id).then(
         () => true,
         () => false

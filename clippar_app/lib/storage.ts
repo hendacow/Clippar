@@ -216,6 +216,28 @@ export async function currentSessionUserId(): Promise<string | null> {
 }
 
 /**
+ * The round a clip belongs to, read off the clip itself.
+ *
+ * For callers deciding whether they may destroy a clip. `deleteLocalClip` is
+ * `DELETE FROM local_clips WHERE id = ?` with no ownership predicate, so a
+ * gate that validates a round id the CALLER supplied proves nothing about the
+ * clip id it then deletes — the two are independent. This lets the gate be
+ * built from the clip's real round instead.
+ *
+ * Deliberately unscoped: it returns the round id for any clip, and the caller
+ * passes that to the scoped `getLocalRound` to decide. Returning null here for
+ * a foreign clip would be indistinguishable from "no such clip".
+ */
+export async function getLocalClipRound(clipId: number): Promise<string | null> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ round_id: string }>(
+    'SELECT round_id FROM local_clips WHERE id = ?',
+    clipId
+  );
+  return row?.round_id ?? null;
+}
+
+/**
  * Resolve the signed-in user for a scoped read, claiming any pre-migration
  * rows for them first (see shouldClaimLegacyRows). Doing the backfill here —
  * on the read path — rather than in a background task means a scoped query can

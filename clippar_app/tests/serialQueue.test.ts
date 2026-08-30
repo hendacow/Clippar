@@ -225,14 +225,54 @@ test('bin entries are validated where the JSON blob re-enters', () => {
 // deleteLocalClip is `DELETE FROM local_clips WHERE id = ?` with no ownership
 // predicate and clip ids are small sequential integers, so callers gating it
 // upstream is a property of today's call sites, not of the function.
-test('the destructive primitive checks ownership itself', () => {
+// And the gate has to constrain the thing being deleted. The first version
+// checked `roundId` while the delete keyed on `clipId` — two independent
+// arguments with nothing binding them, so an owned round id paired with any
+// other clip id passed. That read as protection and provided none.
+test('the destructive primitive derives the round from the clip, not the caller', () => {
   const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
-  assert.match(del, /getLocalRound\(roundId\)/, 'the round must be verified before the row is deleted');
+  assert.match(del, /getLocalClipRound\(clipId\)/, 'the round must come off the clip');
+  assert.doesNotMatch(
+    del,
+    /getLocalRound\(roundId\)/,
+    'validating the caller-supplied roundId proves nothing about clipId'
+  );
+  assert.match(del, /getLocalRound\(ownerRoundId\)/, 'the clip’s own round must be the one checked');
   // Match the CALLS, not prose — the comment above the guard names
   // deleteLocalClip while explaining why the guard is there.
   assert.ok(
-    del.indexOf('await getLocalRound(roundId)') < del.indexOf('await deleteLocalClip('),
+    del.indexOf('await getLocalRound(ownerRoundId)') < del.indexOf('await deleteLocalClip('),
     'the ownership check must precede the delete'
+  );
+  // The stored entry must not carry a round the caller invented, or
+  // listBinnedClips(roundId) filters on a made-up value.
+  assert.match(del, /roundId: typeof row\.round_id === 'string'/);
+});
+
+// local_rounds.user_id is reassignable by another account's sign-in (the
+// NULL-owner backfill), so the row alone cannot decide ownership.
+test('training ownership requires the registry stamp as well as the row', () => {
+  const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  const owns = training.match(/async function ownsRound[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(owns, /ref\.userId !== me/, 'the stamp must be checked');
+  assert.match(owns, /getLocalRound\(roundId\)/, 'and so must the row');
+  assert.match(owns, /if \(!me\) return false;/, 'no session owns nothing');
+  assert.match(
+    training,
+    /export async function startTrainingSession[\s\S]*?userId: owner/,
+    'sessions must be stamped at creation'
+  );
+});
+
+// getLocalRound returns null for "already gone" AND "not yours"; deleteLocalRound
+// is unscoped and unlinks clip files by round_id alone.
+test('the tutorial sweep never runs the unscoped delete on a null row', () => {
+  const tutorial = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
+  const sweep = tutorial.match(/export async function sweepTutorialRounds[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(
+    sweep,
+    /const localOk = row\s*\n?\s*\?/,
+    'the local delete must be conditional on the scoped read returning a row'
   );
 });
 
