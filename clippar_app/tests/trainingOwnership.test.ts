@@ -147,3 +147,40 @@ test('live capture is gated too, not just the import path', () => {
     'every write from this effect must stamp the id, including the catch path'
   );
 });
+
+// The writer half of the same rule.
+//
+// Every READ gate on this branch fails closed on an unresolvable session:
+// listTrainingSessions returns [], ownsRound returns false, the sweep returns
+// 0. The two registry WRITERS did the opposite — they stamped `userId: null`
+// and carried on. Null is read everywhere as "legacy, unattributable", so such
+// an entry is never listed to the golfer who recorded it, and never removed by
+// forgetTrainingSessionsFor — leaving the round id and the session's start
+// timestamp in device-wide local_settings after account deletion. A writer
+// that fails open hands the gates a value they cannot act on.
+test('startTrainingSession refuses an unresolvable session instead of stamping null', () => {
+  const start = training.match(/export async function startTrainingSession[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(start, '', 'startTrainingSession should still exist');
+  assert.match(start, /if \(!owner\) throw/, 'an unresolvable session must refuse, not stamp null');
+  assert.ok(
+    start.indexOf('if (!owner) throw') < start.indexOf('await createRound('),
+    'the refusal must precede the remote create, so a refusal leaves no round behind'
+  );
+  assert.match(start, /userId: owner/, 'the stamp must carry the value that was checked');
+  assert.equal(
+    (start.match(/currentSessionUserId\(\)/g) ?? []).length,
+    1,
+    'resolve once and reuse it — a second read can answer differently'
+  );
+});
+
+// The read side must keep tolerating null, or genuinely pre-stamp rows written
+// by a shipped build become unreadable. The property is only that no NEW one
+// can be minted.
+test('legacy null-owner entries are still tolerated on read', () => {
+  assert.match(
+    training,
+    /userId: string \| null/,
+    'the entry type must still admit null for rows written before the stamp existed'
+  );
+});

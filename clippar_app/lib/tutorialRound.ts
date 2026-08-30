@@ -164,11 +164,30 @@ export async function getActiveTutorialRoundId(): Promise<string | null> {
 
 /** Create the scratch round through the production path. Authed callers only. */
 export async function createTutorialRound(): Promise<string> {
+  // Resolve the owner BEFORE the remote create, and REFUSE without one.
+  //
+  // A null stamp is not a degraded record, it is a permanent one. Both filters
+  // in this module read null as "legacy bare-string entry, unattributable":
+  // the sweep's `e.userId === me` never matches it, so the round and its clip
+  // files are never collected, and `forgetCreatedRoundsFor`'s `e.userId !==
+  // userId` keeps it, so the round id survives the one action whose purpose is
+  // erasure. Minting one here would make that documented invariant false.
+  //
+  // Before `createRound` rather than after, because registering the id is what
+  // makes the registry the only record of a tutorial round — refusing after the
+  // remote row exists would strand it instead.
+  //
+  // This adds no failure mode. `currentSessionUserId` returns null only on a
+  // clean signed-out read, and `createRound` inserts under RLS, so that state
+  // already failed one line below. Both callers handle the throw;
+  // `app/tutorial.tsx` clears the pending flag rather than trapping a new
+  // account.
+  const owner = await currentSessionUserId().catch(() => null);
+  if (!owner) throw new Error('createTutorialRound: no resolvable session');
   const round = await createRound({ course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   if (!round) throw new Error('Failed to create tutorial round');
   // Registered before anything else can fail, so the sweep can always find it,
   // stamped with the account that created it so no other account sweeps it.
-  const owner = await currentSessionUserId().catch(() => null);
   await mutateCreatedIds((entries) => [...entries, { id: round.id, userId: owner }]);
   await saveLocalRound({ id: round.id, course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   await setSetting(ACTIVE_KEY, round.id);

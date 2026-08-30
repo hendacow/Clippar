@@ -28,6 +28,30 @@ test('the sweep does not select rounds by course name alone', () => {
   );
 });
 
+// Both filters in the module read `userId: null` as "legacy, unattributable":
+// the sweep never selects one and the account-deletion scrub never removes one.
+// So a writer that stamps null does not degrade a record, it mints a permanent
+// one — and makes the documented invariant ("null = a pre-stamp bare string")
+// false. Every read gate on this branch fails closed on an unresolvable
+// session; the two writers did not, and this pins them to the same rule.
+test('a null owner is refused rather than stamped, and refused before the remote create', () => {
+  const create = tutorial.match(/export async function createTutorialRound[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(create, '', 'createTutorialRound should still exist');
+  assert.match(create, /if \(!owner\) throw/, 'an unresolvable session must refuse, not stamp null');
+  assert.ok(
+    create.indexOf('if (!owner) throw') < create.indexOf('await createRound('),
+    'the refusal must precede the remote create, or it strands a round the registry never records'
+  );
+  // The stamp itself must carry the checked value, not a re-resolution: two
+  // reads can disagree, which is the defect this branch fixed three times.
+  assert.match(create, /userId: owner/);
+  assert.equal(
+    (create.match(/currentSessionUserId\(\)/g) ?? []).length,
+    1,
+    'resolve once and reuse it — a second read can answer differently'
+  );
+});
+
 test('candidates come from the created-id registry', () => {
   assert.match(sweep, /readCreatedIds\(\)/, 'the sweep must work from ids the app itself created');
   assert.match(

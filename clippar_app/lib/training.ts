@@ -239,6 +239,19 @@ export async function listTrainingSessions(): Promise<TrainingSessionRef[]> {
  * The course name is what the editor shows as its title.
  */
 export async function startTrainingSession(): Promise<string> {
+  // Resolve the owner BEFORE the remote create, and REFUSE without one — see
+  // `createTutorialRound` for the full reasoning; it is the same defect in the
+  // same shape. Short version: null is read everywhere as "legacy,
+  // unattributable", so a null-stamped entry is never listed to the golfer who
+  // recorded it (`listTrainingSessions`), never scrubbed on account deletion
+  // (`forgetTrainingSessionsFor`), and its round id plus session timestamp stay
+  // in device-wide `local_settings` permanently.
+  //
+  // Every other gate this branch added fails closed on an unresolvable session.
+  // These two writers were the exception, and a writer that fails open feeds
+  // the gates a value they cannot act on.
+  const owner = await currentSessionUserId().catch(() => null);
+  if (!owner) throw new Error('startTrainingSession: no resolvable session');
   const round = await createRound({ course_name: 'Practice range' });
   if (!round) throw new Error('Failed to create practice session');
   await saveLocalRound({ id: round.id, course_name: 'Practice range' });
@@ -249,12 +262,15 @@ export async function startTrainingSession(): Promise<string> {
   // gates on round status, and the Practice hub resumes sessions from its own
   // registry, so 'finished' costs nothing and closes that footgun.
   await updateLocalRound(round.id, { status: 'finished', finished_at: new Date().toISOString() });
-  // Resolve the owner FIRST, then read the registry immediately before writing
-  // it. Reading first and resolving after put an await between the read and the
-  // write, and `forgetTrainingSessionsFor` landing in that window would be
-  // undone by the write — restoring a deleted account's id and session
-  // timestamps permanently, since only the signed-in account prunes them.
-  const owner = await currentSessionUserId().catch(() => null);
+  // SERIALISED, and that is what makes the append safe: `mutateRegistry` reads
+  // and writes inside one queued job, so a concurrent `forgetTrainingSessionsFor`
+  // cannot be undone by this write. Resolving the owner before the read was the
+  // earlier fix and it only narrowed that window; the queue closes it. Stated
+  // this way round deliberately — a comment left crediting a superseded fix is
+  // what made a reviewer re-file an already-closed race elsewhere in this branch.
+  //
+  // `owner` is resolved at the top of this function and is non-null by
+  // construction here.
   await mutateRegistry((entries) => [
     ...entries,
     { roundId: round.id, startedAt: new Date().toISOString(), userId: owner },
