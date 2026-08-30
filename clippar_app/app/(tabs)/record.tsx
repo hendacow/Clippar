@@ -23,6 +23,7 @@ import {
   SwitchCamera,
   Smartphone,
   X,
+  Target,
 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -1209,6 +1210,53 @@ export default function RecordScreen() {
               </Text>
               <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
                 Pick already-captured videos from your Photos library.
+              </Text>
+            </View>
+            <ChevronRight size={20} color={theme.colors.textTertiary} />
+          </Pressable>
+
+          {/* Practice card — trainee mode. Routes to its own capture screen;
+              only reachable from this chooser, which only renders when no
+              round is active, so the live CameraView and the practice one
+              can never be mounted at once. */}
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              router.push('/training');
+            }}
+            style={({ pressed }) => ({
+              borderRadius: theme.radius.lg,
+              padding: 20,
+              backgroundColor: theme.colors.surface,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              marginTop: 12,
+              opacity: pressed ? 0.85 : 1,
+              flexDirection: 'row',
+              alignItems: 'center',
+              gap: 16,
+            })}
+          >
+            <View
+              style={{
+                width: 56,
+                height: 56,
+                borderRadius: 28,
+                backgroundColor: theme.colors.surfaceElevated ?? theme.colors.surface,
+                borderWidth: 1,
+                borderColor: theme.colors.surfaceBorder,
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <Target size={28} color={theme.colors.primary} strokeWidth={2.4} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={{ ...theme.typography.h3, color: theme.colors.textPrimary }}>
+                Practice
+              </Text>
+              <Text style={{ color: theme.colors.textSecondary, fontSize: 13, marginTop: 4 }}>
+                Film range sessions by club — review, replay and export them.
               </Text>
             </View>
             <ChevronRight size={20} color={theme.colors.textTertiary} />

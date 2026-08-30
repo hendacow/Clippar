@@ -24,6 +24,7 @@ import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
+import { trainingHoleLabel } from '@/lib/training';
 import { composeReel, addStitchProgressListener, type ScorecardData, type StitchProgressEvent } from '@/modules/shot-detector';
 import { updateRound, getSignedClipUrls } from '@/lib/api';
 import { markReelFresh } from '@/lib/storage';
@@ -370,6 +371,7 @@ function HoleSection({
   selectMode,
   selected,
   onToggleSelect,
+  training,
 }: {
   hole: EditorHoleSection;
   onClipEdit: (clip: EditorClip) => void;
@@ -380,6 +382,9 @@ function HoleSection({
   onHoleShare: (hole: EditorHoleSection) => void;
   busyHoleNumber: number | null;
   selectMode: boolean;
+  /** Trainee mode: this "hole" is a club — label it as one, and drop
+      Par/Score, which are course concepts a range session doesn't have. */
+  training: boolean;
   selected: boolean;
   onToggleSelect: () => void;
 }) {
@@ -427,26 +432,35 @@ function HoleSection({
             fontWeight: '800',
           }}
         >
-          Hole {hole.holeNumber}
+          {training ? trainingHoleLabel(hole.holeNumber) : `Hole ${hole.holeNumber}`}
         </Text>
-        <Text
-          style={{
-            color: theme.colors.textPrimary,
-            fontSize: 16,
-            fontWeight: '700',
-          }}
-        >
-          Par {hole.par}
-        </Text>
-        <Text
-          style={{
-            color: theme.colors.textPrimary,
-            fontSize: 16,
-            fontWeight: '700',
-          }}
-        >
-          Score {hole.strokes}
-        </Text>
+        {!training && (
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: 16,
+              fontWeight: '700',
+            }}
+          >
+            Par {hole.par}
+          </Text>
+        )}
+        {!training && (
+          <Text
+            style={{
+              color: theme.colors.textPrimary,
+              fontSize: 16,
+              fontWeight: '700',
+            }}
+          >
+            Score {hole.strokes}
+          </Text>
+        )}
+        {training && (
+          <Text style={{ color: theme.colors.textSecondary, fontSize: 14, fontWeight: '600' }}>
+            {hole.clips.length} shot{hole.clips.length === 1 ? '' : 's'}
+          </Text>
+        )}
 
         {/* Per-hole stitch + share / save actions. Hidden in select mode
             (the bottom bar handles the multi-hole action there) and when
@@ -568,11 +582,14 @@ function HoleSection({
 // MAIN EDITOR SCREEN
 // ============================================================
 export default function EditorScreen() {
-  const { roundId, recompose, review } = useLocalSearchParams<{ roundId: string; recompose?: string; review?: string }>();
+  const { roundId, recompose, review, training } = useLocalSearchParams<{ roundId: string; recompose?: string; review?: string; training?: string }>();
   // Review mode: opened mid-round from the recording screen's "Review round
   // so far". Hides the final Export action so the user can't accidentally
   // finalize a reel while the round is still in progress.
   const isReview = review === '1';
+  // Trainee mode: holes are clubs (lib/training's mapping) — same data, same
+  // export machinery, different words.
+  const isTraining = training === '1';
   const insets = useSafeAreaInsets();
   const editor = useEditorState(roundId);
   const { state } = editor;
@@ -1480,12 +1497,12 @@ export default function EditorScreen() {
             }}
             numberOfLines={1}
           >
-            {selectMode ? 'Select holes' : state.courseName || 'Edit Reel'}
+            {selectMode ? (isTraining ? 'Select clubs' : 'Select holes') : state.courseName || 'Edit Reel'}
           </Text>
           <Text style={{ color: theme.colors.textTertiary, fontSize: 11 }}>
             {selectMode
               ? `${selectedHoles.length} selected`
-              : `${totalClips} clips · ${state.holes.length} holes`}
+              : `${totalClips} clips · ${state.holes.length} ${isTraining ? 'clubs' : 'holes'}`}
           </Text>
         </View>
 
@@ -1700,6 +1717,7 @@ export default function EditorScreen() {
             selectMode={selectMode}
             selected={selectedHoles.includes(hole.holeNumber)}
             onToggleSelect={() => toggleHoleSelected(hole.holeNumber)}
+            training={isTraining}
           />
         ))}
 

@@ -1,0 +1,181 @@
+/**
+ * Trainee mode — range practice sessions.
+ *
+ * A practice session IS a round. That single decision is what keeps this
+ * feature small: clips save through the same useCamera pipeline (detection,
+ * auto-trim, the Photos mirror, upload queue), the editor reviews them, the
+ * per-hole stitch/share machinery exports them, and the Recently-deleted bin
+ * protects them — none of that code knows training mode exists.
+ *
+ * The mapping that makes it work: **each club is a "hole"**. A 7-iron shot is
+ * saved with hole_number = CLUBS['7i'].holeNumber, so grouping-by-hole IS
+ * grouping-by-club, "export hole 10" IS "export every 9-iron", and the
+ * editor's select mode IS the club filter. No schema change — hole_number is
+ * an unconstrained INTEGER and nothing in SQLite cares that "hole 3" means
+ * 5-wood. The cost is that training rounds must be labelled at the UI layer
+ * (the `training=1` route param) so screens say "7 iron", never "Hole 8".
+ *
+ * Which rounds are training sessions lives in local_settings under
+ * TRAINING_REGISTRY_KEY — the same no-migration store the clip bin uses, and
+ * for the same reason: nothing schema-shaped runs on a device already holding
+ * real rounds.
+ */
+import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound } from '@/lib/storage';
+import { createRound } from '@/lib/api';
+
+export interface TrainingClub {
+  key: string;
+  label: string;
+  /** Short chip label for the capture screen. */
+  short: string;
+  holeNumber: number;
+}
+
+// A 14-club bag plus the putter. Order is bag order, longest to shortest —
+// it is also the order sections appear in review, so drivers lead.
+// holeNumber is POSITIONAL and therefore append-only: renumbering an
+// existing club orphans every shot already recorded under its old number.
+export const CLUBS: readonly TrainingClub[] = [
+  { key: 'driver', label: 'Driver', short: 'Dr', holeNumber: 1 },
+  { key: '3w', label: '3 Wood', short: '3W', holeNumber: 2 },
+  { key: '5w', label: '5 Wood', short: '5W', holeNumber: 3 },
+  { key: 'hybrid', label: 'Hybrid', short: 'Hy', holeNumber: 4 },
+  { key: '4i', label: '4 Iron', short: '4i', holeNumber: 5 },
+  { key: '5i', label: '5 Iron', short: '5i', holeNumber: 6 },
+  { key: '6i', label: '6 Iron', short: '6i', holeNumber: 7 },
+  { key: '7i', label: '7 Iron', short: '7i', holeNumber: 8 },
+  { key: '8i', label: '8 Iron', short: '8i', holeNumber: 9 },
+  { key: '9i', label: '9 Iron', short: '9i', holeNumber: 10 },
+  { key: 'pw', label: 'Pitching Wedge', short: 'PW', holeNumber: 11 },
+  { key: 'gw', label: 'Gap Wedge', short: 'GW', holeNumber: 12 },
+  { key: 'sw', label: 'Sand Wedge', short: 'SW', holeNumber: 13 },
+  { key: 'lw', label: 'Lob Wedge', short: 'LW', holeNumber: 14 },
+  { key: 'putter', label: 'Putter', short: 'Pt', holeNumber: 15 },
+] as const;
+
+export function clubForHole(holeNumber: number): TrainingClub | null {
+  return CLUBS.find((c) => c.holeNumber === holeNumber) ?? null;
+}
+
+/** What review screens print for a training "hole". Falls back honestly. */
+export function trainingHoleLabel(holeNumber: number): string {
+  return clubForHole(holeNumber)?.label ?? `Club ${holeNumber}`;
+}
+
+// ---------------------------------------------------------------------------
+// Session registry
+// ---------------------------------------------------------------------------
+
+const TRAINING_REGISTRY_KEY = 'training.sessions.v1';
+
+export interface TrainingSessionRef {
+  roundId: string;
+  /** ISO timestamp of session start — the date the history screen filters by. */
+  startedAt: string;
+}
+
+async function readRegistry(): Promise<TrainingSessionRef[]> {
+  try {
+    const raw = await getSetting(TRAINING_REGISTRY_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? (parsed as TrainingSessionRef[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Newest first. */
+export async function listTrainingSessions(): Promise<TrainingSessionRef[]> {
+  const all = await readRegistry();
+  return [...all].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+}
+
+/**
+ * Start a practice session: a real round (Supabase + local, so the clip
+ * upload queue and recovery treat it like any other) registered as training.
+ * The course name is what the editor shows as its title.
+ */
+export async function startTrainingSession(): Promise<string> {
+  const round = await createRound({ course_name: 'Practice range' });
+  if (!round) throw new Error('Failed to create practice session');
+  await saveLocalRound({ id: round.id, course_name: 'Practice range' });
+  // Immediately 'finished' ON PURPOSE. status='in_progress' is what feeds the
+  // record tab's orphaned-round card, whose Resume would recover this as a
+  // LIVE round (holes, scorecard) and whose Discard would delete the practice
+  // clips — both wrong for a range session. Nothing in the clip pipeline
+  // gates on round status, and the Practice hub resumes sessions from its own
+  // registry, so 'finished' costs nothing and closes that footgun.
+  await updateLocalRound(round.id, { status: 'finished', finished_at: new Date().toISOString() });
+  const entries = await readRegistry();
+  entries.push({ roundId: round.id, startedAt: new Date().toISOString() });
+  await setSetting(TRAINING_REGISTRY_KEY, JSON.stringify(entries));
+  return round.id;
+}
+
+// ---------------------------------------------------------------------------
+// Per-session shot data (the history screen's summaries + the player's list)
+// ---------------------------------------------------------------------------
+
+export interface TrainingClip {
+  id: number;
+  holeNumber: number;
+  shotNumber: number;
+  fileUri: string;
+  timestamp: string;
+  durationSeconds: number | null;
+}
+
+/** All of a session's shots, oldest first (the order they were hit). */
+export async function listTrainingClips(roundId: string, clubHole?: number): Promise<TrainingClip[]> {
+  const rows = await getClipsForRound(roundId);
+  return rows
+    .filter((r) => (clubHole == null ? true : r.hole_number === clubHole))
+    .map((r) => ({
+      id: r.id,
+      holeNumber: r.hole_number,
+      shotNumber: r.shot_number,
+      fileUri: r.file_uri,
+      timestamp: r.timestamp,
+      durationSeconds: r.duration_seconds,
+    }))
+    .sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
+}
+
+/** { holeNumber → shots hit } for one session — the history row's summary. */
+export async function trainingShotCounts(roundId: string): Promise<Map<number, number>> {
+  const rows = await getClipsForRound(roundId);
+  const counts = new Map<number, number>();
+  for (const r of rows) counts.set(r.hole_number, (counts.get(r.hole_number) ?? 0) + 1);
+  return counts;
+}
+
+// ---------------------------------------------------------------------------
+// ASMR playback interval
+// ---------------------------------------------------------------------------
+
+const INTERVAL_KEY = 'training.playback_interval_ms';
+
+/** The gap between shots in back-to-back playback. */
+export const INTERVAL_OPTIONS_MS = [500, 1000, 2000, 3000] as const;
+const DEFAULT_INTERVAL_MS = 1000;
+
+export async function getPlaybackIntervalMs(): Promise<number> {
+  try {
+    const raw = await getSetting(INTERVAL_KEY);
+    const n = raw ? parseInt(raw, 10) : NaN;
+    return (INTERVAL_OPTIONS_MS as readonly number[]).includes(n) ? n : DEFAULT_INTERVAL_MS;
+  } catch {
+    return DEFAULT_INTERVAL_MS;
+  }
+}
+
+export async function setPlaybackIntervalMs(ms: number): Promise<void> {
+  try {
+    await setSetting(INTERVAL_KEY, String(ms));
+  } catch {}
+}
+
+export function intervalLabel(ms: number): string {
+  return ms % 1000 === 0 ? `${ms / 1000}s` : `${ms / 1000}s`.replace('0.', '.');
+}
