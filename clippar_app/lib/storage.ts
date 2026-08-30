@@ -1782,12 +1782,17 @@ export async function clearLocalDatabase(): Promise<void> {
     ['DELETE FROM local_settings     WHERE key = ?', [`pro.status_cache.${ownerUserId}`]],
     // Same reasoning, second per-account entry: the recently-deleted clip bin
     // (lib/clipBin.ts, keyed `clips.bin.v1.<userId>`) holds whole clip rows for
-    // this user. This drops the metadata only; the video files those entries
-    // pinned are covered by wipeLocalUserData's wholesale clips/ directory
-    // delete (removeOwnedMediaDirectories), which runs straight after this.
-    // NOT by a bin walk — an earlier version of this comment claimed the
-    // caller walks the bin first, and it does not: wipeLocalUserData is
-    // clearLocalDatabase's only caller and never calls purgeAllBinnedClips.
+    // this user. This drops the metadata only — and the files are unlinked by
+    // `purgeAllBinnedClips`, which `wipeLocalUserData` now calls BEFORE this.
+    //
+    // That ordering is load-bearing, so do not reorder it: once this row is
+    // gone, nothing names those files. Two earlier versions of this comment
+    // were wrong in opposite directions — one claimed a bin walk that did not
+    // exist, and its correction then leaned on `removeOwnedMediaDirectories`'
+    // wholesale clips/ sweep instead. That sweep is unscoped (an escalated
+    // HIGH), so scoping it correctly would have silently orphaned these files.
+    // The purge call is what makes this true by construction rather than by
+    // depending on a bug staying unfixed.
     ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
     // The PRE-SCOPING bin key (`clips.bin.v1`, no user suffix) is deliberately
     // NOT deleted here. An earlier version of this list dropped it outright,

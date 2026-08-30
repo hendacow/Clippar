@@ -392,3 +392,40 @@ test('clearLocalDatabase drops the departing account’s bin key', () => {
   const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
   assert.match(storage, /clips\.bin\.v1\.\$\{ownerUserId\}/);
 });
+
+// A binned clip has no local_clips row, so no walk over rounds reaches its
+// video files — both wipe entry points have to purge the bin explicitly, and
+// both have to do it BEFORE clearLocalDatabase deletes the bin key, because
+// once that metadata is gone nothing names those files.
+//
+// removeLocalMediaForCurrentUser got this in the original fix and
+// wipeLocalUserData — the STRONGER promise, account deletion — did not. It
+// leaned on removeOwnedMediaDirectories' wholesale clips/ sweep instead, which
+// is an escalated HIGH precisely because it is unscoped: scoping it correctly
+// would have silently stopped reclaiming a deleted account's binned videos,
+// with nothing going red. This pins the ordering so it cannot drift back.
+test('both wipe paths purge the bin, and before the metadata is dropped', () => {
+  const wipe = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
+
+  for (const fn of ['wipeLocalUserData', 'removeLocalMediaForCurrentUser']) {
+    const body = wipe.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.notEqual(body, '', `${fn} should still exist`);
+    assert.match(body, /await purgeAllBinnedClips\(\)/, `${fn} must purge the bin explicitly`);
+  }
+
+  // Ordering, in the one path where the metadata delete is in the same
+  // function. Anchored on the CALL form, not the bare name: the comments above
+  // these lines discuss both functions by name, so an `indexOf` on the name
+  // alone measures where the prose sits. (It did, and this assertion failed
+  // against correct code until it was pinned properly — the same "the
+  // assertion is not watching the property" mistake as the call-site count.)
+  const full = wipe.match(/export async function wipeLocalUserData[\s\S]*?\n}/)?.[0] ?? '';
+  assert.ok(
+    full.indexOf('await purgeAllBinnedClips()') < full.indexOf('await clearLocalDatabase()'),
+    'the purge must run before clearLocalDatabase drops the bin key'
+  );
+  assert.ok(
+    full.indexOf('await purgeAllBinnedClips()') < full.indexOf('await removeOwnedMediaDirectories()'),
+    'and must not depend on the wholesale directory sweep to reclaim the files'
+  );
+});

@@ -99,6 +99,29 @@ async function removeTemporaryExports(): Promise<void> {
  * redirect that follow it.
  */
 export async function wipeLocalUserData(): Promise<void> {
+  // FIRST, and for the same reason as in removeLocalMediaForCurrentUser: a
+  // binned clip has no local_clips row, so nothing below reaches its video
+  // files by walking rounds. It must also precede clearLocalDatabase, which
+  // deletes this account's bin key — once that metadata is gone, the only
+  // record naming those files is gone with it.
+  //
+  // This used to be left to removeOwnedMediaDirectories' wholesale clips/
+  // sweep. That worked, and it was the wrong thing to rely on: that sweep is
+  // unscoped, which is a HIGH escalated in this same review. Whoever scopes it
+  // correctly would have silently stopped reclaiming a deleted account's
+  // binned videos, with no test going red — a security fix quietly
+  // reintroducing a data-remanence bug. Now this holds by construction.
+  //
+  // Runs before signOut (see above), so the session still resolves and the
+  // purge finds the departing account's bin rather than none.
+  try {
+    const { purgeAllBinnedClips } =
+      require('./clipBin') as typeof import('./clipBin');
+    await purgeAllBinnedClips();
+  } catch (err) {
+    console.warn('[localWipe] purgeAllBinnedClips failed', err);
+  }
+
   try {
     await clearLocalDatabase();
   } catch (err) {
