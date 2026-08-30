@@ -119,13 +119,44 @@ test('the bin fails closed when no session resolves', () => {
   const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
   assert.match(
     del,
-    /const key = await binKey\(\);\s*\n\s*if \(!key\) return null;/,
+    /const userId = await currentSessionUserId\(\)\.catch\(\(\) => null\);\s*\n\s*if \(!userId\) return null;/,
     'a delete with nowhere to record recovery must refuse, not proceed'
   );
   // The refusal has to come before deleteLocalClip, or the row is already gone.
   assert.ok(
-    del.indexOf('if (!key) return null;') < del.indexOf('deleteLocalClip'),
+    del.indexOf('if (!userId) return null;') < del.indexOf('await deleteLocalClip('),
     'the ownership check must precede the row delete'
+  );
+});
+
+// Counting binKey() call sites is not the same as counting session
+// resolutions. deleteClipToBin resolved once through binKey and a SECOND time
+// inside getLocalRound, and the two authorised different halves of the job —
+// which bin to write, and whether the clip may be deleted. sessionUserId()
+// serves a cached id when getSession() errors, so across an account change the
+// halves can come apart, and a divergence there makes the operation looser
+// rather than stricter. The property to pin is that ONE id decides both.
+test('the bin key and the ownership gate are decided by the same resolution', () => {
+  const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(del, '', 'deleteClipToBin should still exist');
+  assert.equal(
+    (del.match(/await currentSessionUserId\(\)/g) ?? []).length,
+    1,
+    'exactly one session resolution may decide this job'
+  );
+  assert.match(
+    del,
+    /const key = BIN_KEY_PREFIX \+ userId;/,
+    'the bin written must be built from that one resolution'
+  );
+  assert.match(
+    del,
+    /if \(!round \|\| round\.user_id !== userId\) return null;/,
+    'and the gate must close against it, not against getLocalRound’s own resolution'
+  );
+  assert.ok(
+    del.indexOf('round.user_id !== userId') < del.indexOf('await deleteLocalClip('),
+    'the binding must be asserted before the row is removed'
   );
 });
 
@@ -134,12 +165,10 @@ test('the bin fails closed when no session resolves', () => {
 // failure — so resolving the owner more than once per job means a read and a
 // write can straddle two accounts, filing A's clip row into B's bin.
 test('each queued job resolves the owning account exactly once', () => {
-  for (const fn of [
-    'deleteClipToBin',
-    'restoreClipFromBin',
-    'purgeClipFromBin',
-    'purgeAllBinnedClips',
-  ]) {
+  // deleteClipToBin is not in this list: it resolves the id directly so the
+  // gate can close against the same value, and the test above pins that
+  // stronger property instead.
+  for (const fn of ['restoreClipFromBin', 'purgeClipFromBin', 'purgeAllBinnedClips']) {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
     assert.notEqual(body, '', `${fn} should still exist`);
     assert.equal(

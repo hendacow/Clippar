@@ -267,8 +267,20 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // record the recovery entry, and a delete we cannot undo is exactly what
     // this module exists to prevent — so refuse rather than remove the row and
     // rely on the rollback below.
-    const key = await binKey();
-    if (!key) return null;
+    //
+    // Resolved inline rather than through binKey() so the SAME id is available
+    // to close the gate below. binKey() threaded the key through every read
+    // and write, which fixed half of this: getLocalRound re-resolves the
+    // session internally, so the bin we write and the rounds we may delete
+    // from were authorised by two independent resolutions. sessionUserId()
+    // falls back to a cached id when getSession() errors, so those two can
+    // disagree across an account change — and because they authorise
+    // different halves of one operation, a divergence made this LOOSER, not
+    // stricter: B's clip deleted, B's row filed into A's bin, where A can
+    // restore or destroy it.
+    const userId = await currentSessionUserId().catch(() => null);
+    if (!userId) return null;
+    const key = BIN_KEY_PREFIX + userId;
     // Ownership is decided by the CLIP'S OWN round, never by the caller's.
     //
     // The first version of this gate checked `roundId` and then deleted
@@ -285,7 +297,13 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // or an unowned round.
     const ownerRoundId = await getLocalClipRound(clipId).catch(() => null);
     if (!ownerRoundId) return null;
-    if (!(await getLocalRound(ownerRoundId).catch(() => null))) return null;
+    const round = await getLocalRound(ownerRoundId).catch(() => null);
+    // getLocalRound only returns a row whose user_id equals ITS OWN
+    // resolution of the session, so comparing that row's owner against the id
+    // that built the key is what actually binds the two halves together. A
+    // mid-job account change now fails the gate instead of splitting it — the
+    // delete is refused and retried, never redirected.
+    if (!round || round.user_id !== userId) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
     // Stamped from the row too, so `listBinnedClips(roundId)` cannot be made
