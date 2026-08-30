@@ -117,14 +117,38 @@ test('another account’s entries survive a sweep, and legacy entries are never 
     'the tail must re-read under the queue, or a concurrent scrub is reverted'
   );
   const tutorial2 = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
-  assert.match(
-    tutorial2,
-    /async function mutateCreatedIds[\s\S]*?registryQueue\.run\(async \(\) => writeCreatedIds\(change\(await readCreatedIds\(\)\)\)\)/,
-    'the helper must read and write inside ONE queued job'
+  // The PROPERTY: the read and the write happen inside one queued job, so no
+  // other writer can land between them. This used to pin the helper's exact
+  // one-line body and went red the moment the read was split into a strict
+  // variant — eighth assertion tonight watching the shape instead of the rule.
+  const helper = tutorial2.match(/async function mutateCreatedIds[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(helper, '', 'mutateCreatedIds should still exist');
+  const runAt = helper.indexOf('registryQueue.run(');
+  assert.notEqual(runAt, -1, 'the read-modify-write must be queued');
+  assert.ok(
+    runAt < helper.indexOf('readCreatedIdsStrict()') &&
+      runAt < helper.indexOf('writeCreatedIds('),
+    'both the read and the write must sit INSIDE the queued job'
   );
+  // And the read must be the strict one: the lenient reader turns a failed
+  // read into [], which this helper would then write back over a key shared by
+  // every account on the handset.
+  assert.doesNotMatch(helper, /await readCreatedIds\(\)/, 'the writer must not use the lenient reader');
+  assert.match(helper, /if \(current === null\) throw/, 'an unreadable row must be refused, not overwritten');
   // writeCreatedIds is the unqueued primitive: only the helper may call it.
-  const writers = [...tutorial2.matchAll(/await writeCreatedIds\(/g)].length;
-  assert.equal(writers, 0, 'every write must go through mutateCreatedIds, or the queue is bypassed');
+  //
+  // Stated as the property. This used to count `await writeCreatedIds(` and
+  // require ZERO — a proxy that held only while the helper happened to call it
+  // without `await`. Adding the await turned it red against correct code:
+  // ninth assertion tonight pinning a shape rather than the rule.
+  const outside = tutorial2
+    .replace(/async function writeCreatedIds[\s\S]*?\n}/, '')
+    .replace(/async function mutateCreatedIds[\s\S]*?\n}/, '');
+  assert.doesNotMatch(
+    outside,
+    /writeCreatedIds\(/,
+    'every write must go through mutateCreatedIds, or the queue is bypassed'
+  );
   // The network delete loop must NOT hold the queue — serialQueue has no
   // reentrancy guard and the sweep is fired unawaited at app start, so a
   // deadlock there hangs silently.

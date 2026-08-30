@@ -177,7 +177,14 @@ async function mutateRegistry(
   change: (entries: TrainingSessionRef[]) => TrainingSessionRef[]
 ): Promise<void> {
   await registryQueue.run(async () => {
-    const next = change(await readRegistry());
+    const current = await readRegistryStrict();
+    // Shared key: an UNREADABLE row is refused, never overwritten. Every caller
+    // handles the throw — the wipe swallows it (a wipe must not block sign-out)
+    // and startTrainingSession surfaces it as "Could not start", which is a
+    // visible, retryable failure rather than a silent loss of someone else's
+    // sessions.
+    if (current === null) throw new Error('training registry unreadable');
+    const next = change(current);
     await setSetting(TRAINING_REGISTRY_KEY, next.length ? JSON.stringify(next) : null);
   });
 }
@@ -209,9 +216,33 @@ async function mutateRegistry(
  * blank date label — and `dateLabel` returns the raw string for an unparseable
  * date rather than throwing.
  */
-async function readRegistry(): Promise<TrainingSessionRef[]> {
+/**
+ * `null` means THE ROW COULD NOT BE READ — never "the registry is empty".
+ *
+ * `getSetting` is a bare `getDatabase()` + `getFirstAsync` with no error
+ * handling of its own, so it rejects on an unopenable or busy database. The
+ * lenient reader below turns that into `[]`, and `mutateRegistry` would then
+ * write `change([])` back over a key shared by EVERY account on the handset —
+ * destroying the other accounts' sessions and making their rounds permanently
+ * unlistable, since `ownsRound` requires a registry stamp. That is finding 20's
+ * blanket delete reached through error handling instead of a DELETE.
+ *
+ * A read failure and an unreadable BLOB are deliberately different answers:
+ *   - read failed        → null. Transient, and we do not know what is in the
+ *                          row, so a writer must refuse rather than guess.
+ *   - absent / corrupt   → []. Nothing any account could have read either way,
+ *                          so overwriting destroys nothing recoverable —
+ *                          and refusing forever would wedge every write to
+ *                          this key with no way back.
+ */
+async function readRegistryStrict(): Promise<TrainingSessionRef[] | null> {
+  let raw: string | null;
   try {
-    const raw = await getSetting(TRAINING_REGISTRY_KEY);
+    raw = await getSetting(TRAINING_REGISTRY_KEY);
+  } catch {
+    return null;
+  }
+  try {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
@@ -233,6 +264,11 @@ async function readRegistry(): Promise<TrainingSessionRef[]> {
   } catch {
     return [];
   }
+}
+
+/** The lenient view, for READ-ONLY callers that fail closed on an empty list. */
+async function readRegistry(): Promise<TrainingSessionRef[]> {
+  return (await readRegistryStrict()) ?? [];
 }
 
 /**

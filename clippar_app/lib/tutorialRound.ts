@@ -90,12 +90,36 @@ const registryQueue = createSerialQueue();
 async function mutateCreatedIds(
   change: (entries: CreatedTutorialRound[]) => CreatedTutorialRound[]
 ): Promise<void> {
-  await registryQueue.run(async () => writeCreatedIds(change(await readCreatedIds())));
+  await registryQueue.run(async () => {
+    const current = await readCreatedIdsStrict();
+    // Shared key: refuse an unreadable row rather than overwrite it. The sweep
+    // tail and the wipe both swallow the throw; createTutorialRound surfaces it,
+    // which strands one uncollected round — far cheaper than dropping another
+    // account's ids, whose rounds would then never be swept at all.
+    if (current === null) throw new Error('tutorial id registry unreadable');
+    await writeCreatedIds(change(current));
+  });
 }
 
-async function readCreatedIds(): Promise<CreatedTutorialRound[]> {
+/**
+ * `null` means THE ROW COULD NOT BE READ — never "no ids registered". Same
+ * split, and the same reason, as `readRegistryStrict` in lib/training.ts:
+ * `getSetting` rejects on a busy or unopenable database, and turning that into
+ * `[]` would let `mutateCreatedIds` write it back over a key shared by every
+ * account — dropping the other accounts' tutorial-round ids, whose rounds are
+ * then never swept because this registry is the only record of them.
+ *
+ * Read failure → null (refuse). Absent or corrupt → [] (nothing recoverable to
+ * protect, and refusing forever would wedge every write with no way back).
+ */
+async function readCreatedIdsStrict(): Promise<CreatedTutorialRound[] | null> {
+  let raw: string | null;
   try {
-    const raw = await getSetting(CREATED_KEY);
+    raw = await getSetting(CREATED_KEY);
+  } catch {
+    return null;
+  }
+  try {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) return [];
@@ -115,6 +139,11 @@ async function readCreatedIds(): Promise<CreatedTutorialRound[]> {
   } catch {
     return [];
   }
+}
+
+/** The lenient view, for READ-ONLY callers that fail closed on an empty list. */
+async function readCreatedIds(): Promise<CreatedTutorialRound[]> {
+  return (await readCreatedIdsStrict()) ?? [];
 }
 
 async function writeCreatedIds(entries: CreatedTutorialRound[]): Promise<void> {
