@@ -38,6 +38,12 @@ const VIDEOS = {
   shot1: require('@/assets/onboarding/shot1.mp4'),
   shot2: require('@/assets/onboarding/shot2.mp4'),
   shot3: require('@/assets/onboarding/shot3.mp4'),
+  // Henry's real screen-recording of putting a reel on his own story —
+  // retimed from a 5s timelapse to 8.2s (0.6x, motion-interpolated back to
+  // 30fps; text stays crisp because the UI chrome is static). Screened
+  // frame-accurately before bundling: all 150 source frames' top strips
+  // tiled and inspected — no notification, no DMs, no other accounts.
+  igstory: require('@/assets/onboarding/igstory.mp4'),
 } as const;
 
 const SCENES = [
@@ -393,35 +399,73 @@ function PreviewScene({ onNext }: { onNext: () => void }) {
 }
 
 function ExportScene({ onNext }: { onNext: () => void }) {
-  // PLACEHOLDER until Henry's real screen-recording of posting to his own
-  // story lands (see plan §7 — real footage of a real post replaces any
-  // recreated social UI). Until then: a progress beat + an EXAMPLE card.
-  const [done, setDone] = useState(false);
+  // Real footage of a real share: Henry's screen-recording of his reel going
+  // onto his own story, played as a demo under an EXAMPLE badge. Genuine
+  // footage replaces any recreated social UI (plan §7) — nothing here is a
+  // mock of another app, it is a recording of the actual thing happening.
+  const [stage, setStage] = useState<'exporting' | 'story' | 'cta'>('exporting');
   const progress = useRef(new RNAnimated.Value(0)).current;
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
+  const player = useVideoPlayer(VIDEOS.igstory, (p) => {
+    p.loop = false;
+    p.muted = true;
+    p.pause();
+  });
+
   useEffect(() => {
-    RNAnimated.timing(progress, { toValue: 1, duration: 2200, useNativeDriver: false }).start(() => {
+    RNAnimated.timing(progress, { toValue: 1, duration: 1800, useNativeDriver: false }).start(() => {
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setDone(true);
+      setStage('story');
+      player.play();
     });
-  }, [progress]);
+  }, [progress, player]);
+
+  useEffect(() => {
+    if (stage !== 'story') return;
+    const sub = player.addListener('playToEnd', () => setStage('cta'));
+    // Wedge guard local to the beat: a decode stall must not strand the scene.
+    const t = setTimeout(() => setStage('cta'), 11_000);
+    return () => {
+      sub.remove();
+      clearTimeout(t);
+    };
+  }, [stage, player]);
+
   return (
-    <View style={[styles.fill, styles.center, { backgroundColor: '#0A0A0F', padding: 32 }]}>
-      {!done ? (
-        <View style={{ width: '80%', gap: 14, alignItems: 'center' }}>
-          <Text style={styles.h1}>Exporting your reel…</Text>
-          <View style={styles.progressTrack}>
-            <RNAnimated.View style={[styles.progressFill, { width: progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
+    <View style={[styles.fill, { backgroundColor: '#0A0A0F' }]}>
+      {stage === 'exporting' && (
+        <View style={[styles.fill, styles.center, { padding: 32 }]}>
+          <View style={{ width: '80%', gap: 14, alignItems: 'center' }}>
+            <Text style={styles.h1}>Exporting your reel…</Text>
+            <View style={styles.progressTrack}>
+              <RNAnimated.View style={[styles.progressFill, { width: progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
+            </View>
           </View>
         </View>
-      ) : (
-        <Animated.View entering={FadeIn.duration(300)} style={{ alignItems: 'center', gap: 16 }}>
-          <View style={styles.exampleBadge}><Text style={styles.exampleBadgeText}>EXAMPLE</Text></View>
-          <Text style={styles.h1}>Ready to share anywhere</Text>
-          <Text style={styles.sub}>One tap sends your real reels to any app on your phone.</Text>
-          <Pressable onPress={onNext} style={styles.cta}>
-            <Text style={styles.ctaText}>Now make YOURS</Text>
-          </Pressable>
-        </Animated.View>
+      )}
+      {stage !== 'exporting' && (
+        <View style={styles.fill}>
+          <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="contain" nativeControls={false} />
+          <View style={[styles.exampleBadge, styles.exampleFloat]}>
+            <Text style={styles.exampleBadgeText}>EXAMPLE — HENRY'S STORY</Text>
+          </View>
+          {stage === 'story' && (
+            <View style={styles.beatWrap}>
+              <Text style={styles.beatText}>One tap from the app to your story.</Text>
+            </View>
+          )}
+          {stage === 'cta' && (
+            <Animated.View entering={FadeIn.duration(300)} style={[styles.fill, styles.center, { backgroundColor: 'rgba(10,10,15,0.82)', padding: 32 }]}>
+              <View style={{ alignItems: 'center', gap: 16 }}>
+                <Text style={styles.h1}>That's the whole flow</Text>
+                <Text style={styles.sub}>Record with a click, get the reel, share it anywhere.</Text>
+                <Pressable onPress={onNext} style={styles.cta}>
+                  <Text style={styles.ctaText}>Now make YOURS</Text>
+                </Pressable>
+              </View>
+            </Animated.View>
+          )}
+        </View>
       )}
     </View>
   );
@@ -452,6 +496,7 @@ const styles = StyleSheet.create({
   progressTrack: { width: '100%', height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },
   progressFill: { height: 8, borderRadius: 4, backgroundColor: '#4CAF50' },
   exampleBadge: { borderWidth: 1.5, borderColor: '#FFD54F', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
+  exampleFloat: { position: 'absolute', top: 64, alignSelf: 'center', backgroundColor: 'rgba(10,10,15,0.75)' },
   exampleBadgeText: { color: '#FFD54F', fontSize: 12, fontWeight: '800', letterSpacing: 2 },
   cta: { backgroundColor: '#4CAF50', borderRadius: 16, paddingHorizontal: 30, paddingVertical: 16, marginTop: 12 },
   ctaText: { color: '#fff', fontSize: 17, fontWeight: '800' },

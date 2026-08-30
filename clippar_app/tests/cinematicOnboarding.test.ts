@@ -53,6 +53,8 @@ test('v2 hands off into the v1 stepper at the Aha step', () => {
 test('the export beat is marked EXAMPLE and its visible text never says post', () => {
   const exportScene = cin.match(/function ExportScene[\s\S]*?\n\}/)?.[0] ?? '';
   assert.match(exportScene, /EXAMPLE/);
+  assert.match(exportScene, /VIDEOS\.igstory/, 'the beat plays the real story recording');
+  assert.match(exportScene, /VIDEOS\.igstory/, 'the beat plays the real story recording');
   const visible = [...exportScene.matchAll(/<Text[^>]*>([\s\S]*?)<\/Text>/g)].map((m) => m[1]).join(' ');
   assert.ok(visible.length > 0, 'export scene should render text');
   assert.doesNotMatch(visible, /[Pp]ost(ed)?\b/);
