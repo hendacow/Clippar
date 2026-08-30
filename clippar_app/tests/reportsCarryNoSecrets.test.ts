@@ -504,6 +504,61 @@ test('the redacted findings’ summary-table rows stay neutral', () => {
   }
 });
 
+/**
+ * The `## Needs Henry` items for the redacted findings, pinned the same way.
+ *
+ * The fourth surface, and the one that mattered most: it is the section the
+ * founder actually reads, and its item for finding 32 carried the precondition,
+ * the trigger, the outcome and the blast radius in four sentences of plain
+ * English — a fuller account than either the heading or the table row that had
+ * already been neutralised, sitting directly under a neighbouring item that
+ * correctly said "Detail withheld".
+ *
+ * **All four existing guards missed it by construction**, which is the general
+ * lesson rather than an oversight: a numbered list item is not an `### <n>.`
+ * heading and not a `| <n> |` table row, and `GUARDED` compares an IDENTIFIER —
+ * it cannot see a paraphrase, and a paraphrase is what a reader actually needs.
+ * Tenth recurrence of "stated a property, enforced a place".
+ *
+ * The item is located by the finding named on its OWN first line, never by
+ * position — the numbering shifts — and never by a body mention, because item 7
+ * cross-references finding 12 and an ambiguous derivation silently guarding the
+ * wrong text is finding 65. `needsHenryItem` returns null on 0 or 2+ matches so
+ * ambiguity fails loudly instead of pinning the wrong item.
+ */
+const REDACTED_NEEDS_HENRY_SHA256: Record<string, string> = {
+  '12': '3403696a8e19075715f9fc939cdc2435ba8fc5bce6798b34d612ae197a215f09',
+  '23': '881eba071c394dd1ab79d3c9199d93c7835dba3025e730a12de8503bdb4d8c92',
+  '32': 'e249dad81c945592498d78a8fdb18efd233179aa7e40d1aa81271b58316753f3',
+};
+
+/** The one `## Needs Henry` item whose FIRST LINE names `finding`, or null. */
+function needsHenryItem(report: string, finding: string): string | null {
+  const at = report.indexOf('\n## Needs Henry');
+  if (at === -1) return null;
+  const items = report.slice(at).split(/\n(?=\d+\. )/).slice(1);
+  const re = new RegExp(`\\bfindings? [\\d/]*\\b${finding}\\b`, 'i');
+  const hits = items.filter((i) => re.test(i.split('\n')[0]));
+  return hits.length === 1 ? hits[0].trimEnd() : null;
+}
+
+test('the Needs Henry items for redacted findings stay neutral', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  for (const [num, digest] of Object.entries(REDACTED_NEEDS_HENRY_SHA256)) {
+    const item = needsHenryItem(report, num);
+    assert.notEqual(
+      item,
+      null,
+      `finding ${num}'s Needs Henry item did not resolve to exactly one entry — it was removed, renumbered, or a second item now names it on its first line. Fix the ambiguity rather than the digest.`
+    );
+    assert.equal(
+      createHash('sha256').update(item!, 'utf8').digest('hex'),
+      digest,
+      `finding ${num}'s Needs Henry item changed. It is prose about an unfixed, live-in-shipped-code defect in a public repo, so its wording is part of the redaction. If the new wording still withholds the mechanism, regenerate the digest in the same commit.`
+    );
+  }
+});
+
 test('the redacted findings’ headings stay neutral', () => {
   const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
   for (const [num, digest] of Object.entries(REDACTED_HEADING_SHA256)) {
