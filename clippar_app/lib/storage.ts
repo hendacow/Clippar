@@ -210,20 +210,19 @@ async function sessionUserId(): Promise<string | null> {
  * Callers must fail closed on null: one shared key is exactly the cross-account
  * leak `lib/localScope.ts` exists to prevent.
  *
- * ⚠️ **NOT SAFE AS AN OWNERSHIP GATE ON ITS OWN.** This can resolve to an
- * account other than the one currently signed in, so failing closed on null is
- * necessary and NOT sufficient — null is not the only failure mode. An earlier
- * version of this docstring claimed otherwise, and that was the sentence I
- * wrote before building four destructive gates on top of it.
+ * ⚠️ **NOT SAFE AS AN OWNERSHIP GATE ON ITS OWN**, and failing closed on null
+ * is necessary but NOT sufficient. **Do not build a new destructive gate on
+ * this function, and do not change it**, without first reading finding 32 in
+ * `org/cto/SECURITY-2026-08-30-unfixed.md` (private company-brain repo). There
+ * are constraints on both, including one change that must not be paired with
+ * it. An earlier version of this docstring claimed the opposite, and that was
+ * the sentence written before four destructive gates were built on top of it.
  *
- * **Do not build a new destructive gate on this function**, and do not change
- * it, without first reading finding 32 in `org/cto/SECURITY-2026-08-30-unfixed.md`
- * in the private company-brain repo. The fix is known and written up there.
- * Do not pair any change with resetting `legacyRoundsClaimed` — that re-arms a
- * separate problem, also written up there.
- *
- * (Detail deliberately kept out of this file: it is public, and the finding is
- * unfixed and live in shipped code. Same rule as the report — see finding 44.)
+ * **Why is deliberately not written here.** This file is public and the finding
+ * is unfixed and live in shipped code, so the reasoning lives in the tracker
+ * and this is a pointer to it. A previous version stated the property and the
+ * status in the same block as the implementation, fifteen lines below — which
+ * is the synthesis the rule exists to withhold, not a citation.
  */
 export async function currentSessionUserId(): Promise<string | null> {
   return sessionUserId();

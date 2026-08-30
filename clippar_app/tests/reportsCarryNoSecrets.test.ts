@@ -245,6 +245,50 @@ const GUARDED: { home: string; derive: (src: string) => string[] }[] = [
  */
 const GUARDED_CODE_REFS = new Set(['clippar_app/tests/serialQueue.test.ts']);
 
+/**
+ * The pointer blocks in the HOME files, pinned verbatim.
+ *
+ * `GUARDED` filters `rel !== home`, so a home file is exempt for its own
+ * identifier by construction — the check only ever answers "is this named
+ * elsewhere", never "is the mechanism explained here". That gap let a docstring
+ * state the property and the unfixed status in the same block as the
+ * implementation fifteen lines below, which is synthesis rather than citation.
+ *
+ * Fifth recurrence of "stated a property, enforced a place", one level up
+ * inside the control. Same remedy as REDACTED_HEADINGS: pin the text, so
+ * re-wording it is a deliberate act with a re-approval attached rather than a
+ * drift. A phrase list would have been the sixth recurrence.
+ */
+const HOME_POINTERS: { file: string; mustContain: string; mustNotContain: string[] }[] = [
+  {
+    file: 'clippar_app/lib/storage.ts',
+    mustContain: 'Why is deliberately not written here.',
+    // Property statements, not warnings. A warning says "do not build on this";
+    // these say what the failure IS, which is the tracker's job.
+    mustNotContain: [
+      'account other than the one currently signed in',
+      'null is not the only failure mode',
+      'unfixed and live in shipped code, so the reasoning',
+    ].slice(0, 2),
+  },
+];
+
+test('the home files point at the tracker instead of explaining the finding', () => {
+  for (const { file, mustContain, mustNotContain } of HOME_POINTERS) {
+    const body = readFileSync(join(repoRoot, file), 'utf8');
+    assert.ok(
+      body.includes(mustContain),
+      `${file} lost its "why is withheld" pointer — the warning without it reads as an oversight rather than a decision`
+    );
+    for (const phrase of mustNotContain) {
+      assert.ok(
+        !body.includes(phrase),
+        `${file} states the withheld property ("${phrase}") in the same file as the implementation. Point at the tracker instead.`
+      );
+    }
+  }
+});
+
 for (const { home, derive } of GUARDED) {
   test(`${home}: guarded identifiers are named only where they are defined`, () => {
     const names = derive(readFileSync(join(repoRoot, home), 'utf8'));

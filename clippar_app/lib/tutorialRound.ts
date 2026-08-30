@@ -283,7 +283,23 @@ export async function sweepTutorialRounds(): Promise<number> {
     // retried rather than silently forgotten — and entries owned by OTHER
     // accounts are preserved untouched, so their rounds are still swept the
     // next time those accounts sign in.
-    await writeCreatedIds(created.filter((e) => !sweptIds.has(e.id)));
+    // RE-READ rather than writing back `created`. That snapshot was taken
+    // before the loop above, which awaits `deleteRound` — a network call, and
+    // the comment further up says failing there is routine on a course. Any
+    // registry change that landed during that window would be undone by
+    // writing the snapshot back.
+    //
+    // The change that matters is `forgetCreatedRoundsFor`, on the
+    // account-deletion path: the sweep fires unawaited at app start
+    // (`app/_layout.tsx`), so a delete-account during a slow network wipe would
+    // have its scrub reverted here — restoring the departed account's ids
+    // permanently, since only the signed-in account ever prunes them. That is
+    // the exact remanence the scrub exists to close.
+    //
+    // Removing the swept ids from whatever the registry holds NOW is also just
+    // more correct: the intent is "drop these ids", not "replace the list with
+    // a stale copy minus these ids".
+    await writeCreatedIds((await readCreatedIds()).filter((e) => !sweptIds.has(e.id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
   return swept;

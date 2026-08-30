@@ -73,8 +73,21 @@ test('registry entries carry their owner and only the owner sweeps them', () => 
 });
 
 test('another account’s entries survive a sweep, and legacy entries are never swept', () => {
-  // Preserved so A's round is still collected next time A signs in.
-  assert.match(sweep, /created\.filter\(\(e\) => !sweptIds\.has\(e\.id\)\)/);
+  // Preserved so A's round is still collected next time A signs in: the write
+  // removes ONLY swept ids, so every other entry survives whatever its owner.
+  //
+  // This used to pin `created.filter(...)` — the pre-loop snapshot — by name,
+  // which required the lost-update bug: the loop awaits a network delete, and
+  // writing that snapshot back undid any registry change made meanwhile,
+  // including the account-deletion scrub. Fixing it turned this red. Fourth
+  // assertion tonight watching the shape of the code rather than the property.
+  assert.match(sweep, /\.filter\(\(e\) => !sweptIds\.has\(e\.id\)\)/);
+  // And the list written must be read AFTER the awaits, not before them.
+  assert.match(
+    sweep,
+    /await writeCreatedIds\(\(await readCreatedIds\(\)\)\.filter/,
+    'the write must re-read, or a concurrent scrub is silently reverted'
+  );
   // The previous string[] shape has no known owner; keep it, never sweep it.
   assert.match(tutorial, /typeof v === 'string'\) return \[\{ id: v, userId: null \}\]/);
 });

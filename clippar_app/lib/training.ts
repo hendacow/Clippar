@@ -221,8 +221,13 @@ export async function startTrainingSession(): Promise<string> {
   // gates on round status, and the Practice hub resumes sessions from its own
   // registry, so 'finished' costs nothing and closes that footgun.
   await updateLocalRound(round.id, { status: 'finished', finished_at: new Date().toISOString() });
-  const entries = await readRegistry();
+  // Resolve the owner FIRST, then read the registry immediately before writing
+  // it. Reading first and resolving after put an await between the read and the
+  // write, and `forgetTrainingSessionsFor` landing in that window would be
+  // undone by the write — restoring a deleted account's id and session
+  // timestamps permanently, since only the signed-in account prunes them.
   const owner = await currentSessionUserId().catch(() => null);
+  const entries = await readRegistry();
   entries.push({ roundId: round.id, startedAt: new Date().toISOString(), userId: owner });
   await setSetting(TRAINING_REGISTRY_KEY, JSON.stringify(entries));
   return round.id;
