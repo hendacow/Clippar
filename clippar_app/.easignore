@@ -44,3 +44,19 @@ Thumbs.db
 
 # Already not tracked but be defensive
 node_modules/
+
+# Agent + tooling state. These are gitignored, but .easignore REPLACES .gitignore
+# for EAS uploads — anything not listed here is uploaded even if git ignores it.
+# `.claude/worktrees` alone measured 2.5 GB on 30 Aug 2026 and is what produced a
+# 428 MB project archive (against the ~30 MB this file claims above) and an upload
+# that hung long enough to be abandoned mid-session.
+.claude/
+.playwright-mcp/
+.history/
+
+# Build output and non-runtime asset folders — regenerated or never needed on the
+# build server. Measured 30 Aug: dist 69 MB, golfcam 38 MB, store-assets 21 MB.
+# NOTE: do NOT add modules/ — that is the native Swift shot-detector source.
+dist/
+golfcam/
+store-assets/
