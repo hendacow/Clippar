@@ -184,3 +184,37 @@ test('legacy null-owner entries are still tolerated on read', () => {
     'the entry type must still admit null for rows written before the stamp existed'
   );
 });
+
+// The two registries are the same device-wide local_settings list under two
+// keys. `tutorialRound.readCreatedIds` validated each entry; this one cast the
+// parsed array straight through — same PR, same pattern, one guard.
+//
+// It matters because of one caller. `forgetTrainingSessionsFor` filters on
+// `s.userId`, so a null element throws inside the change function, rejecting
+// mutateRegistry — which that function swallows on purpose and localWipe only
+// warns about. One malformed entry therefore makes the account-deletion scrub a
+// silent, permanent no-op while the golfer is shown a successful deletion.
+test('registry entries are validated on read, so no caller inherits an unchecked value', () => {
+  const read = training.match(/async function readRegistry[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(read, '', 'readRegistry should still exist');
+  assert.doesNotMatch(
+    read,
+    /parsed as TrainingSessionRef\[\]/,
+    'a bare cast lets a malformed element reach the account-deletion scrub'
+  );
+  assert.match(
+    read,
+    /typeof e\.roundId !== 'string'/,
+    'every element must be type-checked before it escapes this function'
+  );
+});
+
+// The scrub is the caller whose failure is invisible, so pin that it still
+// filters rather than blanket-deleting, and that its failure stays swallowed
+// (blocking a sign-out on a cache write is worse than a stale entry).
+test('the account-deletion scrub filters and never throws', () => {
+  const scrub = training.match(/export async function forgetTrainingSessionsFor[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(scrub, '', 'forgetTrainingSessionsFor should still exist');
+  assert.match(scrub, /entries\.filter\(/, 'filter — a blanket delete destroys the other account’s sessions');
+  assert.match(scrub, /catch/, 'a wipe must never throw');
+});

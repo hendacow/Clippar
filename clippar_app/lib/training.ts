@@ -182,12 +182,54 @@ async function mutateRegistry(
   });
 }
 
+/**
+ * Validated per entry, for the same reason `tutorialRound.readCreatedIds` is —
+ * these are the same device-wide `local_settings` list under two keys, and this
+ * one used to cast the parsed array straight through.
+ *
+ * The cast mattered because of ONE caller. `forgetTrainingSessionsFor` filters
+ * on `s.userId`, so a single `null` element throws a TypeError inside the
+ * change function, which rejects `mutateRegistry`, which that function
+ * deliberately swallows (a wipe must never block the sign-out behind it) and
+ * `localWipe` only warns about. So one malformed entry turns the
+ * account-deletion scrub into a **silent, permanent** no-op for every account
+ * on the handset, while the golfer is shown a successful deletion. The read
+ * paths degrade safely by comparison — `ownsRound` fails closed and
+ * `listTrainingSessions` would throw where someone sees it.
+ *
+ * Guarded here rather than in the scrub so no caller can inherit an unchecked
+ * value — the same argument that moved `SQL_IDENTIFIER` to its sink.
+ *
+ * **Dropping an entry is safe HERE and is not the trade finding 34 describes.**
+ * There, the dropped entry is the only record naming a clip's video files, so
+ * discarding it orphans them. An entry with no string `roundId` names nothing:
+ * it cannot be listed, opened or played, and the round's clips remain reachable
+ * through `local_rounds` regardless. A bad `startedAt` is coerced rather than
+ * dropped, because losing the session from the hub costs the golfer more than a
+ * blank date label — and `dateLabel` returns the raw string for an unparseable
+ * date rather than throwing.
+ */
 async function readRegistry(): Promise<TrainingSessionRef[]> {
   try {
     const raw = await getSetting(TRAINING_REGISTRY_KEY);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
-    return Array.isArray(parsed) ? (parsed as TrainingSessionRef[]) : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((v): TrainingSessionRef[] => {
+      if (!v || typeof v !== 'object') return [];
+      const e = v as { roundId?: unknown; startedAt?: unknown; userId?: unknown };
+      if (typeof e.roundId !== 'string') return [];
+      // Unattributable entries keep the null-owner semantics documented on
+      // TrainingSessionRef.userId: never listed, never played, never scrubbed
+      // under anyone's account.
+      return [
+        {
+          roundId: e.roundId,
+          startedAt: typeof e.startedAt === 'string' ? e.startedAt : '',
+          userId: typeof e.userId === 'string' ? e.userId : null,
+        },
+      ];
+    });
   } catch {
     return [];
   }
