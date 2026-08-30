@@ -222,21 +222,34 @@ test('no tracked file quotes a fallback credential instead of citing its line', 
  * Each identifier is DERIVED from its home file, never written here. A guard
  * that restates what it protects has become the leak.
  */
-const GUARDED: { home: string; derive: (src: string) => string[] }[] = [
-  {
-    // finding 32 — the module-scope session cache
-    home: 'clippar_app/lib/storage.ts',
-    derive: (src) =>
-      [...src.matchAll(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/gm)].map((m) => m[1]),
-  },
-  {
-    // finding 12 — the unscoped media sweep
-    home: 'clippar_app/lib/localWipe.ts',
-    derive: (src) =>
-      [...src.matchAll(/^async function (remove[A-Z]\w*MediaDirectories)\(/gm)].map((m) => m[1]),
-  },
+const GUARDED: { home: string; tag: string }[] = [
+  { home: 'clippar_app/lib/storage.ts', tag: '32' },   // see the private tracker
+  { home: 'clippar_app/lib/localWipe.ts', tag: '12' }, // see the private tracker
 ];
 
+/**
+ * Derive the guarded identifier from an explicit `@guarded <n>` marker in its
+ * home file, rather than from a regex describing the declaration's shape.
+ *
+ * Two reasons, and the second is the one that caught me. The shape regexes
+ * this replaces reconstructed what they were hiding — one spelled the guarded
+ * name to within a word, in the guard whose entire job is keeping that name
+ * out of every file but its home. The table's comments described the
+ * mechanism in English besides. `GUARDED` only asks whether the identifier
+ * appears elsewhere, so it stayed green while its own annotations published
+ * what it protects. A finding NUMBER discloses nothing; a description does.
+ *
+ * And a marker is simply better: finding 65 was this derivation silently
+ * guarding the wrong name because a second declaration matched the same shape.
+ * An explicit tag cannot drift onto something else.
+ */
+function deriveGuarded(src: string, tag: string): string[] {
+  const pattern = new RegExp(
+    `@guarded ${tag} \\*/\\s*(?:export\\s+)?(?:let|const|async function|function)\\s+([A-Za-z_$][\\w$]*)`,
+    'g'
+  );
+  return [...src.matchAll(pattern)].map((m) => m[1]);
+}
 /**
  * Files that reference a guarded symbol AS CODE rather than explaining it. An
  * assertion naming the function it pins is not a disclosure; a sentence saying
@@ -308,16 +321,16 @@ test('the home files point at the tracker instead of explaining the finding', ()
   }
 });
 
-for (const { home, derive } of GUARDED) {
+for (const { home, tag } of GUARDED) {
   test(`${home}: guarded identifiers are named only where they are defined`, () => {
-    const names = derive(readFileSync(join(repoRoot, home), 'utf8'));
+    const names = deriveGuarded(readFileSync(join(repoRoot, home), 'utf8'), tag);
     // Loudly, in both directions: none means the derivation broke or the finding
     // was fixed away; more than one means it may be guarding the wrong name.
     assert.equal(
       names.length,
       1,
       names.length === 0
-        ? `could not derive the guarded identifier from ${home} — if the finding is fixed and it is gone, remove its GUARDED entry deliberately`
+        ? `no @guarded ${tag} marker resolved in ${home} — if the finding is fixed and the marker is gone, remove its GUARDED entry deliberately`
         : `the derivation is ambiguous: ${names.length} matches in ${home}`
     );
     const name = names[0];

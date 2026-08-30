@@ -181,7 +181,8 @@ async function migrateEditorColumns() {
  * clean signed-out read, so it can never serve a departed user's id to the
  * next account: signing in as B necessarily produced a successful getSession
  * that set this to B.
- */
+ *
+ * @guarded 32 */
 let lastKnownUserId: string | null = null;
 let legacyRoundsClaimed = false;
 

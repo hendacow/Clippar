@@ -47,6 +47,7 @@ const ACCOUNT_LINKED_SETTING_KEYS = [
  */
 const OWNED_MEDIA_DIRS = ['clips/', 'exports/'];
 
+/** @guarded 12 */
 async function removeOwnedMediaDirectories(): Promise<void> {
   if (Platform.OS === 'web') return;
   try {
