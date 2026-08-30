@@ -11,6 +11,7 @@ import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
 import { useSalesFlowDone } from '@/lib/salesFlow';
+import { isTutorialPending, sweepTutorialRounds, getActiveTutorialRoundId } from '@/lib/tutorialRound';
 import { resolvePostAuthRoute } from '@/lib/mountOffer';
 import { StripeWrapper } from '@/components/shared/StripeWrapper';
 import { UploadProvider } from '@/contexts/UploadContext';
@@ -94,6 +95,30 @@ function RootLayout() {
   //   - Signed-in user on any (auth)/(onboarding) screen → bounce to /(tabs)
   // Wait for auth + the sales flag to finish loading so we don't redirect on
   // a stale null user during cold start.
+  // v3: a signed-in user with the tutorial pending goes to the tutorial
+  // bootstrap once; and every authed start sweeps leftover tutorial rounds
+  // (idempotent — matches only the sentinel course name), so a crash
+  // mid-tutorial is at worst one launch of self-clutter in the user's own
+  // account. Plan §12.
+  useEffect(() => {
+    if (loading || !user) return;
+    let alive = true;
+    (async () => {
+      const [pending, active] = await Promise.all([isTutorialPending(), getActiveTutorialRoundId()]);
+      if (!alive) return;
+      if (pending) {
+        router.replace('/tutorial');
+        return;
+      }
+      // No pending, no active session mid-flight -> clean any leftovers.
+      if (!active) void sweepTutorialRounds();
+    })().catch(() => {});
+    return () => {
+      alive = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading, user?.id]);
+
   useEffect(() => {
     if (loading || !sales.loaded) return;
     const inAuthGroup = segments[0] === '(auth)';

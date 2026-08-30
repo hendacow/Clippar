@@ -41,6 +41,7 @@ import {
 } from '@/lib/onboardingProfile';
 import { getOnboardingVariant, logFunnel, type OnboardingVariant } from '@/lib/onboardingFunnel';
 import { CinematicOnboarding } from '@/components/onboarding/cinematic/CinematicOnboarding';
+import { setTutorialPending } from '@/lib/tutorialRound';
 
 const STEPS = [
   HeroScreen, // 1 — show the finished value first
@@ -157,6 +158,16 @@ export default function OnboardingFunnel() {
   // live in the simulator pass, which is exactly what it exists for.
   if (variant === null) {
     return <View style={{ flex: 1, backgroundColor: '#0A0A0F' }} />;
+  }
+  if (variant === 'v3') {
+    // The hook earns the signup; the REAL app does the teaching after it
+    // (the post-auth tutorial redirect in _layout picks up the pending flag).
+    const toSignup = async () => {
+      await markSalesDone();
+      await setTutorialPending(true);
+      router.replace('/(auth)/signup');
+    };
+    return <CinematicOnboarding hook onDone={() => void toSignup()} onSkip={() => void toSignup()} />;
   }
   if (variant === 'v2') {
     return (

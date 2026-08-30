@@ -15,7 +15,11 @@ import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { getSetting, setSetting } from '@/lib/storage';
 
-export type OnboardingVariant = 'v1' | 'v2';
+// v1 = shipped 5-screen stepper (production default until beaten).
+// v2 = full cinematic theatre (kept as a variant at Henry's instruction).
+// v3 = short cinematic hook -> signup -> REAL-interface tutorial on a
+//      scoped scratch round (the approved reordered funnel, plan §12).
+export type OnboardingVariant = 'v1' | 'v2' | 'v3';
 
 const VARIANT_KEY = 'onboarding.variant';
 const FUNNEL_KEY = 'onboarding.funnel.log';
@@ -24,10 +28,12 @@ const FUNNEL_MAX = 200;
 export async function getOnboardingVariant(): Promise<OnboardingVariant> {
   try {
     const override = await getSetting(VARIANT_KEY);
-    if (override === 'v1' || override === 'v2') return override;
+    if (override === 'v1' || override === 'v2' || override === 'v3') return override;
   } catch {}
   // app.config.js stamps extra.variant from APP_VARIANT at build time.
   const appVariant = (Constants.expoConfig?.extra as { variant?: string } | undefined)?.variant;
+  // v3 becomes the dev default when its record-screen coach lands; until
+  // then defaulting to it would strand a fresh signup on a coach-less round.
   return appVariant === 'development' ? 'v2' : 'v1';
 }
 

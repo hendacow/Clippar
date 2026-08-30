@@ -74,7 +74,14 @@ const SCENE_TIMEOUT_MS: Record<Scene, number> = {
   EXPORT: 15_000,
 };
 
-export function CinematicOnboarding({ onDone, onSkip }: { onDone: () => void; onSkip: () => void }) {
+export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
+  onDone: () => void;
+  onSkip: () => void;
+  /** v3 hook mode: montage + one CTA card, nothing else — the theatre's job
+   *  is reduced to earning the signup, and the REAL app does the teaching
+   *  after it (plan §12). */
+  hook?: boolean;
+}) {
   const insets = useSafeAreaInsets();
   const [scene, setScene] = useState<Scene>('MONTAGE');
   const [showSkip, setShowSkip] = useState(false);
@@ -87,11 +94,26 @@ export function CinematicOnboarding({ onDone, onSkip }: { onDone: () => void; on
     logFunnel('v2', sceneRef.current, 'complete', Date.now() - sceneStartedAt.current);
     sceneStartedAt.current = Date.now();
     setScene(next);
-    void setSetting(SCENE_KEY, next).catch(() => {});
+    if (!hook) void setSetting(SCENE_KEY, next).catch(() => {});
     logFunnel('v2', next, 'enter', 0);
   }, []);
 
   const advance = useCallback(() => {
+    if (hook) {
+      // Hook mode has two beats: MONTAGE, then the CTA card (rendered below
+      // as HOOK). Whatever scene asks to advance past the montage goes there;
+      // the CTA's button is the only exit.
+      if (sceneRef.current === 'MONTAGE') {
+        logFunnel('v3', 'MONTAGE', 'complete', Date.now() - sceneStartedAt.current);
+        sceneStartedAt.current = Date.now();
+        setScene('CLICKER_INTRO'); // reused slot; renders the hook CTA below
+        logFunnel('v3', 'HOOK_CTA', 'enter', 0);
+      } else {
+        logFunnel('v3', 'HOOK_CTA', 'complete', Date.now() - sceneStartedAt.current);
+        onDone();
+      }
+      return;
+    }
     const i = SCENES.indexOf(sceneRef.current);
     if (i >= SCENES.length - 1) {
       logFunnel('v2', 'EXPORT', 'complete', Date.now() - sceneStartedAt.current);
@@ -142,7 +164,7 @@ export function CinematicOnboarding({ onDone, onSkip }: { onDone: () => void; on
   return (
     <View style={[styles.fill, { backgroundColor: '#000' }]}>
       {scene === 'MONTAGE' && <MontageScene onNext={advance} />}
-      {scene === 'CLICKER_INTRO' && <ClickerIntroScene onNext={advance} />}
+      {scene === 'CLICKER_INTRO' && (hook ? <HookCtaScene onNext={advance} /> : <ClickerIntroScene onNext={advance} />)}
       {scene === 'RECORD_SHOT' && <RecordShotScene onNext={advance} />}
       {scene === 'NEXT_HOLE' && <MultiTapScene key="nh" taps={2} video={VIDEOS.shot2}
         title="Double-tap = next hole" sub="Two quick taps on the clicker moves your round along." confirm="Hole 2 →" onNext={advance} />}
@@ -206,6 +228,24 @@ function FakeClicker({ onPress, label }: { onPress: () => void; label?: string }
 }
 
 // ---- scenes -------------------------------------------------------------
+
+function HookCtaScene({ onNext }: { onNext: () => void }) {
+  return (
+    <View style={[styles.fill, styles.center, { backgroundColor: '#0A0A0F', padding: 32 }]}>
+      <Animated.View entering={FadeIn.duration(400)} style={{ alignItems: 'center', gap: 16 }}>
+        <Text style={styles.h1}>Every round, a reel.</Text>
+        <Text style={styles.sub}>
+          Film every shot with one click. We cut the round into a highlight
+          reel — no editing, ever. Set up your account and we'll walk you
+          through your first one, in the real app.
+        </Text>
+        <Pressable onPress={onNext} style={[styles.cta, { marginTop: 20 }]}>
+          <Text style={styles.ctaText}>Get started — it's free</Text>
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
 
 function MontageScene({ onNext }: { onNext: () => void }) {
   // Value lines ride the montage's back half — no separate explainer scene.
