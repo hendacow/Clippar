@@ -285,15 +285,37 @@ test('bin entries are validated where the JSON blob re-enters', () => {
     'one definition, imported — two copies drift into two ideas of "safe"'
   );
   assert.match(bin, /import \{[^}]*SQL_IDENTIFIER[^}]*\} from '@\/lib\/storage'/);
-  // fileUris reach a file delete, so the file:// prefix is re-checked.
-  assert.match(validator, /startsWith\('file:\/\/'\)/);
+  // fileUris reach a file delete, so they are re-checked here.
+  //
+  // Matched loosely, and that is the point. `startsWith('file://')` is a
+  // PREFIX test, not containment — finding 35, still open. Pinning it by name
+  // would turn this assertion red the moment someone lands the containment
+  // predicate, which is a security test punishing the security fix: exactly
+  // the defect fixed in `reportsCarryNoSecrets.test.ts` at 26c0517, in another
+  // file, missed here. What must hold is that SOME uri guard runs before a
+  // uri can reach a delete — not which one.
+  assert.match(
+    validator,
+    /startsWith\('file:\/\/'\)|isInside[A-Za-z]*\(/,
+    'fileUris must be checked before they can reach an unlink'
+  );
   // The ownership decision is made on e.roundId; everything destructive acts
   // on e.row. Unbound, the gate authorises one field and destroys another.
   assert.match(validator, /e\.row\.round_id !== e\.roundId/, 'the two round ids must be bound');
 
   // purgeEntry is the unlink side of the same boundary.
   const purge = bin.match(/async function purgeEntry[\s\S]*?\n}/)?.[0] ?? '';
-  assert.match(purge, /startsWith\('file:\/\/'\)/, 'the unlink must re-check the prefix too');
+  // Same loose match, same reason — and the ordering matters more than the
+  // predicate: whatever the guard is, `continue` must precede `deleteFile`.
+  assert.match(
+    purge,
+    /startsWith\('file:\/\/'\)|isInside[A-Za-z]*\(/,
+    'the unlink side must re-check the uri too'
+  );
+  assert.ok(
+    purge.indexOf('continue') < purge.indexOf('deleteFile('),
+    'the uri guard must reject before the delete, not after'
+  );
 
   // The legacy drain reads the same shape and also feeds purgeEntry.
   const drain = bin.match(/async function drainLegacyBin[\s\S]*?\n}/)?.[0] ?? '';
