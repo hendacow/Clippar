@@ -404,14 +404,46 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
 }
 
 /** Remove one clip from the bin permanently — files unlinked, no way back. */
+/**
+ * May this account purge this entry — i.e. destroy its video files?
+ *
+ * `binKey()` alone decided this before, so the key was the only thing naming
+ * whose footage got unlinked, with nothing cross-checking it the way
+ * `deleteClipToBin` does. These are the two destructive paths; the read and
+ * restore paths deliberately do NOT get this gate, because a binned clip can
+ * legitimately outlive its round and gating them would make such entries
+ * invisible and unrestorable — findings 34/41 recreated at the moment someone
+ * is trying to recover a clip.
+ *
+ * A round that is genuinely GONE has no owner to compare, so it is allowed
+ * through: refusing there would make the entry permanently unpurgeable, which
+ * is a retention failure rather than a fix.
+ *
+ * **Defence in depth, stated plainly:** `local_rounds.user_id` is itself
+ * reassignable (finding 23, private tracker), so this does not make the
+ * destructive paths sound. It makes them require two things to go wrong rather
+ * than one, which is strictly better than resting on the resolution alone.
+ */
+async function entryPurgeableBy(entry: BinnedClip, userId: string): Promise<boolean> {
+  const round = await getLocalRound(entry.roundId).catch(() => null);
+  // getLocalRound scopes to ITS OWN resolution of the session, so comparing
+  // that row's owner against the id that built the key is what binds the two
+  // halves together — the same line as the deleteClipToBin gate.
+  return round == null || round.user_id === userId;
+}
+
 export async function purgeClipFromBin(clipId: number): Promise<void> {
   return binQueue.run(async () => {
     await drainLegacyBin();
-    const key = await binKey();
-    if (!key) return;
+    // Resolved once and inline, so the SAME id builds the key and closes the
+    // gate below — the reason deleteClipToBin stopped using binKey().
+    const userId = await currentSessionUserId().catch(() => null);
+    if (!userId) return;
+    const key = BIN_KEY_PREFIX + userId;
     const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return;
+    if (!(await entryPurgeableBy(entry, userId))) return;
     await writeBinAt(key, entries.filter((e) => Number(e.row?.id) !== clipId));
     await purgeEntry(entry);
   });
@@ -432,22 +464,25 @@ export async function purgeAllBinnedClips(): Promise<number> {
       // Pre-scoping entries are this action's responsibility too — they are
       // exactly the videos it promises to remove.
       await drainLegacyBin();
-      const key = await binKey();
-      if (!key) return 0;
+      // Same single inline resolution as purgeClipFromBin, for the same reason.
+      const userId = await currentSessionUserId().catch(() => null);
+      if (!userId) return 0;
+      const key = BIN_KEY_PREFIX + userId;
       const entries = await readBinAt(key);
       if (entries.length === 0) return 0;
-      // Clear the list first: if a file unlink stalls, the entries must not be
-      // left pointing at videos the user has already asked us to remove.
-      //
-      // KNOWN GAP, deliberately not closed here (see the drainLegacyBin note
-      // above): readBinAt filters malformed entries out, and this writes []
-      // over the WHOLE key — so a malformed entry's metadata is erased while
-      // its files are never unlinked. They survive the one action that
-      // promises to remove them, unreachable. Closing it means unlinking paths
-      // named by a blob that failed validation, which is a trade, not a fix.
-      await writeBinAt(key, []);
-      for (const entry of entries) await purgeEntry(entry);
-      return entries.length;
+      // Partition rather than blanking the key. An entry this account cannot
+      // prove it owns is written BACK, never unlinked — the safe direction,
+      // and it is what lets the gate above exist at all: refusing without
+      // writing back would destroy the record while leaving the files.
+      const purgeable = await Promise.all(entries.map((e) => entryPurgeableBy(e, userId)));
+      const mine = entries.filter((_, i) => purgeable[i]);
+      const kept = entries.filter((_, i) => !purgeable[i]);
+      if (mine.length === 0) return 0;
+      // Shrink the list BEFORE unlinking: if a file unlink stalls, no entry may
+      // be left pointing at a video the user has already asked us to remove.
+      await writeBinAt(key, kept);
+      for (const entry of mine) await purgeEntry(entry);
+      return mine.length;
     } catch {
       return 0;
     }

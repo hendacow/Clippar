@@ -166,23 +166,68 @@ test('the bin key and the ownership gate are decided by the same resolution', ()
 // tracker) — so resolving the owner more than once per job means a read and a
 // write can straddle two accounts.
 test('each queued job resolves the owning account exactly once', () => {
-  // deleteClipToBin is not in this list: it resolves the id directly so the
-  // gate can close against the same value, and the test above pins that
-  // stronger property instead.
+  // This used to require `binKey()` BY NAME in the two purge paths — so
+  // giving them the stronger deleteClipToBin shape (resolve inline, then close
+  // the gate against that same id) turned it red. Fifth assertion tonight
+  // watching the shape of the code rather than the property.
+  //
+  // The property is: exactly one resolution decides the job, however it is
+  // spelled. restoreClipFromBin still threads binKey(); the destructive paths
+  // resolve inline because they must ALSO bind an ownership read to the same
+  // id, which binKey() cannot hand back.
   for (const fn of ['restoreClipFromBin', 'purgeClipFromBin', 'purgeAllBinnedClips']) {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
     assert.notEqual(body, '', `${fn} should still exist`);
-    assert.equal(
-      (body.match(/await binKey\(\)/g) ?? []).length,
-      1,
-      `${fn} must resolve the account once and thread the key`
-    );
+    const resolutions =
+      (body.match(/await binKey\(\)/g) ?? []).length +
+      (body.match(/await currentSessionUserId\(\)/g) ?? []).length;
+    assert.equal(resolutions, 1, `${fn} must resolve the account exactly once per job`);
     assert.doesNotMatch(
       body,
       /await (readBin|writeBin)\(/,
       `${fn} must use the key-taking readBinAt/writeBinAt, which cannot re-resolve`
     );
   }
+});
+
+// The two paths that UNLINK FILES must bind their key to a scoped ownership
+// read, exactly as deleteClipToBin does — the key alone was the only thing
+// naming whose footage got destroyed.
+//
+// listBinnedClips and restoreClipFromBin deliberately do NOT get this: a binned
+// clip can outlive its round, and gating the read/restore side would make such
+// entries invisible and unrestorable at the moment someone is recovering a clip.
+test('the destructive bin paths bind ownership; the read paths deliberately do not', () => {
+  const helper = bin.match(/async function entryPurgeableBy[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(helper, '', 'the shared purge gate should exist');
+  assert.match(
+    helper,
+    /round == null \|\| round\.user_id === userId/,
+    'a genuinely missing round stays purgeable; a foreign one does not'
+  );
+
+  for (const fn of ['purgeClipFromBin', 'purgeAllBinnedClips']) {
+    const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.match(body, /entryPurgeableBy\(/, `${fn} must gate on ownership before unlinking`);
+    assert.match(body, /const key = BIN_KEY_PREFIX \+ userId;/, `${fn} must build the key from that same id`);
+  }
+
+  // Partition, never blank: an entry this account cannot prove it owns is
+  // written BACK, so refusing never destroys the record while leaving the files.
+  const all = bin.match(/export async function purgeAllBinnedClips[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(all, /await writeBinAt\(key, kept\)/, 'unowned entries must be written back');
+  assert.doesNotMatch(all, /writeBinAt\(key, \[\]\)/, 'blanking the key destroys other accounts’ records');
+  assert.ok(
+    all.indexOf('await writeBinAt(key, kept)') < all.indexOf('purgeEntry(entry)'),
+    'shrink the list before unlinking, so a stalled unlink leaves no dangling entry'
+  );
+
+  const restore = bin.match(/export async function restoreClipFromBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.doesNotMatch(
+    restore,
+    /entryPurgeableBy\(/,
+    'gating restore would make an entry whose round is gone unrecoverable'
+  );
 });
 
 // Renaming the key stranded every entry written by an earlier build: nothing
