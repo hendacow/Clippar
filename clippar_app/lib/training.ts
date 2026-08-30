@@ -20,8 +20,35 @@
  * for the same reason: nothing schema-shaped runs on a device already holding
  * real rounds.
  */
-import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound } from '@/lib/storage';
+import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound, getLocalRound } from '@/lib/storage';
 import { createRound } from '@/lib/api';
+
+/**
+ * Does the signed-in account own this round?
+ *
+ * `getClipsForRound` is a bare `WHERE round_id = ?` with no ownership
+ * predicate, and the registry below is a device-wide `local_settings` row that
+ * accumulates sessions from every account that has used the handset. Together
+ * those two facts leaked real footage: B signs in on A's phone, opens Practice,
+ * sees A's sessions with true shot counts, taps Watch, and
+ * `app/training/play.tsx` plays A's swing videos — it reads clips straight out
+ * of `listTrainingClips` with nothing checking who owns them. The editor route
+ * off the same screen was already safe because `useEditorState.loadFromLocal`
+ * gates on `getLocalRound` first; the player simply did not.
+ *
+ * So the gate lives HERE, at the data layer, rather than in one screen —
+ * `getLocalRound` is scoped through `ownedRoundsClause` and fails closed, so a
+ * round belonging to anybody else reads as null. That also handles registry
+ * entries written before this check existed: ownership is decided by the
+ * database, not by what the settings blob happens to say.
+ */
+async function ownsRound(roundId: string): Promise<boolean> {
+  try {
+    return (await getLocalRound(roundId)) != null;
+  } catch {
+    return false;
+  }
+}
 
 export interface TrainingClub {
   key: string;
@@ -85,10 +112,14 @@ async function readRegistry(): Promise<TrainingSessionRef[]> {
   }
 }
 
-/** Newest first. */
+/** Newest first, and only the signed-in account's own sessions. */
 export async function listTrainingSessions(): Promise<TrainingSessionRef[]> {
   const all = await readRegistry();
-  return [...all].sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
+  const owned: TrainingSessionRef[] = [];
+  for (const s of all) {
+    if (await ownsRound(s.roundId)) owned.push(s);
+  }
+  return owned.sort((a, b) => (a.startedAt < b.startedAt ? 1 : -1));
 }
 
 /**
@@ -128,6 +159,8 @@ export interface TrainingClip {
 
 /** All of a session's shots, oldest first (the order they were hit). */
 export async function listTrainingClips(roundId: string, clubHole?: number): Promise<TrainingClip[]> {
+  // Ownership gate — see ownsRound. This is what the ASMR player relies on.
+  if (!(await ownsRound(roundId))) return [];
   const rows = await getClipsForRound(roundId);
   return rows
     .filter((r) => (clubHole == null ? true : r.hole_number === clubHole))
@@ -144,6 +177,9 @@ export async function listTrainingClips(roundId: string, clubHole?: number): Pro
 
 /** { holeNumber → shots hit } for one session — the history row's summary. */
 export async function trainingShotCounts(roundId: string): Promise<Map<number, number>> {
+  // Ownership gate — see ownsRound. Counts alone told B how many shots A hit
+  // with each club, before B had played a single one of them.
+  if (!(await ownsRound(roundId))) return new Map();
   const rows = await getClipsForRound(roundId);
   const counts = new Map<number, number>();
   for (const r of rows) counts.set(r.hole_number, (counts.get(r.hole_number) ?? 0) + 1);
@@ -207,6 +243,10 @@ export async function importShotsToSession(
   clubHole: number,
   assets: { uri: string; durationMs?: number | null }[]
 ): Promise<number> {
+  // Never write clips into a round this account does not own — the same gate
+  // the reads use, so a stale nav param cannot file shots into someone else's
+  // session.
+  if (!(await ownsRound(roundId))) return 0;
   const { persistAsset } = require('@/lib/media') as typeof import('@/lib/media');
   const existing = await getClipsForRound(roundId);
   let shot = existing.filter((c) => c.hole_number === clubHole).length;
