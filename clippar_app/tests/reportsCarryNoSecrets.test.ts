@@ -281,6 +281,13 @@ const HOME_POINTERS: { file: string; mustContain: string; mustNotContain: string
     mustNotContain: [
       'account other than the one currently signed in',
       'null is not the only failure mode',
+      // Cut in the sixth redaction pass: this characterises WHICH failure mode
+      // is the wrong one to guard against, which narrows the search for anyone
+      // reading the implementation a few lines below.
+      'necessary but NOT sufficient',
+      // Blast radius. "Four destructive gates are built on a function
+      // documented as unsafe" is a map, not a warning.
+      'four destructive gates were built on top of it',
     ],
   },
 ];
