@@ -229,6 +229,18 @@ export async function sweepTutorialRounds(): Promise<number> {
       // for. A row that exists but is NOT a tutorial round means the id was
       // recycled or the registry is wrong; leave it alone.
       if (row && row.course_name !== TUTORIAL_COURSE_NAME) continue;
+      // BIND the two halves, same as ownsRound and deleteClipToBin. The
+      // candidate passed on `e.userId === me` — one resolution of the session
+      // — and this row came back from `getLocalRound`, which resolves it again
+      // internally. Only `course_name` was applied to the row, never its
+      // owner, so the two could name different accounts and `deleteLocalRound`
+      // below is unscoped: it deletes by round_id alone and unlinks every clip
+      // file it finds, with no bin entry and no undo.
+      //
+      // Deliberately `row &&`: a null row still means "already gone locally,
+      // retire the id once the remote delete lands", so the offline-retry and
+      // partial-failure behaviour documented below is unchanged.
+      if (row && row.user_id !== me) continue;
 
       // Both halves must actually succeed before the id is retired. The
       // registry is now the ONLY record of a tutorial round — the orphan scan

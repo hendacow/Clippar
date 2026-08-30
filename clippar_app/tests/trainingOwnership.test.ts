@@ -40,10 +40,18 @@ test('the player reads clips through the gated helper, not the raw store', () =>
 });
 
 test('every training read and write gates on ownership', () => {
+  // This used to assert `getLocalRound(roundId)) != null` VERBATIM, which
+  // pinned the weaker form in place: `!= null` only says somebody's row came
+  // back, and getLocalRound resolves the session on its own, so the stamp and
+  // the row were authorised by two answers nothing compared. Strengthening the
+  // gate turned this assertion red — the test was holding the defect.
+  //
+  // Same shape as the `startsWith('file://')` pin and the call-site count: the
+  // assertion watched the shape of the code rather than the property.
   assert.match(
     training,
-    /async function ownsRound[\s\S]*?getLocalRound\(roundId\)\) != null/,
-    'ownership must be decided by the scoped, fail-closed getLocalRound'
+    /async function ownsRound[\s\S]*?round != null && round\.user_id === me/,
+    'ownership needs the scoped read AND the row bound back to this resolution'
   );
 
   for (const fn of ['listTrainingClips', 'trainingShotCounts', 'importShotsToSession']) {

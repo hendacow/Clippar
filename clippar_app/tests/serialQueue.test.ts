@@ -473,3 +473,55 @@ test('account deletion scrubs the departing account from both registries', () =>
     );
   }
 });
+
+// The split-resolution defect, as a property over EVERY gate rather than one.
+//
+// deleteClipToBin diagnosed it and closed it: a stamp checked against one
+// resolution of the session and a row returned by getLocalRound — which
+// resolves the session again, internally — are two answers that were never
+// compared. `!= null` only says "somebody's row came back".
+//
+// ownsRound and sweepTutorialRounds were written in the same sitting, over the
+// same primitive, and neither got the line. Written as a loop over all three
+// so the next gate cannot be the one that misses it — the previous version of
+// this rule lived in one test about one function, which is how two siblings
+// stayed open while the pattern was catalogued fourteen times.
+test('every ownership gate binds the row owner back to its own resolution', () => {
+  const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  const tutorial = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
+
+  const owns = training.match(/async function ownsRound[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(owns, '', 'ownsRound should still exist');
+  assert.match(
+    owns,
+    /round != null && round\.user_id === me/,
+    'the row must be bound to the id that passed the stamp check, not merely non-null'
+  );
+  assert.doesNotMatch(
+    owns,
+    /return \(await getLocalRound\(roundId\)\) != null;/,
+    'a bare non-null check accepts a row scoped to a DIFFERENT resolution'
+  );
+
+  const sweep = tutorial.match(/export async function sweepTutorialRounds[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(sweep, '', 'sweepTutorialRounds should still exist');
+  assert.match(
+    sweep,
+    /if \(row && row\.user_id !== me\) continue;/,
+    'the sweep must bind the row owner before the unscoped delete'
+  );
+  // `row &&` is load-bearing: a null row still means "already gone locally".
+  assert.doesNotMatch(
+    sweep,
+    /if \(row\.user_id !== me\) continue;/,
+    'dropping the row-null guard would break the offline-retry path'
+  );
+  assert.ok(
+    sweep.indexOf('row.user_id !== me') < sweep.indexOf('deleteLocalRound(id)'),
+    'the binding must precede the unscoped delete'
+  );
+
+  // And the one that already had it, so the property stays stated in one place.
+  const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(del, /round\.user_id !== userId/, 'deleteClipToBin keeps its binding');
+});

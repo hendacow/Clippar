@@ -56,7 +56,17 @@ async function ownsRound(roundId: string): Promise<boolean> {
     // entry stamped to somebody else — or to nobody, from before the stamp
     // existed — is never ours.
     if (!ref || ref.userId !== me) return false;
-    return (await getLocalRound(roundId)) != null;
+    // BIND the two halves. `getLocalRound` scopes to ITS OWN resolution of the
+    // session, so `!= null` only says "somebody's row came back" — the stamp
+    // was checked against `me` and the row against a second, independent
+    // answer, and nothing compared them. Both halves of a check documented as
+    // requiring BOTH conditions hung off ids that were never bound together.
+    //
+    // This is the identical defect `deleteClipToBin` diagnoses and closes in
+    // this same branch, in the gate this branch offers as the fix for the
+    // practice-footage leak. Same one line, same reasoning.
+    const round = await getLocalRound(roundId);
+    return round != null && round.user_id === me;
   } catch {
     return false;
   }
