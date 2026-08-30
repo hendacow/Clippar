@@ -176,6 +176,40 @@ test('the pre-scoping device-wide bin is drained, not orphaned', () => {
   assert.match(storage, /\['clips\.bin\.v1'\]/, 'sign-out must drop the legacy key too');
 });
 
+// The first drain purged the WHOLE legacy list, on the reasoning that its
+// entries could not be attributed to an account. Wrong, and in the dangerous
+// direction: the legacy row is device-wide, so draining it under B unlinks A's
+// video files — the very cross-account destruction the scoping exists to stop.
+// Ownership IS recoverable: only the clip row was deleted, the round row
+// survives, and getLocalRound is scoped and fails closed.
+test('the legacy drain destroys only the signed-in account’s own entries', () => {
+  const body = bin.match(/async function drainLegacyBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'drainLegacyBin should exist');
+  assert.match(body, /getLocalRound\(/, 'ownership must be decided by the scoped round read');
+  assert.match(body, /others/, 'entries belonging to other accounts must be kept');
+  assert.match(
+    body,
+    /others\.length \? JSON\.stringify\(others\) : null/,
+    'other accounts’ entries must be written back, not dropped'
+  );
+  // A latch would skip the retry that other accounts depend on.
+  assert.doesNotMatch(body, /legacyDrained/, 'no latch: later accounts still need their drain');
+});
+
+// deleteLocalClip is `DELETE FROM local_clips WHERE id = ?` with no ownership
+// predicate and clip ids are small sequential integers, so callers gating it
+// upstream is a property of today's call sites, not of the function.
+test('the destructive primitive checks ownership itself', () => {
+  const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(del, /getLocalRound\(roundId\)/, 'the round must be verified before the row is deleted');
+  // Match the CALLS, not prose — the comment above the guard names
+  // deleteLocalClip while explaining why the guard is there.
+  assert.ok(
+    del.indexOf('await getLocalRound(roundId)') < del.indexOf('await deleteLocalClip('),
+    'the ownership check must precede the delete'
+  );
+});
+
 // removeLocalMediaForCurrentUser walks rounds via deleteLocalRound, and a
 // binned clip has no local_clips row — so without an explicit purge its video
 // files survive the one action whose purpose is removing them.

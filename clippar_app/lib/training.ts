@@ -50,6 +50,20 @@ async function ownsRound(roundId: string): Promise<boolean> {
   }
 }
 
+/**
+ * The same gate, for screens that write through a path this module does not own.
+ *
+ * `app/training/record.tsx` takes `roundId` from the URL and hands it to
+ * `useCamera`, whose save path is a bare `saveLocalClip({ round_id })` with no
+ * ownership predicate — and `app.config.js` sets a URL scheme, so that route is
+ * externally reachable. Gating `importShotsToSession` and leaving capture open
+ * would protect one of the two ways shots enter a session, which is the same
+ * half-covered mistake the reads had.
+ */
+export async function ownsTrainingRound(roundId: string): Promise<boolean> {
+  return ownsRound(roundId);
+}
+
 export interface TrainingClub {
   key: string;
   label: string;

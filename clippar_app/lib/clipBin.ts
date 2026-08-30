@@ -16,7 +16,7 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, type LocalClipRow } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 import { createSerialQueue } from '@/lib/serialQueue';
 
@@ -147,25 +147,50 @@ async function readBin(): Promise<BinnedClip[]> {
  * which is the bug this scoping fixed.
  */
 const LEGACY_BIN_KEY = 'clips.bin.v1';
-let legacyDrained = false;
 
+/**
+ * Only the signed-in account's own entries are destroyed.
+ *
+ * The first version of this drain purged the whole legacy list, on the
+ * reasoning that its entries "cannot be attributed to an account". That was
+ * wrong, and wrong in the dangerous direction: the legacy row is DEVICE-WIDE,
+ * so draining it wholesale under B unlinks A's video files — reintroducing
+ * precisely the cross-account destruction this scoping exists to prevent.
+ *
+ * Ownership is in fact recoverable. Only the CLIP row was deleted; the ROUND
+ * row survives, and `getLocalRound` is scoped through `ownedRoundsClause` and
+ * fails closed. So entries are partitioned by round ownership: mine are
+ * purged, everyone else's are written back untouched and destroyed when that
+ * account next signs in.
+ *
+ * No latch: with entries left behind for other accounts, this has to run again
+ * for whoever signs in next. It is a single settings read when the key is
+ * absent, which is the steady state after the first drain.
+ */
 async function drainLegacyBin(): Promise<void> {
-  if (legacyDrained) return;
-  legacyDrained = true;
   try {
     const raw = await getSetting(LEGACY_BIN_KEY);
     if (!raw) return;
-    // Drop the metadata FIRST, so a stalled unlink cannot leave entries
-    // pointing at videos the user has already asked us to remove.
-    await setSetting(LEGACY_BIN_KEY, null);
     const parsed = JSON.parse(raw) as unknown;
-    if (Array.isArray(parsed)) {
-      for (const entry of parsed as BinnedClip[]) await purgeEntry(entry);
+    if (!Array.isArray(parsed)) {
+      // Unparseable: drop the row rather than carry a blob nothing can read.
+      await setSetting(LEGACY_BIN_KEY, null);
+      return;
     }
+    const mine: BinnedClip[] = [];
+    const others: BinnedClip[] = [];
+    for (const entry of parsed as BinnedClip[]) {
+      const owned = await getLocalRound(entry?.roundId ?? '').catch(() => null);
+      (owned ? mine : others).push(entry);
+    }
+    if (mine.length === 0) return;
+    // Shrink the list BEFORE unlinking, so a stalled delete cannot leave an
+    // entry pointing at a video the user has already asked us to remove.
+    await setSetting(LEGACY_BIN_KEY, others.length ? JSON.stringify(others) : null);
+    for (const entry of mine) await purgeEntry(entry);
   } catch {
-    // Unparseable or unreadable — the key is dropped either way, and
-    // wipeLocalUserData's wholesale clips/ delete is the backstop for whatever
-    // files it was pinning. Never throw from a migration path.
+    // Never throw from a migration path — a failed drain must not block a
+    // delete. The row survives and the next attempt retries it.
   }
 }
 
@@ -189,6 +214,13 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // rely on the rollback below.
     const key = await binKey();
     if (!key) return null;
+    // And the round has to be ours. `deleteLocalClip` is
+    // `DELETE FROM local_clips WHERE id = ?` with no ownership predicate, and
+    // clip ids are small sequential integers — so this is the destructive
+    // primitive, and every caller gating it upstream is a property of today's
+    // call sites rather than of the function. Same argument lib/training.ts
+    // makes: the gate belongs at the data layer, not in the screens.
+    if (!(await getLocalRound(roundId).catch(() => null))) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
     const entry: BinnedClip = { row, fileUris, deletedAt: new Date().toISOString(), roundId };

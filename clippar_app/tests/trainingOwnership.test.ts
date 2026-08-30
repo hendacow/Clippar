@@ -57,3 +57,22 @@ test('the session list only offers the signed-in account’s own sessions', () =
   const body = training.match(/export async function listTrainingSessions[\s\S]*?\n}/)?.[0] ?? '';
   assert.match(body, /await ownsRound\(s\.roundId\)/);
 });
+
+// Shots enter a session two ways. Gating the import and leaving live capture
+// open protects one of them — the same half-covered mistake the reads had.
+// app/training/record.tsx takes roundId from the URL, app.config.js registers a
+// URL scheme, and useCamera's save path is a bare saveLocalClip({ round_id })
+// with no ownership predicate.
+test('live capture is gated too, not just the import path', () => {
+  const record = readFileSync(join(root, 'app/training/record.tsx'), 'utf8');
+  assert.match(record, /ownsTrainingRound/, 'the capture screen must check ownership');
+  assert.match(training, /export async function ownsTrainingRound/);
+  // The camera is armed on mount while the check is still resolving, so the
+  // binding is gated, not merely the render.
+  assert.match(
+    record,
+    /roundId: owned === true \? \(roundId \?\? ''\) : ''/,
+    'the useCamera binding must not carry an unverified round id'
+  );
+  assert.match(record, /if \(owned === false\)/, 'an unowned session must not render the camera');
+});

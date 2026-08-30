@@ -22,7 +22,7 @@ import * as Haptics from 'expo-haptics';
 import { X, ListVideo, Undo2 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { useCamera } from '@/hooks/useCamera';
-import { CLUBS, listTrainingClips, type TrainingClub } from '@/lib/training';
+import { CLUBS, listTrainingClips, ownsTrainingRound, type TrainingClub } from '@/lib/training';
 import { deleteClipToBin } from '@/lib/clipBin';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -41,13 +41,40 @@ export default function TrainingRecordScreen() {
   const [counts, setCounts] = useState<Map<number, number>>(new Map());
   const [lastClipId, setLastClipId] = useState<number | null>(null);
 
+  // Does the signed-in account own this session? `roundId` comes from the URL
+  // and app.config.js registers a URL scheme, so this route is externally
+  // reachable — and useCamera's save path is a bare saveLocalClip({ round_id })
+  // with no ownership predicate. Without this, a link carrying someone else's
+  // round id would film B's swings into A's session, silently: the reads are
+  // gated now, so the shot counter would show zero and the screen would look
+  // like a fresh session rather than an error.
+  //
+  // null = still checking, false = not ours.
+  const [owned, setOwned] = useState<boolean | null>(null);
+  useEffect(() => {
+    if (!roundId) {
+      setOwned(false);
+      return;
+    }
+    let alive = true;
+    ownsTrainingRound(roundId)
+      .then((ok) => alive && setOwned(ok))
+      .catch(() => alive && setOwned(false));
+    return () => {
+      alive = false;
+    };
+  }, [roundId]);
+
   const countsRef = useRef(counts);
   countsRef.current = counts;
   const clubRef = useRef(club);
   clubRef.current = club;
 
   const camera = useCamera({
-    roundId: roundId ?? '',
+    // The camera is armed on mount while `owned` is still resolving, so the
+    // binding is gated too, not just the render below. An empty round id
+    // writes an orphan row rather than into somebody else's round.
+    roundId: owned === true ? (roundId ?? '') : '',
     holeNumber: club.holeNumber,
     shotNumber: (counts.get(club.holeNumber) ?? 0) + 1,
     onClipSaved: (clip) => {
@@ -156,6 +183,29 @@ export default function TrainingRecordScreen() {
       },
     ]);
   }, [recordingBusy, roundId]);
+
+  // Ownership decides before the camera is offered at all — checked ahead of
+  // the permission prompt so a link to somebody else's session never gets as
+  // far as asking for the camera.
+  if (owned === null) {
+    return (
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <ActivityIndicator color={theme.colors.primary} />
+      </View>
+    );
+  }
+  if (owned === false) {
+    return (
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <Text style={{ color: theme.colors.textPrimary, fontSize: 16, marginBottom: 16, textAlign: 'center' }}>
+          That practice session isn't available on this account.
+        </Text>
+        <Pressable onPress={() => router.replace('/training')} style={styles.retryBtn}>
+          <Text style={{ color: '#fff', fontWeight: '700' }}>Back to practice</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   if (isNative && camera.hasPermission === false) {
     return (
