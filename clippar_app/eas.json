@@ -17,7 +17,6 @@
       }
     },
     "dev-standalone": {
-      "_comment": "Clippar Dev as a normal app: dev bundle id and dev backend, but NO dev client - the JS is embedded, so it opens and runs with no Metro server and no laptop. Subscribes to the development update channel so OTA publishes still reach it.",
       "distribution": "internal",
       "channel": "development",
       "environment": "development",
