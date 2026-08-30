@@ -891,11 +891,21 @@ export default function EditorScreen() {
       return;
     }
     if (totalClips === 0) return;
+    if (isTraining) {
+      // Henry, 31 Aug: previewing practice "should be exactly like the watch
+      // mode but in the editor". One playback behaviour for practice content
+      // everywhere — so this IS the watch mode: the same ASMR player, same
+      // per-shot play length control (0.5/1/2/3s), same club labels, not a
+      // round-preview variant of it. No scorecard, because that screen has
+      // never had one.
+      router.push(`/training/play?roundId=${state.roundId}`);
+      return;
+    }
     router.push({
       pathname: '/round/preview',
       params: { roundId: state.roundId, startIndex: '0' },
     });
-  }, [state.roundId, totalClips, hasUntrimmedClips]);
+  }, [state.roundId, totalClips, hasUntrimmedClips, isTraining]);
 
   const handleExportPress = useCallback(() => {
     if (hasUntrimmedClips) {

@@ -45,6 +45,26 @@ private struct SwingResult {
     let shotType: ShotType
 }
 
+// Field calibration, Henry, 31 Aug 2026: the shipped impact estimate reads
+// ~0.3s EARLY against real strikes. Requested fix, in his words: "make its
+// estimated impact time .3 seconds forward" and "don't change anything into
+// how else it picks anything up". So: every selection, classification and
+// confidence computation runs on the RAW pick; only the estimate that ships
+// (and therefore the trim window built around it, the stored impact_time_ms,
+// and the ball-launch window seeded from it) moves 300ms later, clamped to
+// the clip. One constant so the next field calibration is a one-line change.
+private let impactCalibrationMs: Double = 300.0
+
+private func calibrateImpact(_ r: SwingResult, durationMs: Double) -> SwingResult {
+    guard r.found else { return r }
+    return SwingResult(
+        found: r.found,
+        impactTimeMs: min(durationMs, r.impactTimeMs + impactCalibrationMs),
+        impactFrameIndex: r.impactFrameIndex,
+        confidence: r.confidence,
+        shotType: r.shotType)
+}
+
 public class ShotDetectorModule: Module {
     public func definition() -> ModuleDefinition {
         Name("ShotDetector")
@@ -320,7 +340,7 @@ public class ShotDetectorModule: Module {
                 diag.poseFrameCount = poseFrames.count
                 diag.hadAudioTrack = !asset.tracks(withMediaType: .audio).isEmpty
                 diag.hadAnyTransient = !audioTransients.isEmpty
-                let result = self.dispatchDetection(
+                let rawResult = self.dispatchDetection(
                     strategy: strategy,
                     poseFrames: poseFrames,
                     audioTransients: audioTransients,
@@ -329,6 +349,8 @@ public class ShotDetectorModule: Module {
                     options: options,
                     diag: &diag
                 )
+                // See calibrateImpact — +300ms on the shipped estimate only.
+                let result = calibrateImpact(rawResult, durationMs: CMTimeGetSeconds(asset.duration) * 1000.0)
 
                 let detectionElapsed = CACurrentMediaTime() - startTime
                 let durationMs = CMTimeGetSeconds(asset.duration) * 1000.0
@@ -530,12 +552,14 @@ public class ShotDetectorModule: Module {
                 let audioTransients = try self.detectAudioTransients(from: asset)
 
                 // Run the state machine to find the best swing
-                let result = self.detectSwingEvent(
+                let rawClassifyResult = self.detectSwingEvent(
                     poseFrames: poseFrames,
                     audioTransients: audioTransients,
                     asset: asset,
                     recentShotTypes: []
                 )
+                // See calibrateImpact — +300ms on the shipped estimate only.
+                let result = calibrateImpact(rawClassifyResult, durationMs: CMTimeGetSeconds(asset.duration) * 1000.0)
 
                 let elapsed = CACurrentMediaTime() - startTime
                 let durationMs = CMTimeGetSeconds(asset.duration) * 1000.0

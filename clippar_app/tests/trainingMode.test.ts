@@ -147,3 +147,14 @@ test('import fetches iCloud videos instead of refusing', () => {
   assert.match(catches, /launchImageLibraryAsync\(pickerOptions\)/, 'retries once — iCloud downloads resume');
   assert.match(catches, /reason/, 'the alert reports the real error, not a guessed cause');
 });
+
+// Henry, 31 Aug: previewing practice in the editor "should be exactly like
+// the watch mode". One playback behaviour for practice content everywhere —
+// the editor's Preview must open THE watch screen, not a variant of it.
+test('editor preview for a practice session IS the watch mode', () => {
+  const ed = readFileSync(join(root, 'app/round/editor.tsx'), 'utf8');
+  const block = ed.match(/const handlePreviewAll[\s\S]*?\n  \}, /)?.[0] ?? '';
+  assert.match(block, /isTraining/);
+  assert.match(block, /\/training\/play\?roundId=/);
+  assert.match(block, /'\/round\/preview'/, 'round previews still use the round player');
+});
