@@ -298,16 +298,20 @@ function RecordShotScene({ onNext }: { onNext: () => void }) {
     <View style={styles.fill}>
       <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />
       {/* Live-recording chrome, same visual grammar as the real screen */}
+      {/* REC sits BESIDE the hole chip — top-right belongs to the parent's
+          Skip button, and the two overlapped in the first sim pass. */}
       <View style={styles.hudTop}>
-        <View style={styles.hudChip}><Text style={styles.hudChipText}>Hole 1 · Par 4</Text></View>
-        {phase !== 'address' && (
-          <View style={[styles.hudChip, { backgroundColor: 'rgba(229,57,53,0.9)' }]}>
-            <Text style={styles.hudChipText}>● REC</Text>
-          </View>
-        )}
+        <View style={{ flexDirection: 'row', gap: 8 }}>
+          <View style={styles.hudChip}><Text style={styles.hudChipText}>Hole 1 · Par 4</Text></View>
+          {phase !== 'address' && (
+            <View style={[styles.hudChip, { backgroundColor: 'rgba(229,57,53,0.9)' }]}>
+              <Text style={styles.hudChipText}>● REC</Text>
+            </View>
+          )}
+        </View>
       </View>
       {phase === 'slowmo' && (
-        <Animated.View entering={FadeIn.duration(250)} style={styles.beatWrap}>
+        <Animated.View entering={FadeIn.duration(250)} style={styles.slowmoWrap}>
           <Text style={styles.beatText}>Slow-mo on the strike. Automatic.</Text>
         </Animated.View>
       )}
@@ -483,6 +487,7 @@ const styles = StyleSheet.create({
   h1: { color: '#fff', fontSize: 26, fontWeight: '800', textAlign: 'center' },
   sub: { color: 'rgba(255,255,255,0.75)', fontSize: 15, textAlign: 'center', lineHeight: 22 },
   hint: { color: '#FFD54F', fontSize: 14, fontWeight: '600' },
+  slowmoWrap: { position: 'absolute', top: 130, left: 24, right: 24, alignItems: 'center' },
   beatWrap: { position: 'absolute', bottom: 130, left: 24, right: 24, alignItems: 'center' },
   beatText: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   brandWrap: { position: 'absolute', top: 70, left: 0, right: 0, alignItems: 'center' },

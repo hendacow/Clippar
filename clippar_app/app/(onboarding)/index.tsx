@@ -132,6 +132,29 @@ export default function OnboardingFunnel() {
     router.replace('/(auth)/signup');
   }, [finish]);
 
+  const Current = STEPS[step];
+  const props: FlowScreenProps = useMemo(
+    () => ({
+      answers,
+      setAnswers,
+      onNext: advance,
+      onSkip: advance,
+      onLogin,
+      onSeePro,
+      onMaybeLater,
+      ahaOutcome,
+      setAhaOutcome,
+    }),
+    [answers, setAnswers, advance, onLogin, onSeePro, onMaybeLater, ahaOutcome]
+  );
+
+  // Endowed progress: never zero, completes at the pro gate.
+  const progress = PROGRESS_START + (1 - PROGRESS_START) * (step / (STEPS.length - 1));
+
+  // Variant branch lives BELOW every hook. Early-returning above the
+  // useMemo made the v2->v1 handoff render MORE hooks than the previous
+  // render ("Rendered more hooks than during the previous render") — caught
+  // live in the simulator pass, which is exactly what it exists for.
   if (variant === null) {
     return <View style={{ flex: 1, backgroundColor: '#0A0A0F' }} />;
   }
@@ -152,25 +175,6 @@ export default function OnboardingFunnel() {
       />
     );
   }
-
-  const Current = STEPS[step];
-  const props: FlowScreenProps = useMemo(
-    () => ({
-      answers,
-      setAnswers,
-      onNext: advance,
-      onSkip: advance,
-      onLogin,
-      onSeePro,
-      onMaybeLater,
-      ahaOutcome,
-      setAhaOutcome,
-    }),
-    [answers, setAnswers, advance, onLogin, onSeePro, onMaybeLater, ahaOutcome]
-  );
-
-  // Endowed progress: never zero, completes at the pro gate.
-  const progress = PROGRESS_START + (1 - PROGRESS_START) * (step / (STEPS.length - 1));
 
   return (
     <View style={{ flex: 1, backgroundColor: '#0A0A0F' }}>
