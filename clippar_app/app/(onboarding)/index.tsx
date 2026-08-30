@@ -16,7 +16,7 @@
  *  - Pro gate "Not now" → signup.
  * All three mark the funnel done + persist answers first.
  */
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useMemo, useRef, useState, useEffect } from 'react';
 import { View } from 'react-native';
 import { router } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
@@ -39,6 +39,8 @@ import {
   saveOnboardingAnswers,
   markOnboardingComplete,
 } from '@/lib/onboardingProfile';
+import { getOnboardingVariant, logFunnel, type OnboardingVariant } from '@/lib/onboardingFunnel';
+import { CinematicOnboarding } from '@/components/onboarding/cinematic/CinematicOnboarding';
 
 const STEPS = [
   HeroScreen, // 1 — show the finished value first
@@ -48,9 +50,34 @@ const STEPS = [
   ProGateScreen, // 5 — optional paid handoff
 ] as const;
 
+// Step names for funnel telemetry — index-aligned with STEPS.
+const STEP_NAMES = ['HERO', 'INTENT', 'AHA', 'REEL_READY', 'PRO_GATE'] as const;
+// The v2 cinematic flow hands off INTO this stepper at the Aha step —
+// "watch Henry, then make yours" — so the camera-roll moment is shared by
+// both variants rather than rebuilt.
+const AHA_STEP_INDEX = 2;
+
 export default function OnboardingFunnel() {
   const insets = useSafeAreaInsets();
   const [step, setStep] = useState(0);
+  // null = variant not resolved yet (one async read); render nothing rather
+  // than flashing v1 for a frame on a v2 device.
+  const [variant, setVariant] = useState<OnboardingVariant | null>(null);
+  useEffect(() => {
+    getOnboardingVariant()
+      .then((v) => {
+        setVariant(v);
+        if (v === 'v1') logFunnel('v1', STEP_NAMES[0], 'enter', 0);
+      })
+      .catch(() => setVariant('v1'));
+  }, []);
+  // v1 funnel telemetry: entering each step. v2 logs its own scenes.
+  const stepEnteredAt = useRef(Date.now());
+  useEffect(() => {
+    if (variant !== 'v1' || step === 0) return;
+    logFunnel('v1', STEP_NAMES[step] ?? String(step), 'enter', 0);
+    stepEnteredAt.current = Date.now();
+  }, [step, variant]);
   const [answers, setAnswersState] = useState<FlowAnswers>({
     intent: null,
     memorableShot: null,
@@ -79,12 +106,13 @@ export default function OnboardingFunnel() {
 
   const finish = useCallback(
     async (wantsTrial: boolean) => {
+      logFunnel(variant ?? 'v1', STEP_NAMES[step] ?? String(step), 'complete', Date.now() - stepEnteredAt.current);
       await saveOnboardingAnswers(answers);
       await markOnboardingComplete();
       await setTrialIntent(wantsTrial);
       await markSalesDone();
     },
-    [answers]
+    [answers, variant, step]
   );
 
   const onLogin = useCallback(async () => {
@@ -103,6 +131,27 @@ export default function OnboardingFunnel() {
     await finish(false);
     router.replace('/(auth)/signup');
   }, [finish]);
+
+  if (variant === null) {
+    return <View style={{ flex: 1, backgroundColor: '#0A0A0F' }} />;
+  }
+  if (variant === 'v2') {
+    return (
+      <CinematicOnboarding
+        onDone={() => {
+          // Hand off into the real funnel at the Aha step — the tutorial
+          // sold it; now they make their own from the camera roll.
+          setStep(AHA_STEP_INDEX);
+          setVariant('v1');
+          logFunnel('v2', 'HANDOFF', 'complete', 0);
+        }}
+        onSkip={() => {
+          setStep(AHA_STEP_INDEX);
+          setVariant('v1');
+        }}
+      />
+    );
+  }
 
   const Current = STEPS[step];
   const props: FlowScreenProps = useMemo(
