@@ -313,24 +313,25 @@ export async function sweepTutorialRounds(): Promise<number> {
     // retried rather than silently forgotten — and entries owned by OTHER
     // accounts are preserved untouched, so their rounds are still swept the
     // next time those accounts sign in.
-    // RE-READ rather than writing back `created`. That snapshot was taken
-    // before the loop above, which awaits `deleteRound` — a network call, and
-    // the comment further up says failing there is routine on a course. Any
-    // registry change that landed during that window would be undone by
-    // writing the snapshot back.
+    // SERIALISED, and that is what makes this safe — not the re-read.
     //
-    // The change that matters is `forgetCreatedRoundsFor`, on the
-    // account-deletion path: the sweep fires unawaited at app start
-    // (`app/_layout.tsx`), so a delete-account during a slow network wipe would
-    // have its scrub reverted here — restoring the departed account's ids
-    // permanently, since only the signed-in account ever prunes them. That is
-    // the exact remanence the scrub exists to close.
+    // The hazard: this used to write back `created`, a snapshot taken before
+    // the loop above, which awaits `deleteRound` — a network call, routinely
+    // slow on a course. The sweep fires unawaited at app start
+    // (`app/_layout.tsx`), so a delete-account during that window had its
+    // `forgetCreatedRoundsFor` scrub undone here, restoring the departed
+    // account's ids permanently: only the signed-in account ever prunes them.
     //
-    // Removing the swept ids from whatever the registry holds NOW is also just
-    // more correct: the intent is "drop these ids", not "replace the list with
-    // a stale copy minus these ids".
-    // Queued — and ONLY this tail. The delete loop above awaits a network call
-    // and must never hold the queue.
+    // Re-reading was the first fix and it only NARROWED the window, from the
+    // whole network loop to the gap between the read and the write — both of
+    // which await. `local_settings` has no transaction and no compare-and-swap,
+    // so nothing but the queue makes a read-modify-write atomic against another
+    // one. An earlier version of this comment presented the re-read as the
+    // protection; a reviewer read it that way and re-filed the race, which is
+    // how a comment describing a superseded rationale does damage.
+    //
+    // ONLY this tail is queued. The delete loop above must never hold the
+    // queue, and `createSerialQueue` has no reentrancy guard.
     await mutateCreatedIds((entries) => entries.filter((e) => !sweptIds.has(e.id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
