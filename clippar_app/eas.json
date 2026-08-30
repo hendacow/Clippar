@@ -26,7 +26,8 @@
         "buildConfiguration": "Release"
       },
       "env": {
-        "APP_VARIANT": "development"
+        "APP_VARIANT": "development",
+        "SENTRY_DISABLE_AUTO_UPLOAD": "true"
       }
     },
     "development-simulator": {
