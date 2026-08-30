@@ -119,9 +119,61 @@ test('the bin fails closed when no session resolves', () => {
   const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
   assert.match(
     del,
-    /if \(!\(await binKey\(\)\)\) return null;/,
+    /const key = await binKey\(\);\s*\n\s*if \(!key\) return null;/,
     'a delete with nowhere to record recovery must refuse, not proceed'
   );
+  // The refusal has to come before deleteLocalClip, or the row is already gone.
+  assert.ok(
+    del.indexOf('if (!key) return null;') < del.indexOf('deleteLocalClip'),
+    'the ownership check must precede the row delete'
+  );
+});
+
+// binQueue orders jobs against each other, not against auth changes, and
+// sessionUserId() can fall back to a cached id on a transient getSession()
+// failure — so resolving the owner more than once per job means a read and a
+// write can straddle two accounts, filing A's clip row into B's bin.
+test('each queued job resolves the owning account exactly once', () => {
+  for (const fn of [
+    'deleteClipToBin',
+    'restoreClipFromBin',
+    'purgeClipFromBin',
+    'purgeAllBinnedClips',
+  ]) {
+    const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.notEqual(body, '', `${fn} should still exist`);
+    assert.equal(
+      (body.match(/await binKey\(\)/g) ?? []).length,
+      1,
+      `${fn} must resolve the account once and thread the key`
+    );
+    assert.doesNotMatch(
+      body,
+      /await (readBin|writeBin)\(/,
+      `${fn} must use the key-taking readBinAt/writeBinAt, which cannot re-resolve`
+    );
+  }
+});
+
+// Renaming the key stranded every entry written by an earlier build: nothing
+// read the old row, so nothing unlinked the videos it pinned — and
+// "remove my videos from this phone" walked straight past them.
+test('the pre-scoping device-wide bin is drained, not orphaned', () => {
+  assert.match(bin, /const LEGACY_BIN_KEY = 'clips\.bin\.v1'/);
+  assert.match(bin, /async function drainLegacyBin/);
+  // Purged, never adopted: adopting would hand the next account the previous
+  // one's entries, which is the bug the scoping fixed.
+  assert.doesNotMatch(
+    bin.match(/async function drainLegacyBin[\s\S]*?\n}/)?.[0] ?? '',
+    /writeBinAt/,
+    'legacy entries must be destroyed, not migrated into a scoped bin'
+  );
+  for (const fn of ['deleteClipToBin', 'restoreClipFromBin', 'purgeClipFromBin', 'purgeAllBinnedClips']) {
+    const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.match(body, /await drainLegacyBin\(\)/, `${fn} must drain the legacy bin first`);
+  }
+  const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  assert.match(storage, /\['clips\.bin\.v1'\]/, 'sign-out must drop the legacy key too');
 });
 
 // removeLocalMediaForCurrentUser walks rounds via deleteLocalRound, and a

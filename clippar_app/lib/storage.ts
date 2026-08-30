@@ -1714,9 +1714,17 @@ export async function clearLocalDatabase(): Promise<void> {
     ['DELETE FROM local_settings     WHERE key = ?', [`pro.status_cache.${ownerUserId}`]],
     // Same reasoning, second per-account entry: the recently-deleted clip bin
     // (lib/clipBin.ts, keyed `clips.bin.v1.<userId>`) holds whole clip rows for
-    // this user. Its video files are unlinked separately by the caller, which
-    // walks the bin before this runs — this only drops the metadata.
+    // this user. This drops the metadata only; the video files those entries
+    // pinned are covered by wipeLocalUserData's wholesale clips/ directory
+    // delete (removeOwnedMediaDirectories), which runs straight after this.
+    // NOT by a bin walk — an earlier version of this comment claimed the
+    // caller walks the bin first, and it does not: wipeLocalUserData is
+    // clearLocalDatabase's only caller and never calls purgeAllBinnedClips.
     ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
+    // The pre-scoping device-wide bin. clipBin drains it on first use, but a
+    // sign-out that happens before any bin operation would otherwise leave the
+    // row (and a previous account's clip metadata) behind indefinitely.
+    ['DELETE FROM local_settings     WHERE key = ?', ['clips.bin.v1']],
   ];
   for (const [sql, params] of scopedDeletes) {
     try {

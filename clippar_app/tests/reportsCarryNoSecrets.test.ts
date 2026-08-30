@@ -24,6 +24,14 @@ import test from 'node:test';
 
 const repoRoot = join(import.meta.dirname, '..', '..');
 
+/**
+ * Defaults that match the credential-shaped pattern but are not secrets, so a
+ * report may name them freely. Kept as an explicit list rather than inferred:
+ * a value only belongs here because someone decided it is public, never
+ * because it happened to be short.
+ */
+const NON_SECRET_DEFAULTS = new Set(['true', 'false', 'none', 'null', 'development', 'production']);
+
 /** Literal defaults in `os.getenv("NAME", "literal")` / `os.environ.get(...)`. */
 function fallbackLiteralsInAppPy(): string[] {
   let source: string;
@@ -35,8 +43,16 @@ function fallbackLiteralsInAppPy(): string[] {
   const pattern = /os\.(?:getenv|environ\.get)\(\s*["'][A-Z_]*(?:KEY|PASSWORD|SECRET|TOKEN)["']\s*,\s*["']([^"']+)["']\s*\)/g;
   const found = new Set<string>();
   for (const match of source.matchAll(pattern)) {
-    // Ignore anything too short to be a meaningful search term.
-    if (match[1] && match[1].length >= 8) found.add(match[1]);
+    const literal = match[1];
+    if (!literal) continue;
+    // A length floor stops ordinary words ("true", "dev") matching half the
+    // prose in every report. It was 8, which would have let a SHORT fallback
+    // credential be quoted verbatim while this test still passed — so it is 4
+    // now, with the handful of non-secret defaults that live in this shape
+    // allow-listed by value rather than waved through by length.
+    if (literal.length < 4) continue;
+    if (NON_SECRET_DEFAULTS.has(literal.toLowerCase())) continue;
+    found.add(literal);
   }
   return [...found];
 }

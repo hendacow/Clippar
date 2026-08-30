@@ -90,10 +90,23 @@ export interface BinnedClip {
   roundId: string;
 }
 
-async function readBin(): Promise<BinnedClip[]> {
+/**
+ * Read/write take the key as an ARGUMENT rather than resolving it themselves.
+ *
+ * Each mutation used to resolve the owner up to three times across await
+ * points — the guard, then `readBin`, then `writeBin` — and `binQueue`
+ * serialises jobs against each other, not against auth changes.
+ * `sessionUserId()` also falls back to a cached `lastKnownUserId` when
+ * `getSession()` transiently fails, so consecutive calls inside one job are
+ * not guaranteed to agree. A sign-out landing mid-job could therefore read
+ * from A's bin and write to B's — filing A's clip row into B's recovery list,
+ * where B's "Delete for good" unlinks A's video. That is the cross-account
+ * destruction this module exists to prevent, reached through a narrower door.
+ *
+ * So every queued job resolves the key ONCE and threads it through.
+ */
+async function readBinAt(key: string): Promise<BinnedClip[]> {
   try {
-    const key = await binKey();
-    if (!key) return [];
     const raw = await getSetting(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
@@ -106,11 +119,54 @@ async function readBin(): Promise<BinnedClip[]> {
   }
 }
 
-/** Throws when no session resolves, so a caller cannot write a shared bin. */
-async function writeBin(entries: BinnedClip[]): Promise<void> {
-  const key = await binKey();
-  if (!key) throw new Error('clipBin: no signed-in user to scope the bin to');
+async function writeBinAt(key: string, entries: BinnedClip[]): Promise<void> {
   await setSetting(key, JSON.stringify(entries));
+}
+
+/** Convenience for the read-only, unqueued `listBinnedClips`. */
+async function readBin(): Promise<BinnedClip[]> {
+  const key = await binKey();
+  return key ? readBinAt(key) : [];
+}
+
+/**
+ * The pre-scoping, device-wide bin key.
+ *
+ * Renaming to `clips.bin.v1.<userId>` left every entry written by an earlier
+ * build stranded: nothing reads the old row, so nothing ever unlinks the video
+ * files it pins. `purgeAllBinnedClips` could not reach them, which means
+ * "remove my videos from this phone" walked straight past up to MAX_ENTRIES
+ * videos and reported success — a failed erasure on the one screen a user is
+ * told to trust before handing the phone on.
+ *
+ * Leaving it orphaned was my first call and it was wrong: the choice is not
+ * "adopt or ignore". These entries cannot be attributed to an account, so they
+ * are PURGED rather than adopted — and they are clips whose owner already
+ * chose to delete them, so destroying them is the correct end state, not a
+ * loss. Adopting them would hand the next account the previous one's clips,
+ * which is the bug this scoping fixed.
+ */
+const LEGACY_BIN_KEY = 'clips.bin.v1';
+let legacyDrained = false;
+
+async function drainLegacyBin(): Promise<void> {
+  if (legacyDrained) return;
+  legacyDrained = true;
+  try {
+    const raw = await getSetting(LEGACY_BIN_KEY);
+    if (!raw) return;
+    // Drop the metadata FIRST, so a stalled unlink cannot leave entries
+    // pointing at videos the user has already asked us to remove.
+    await setSetting(LEGACY_BIN_KEY, null);
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed)) {
+      for (const entry of parsed as BinnedClip[]) await purgeEntry(entry);
+    }
+  } catch {
+    // Unparseable or unreadable — the key is dropped either way, and
+    // wipeLocalUserData's wholesale clips/ delete is the backstop for whatever
+    // files it was pinning. Never throw from a migration path.
+  }
 }
 
 /**
@@ -124,19 +180,23 @@ async function writeBin(entries: BinnedClip[]): Promise<void> {
  */
 export async function deleteClipToBin(clipId: number, roundId: string): Promise<BinnedClip | null> {
   return binQueue.run(async () => {
-    // Checked BEFORE the row is touched. With no session there is nowhere to
+    await drainLegacyBin();
+    // Resolved ONCE, and BEFORE the row is touched. Once, so every read and
+    // write below belongs to this account even if the session changes
+    // underneath us. Before, because with no session there is nowhere to
     // record the recovery entry, and a delete we cannot undo is exactly what
     // this module exists to prevent — so refuse rather than remove the row and
     // rely on the rollback below.
-    if (!(await binKey())) return null;
+    const key = await binKey();
+    if (!key) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
     const entry: BinnedClip = { row, fileUris, deletedAt: new Date().toISOString(), roundId };
-    const entries = [entry, ...(await readBin())];
+    const entries = [entry, ...(await readBinAt(key))];
     const kept = entries.slice(0, MAX_ENTRIES);
     const evicted = entries.slice(MAX_ENTRIES);
     try {
-      await writeBin(kept);
+      await writeBinAt(key, kept);
     } catch (err) {
       // The row is already out of SQLite at this point, so a failed bin write
       // means an unrecoverable clip. Put the row back and report the delete as
@@ -154,11 +214,14 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
 /** Put a binned clip back. Returns false if its row already exists again. */
 export async function restoreClipFromBin(clipId: number): Promise<boolean> {
   return binQueue.run(async () => {
-    const entries = await readBin();
+    await drainLegacyBin();
+    const key = await binKey();
+    if (!key) return false;
+    const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return false;
     const restored = await restoreLocalClip(entry.row);
-    await writeBin(entries.filter((e) => Number(e.row?.id) !== clipId));
+    await writeBinAt(key, entries.filter((e) => Number(e.row?.id) !== clipId));
     return restored;
   });
 }
@@ -182,10 +245,13 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
 /** Remove one clip from the bin permanently — files unlinked, no way back. */
 export async function purgeClipFromBin(clipId: number): Promise<void> {
   return binQueue.run(async () => {
-    const entries = await readBin();
+    await drainLegacyBin();
+    const key = await binKey();
+    if (!key) return;
+    const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return;
-    await writeBin(entries.filter((e) => Number(e.row?.id) !== clipId));
+    await writeBinAt(key, entries.filter((e) => Number(e.row?.id) !== clipId));
     await purgeEntry(entry);
   });
 }
@@ -202,11 +268,16 @@ export async function purgeClipFromBin(clipId: number): Promise<void> {
 export async function purgeAllBinnedClips(): Promise<number> {
   return binQueue.run(async () => {
     try {
-      const entries = await readBin();
+      // Pre-scoping entries are this action's responsibility too — they are
+      // exactly the videos it promises to remove.
+      await drainLegacyBin();
+      const key = await binKey();
+      if (!key) return 0;
+      const entries = await readBinAt(key);
       if (entries.length === 0) return 0;
       // Clear the list first: if a file unlink stalls, the entries must not be
       // left pointing at videos the user has already asked us to remove.
-      await writeBin([]);
+      await writeBinAt(key, []);
       for (const entry of entries) await purgeEntry(entry);
       return entries.length;
     } catch {
