@@ -75,4 +75,12 @@ test('live capture is gated too, not just the import path', () => {
     'the useCamera binding must not carry an unverified round id'
   );
   assert.match(record, /if \(owned === false\)/, 'an unowned session must not render the camera');
+  // The verdict must not outlive the id it was made for: expo-router updates
+  // params in place, so a second deep link re-renders rather than remounting.
+  const effect = record.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[roundId\]\);/)?.[0] ?? '';
+  assert.match(effect, /setOwned\(null\);/, 'the check must reset before re-resolving');
+  assert.ok(
+    effect.indexOf('setOwned(null);') < effect.indexOf('ownsTrainingRound('),
+    'the reset must precede the new check, or the stale verdict arms the camera'
+  );
 });

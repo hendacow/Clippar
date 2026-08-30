@@ -52,6 +52,14 @@ export default function TrainingRecordScreen() {
   // null = still checking, false = not ours.
   const [owned, setOwned] = useState<boolean | null>(null);
   useEffect(() => {
+    // Reset FIRST. Without this the verdict for the previous round survives
+    // the async re-check, and `useCamera` is rebuilt with the new, unverified
+    // id while `owned` still reads true — so the render gates pass and the
+    // camera stays armed against a round nothing has checked. expo-router
+    // updates params in place on a mounted screen, so a second deep link to
+    // this route re-renders rather than remounting: exactly the path this gate
+    // exists for was the one it did not cover.
+    setOwned(null);
     if (!roundId) {
       setOwned(false);
       return;
