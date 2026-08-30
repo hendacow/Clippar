@@ -173,6 +173,17 @@ export async function clearAccountLinkedCaches(): Promise<void> {
  */
 export async function removeLocalMediaForCurrentUser(): Promise<number> {
   let removed = 0;
+  // Before the rounds, because a binned clip no longer has a local_clips row:
+  // deleteLocalRound below would never reach its video files, so up to 30 of
+  // them would survive the one action whose whole purpose is removing them.
+  // Lazy require for the same import-cycle reason as the shot-detector calls.
+  try {
+    const { purgeAllBinnedClips } =
+      require('./clipBin') as typeof import('./clipBin');
+    await purgeAllBinnedClips();
+  } catch (err) {
+    console.warn('[localWipe] purgeAllBinnedClips failed', err);
+  }
   try {
     const roundIds = await listLocalRoundIdsForCurrentUser();
     for (const id of roundIds) {

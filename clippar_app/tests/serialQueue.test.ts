@@ -93,3 +93,49 @@ test('a failed bin write puts the clip row back', () => {
   assert.match(body, /catch/, 'the bin write needs a failure path');
   assert.match(body, /restoreLocalClip\(row\)/, 'a failed bin write must restore the deleted row');
 });
+
+// ---------------------------------------------------------------------------
+// Account scoping. One clippar.db is shared by every account that signs in on
+// the handset and sign-out deliberately does not wipe it (lib/localScope.ts),
+// so a device-wide bin would show user A's deleted shots to user B — and B's
+// "Delete for good" would unlink A's video files.
+// ---------------------------------------------------------------------------
+
+test('the bin key is per account, not per handset', () => {
+  assert.doesNotMatch(
+    bin,
+    /const BIN_KEY = ['"]clips\.bin\.v1['"]/,
+    'a single device-wide key leaks one account’s deletions to the next'
+  );
+  assert.match(bin, /BIN_KEY_PREFIX/, 'the key must carry the owning user id');
+  assert.match(bin, /currentSessionUserId/, 'ownership comes from the session, not the caller');
+});
+
+test('the bin fails closed when no session resolves', () => {
+  const key = bin.match(/async function binKey[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(key, '', 'binKey should exist');
+  assert.match(key, /userId \?.*: null/s, 'no session must yield no key, never a shared one');
+
+  const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(
+    del,
+    /if \(!\(await binKey\(\)\)\) return null;/,
+    'a delete with nowhere to record recovery must refuse, not proceed'
+  );
+});
+
+// removeLocalMediaForCurrentUser walks rounds via deleteLocalRound, and a
+// binned clip has no local_clips row — so without an explicit purge its video
+// files survive the one action whose purpose is removing them.
+test('"remove my videos" empties the bin too', () => {
+  const wipe = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
+  const body = wipe.match(/export async function removeLocalMediaForCurrentUser[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(body, /purgeAllBinnedClips/, 'binned videos must go with the rest');
+  assert.match(bin, /export async function purgeAllBinnedClips/);
+});
+
+// The sign-out wipe drops rows by owner; the bin's metadata must go with it.
+test('clearLocalDatabase drops the departing account’s bin key', () => {
+  const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  assert.match(storage, /clips\.bin\.v1\.\$\{ownerUserId\}/);
+});

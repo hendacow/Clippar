@@ -200,6 +200,22 @@ async function sessionUserId(): Promise<string | null> {
 }
 
 /**
+ * The signed-in user id, for callers outside this module that must scope a
+ * `local_settings` entry to an account rather than the handset.
+ *
+ * `local_settings` has no owner column and most of it is genuinely device
+ * preference (trim window, playback speed) that should survive a change of
+ * account — so per-account entries are distinguished by KEY, the convention
+ * `pro.status_cache.<userId>` established and `clips.bin.v1.<userId>` follows.
+ * Returns null when no session resolves, and callers must fail closed on that:
+ * one shared key is exactly the cross-account leak `lib/localScope.ts` exists
+ * to prevent.
+ */
+export async function currentSessionUserId(): Promise<string | null> {
+  return sessionUserId();
+}
+
+/**
  * Resolve the signed-in user for a scoped read, claiming any pre-migration
  * rows for them first (see shouldClaimLegacyRows). Doing the backfill here —
  * on the read path — rather than in a background task means a scoped query can
@@ -1696,6 +1712,11 @@ export async function clearLocalDatabase(): Promise<void> {
     // subscription.ts keys as `pro.status_cache.<userId>`, so remove exactly
     // that and leave the rest alone.
     ['DELETE FROM local_settings     WHERE key = ?', [`pro.status_cache.${ownerUserId}`]],
+    // Same reasoning, second per-account entry: the recently-deleted clip bin
+    // (lib/clipBin.ts, keyed `clips.bin.v1.<userId>`) holds whole clip rows for
+    // this user. Its video files are unlinked separately by the caller, which
+    // walks the bin before this runs — this only drops the metadata.
+    ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
   ];
   for (const [sql, params] of scopedDeletes) {
     try {

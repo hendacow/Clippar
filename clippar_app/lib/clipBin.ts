@@ -16,11 +16,43 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, type LocalClipRow } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 import { createSerialQueue } from '@/lib/serialQueue';
 
-const BIN_KEY = 'clips.bin.v1';
+/**
+ * The bin is keyed PER ACCOUNT, not per handset.
+ *
+ * One `clippar.db` is shared by every account that ever signs in, and sign-out
+ * deliberately does not wipe it — `lib/localScope.ts` explains why (this app
+ * holds the only copy of footage that cannot be re-recorded) and scopes the
+ * round reads instead. A single `clips.bin.v1` row would have walked straight
+ * past that: user A deletes shots and hands the phone over; B signs in, opens
+ * Profile → Recently deleted, and sees A's entries — because
+ * `listBinnedClips()` had no ownership filter. "Delete for good" would then
+ * unlink A's video files, and "Put back" would reinsert A's row under B's
+ * session. Irreversible destruction of another account's footage from an
+ * ordinary screen.
+ *
+ * `local_settings` has no owner column, so ownership lives in the key, exactly
+ * as `pro.status_cache.<userId>` already does. `clearLocalDatabase` deletes
+ * this key for the account it wipes.
+ */
+const BIN_KEY_PREFIX = 'clips.bin.v1.';
+
+/**
+ * Fails CLOSED. With no resolvable session there is no bin — never the shared
+ * one — so a read returns nothing and a delete refuses rather than removing a
+ * row it cannot record.
+ */
+async function binKey(): Promise<string | null> {
+  try {
+    const userId = await currentSessionUserId();
+    return userId ? BIN_KEY_PREFIX + userId : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Every mutation below is read-bin → change it → write-bin, over a single
@@ -60,7 +92,9 @@ export interface BinnedClip {
 
 async function readBin(): Promise<BinnedClip[]> {
   try {
-    const raw = await getSetting(BIN_KEY);
+    const key = await binKey();
+    if (!key) return [];
+    const raw = await getSetting(key);
     if (!raw) return [];
     const parsed = JSON.parse(raw) as unknown;
     return Array.isArray(parsed) ? (parsed as BinnedClip[]) : [];
@@ -72,8 +106,11 @@ async function readBin(): Promise<BinnedClip[]> {
   }
 }
 
+/** Throws when no session resolves, so a caller cannot write a shared bin. */
 async function writeBin(entries: BinnedClip[]): Promise<void> {
-  await setSetting(BIN_KEY, JSON.stringify(entries));
+  const key = await binKey();
+  if (!key) throw new Error('clipBin: no signed-in user to scope the bin to');
+  await setSetting(key, JSON.stringify(entries));
 }
 
 /**
@@ -87,6 +124,11 @@ async function writeBin(entries: BinnedClip[]): Promise<void> {
  */
 export async function deleteClipToBin(clipId: number, roundId: string): Promise<BinnedClip | null> {
   return binQueue.run(async () => {
+    // Checked BEFORE the row is touched. With no session there is nowhere to
+    // record the recovery entry, and a delete we cannot undo is exactly what
+    // this module exists to prevent — so refuse rather than remove the row and
+    // rely on the rollback below.
+    if (!(await binKey())) return null;
     const { fileUris, row } = await deleteLocalClip(clipId, false);
     if (!row) return null;
     const entry: BinnedClip = { row, fileUris, deletedAt: new Date().toISOString(), roundId };
@@ -145,6 +187,31 @@ export async function purgeClipFromBin(clipId: number): Promise<void> {
     if (!entry) return;
     await writeBin(entries.filter((e) => Number(e.row?.id) !== clipId));
     await purgeEntry(entry);
+  });
+}
+
+/**
+ * Empty the signed-in user's whole bin for good — files unlinked.
+ *
+ * For `removeLocalMediaForCurrentUser` ("remove my videos from this phone").
+ * That walks rounds through deleteLocalRound, and a binned clip no longer HAS
+ * a local_clips row, so without this up to MAX_ENTRIES videos would survive
+ * the one action whose entire purpose is removing them. Returns how many
+ * entries were destroyed. Never throws — it is a cleanup path.
+ */
+export async function purgeAllBinnedClips(): Promise<number> {
+  return binQueue.run(async () => {
+    try {
+      const entries = await readBin();
+      if (entries.length === 0) return 0;
+      // Clear the list first: if a file unlink stalls, the entries must not be
+      // left pointing at videos the user has already asked us to remove.
+      await writeBin([]);
+      for (const entry of entries) await purgeEntry(entry);
+      return entries.length;
+    } catch {
+      return 0;
+    }
   });
 }
 
