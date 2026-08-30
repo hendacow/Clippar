@@ -263,12 +263,23 @@ function ClipCard({
             </View>
           ) : null}
 
-          {/* Remove button (top-right X) */}
+          {/* Remove button (top-right X).
+              Confirms before deleting. It did not until 30 Aug, and until the
+              same day the delete never reached SQLite, so a mis-tap was
+              harmless — the clip came back on the next focus reload. Now that
+              the delete persists, a single stray tap on an 18px target at the
+              corner of a thumbnail would destroy a shot, so the prompt is not
+              politeness, it is the thing standing between a fat finger and a
+              lost hole-in-one. The clip-actions menu's Delete has asked since
+              it shipped; this control is now consistent with it. */}
           <Pressable
             onPress={(e) => {
               e.stopPropagation?.();
               Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-              onRemove();
+              Alert.alert('Delete this shot?', 'You can put it back from Profile → Recently deleted.', [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Delete', style: 'destructive', onPress: () => onRemove() },
+              ]);
             }}
             hitSlop={6}
             style={{
@@ -1964,7 +1975,7 @@ export default function EditorScreen() {
                   onPress={() => {
                     const id = movingClip.id;
                     setMovingClip(null);
-                    Alert.alert('Delete clip', 'Remove this clip from the round?', [
+                    Alert.alert('Delete clip', 'Remove this clip from the round? You can put it back from Profile \u2192 Recently deleted.', [
                       { text: 'Cancel', style: 'cancel' },
                       { text: 'Delete', style: 'destructive', onPress: () => editor.removeClip(id) },
                     ]);

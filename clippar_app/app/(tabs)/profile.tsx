@@ -25,6 +25,7 @@ import {
   Activity,
   HardDrive,
   Ticket,
+  RotateCcw,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import Constants from 'expo-constants';
@@ -773,6 +774,13 @@ export default function ProfileScreen() {
               title="Trim Settings"
               subtitle="Auto-trim, timing, quality"
               onPress={() => router.push('/profile/trim-settings')}
+            />
+            <Divider />
+            <SettingsRow
+              icon={<RotateCcw size={18} color={theme.colors.textSecondary} />}
+              title="Recently deleted"
+              subtitle="Put back a shot you deleted by mistake"
+              onPress={() => router.push('/profile/deleted-clips')}
             />
             <Divider />
             <SettingsRow

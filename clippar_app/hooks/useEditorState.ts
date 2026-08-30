@@ -15,6 +15,7 @@ import {
 } from '@/lib/trimDiagnostics';
 import { config, resolveEffectiveTrimWindow, type TrimWindow } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
+import { deleteClipToBin, restoreClipFromBin } from '@/lib/clipBin';
 
 const DEFAULT_PAR = 4;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -352,15 +353,48 @@ export function useEditorState(roundId: string | undefined) {
     [state.roundId]
   );
 
-  const removeClip = useCallback((clipId: string) => {
-    setState((prev) => ({
-      ...prev,
-      holes: prev.holes.map((h) => ({
-        ...h,
-        clips: h.clips.filter((c) => c.id !== clipId),
-      })),
-    }));
-  }, []);
+  // Delete a clip. This used to call setState and nothing else — every other
+  // mutation in this hook persists (updateTrim writes updateClipEditorState,
+  // moveClipToHole writes hole_number) and this one did not. The editor runs
+  // editor.reload() on every focus after the first, which re-reads SQLite, so
+  // a deleted clip reappeared the moment the screen was revisited. Reported
+  // from the course on 30 Aug: "I deleted a clip, went back, and all the
+  // deleted clips were there again."
+  //
+  // It deletes for real now, which is why it deletes INTO THE BIN rather than
+  // outright: making this persist without a recovery path would turn a bug
+  // that lost nothing into one that destroys a shot on a single tap. The
+  // video files stay on disk until the entry leaves the bin.
+  const removeClip = useCallback(
+    (clipId: string) => {
+      setState((prev) => ({
+        ...prev,
+        holes: prev.holes.map((h) => ({
+          ...h,
+          clips: h.clips.filter((c) => c.id !== clipId),
+        })),
+      }));
+      const numId = parseInt(clipId, 10);
+      if (isNaN(numId) || !storage) return;
+      // Fire-and-forget to keep the tap responsive; the state update above is
+      // what the user sees, and a failed write leaves the clip in SQLite,
+      // i.e. it comes back on next reload rather than disappearing silently.
+      void deleteClipToBin(numId, state.roundId).catch(() => {});
+    },
+    [state.roundId]
+  );
+
+  /** Put back the most recently deleted clip and re-read from SQLite. */
+  const undoRemoveClip = useCallback(
+    async (clipId: string) => {
+      const numId = parseInt(clipId, 10);
+      if (isNaN(numId) || !storage) return false;
+      const ok = await restoreClipFromBin(numId);
+      if (ok) await loadRound();
+      return ok;
+    },
+    [loadRound]
+  );
 
   // Move a clip to a different hole (scorecard screen's "Move to hole"
   // action). Updates the in-memory section grouping immediately and
@@ -1402,6 +1436,7 @@ export function useEditorState(roundId: string | undefined) {
     reload: loadRound,
     reorderClips,
     removeClip,
+    undoRemoveClip,
     moveClipToHole,
     updateTrim,
     updateClipDuration,
