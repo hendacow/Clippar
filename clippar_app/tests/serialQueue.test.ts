@@ -172,8 +172,18 @@ test('the pre-scoping device-wide bin is drained, not orphaned', () => {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
     assert.match(body, /await drainLegacyBin\(\)/, `${fn} must drain the legacy bin first`);
   }
+  // And the wipe must NOT blanket-delete it: the row is device-wide, so
+  // dropping it under B loses A's recovery records and orphans A's files.
+  // drainLegacyBin's owner partition is the only correct treatment.
   const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
-  assert.match(storage, /\['clips\.bin\.v1'\]/, 'sign-out must drop the legacy key too');
+  const scoped = storage.match(/const scopedDeletes[\s\S]*?\n  \];/)?.[0] ?? '';
+  assert.notEqual(scoped, '', 'scopedDeletes should still exist');
+  assert.doesNotMatch(
+    scoped,
+    /\['clips\.bin\.v1'\]/,
+    'a blanket delete of the device-wide legacy key destroys other accounts’ entries'
+  );
+  assert.match(scoped, /clips\.bin\.v1\.\$\{ownerUserId\}/, 'the per-account key still goes');
 });
 
 // The first drain purged the WHOLE legacy list, on the reasoning that its

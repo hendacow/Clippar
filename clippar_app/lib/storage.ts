@@ -1743,16 +1743,24 @@ export async function clearLocalDatabase(): Promise<void> {
     // caller walks the bin first, and it does not: wipeLocalUserData is
     // clearLocalDatabase's only caller and never calls purgeAllBinnedClips.
     ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
-    // The pre-scoping device-wide bin. clipBin drains it on first use, but a
-    // sign-out that happens before any bin operation would otherwise leave the
-    // row (and a previous account's clip metadata) behind indefinitely.
-    ['DELETE FROM local_settings     WHERE key = ?', ['clips.bin.v1']],
-    // The tutorial's active-round marker. Device-wide and owner-less, and
-    // app/_layout only runs the tutorial sweep when it is EMPTY — so an
-    // account that signs out mid-tutorial would leave it set and silently
-    // disable tutorial cleanup for every account afterwards. It only ever
-    // holds a tutorial round belonging to the session being wiped, so clearing
-    // it here is safe as well as necessary.
+    // The PRE-SCOPING bin key (`clips.bin.v1`, no user suffix) is deliberately
+    // NOT deleted here. An earlier version of this list dropped it outright,
+    // which contradicted the rule clipBin's own `drainLegacyBin` establishes in
+    // the same breath: that row is DEVICE-WIDE, so acting on it wholesale
+    // destroys the other account's entries. A blanket delete under B loses A's
+    // recovery records with no undo AND orphans the files they pinned, because
+    // nothing can reach them once the metadata is gone. `drainLegacyBin`
+    // partitions it by round ownership instead — this account's entries purged
+    // and their files unlinked, everyone else's written back for them to drain
+    // when they next sign in — and that is the only correct treatment.
+    //
+    // The tutorial's active-round marker. app/_layout only runs the tutorial
+    // sweep when this is EMPTY, so an account that signs out mid-tutorial would
+    // leave it set and silently disable tutorial cleanup for every account
+    // afterwards. It is device-wide and owner-less, so it may hold a round
+    // belonging to a DIFFERENT account than the one being wiped — clearing it
+    // is still right, because the sweep no longer takes candidates from it, so
+    // the worst case is one uncollected tutorial round rather than a delete.
     ['DELETE FROM local_settings     WHERE key = ?', ['tutorial.active_round']],
   ];
   for (const [sql, params] of scopedDeletes) {
