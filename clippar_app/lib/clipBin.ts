@@ -384,6 +384,9 @@ export async function restoreClipFromBin(clipId: number): Promise<boolean> {
     const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return false;
+    // Before restoreLocalClip and before writeBinAt, so a refusal mutates
+    // nothing and the entry stays in the bin for whoever actually owns it.
+    if (!(await entryOwnedBy(entry, userId))) return false;
     const restored = await restoreLocalClip(entry.row);
     await writeBinAt(key, entries.filter((e) => Number(e.row?.id) !== clipId));
     return restored;
@@ -412,26 +415,32 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
 
 /** Remove one clip from the bin permanently — files unlinked, no way back. */
 /**
- * May this account purge this entry — i.e. destroy its video files?
+ * Does this entry belong to this account?
  *
  * `binKey()` alone decided this before, so the key was the only thing naming
- * whose footage got unlinked, with nothing cross-checking it the way
- * `deleteClipToBin` does. These are the two destructive paths; the read and
- * restore paths deliberately do NOT get this gate, because a binned clip can
- * legitimately outlive its round and gating them would make such entries
- * invisible and unrestorable — findings 34/41 recreated at the moment someone
- * is trying to recover a clip.
+ * whose footage got read, restored or unlinked, with nothing cross-checking it
+ * the way `deleteClipToBin` does. **All five paths that touch an entry now go
+ * through here** — the two destructive ones, the read and the restore.
  *
  * A round that is genuinely GONE has no owner to compare, so it is allowed
- * through: refusing there would make the entry permanently unpurgeable, which
- * is a retention failure rather than a fix.
+ * through: refusing there would make the entry permanently unpurgeable and
+ * unrestorable, which is a retention failure rather than a fix.
+ *
+ * **That null-tolerance is exactly why read and restore CAN be gated, and an
+ * earlier version of this docstring argued the opposite three lines above the
+ * clause that refutes it.** It said gating them would make an entry outliving
+ * its round invisible and unrestorable — findings 34/41 recreated. It would
+ * not: such an entry has `round == null` and passes. The predicate excludes
+ * only entries whose round still EXISTS and belongs to somebody else, which is
+ * the case that should never be listed or restored. The rationale was written
+ * before this predicate existed and was never re-priced when it arrived.
  *
  * **Defence in depth, stated plainly:** `local_rounds.user_id` is itself
  * reassignable (finding 23, private tracker), so this does not make the
  * destructive paths sound. It makes them require two things to go wrong rather
  * than one, which is strictly better than resting on the resolution alone.
  */
-async function entryPurgeableBy(entry: BinnedClip, userId: string): Promise<boolean> {
+async function entryOwnedBy(entry: BinnedClip, userId: string): Promise<boolean> {
   const round = await getLocalRound(entry.roundId).catch(() => null);
   // getLocalRound scopes to ITS OWN resolution of the session, so comparing
   // that row's owner against the id that built the key is what binds the two
@@ -451,7 +460,7 @@ export async function purgeClipFromBin(clipId: number): Promise<void> {
     const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return;
-    if (!(await entryPurgeableBy(entry, userId))) return;
+    if (!(await entryOwnedBy(entry, userId))) return;
     await writeBinAt(key, entries.filter((e) => Number(e.row?.id) !== clipId));
     await purgeEntry(entry);
   });
@@ -482,7 +491,7 @@ export async function purgeAllBinnedClips(): Promise<number> {
       // prove it owns is written BACK, never unlinked — the safe direction,
       // and it is what lets the gate above exist at all: refusing without
       // writing back would destroy the record while leaving the files.
-      const purgeable = await Promise.all(entries.map((e) => entryPurgeableBy(e, userId)));
+      const purgeable = await Promise.all(entries.map((e) => entryOwnedBy(e, userId)));
       const mine = entries.filter((_, i) => purgeable[i]);
       const kept = entries.filter((_, i) => !purgeable[i]);
       if (mine.length === 0) return 0;
@@ -499,6 +508,12 @@ export async function purgeAllBinnedClips(): Promise<number> {
 
 /** Newest first. Pass a roundId to see only that round's deletions. */
 export async function listBinnedClips(roundId?: string): Promise<BinnedClip[]> {
-  const entries = await readBin();
-  return roundId ? entries.filter((e) => e.roundId === roundId) : entries;
+  // Resolved once and inline, so the SAME id builds the key and closes the
+  // gate — the reason deleteClipToBin stopped using binKey(). Fails closed.
+  const userId = await currentSessionUserId().catch(() => null);
+  if (!userId) return [];
+  const entries = await readBinAt(BIN_KEY_PREFIX + userId);
+  const owned = await Promise.all(entries.map((e) => entryOwnedBy(e, userId)));
+  const visible = entries.filter((_, i) => owned[i]);
+  return roundId ? visible.filter((e) => e.roundId === roundId) : visible;
 }

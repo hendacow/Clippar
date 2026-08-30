@@ -76,3 +76,49 @@ test('deleting for good asks, restoring does not', () => {
   assert.match(screen, /Delete for good\?/);
   assert.match(screen, /cannot be undone/);
 });
+
+// Every path that touches a bin entry binds the id that built the key to the
+// round's owner. Read and restore were the two that did not, on the argument
+// that gating them would hide an entry whose round is gone — which the
+// predicate's own null-tolerance refutes: `round == null` passes. What it
+// excludes is an entry whose round still EXISTS and belongs to someone else.
+test('all five entry paths go through the ownership predicate', () => {
+  const bin = readFileSync(join(root, 'lib/clipBin.ts'), 'utf8');
+  for (const fn of [
+    'export async function listBinnedClips',
+    'export async function restoreClipFromBin',
+    'export async function purgeClipFromBin',
+    'export async function purgeAllBinnedClips',
+  ]) {
+    const body = bin.match(new RegExp(`${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.notEqual(body, '', `${fn} should still exist`);
+    assert.match(body, /entryOwnedBy\(/, `${fn} must gate on the shared ownership predicate`);
+  }
+  // The predicate must stay null-tolerant, or gating the read path DOES
+  // recreate findings 34/41 — an entry outliving its round would vanish.
+  const pred = bin.match(/async function entryOwnedBy[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(pred, /round == null \|\|/, 'a round that is gone must still pass, or recovery breaks');
+});
+
+test('the restore refusal mutates nothing', () => {
+  const bin = readFileSync(join(root, 'lib/clipBin.ts'), 'utf8');
+  const body = bin.match(/export async function restoreClipFromBin[\s\S]*?\n}/)?.[0] ?? '';
+  // Refuse BEFORE the row insert and before the bin is rewritten, so the entry
+  // survives for its real owner rather than being dropped by the refusal.
+  assert.ok(
+    body.indexOf('entryOwnedBy(') < body.indexOf('await restoreLocalClip('),
+    'the gate must precede the restore'
+  );
+  assert.ok(
+    body.indexOf('entryOwnedBy(') < body.indexOf('await writeBinAt('),
+    'the gate must precede the bin write, or a refusal destroys the entry'
+  );
+});
+
+// The read path must fail closed, like every other gate on this branch.
+test('listBinnedClips shows nothing when the account cannot be resolved', () => {
+  const bin = readFileSync(join(root, 'lib/clipBin.ts'), 'utf8');
+  const body = bin.match(/export async function listBinnedClips[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(body, /if \(!userId\) return \[\];/, 'no session must list nothing');
+  assert.doesNotMatch(body, /readBin\(\)/, 'binKey() alone is the unbound resolution this replaced');
+});

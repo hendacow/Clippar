@@ -48,7 +48,7 @@ export default function DeletedClipsScreen() {
         Haptics.notificationAsync(
           ok ? Haptics.NotificationFeedbackType.Success : Haptics.NotificationFeedbackType.Warning
         );
-        if (!ok) Alert.alert('Could not restore', 'That shot is already back in its round.');
+        if (!ok) Alert.alert('Could not restore', 'It may already be back in its round.');
       } finally {
         setBusy(null);
         refresh();
