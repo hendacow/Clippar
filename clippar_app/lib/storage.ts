@@ -207,9 +207,29 @@ async function sessionUserId(): Promise<string | null> {
  * preference (trim window, playback speed) that should survive a change of
  * account — so per-account entries are distinguished by KEY, the convention
  * `pro.status_cache.<userId>` established and `clips.bin.v1.<userId>` follows.
- * Returns null when no session resolves, and callers must fail closed on that:
- * one shared key is exactly the cross-account leak `lib/localScope.ts` exists
- * to prevent.
+ * Callers must fail closed on null: one shared key is exactly the cross-account
+ * leak `lib/localScope.ts` exists to prevent.
+ *
+ * ⚠️ **This CAN return a departed account's id, and null is not the only
+ * failure mode.** An earlier version of this docstring said it "returns null
+ * when no session resolves". That was false, and it is the sentence I wrote
+ * before building four destructive gates on top of it.
+ *
+ * `sessionUserId()` returns the module-global `lastKnownUserId` on BOTH failure
+ * branches — `if (error)` and the `catch`. That global is assigned in exactly
+ * one place (on a *successful* getSession) and **nothing clears it on
+ * sign-out**: useAuth's SIGNED_OUT branch resets RevenueCat and the round
+ * prefetch and touches nothing here, and sign-in goes through GoTrue rather
+ * than through this function. So after A signs out and B signs in, a transient
+ * getSession failure under B resolves to **A**, and a gate comparing two such
+ * answers sees them agree — on the wrong account.
+ *
+ * Failing closed on null is therefore necessary and NOT sufficient. Do not
+ * build a new ownership gate on this without reading the escalation: the fix
+ * is a strict variant that never serves the cache, plus invalidation at
+ * SIGNED_OUT, and it is deliberately out of scope here as authentication code.
+ * (Do not pair that with resetting `legacyRoundsClaimed` — that re-arms the
+ * NULL-owner backfill on the next sign-in, which is a separate escalation.)
  */
 export async function currentSessionUserId(): Promise<string | null> {
   return sessionUserId();
