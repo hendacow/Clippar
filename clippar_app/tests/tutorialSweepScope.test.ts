@@ -86,6 +86,20 @@ test('the unattributable active-round key is not a sweep candidate', () => {
   assert.doesNotMatch(sweep, /candidates\.add\(active\)/);
 });
 
+// app/_layout only sweeps when the active key is EMPTY, so an account that
+// signs out mid-tutorial would leave it set and disable tutorial cleanup for
+// every account afterwards.
+test('sign-out clears the active-round key', () => {
+  const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  assert.match(storage, /\['tutorial\.active_round'\]/);
+  const layout = readFileSync(join(root, 'app/_layout.tsx'), 'utf8');
+  assert.match(
+    layout,
+    /if \(!active\) void sweepTutorialRounds\(\)/,
+    'this is the gate that makes a stuck active key matter'
+  );
+});
+
 // Removing the orphan scan made the registry the ONLY record of a tutorial
 // round, so retiring an id after a failed delete strands that round forever:
 // deleteRound is a network call that throws, and being offline at app start is

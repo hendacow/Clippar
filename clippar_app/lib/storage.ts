@@ -1725,6 +1725,13 @@ export async function clearLocalDatabase(): Promise<void> {
     // sign-out that happens before any bin operation would otherwise leave the
     // row (and a previous account's clip metadata) behind indefinitely.
     ['DELETE FROM local_settings     WHERE key = ?', ['clips.bin.v1']],
+    // The tutorial's active-round marker. Device-wide and owner-less, and
+    // app/_layout only runs the tutorial sweep when it is EMPTY — so an
+    // account that signs out mid-tutorial would leave it set and silently
+    // disable tutorial cleanup for every account afterwards. It only ever
+    // holds a tutorial round belonging to the session being wiped, so clearing
+    // it here is safe as well as necessary.
+    ['DELETE FROM local_settings     WHERE key = ?', ['tutorial.active_round']],
   ];
   for (const [sql, params] of scopedDeletes) {
     try {
