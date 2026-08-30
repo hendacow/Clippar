@@ -483,21 +483,29 @@ const REDACTED_HEADING_SHA256: Record<string, string> = {
  * writing rather than for the property. A pin does not care what I remember.
  */
 const REDACTED_TABLE_SHA256: Record<string, string> = {
-  '12': '9689af43da0c23eef8d07ea2d74cba38ffbe6d6957555a258e471af5da97cef5',
-  '32': 'e69b3fdf46d898c33e887a91bdcf8c5c2181dc3da50ddac9c19a1016803641fa',
+  '12': '4fcb857e543518c59f08bcb4df1fe3fd5b20fbea0eda1822b914e0c81a8f3c7b',
+  '23': 'f10d27fa9e236498d4e8c40f0c440b1456ce65edf46e417d78868cee3df091e6',
+  '29': 'e14812596b6e5e370dc73adb4778cca7a9c20cd9a54826915e4ac377aeee0a03',
+  '32': '5d9a5a00b21686d704d6dd527b3aeb11c44a4ea2363885506ac648c048414c65',
 };
+
+/** The whole row, so the STATUS cell is covered too, not just the description. */
+function tableRow(report: string, finding: string): string | null {
+  const m = report.match(new RegExp(`^\\| ${finding} \\|.*$`, 'm'));
+  return m ? m[0] : null;
+}
 
 test('the redacted findings’ summary-table rows stay neutral', () => {
   const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
   for (const [num, digest] of Object.entries(REDACTED_TABLE_SHA256)) {
-    const m = report.match(new RegExp(`^\\| ${num} \\| (.+?) \\|`, 'm'));
+    const row = tableRow(report, num);
     assert.notEqual(
-      m,
+      row,
       null,
       `finding ${num}'s summary-table row is gone — if it was renumbered or removed, update REDACTED_TABLE_SHA256 deliberately`
     );
     assert.equal(
-      createHash('sha256').update(m![1], 'utf8').digest('hex'),
+      createHash('sha256').update(row!, 'utf8').digest('hex'),
       digest,
       `finding ${num}'s summary-table row changed. It summarises an unfixed, live-in-shipped-code defect in a public repo, so the row is part of the redaction — and it is the line that carried the mechanism while the section body said "Detail withheld". If the new wording still withholds it, regenerate the digest in the same commit.`
     );
@@ -529,6 +537,10 @@ test('the redacted findings’ summary-table rows stay neutral', () => {
 const REDACTED_NEEDS_HENRY_SHA256: Record<string, string> = {
   '12': '3403696a8e19075715f9fc939cdc2435ba8fc5bce6798b34d612ae197a215f09',
   '23': '881eba071c394dd1ab79d3c9199d93c7835dba3025e730a12de8503bdb4d8c92',
+  // 23 and 29 share one item ("Finding 23/29 — …"), so they share its digest.
+  // Both are listed rather than one: the derived coverage check asks per
+  // finding, and a shared surface is still a surface each of them has.
+  '29': '881eba071c394dd1ab79d3c9199d93c7835dba3025e730a12de8503bdb4d8c92',
   '32': 'e249dad81c945592498d78a8fdb18efd233179aa7e40d1aa81271b58316753f3',
 };
 
@@ -557,6 +569,72 @@ test('the Needs Henry items for redacted findings stay neutral', () => {
       `finding ${num}'s Needs Henry item changed. It is prose about an unfixed, live-in-shipped-code defect in a public repo, so its wording is part of the redaction. If the new wording still withholds the mechanism, regenerate the digest in the same commit.`
     );
   }
+});
+
+/**
+ * The three maps above are keyed on a hand-written list of finding numbers.
+ *
+ * **That is "stated a property, enforced a place" one level up, and it is the
+ * reason this control has needed eleven passes.** Each pass added a surface —
+ * headings, then table rows, then Needs Henry items — and every one of them
+ * still only protects the findings someone remembered to list. Findings 23 and
+ * 29 were re-rated to unfixed-and-live hours ago and were never added, so their
+ * rows stated the mechanism and the reachability while all three maps reported
+ * green. Nothing structural stopped that; it needed a person to notice.
+ *
+ * So the key set is DERIVED from the report. A finding is redacted because of a
+ * property it has — unfixed AND live in shipped code — marked in its status
+ * cell as `🔴 LIVE`. Re-rate a finding to live, and this test fails until its
+ * surfaces are pinned, at the moment of the re-rating rather than at the next
+ * manual sweep.
+ *
+ * **Deliberately NOT the obvious predicate.** "High severity AND escalated"
+ * was suggested and is wrong in both directions: it sweeps in finding 40
+ * ("goes live on merge" — not live yet) and finding 34 (branch-only), costing
+ * information for no gain, and it MISSES finding 23, which is rated Medium and
+ * is live. Severity is not the property. Reachability in shipped code is, and
+ * it has to be written down to be checkable — which is why the marker exists.
+ */
+function liveUnfixedFindings(report: string): string[] {
+  return [...report.matchAll(/^\| (\d+) \| (.*?) \| (.*?) \| (.*?) \|$/gm)]
+    .filter((m) => m[4].includes('🔴 LIVE'))
+    .map((m) => m[1]);
+}
+
+test('every finding marked LIVE has all of its public surfaces pinned', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  const live = liveUnfixedFindings(report);
+  // A renamed marker or a reshaped table would otherwise make this pass while
+  // checking nothing — the same vacuous-green failure as an empty file list.
+  assert.ok(
+    live.length > 0,
+    'no summary-table row is marked 🔴 LIVE — the marker was renamed or the table reshaped, and this guard would pass vacuously'
+  );
+
+  const unpinnedRow = live.filter((n) => !(n in REDACTED_TABLE_SHA256));
+  assert.deepEqual(
+    unpinnedRow,
+    [],
+    `these findings are marked live in shipped code but their summary-table rows are not pinned: ${unpinnedRow.join(', ')}. Neutralise the row, then add its digest.`
+  );
+
+  const unpinnedHeading = live.filter(
+    (n) => new RegExp(`^### ${n}\\.`, 'm').test(report) && !(n in REDACTED_HEADING_SHA256)
+  );
+  assert.deepEqual(
+    unpinnedHeading,
+    [],
+    `these findings are marked live and have a section heading, but it is not pinned: ${unpinnedHeading.join(', ')}`
+  );
+
+  const unpinnedNeeds = live.filter(
+    (n) => needsHenryItem(report, n) != null && !(n in REDACTED_NEEDS_HENRY_SHA256)
+  );
+  assert.deepEqual(
+    unpinnedNeeds,
+    [],
+    `these findings are marked live and have a Needs Henry item, but it is not pinned: ${unpinnedNeeds.join(', ')}`
+  );
 });
 
 test('the redacted findings’ headings stay neutral', () => {
