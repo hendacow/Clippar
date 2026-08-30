@@ -14,7 +14,7 @@
  * a crash mid-tutorial leaves at worst one launch's worth of clutter in the
  * user's OWN account before the sweep removes it.
  */
-import { getSetting, setSetting, saveLocalRound, deleteLocalRound, getClipsForRound, getOrphanedRounds, getLocalRound, saveLocalClip } from '@/lib/storage';
+import { getSetting, setSetting, saveLocalRound, deleteLocalRound, getClipsForRound, getLocalRound, saveLocalClip } from '@/lib/storage';
 import { createRound, deleteRound } from '@/lib/api';
 import { persistAsset } from '@/lib/media';
 
@@ -22,6 +22,41 @@ export const TUTORIAL_COURSE_NAME = 'Tutorial round';
 
 const PENDING_KEY = 'onboarding.v3.tutorial_pending';
 const ACTIVE_KEY = 'tutorial.active_round';
+
+/**
+ * Ids of rounds THIS APP created as tutorial rounds.
+ *
+ * The sweep used to select its victims by course name alone, and
+ * `course_name` is free text — the round-setup screen binds a TextInput
+ * straight to it (app/(tabs)/record.tsx). So a golfer who typed
+ * "Tutorial round" as their course had that round deleted on the next app
+ * start: local rows AND every clip file unlinked by deleteLocalRound, plus
+ * the remote row by deleteRound. No bin entry, no undo. Unlikely to be typed,
+ * total when it happens, and it needed nothing but the user's own words.
+ *
+ * A sentinel that the user can write is not a sentinel. The id registry is
+ * the real one: only rounds created by createTutorialRound are ever
+ * candidates, and the course-name check below is kept as a second gate rather
+ * than the only one.
+ */
+const CREATED_KEY = 'tutorial.created_round_ids';
+
+async function readCreatedIds(): Promise<string[]> {
+  try {
+    const raw = await getSetting(CREATED_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
+async function writeCreatedIds(ids: string[]): Promise<void> {
+  try {
+    await setSetting(CREATED_KEY, ids.length ? JSON.stringify(ids) : null);
+  } catch {}
+}
 
 export async function setTutorialPending(pending: boolean): Promise<void> {
   try {
@@ -49,6 +84,8 @@ export async function getActiveTutorialRoundId(): Promise<string | null> {
 export async function createTutorialRound(): Promise<string> {
   const round = await createRound({ course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   if (!round) throw new Error('Failed to create tutorial round');
+  // Registered before anything else can fail, so the sweep can always find it.
+  await writeCreatedIds([...(await readCreatedIds()), round.id]);
   await saveLocalRound({ id: round.id, course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   await setSetting(ACTIVE_KEY, round.id);
   await setTutorialPending(false);
@@ -101,28 +138,45 @@ export async function endTutorial(): Promise<void> {
 
 /**
  * Remove every tutorial round, local and remote, wherever the app finds one.
- * Idempotent and safe to run at every authed launch: matches ONLY the
- * sentinel course name, deletes the local rows and clip files via
- * deleteLocalRound, and best-effort deletes the remote row (RLS scopes it to
- * the owner, so this can only ever touch the user's own tutorial rounds).
+ * Idempotent and safe to run at every authed launch.
+ *
+ * Candidates come from the id registry ONLY — rounds this app created through
+ * createTutorialRound. It does not scan for rounds that merely look like
+ * tutorials, because "looks like a tutorial" was a user-typed string (see
+ * CREATED_KEY). The course-name check is kept underneath as a second gate.
+ *
+ * deleteLocalRound removes the local rows and unlinks every clip file;
+ * deleteRound removes the remote row (RLS scopes it to the owner). Both are
+ * irreversible, which is the whole reason the candidate set is now closed
+ * rather than pattern-matched.
  */
 export async function sweepTutorialRounds(): Promise<number> {
   let swept = 0;
   try {
     const active = await getActiveTutorialRoundId();
-    const candidates = new Set<string>();
+    const created = await readCreatedIds();
+    const candidates = new Set<string>(created);
+    // The active key is written immediately after the registry, so this only
+    // matters if the registry write was the one that failed.
     if (active) candidates.add(active);
-    // Orphan scan catches in_progress ones; finished tutorials are closed by
-    // endTutorial before this runs, and the active key covers a crash window.
-    const orphans = await getOrphanedRounds().catch(() => []);
-    for (const o of orphans) if (o.course_name === TUTORIAL_COURSE_NAME) candidates.add(o.id);
+
+    const sweptIds = new Set<string>();
     for (const id of candidates) {
       const row = await getLocalRound(id).catch(() => null);
-      if (row && row.course_name !== TUTORIAL_COURSE_NAME) continue; // never sweep a real round
+      // A missing local row is expected — the round may already be gone
+      // locally while the remote row survives, which is what this sweep is
+      // for. A row that exists but is NOT a tutorial round means the id was
+      // recycled or the registry is wrong; leave it alone.
+      if (row && row.course_name !== TUTORIAL_COURSE_NAME) continue;
       await deleteLocalRound(id).catch(() => {});
       await deleteRound(id).catch(() => {});
+      sweptIds.add(id);
       swept += 1;
     }
+
+    // Drop what we swept so the registry does not grow for the life of the
+    // install. Anything skipped above stays, so it is not silently forgotten.
+    await writeCreatedIds(created.filter((id) => !sweptIds.has(id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
   return swept;
