@@ -1788,11 +1788,11 @@ export async function clearLocalDatabase(): Promise<void> {
     // That ordering is load-bearing, so do not reorder it: once this row is
     // gone, nothing names those files. Two earlier versions of this comment
     // were wrong in opposite directions — one claimed a bin walk that did not
-    // exist, and its correction then leaned on `removeOwnedMediaDirectories`'
-    // wholesale clips/ sweep instead. That sweep is unscoped (an escalated
-    // HIGH), so scoping it correctly would have silently orphaned these files.
-    // The purge call is what makes this true by construction rather than by
-    // depending on a bug staying unfixed.
+    // exist, and its correction then leaned on localWipe's directory sweep
+    // instead. Changing that sweep correctly would have silently orphaned these
+    // files. The purge call is what makes this true by construction rather than
+    // by depending on a bug staying unfixed. (Why the sweep must change: finding
+    // 12, private tracker — unfixed and live, so not restated in a public file.)
     ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
     // The PRE-SCOPING bin key (`clips.bin.v1`, no user suffix) is deliberately
     // NOT deleted here. An earlier version of this list dropped it outright,

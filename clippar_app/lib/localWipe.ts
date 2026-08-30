@@ -105,12 +105,16 @@ export async function wipeLocalUserData(): Promise<void> {
   // deletes this account's bin key — once that metadata is gone, the only
   // record naming those files is gone with it.
   //
-  // This used to be left to removeOwnedMediaDirectories' wholesale clips/
-  // sweep. That worked, and it was the wrong thing to rely on: that sweep is
-  // unscoped, which is a HIGH escalated in this same review. Whoever scopes it
-  // correctly would have silently stopped reclaiming a deleted account's
-  // binned videos, with no test going red — a security fix quietly
-  // reintroducing a data-remanence bug. Now this holds by construction.
+  // This used to be left to the directory sweep further down. That worked, and
+  // it was the wrong thing to rely on: whoever changes that sweep would have
+  // silently stopped reclaiming a deleted account's binned videos, with no test
+  // going red — a security fix quietly reintroducing a data-remanence bug. Now
+  // this holds by construction.
+  //
+  // Why that sweep must change is deliberately not spelled out here: this file
+  // is public and the finding is unfixed and live in shipped code. Read finding
+  // 12 in `org/cto/SECURITY-2026-08-30-unfixed.md` (private company-brain repo)
+  // before touching it.
   //
   // Runs before signOut (see above), so the session still resolves and the
   // purge finds the departing account's bin rather than none.

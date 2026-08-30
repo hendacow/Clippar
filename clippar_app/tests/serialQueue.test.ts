@@ -400,10 +400,11 @@ test('clearLocalDatabase drops the departing account’s bin key', () => {
 //
 // removeLocalMediaForCurrentUser got this in the original fix and
 // wipeLocalUserData — the STRONGER promise, account deletion — did not. It
-// leaned on removeOwnedMediaDirectories' wholesale clips/ sweep instead, which
-// is an escalated HIGH precisely because it is unscoped: scoping it correctly
-// would have silently stopped reclaiming a deleted account's binned videos,
-// with nothing going red. This pins the ordering so it cannot drift back.
+// leaned on the directory sweep that runs after it, and changing that sweep
+// correctly would have silently stopped reclaiming a deleted account's binned
+// videos with nothing going red. This pins the ordering so it cannot drift
+// back. (Why the sweep must change: finding 12, private tracker — unfixed and
+// live, so not restated in a public file.)
 test('both wipe paths purge the bin, and before the metadata is dropped', () => {
   const wipe = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
 

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -142,7 +143,14 @@ test('app.py fallback credentials are discoverable, so this test has teeth', () 
  *
  * A named copy with a reason beats a directory that happens not to be scanned.
  */
-const ALLOWED_COPIES = new Set(['clippar_app/.env.development.local.example']);
+const ALLOWED_COPIES = new Set([
+  // The HOME of these literals — where they are defined, not a copy of them.
+  // It was exempt only because the old extension filter happened to drop `.py`,
+  // which is an accident rather than a decision. Widening the scan surfaced it
+  // immediately, which is the argument for scanning the tracked tree.
+  'app.py',
+  'clippar_app/.env.development.local.example',
+]);
 
 /**
  * Widened from `reports/` to the tree, because the rule was written as a
@@ -153,22 +161,7 @@ const ALLOWED_COPIES = new Set(['clippar_app/.env.development.local.example']);
  * it either.
  */
 function scannableFiles(): string[] {
-  const out = [
-    ...markdownFilesUnder(join(repoRoot, 'reports')),
-    ...textFilesUnder(join(repoRoot, 'clippar_app')),
-  ];
-  // The env examples: dotfiles, so every generic walker skips them, which is
-  // why this copy stayed invisible.
-  for (const name of ['.env.development.local.example', '.env.staging.local.example']) {
-    const full = join(repoRoot, 'clippar_app', name);
-    try {
-      statSync(full);
-      out.push(full);
-    } catch {
-      // absent is fine
-    }
-  }
-  return out;
+  return trackedTextFiles().map((rel) => join(repoRoot, rel));
 }
 
 test('no tracked file quotes a fallback credential instead of citing its line', () => {
@@ -216,59 +209,95 @@ test('no tracked file quotes a fallback credential instead of citing its line', 
  */
 
 /**
- * The module-scope session cache in lib/storage.ts, by name, read from source.
+ * Identifiers that name an UNFIXED, LIVE finding, and the one file each may
+ * appear in.
  *
- * Returns every declaration of that shape, not the first. The first version of
- * this used `String.match` without `/g`, which returns match one and ignores
- * the rest — so a second `let x: string | null = null;` added ABOVE the cache
- * would silently redirect the guard to the wrong identifier while this test
- * went on passing. The write-up claimed it "fails loudly rather than vacuously
- * if the declaration moves"; that covered the declaration DISAPPEARING and not
- * the derivation becoming AMBIGUOUS, which is the failure that leaks.
+ * A table rather than one hard-coded derivation, because the single-identifier
+ * version guarded finding 32's cache and nothing else — so finding 12's
+ * mechanism was published in six other places while this file stayed green.
+ * Third recurrence of "stated a property, enforced a place", and the fix is not
+ * a longer list of places: one entry per guarded thing, checked over every
+ * tracked file.
  *
- * Same shape as everything else this review kept finding: a guard that reads
- * stronger than it is. Worth spelling out because it was in the control added
- * to stop exactly that.
+ * Each identifier is DERIVED from its home file, never written here. A guard
+ * that restates what it protects has become the leak.
  */
-function sessionCacheIdentifiers(): string[] {
-  const storage = readFileSync(join(repoRoot, 'clippar_app/lib/storage.ts'), 'utf8');
-  return [...storage.matchAll(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/gm)].map(
-    (m) => m[1]
-  );
+const GUARDED: { home: string; derive: (src: string) => string[] }[] = [
+  {
+    // finding 32 — the module-scope session cache
+    home: 'clippar_app/lib/storage.ts',
+    derive: (src) =>
+      [...src.matchAll(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/gm)].map((m) => m[1]),
+  },
+  {
+    // finding 12 — the unscoped media sweep
+    home: 'clippar_app/lib/localWipe.ts',
+    derive: (src) =>
+      [...src.matchAll(/^async function (remove[A-Z]\w*MediaDirectories)\(/gm)].map((m) => m[1]),
+  },
+];
+
+/**
+ * Files that reference a guarded symbol AS CODE rather than explaining it. An
+ * assertion naming the function it pins is not a disclosure; a sentence saying
+ * why that function is dangerous is. Explicit and reasoned, so the next one is
+ * a decision rather than a directory that happens not to be scanned.
+ */
+const GUARDED_CODE_REFS = new Set(['clippar_app/tests/serialQueue.test.ts']);
+
+for (const { home, derive } of GUARDED) {
+  test(`${home}: guarded identifiers are named only where they are defined`, () => {
+    const names = derive(readFileSync(join(repoRoot, home), 'utf8'));
+    // Loudly, in both directions: none means the derivation broke or the finding
+    // was fixed away; more than one means it may be guarding the wrong name.
+    assert.equal(
+      names.length,
+      1,
+      names.length === 0
+        ? `could not derive the guarded identifier from ${home} — if the finding is fixed and it is gone, remove its GUARDED entry deliberately`
+        : `the derivation is ambiguous: ${names.length} matches in ${home}`
+    );
+    const name = names[0];
+    const offenders = trackedTextFiles()
+      .filter((rel) => rel !== home)
+      .filter((rel) => !GUARDED_CODE_REFS.has(rel))
+      .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name));
+    assert.deepEqual(
+      offenders,
+      [],
+      `these files name a guarded identifier outside the file that defines it — point at the private tracker instead of restating the mechanism:\n${offenders.join('\n')}`
+    );
+  });
 }
 
-test('the session cache is named only where it is defined, not explained elsewhere', () => {
-  const names = sessionCacheIdentifiers();
-  // Fail loudly rather than passing vacuously, in BOTH directions: zero
-  // declarations means the derivation broke or the finding was fixed away, and
-  // more than one means the derivation is ambiguous and may be guarding the
-  // wrong name. A redaction test that silently stops testing is worse than none.
-  assert.equal(
-    names.length,
-    1,
-    names.length === 0
-      ? 'could not derive the session cache identifier from lib/storage.ts — if finding 32 is fixed and it is gone, delete this test deliberately'
-      : `the derivation is ambiguous: ${names.length} declarations match, so this test may be guarding the wrong identifier. Narrow the pattern or name the cache explicitly here.`
-  );
-  const name = names[0];
-
-  // storage.ts is where it lives; the private tracker is where it is explained.
-  const HOME = 'clippar_app/lib/storage.ts';
-  const roots = [join(repoRoot, 'clippar_app'), join(repoRoot, 'reports')];
-  const files = roots.flatMap((r) => textFilesUnder(r));
-  assert.ok(files.length > 0, 'expected to find files to scan');
-
-  const offenders = files
-    .map((file) => file.slice(repoRoot.length + 1))
-    .filter((rel) => rel !== HOME)
-    .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name));
-
-  assert.deepEqual(
-    offenders,
-    [],
-    `these files name the session cache outside the file that defines it — point at the private tracker instead of restating the mechanism:\n${offenders.join('\n')}`
-  );
-});
+/**
+ * Every tracked file, so both guards are properties of the REPOSITORY rather
+ * than of whichever directories someone remembered to list.
+ *
+ * The previous version walked `reports/` and `clippar_app/`. The repo root also
+ * holds README.md, several audit markdown files, docs/, scripts/, templates/
+ * and .github/ — none of it scanned, and dotfiles were skipped besides. Going
+ * from one directory to two is a longer list, not a property.
+ *
+ * Throws rather than returning [] if git is unavailable: a guard that passes
+ * vacuously is worse than no guard at all.
+ */
+function trackedTextFiles(): string[] {
+  const out = execFileSync('git', ['ls-files', '-z'], { cwd: repoRoot, encoding: 'utf8' });
+  const files = out
+    .split('\0')
+    .filter(Boolean)
+    .filter((rel) => !/(^|\/)(node_modules|ios|android|dist|build|\.expo)\//.test(rel))
+    .filter(
+      (rel) =>
+        /\.(ts|tsx|js|jsx|md|json|ya?ml|sh|py|html|example)$/.test(rel) ||
+        /(^|\/)\.env[^/]*$/.test(rel)
+    );
+  if (files.length === 0) {
+    throw new Error('git ls-files returned nothing — this guard would pass vacuously');
+  }
+  return files;
+}
 
 /** Source and markdown files, skipping build output and dependencies. */
 function textFilesUnder(dir: string): string[] {
