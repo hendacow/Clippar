@@ -132,10 +132,11 @@ test('the bin fails closed when no session resolves', () => {
 // Counting binKey() call sites is not the same as counting session
 // resolutions. deleteClipToBin resolved once through binKey and a SECOND time
 // inside getLocalRound, and the two authorised different halves of the job —
-// which bin to write, and whether the clip may be deleted. sessionUserId()
-// serves a cached id when getSession() errors, so across an account change the
-// halves can come apart, and a divergence there makes the operation looser
-// rather than stricter. The property to pin is that ONE id decides both.
+// which bin to write, and whether the clip may be deleted. Those two answers
+// are not guaranteed to agree (finding 32, private tracker — unfixed and live,
+// so not restated in a public repo), and a divergence there makes the
+// operation looser rather than stricter. The property to pin is that ONE id
+// decides both.
 test('the bin key and the ownership gate are decided by the same resolution', () => {
   const del = bin.match(/export async function deleteClipToBin[\s\S]*?\n}/)?.[0] ?? '';
   assert.notEqual(del, '', 'deleteClipToBin should still exist');
@@ -160,10 +161,10 @@ test('the bin key and the ownership gate are decided by the same resolution', ()
   );
 });
 
-// binQueue orders jobs against each other, not against auth changes, and
-// sessionUserId() can fall back to a cached id on a transient getSession()
-// failure — so resolving the owner more than once per job means a read and a
-// write can straddle two accounts, filing A's clip row into B's bin.
+// binQueue orders jobs against each other, not against auth changes, and two
+// resolutions inside one job are not guaranteed to agree (finding 32, private
+// tracker) — so resolving the owner more than once per job means a read and a
+// write can straddle two accounts.
 test('each queued job resolves the owning account exactly once', () => {
   // deleteClipToBin is not in this list: it resolves the id directly so the
   // gate can close against the same value, and the test above pins that

@@ -303,14 +303,16 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     //
     // Resolved inline rather than through binKey() so the SAME id is available
     // to close the gate below. binKey() threaded the key through every read
-    // and write, which fixed half of this: getLocalRound re-resolves the
+    // and write, which fixed only half of this: getLocalRound re-resolves the
     // session internally, so the bin we write and the rounds we may delete
-    // from were authorised by two independent resolutions. sessionUserId()
-    // falls back to a cached id when getSession() errors, so those two can
-    // disagree across an account change — and because they authorise
-    // different halves of one operation, a divergence made this LOOSER, not
-    // stricter: B's clip deleted, B's row filed into A's bin, where A can
-    // restore or destroy it.
+    // from were authorised by two independent resolutions, which are not
+    // guaranteed to agree. Because they authorise different halves of one
+    // operation, a divergence made this LOOSER rather than stricter.
+    //
+    // Why they can disagree is finding 32 in the private tracker
+    // (`org/cto/SECURITY-2026-08-30-unfixed.md`, company-brain). Deliberately
+    // not restated here: it is unfixed and live in shipped code, and this
+    // repository is public.
     const userId = await currentSessionUserId().catch(() => null);
     if (!userId) return null;
     const key = BIN_KEY_PREFIX + userId;

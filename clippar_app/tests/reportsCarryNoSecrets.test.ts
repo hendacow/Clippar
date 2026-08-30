@@ -144,3 +144,88 @@ test('no report quotes a fallback credential instead of citing its line', () => 
     `these reports quote a credential; cite the location (e.g. app.py:31) instead:\n${offenders.join('\n')}`
   );
 });
+
+/**
+ * The same rule, applied to an unfixed vulnerability rather than a credential.
+ *
+ * Finding 33: this repository is public and finding 32 is unfixed and live in
+ * shipped code. What raises the exposure is not the code — that is readable
+ * either way — it is the SYNTHESIS: naming the mechanism, the condition that
+ * triggers it, every gate that depends on it, and confirming it is deliberately
+ * unfixed. That belongs in the private tracker, and `lib/storage.ts` carries a
+ * pointer to it rather than the detail.
+ *
+ * This test exists because the rule was applied by hand five times and missed a
+ * sibling every time — the report body, the source comment in `lib/clipBin.ts`,
+ * two comment blocks in `tests/serialQueue.test.ts`, and the PR description.
+ * Finding 52 was that a rule written as a list of places is a snapshot of what
+ * you were thinking when you wrote it. **The fix for that is not a longer list;
+ * it is a check that runs.**
+ *
+ * The identifier is DERIVED from `lib/storage.ts` rather than written here, for
+ * the same reason the credential literals are derived from app.py: a test that
+ * restates the thing it is protecting has become the leak.
+ */
+
+/** The module-scope session cache in lib/storage.ts, by name, read from source. */
+function sessionCacheIdentifier(): string | null {
+  const storage = readFileSync(join(repoRoot, 'clippar_app/lib/storage.ts'), 'utf8');
+  const decl = storage.match(/^let ([A-Za-z_$][\w$]*): string \| null = null;$/m);
+  return decl?.[1] ?? null;
+}
+
+test('the session cache is named only where it is defined, not explained elsewhere', () => {
+  const name = sessionCacheIdentifier();
+  // Fail loudly rather than passing vacuously if the declaration moves or is
+  // fixed away — a redaction test that silently stops testing is worse than none.
+  assert.notEqual(
+    name,
+    null,
+    'could not derive the session cache identifier from lib/storage.ts — if finding 32 is fixed and it is gone, delete this test deliberately'
+  );
+
+  // storage.ts is where it lives; the private tracker is where it is explained.
+  const HOME = 'clippar_app/lib/storage.ts';
+  const roots = [join(repoRoot, 'clippar_app'), join(repoRoot, 'reports')];
+  const files = roots.flatMap((r) => textFilesUnder(r));
+  assert.ok(files.length > 0, 'expected to find files to scan');
+
+  const offenders = files
+    .map((file) => file.slice(repoRoot.length + 1))
+    .filter((rel) => rel !== HOME)
+    .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name!));
+
+  assert.deepEqual(
+    offenders,
+    [],
+    `these files name the session cache outside the file that defines it — point at the private tracker instead of restating the mechanism:\n${offenders.join('\n')}`
+  );
+});
+
+/** Source and markdown files, skipping build output and dependencies. */
+function textFilesUnder(dir: string): string[] {
+  const out: string[] = [];
+  const skip = new Set(['node_modules', 'ios', 'android', 'dist', '.expo', 'build']);
+  const walk = (d: string) => {
+    let entries;
+    try {
+      entries = readdirSync(d);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.startsWith('.') || skip.has(entry)) continue;
+      const full = join(d, entry);
+      let st;
+      try {
+        st = statSync(full);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(full);
+      else if (/\.(ts|tsx|js|jsx|md)$/.test(entry)) out.push(full);
+    }
+  };
+  walk(dir);
+  return out;
+}
