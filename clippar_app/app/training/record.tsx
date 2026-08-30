@@ -100,7 +100,14 @@ export default function TrainingRecordScreen() {
   // spec-5.6 rule record.tsx follows: ask at the moment capture starts, not
   // when a tab renders.
   useEffect(() => {
-    if (!roundId) return;
+    // Gated on `owned`, not just `roundId`. Effects run after the first
+    // render — which is the ownership spinner — so keying this on roundId
+    // alone fired the OS camera prompt for a round nothing had checked yet,
+    // reachable from a clippar:// link to somebody else's session. No footage
+    // crossed, but the comment below the gate claimed the check came first and
+    // it did not, and a gate that reads stronger than it is was the thing this
+    // whole review kept catching.
+    if (!roundId || owned !== true) return;
     listTrainingClips(roundId)
       .then((clips) => {
         const m = new Map<number, number>();
@@ -112,7 +119,7 @@ export default function TrainingRecordScreen() {
       .catch(() => {});
     void camera.requestPermission();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roundId]);
+  }, [roundId, owned]);
 
   const recordingBusy = camera.isRecording || camera.isFinalizing;
 

@@ -222,6 +222,9 @@ test('bin entries are validated where the JSON blob re-enters', () => {
   assert.match(validator, /SQL_IDENTIFIER\.test\(c\)/);
   // fileUris reach a file delete, so the file:// prefix is re-checked.
   assert.match(validator, /startsWith\('file:\/\/'\)/);
+  // The ownership decision is made on e.roundId; everything destructive acts
+  // on e.row. Unbound, the gate authorises one field and destroys another.
+  assert.match(validator, /e\.row\.round_id !== e\.roundId/, 'the two round ids must be bound');
 
   // purgeEntry is the unlink side of the same boundary.
   const purge = bin.match(/async function purgeEntry[\s\S]*?\n}/)?.[0] ?? '';

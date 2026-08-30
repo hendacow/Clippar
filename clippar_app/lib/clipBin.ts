@@ -138,6 +138,14 @@ function isValidEntry(v: unknown): v is BinnedClip {
   const e = v as BinnedClip;
   if (typeof e.roundId !== 'string') return false;
   if (!e.row || typeof e.row !== 'object' || typeof e.row.id !== 'number') return false;
+  // Bind the two. `drainLegacyBin` decides mine-vs-theirs from `e.roundId`,
+  // but everything destructive then acts on `e.row` and `e.fileUris` —
+  // `purgeEntry` reaches `markPredecessorTracerStale(db, row.round_id, …)`,
+  // which is unscoped. An entry pairing an owned `roundId` with a foreign
+  // `row.round_id` would authorise on one field and destroy another. Same
+  // shape as the `deleteClipToBin` gate that validated `roundId` while the
+  // delete keyed on `clipId`; a gate has to constrain the thing it protects.
+  if (e.row.round_id !== e.roundId) return false;
   if (!Object.keys(e.row).every((c) => SQL_IDENTIFIER.test(c))) return false;
   if (!Array.isArray(e.fileUris)) return false;
   return e.fileUris.every((u) => typeof u === 'string' && u.startsWith('file://'));

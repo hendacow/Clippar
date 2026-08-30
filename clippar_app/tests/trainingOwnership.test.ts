@@ -79,6 +79,11 @@ test('live capture is gated too, not just the import path', () => {
   // params in place, so a second deep link re-renders rather than remounting.
   const effect = record.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[roundId\]\);/)?.[0] ?? '';
   assert.match(effect, /setOwned\(null\);/, 'the check must reset before re-resolving');
+  // The permission prompt must sit behind the check too — effects run after
+  // the first render, so gating the hydrate effect on roundId alone fired the
+  // OS camera prompt for a round nothing had verified.
+  assert.match(record, /if \(!roundId \|\| owned !== true\) return;/, 'hydrate must wait for ownership');
+  assert.match(record, /\}, \[roundId, owned\]\);/, 'and re-run when it resolves');
   assert.ok(
     effect.indexOf('setOwned(null);') < effect.indexOf('ownsTrainingRound('),
     'the reset must precede the new check, or the stale verdict arms the camera'
