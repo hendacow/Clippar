@@ -47,3 +47,22 @@ test('the course-name check survives as a second gate', () => {
 test('swept ids are dropped from the registry', () => {
   assert.match(sweep, /writeCreatedIds\(/);
 });
+
+// Removing the orphan scan made the registry the ONLY record of a tutorial
+// round, so retiring an id after a failed delete strands that round forever:
+// deleteRound is a network call that throws, and being offline at app start is
+// routine. Both deletes must succeed before the id is forgotten.
+test('an id is retired only when both deletes succeed', () => {
+  assert.doesNotMatch(
+    sweep,
+    /deleteRound\(id\)\.catch\(/,
+    'swallowing the remote delete loses the only record that it still needs doing'
+  );
+  assert.match(sweep, /localOk/, 'the local delete result must be observed');
+  assert.match(sweep, /remoteOk/, 'the remote delete result must be observed');
+  assert.match(
+    sweep,
+    /if \(!localOk \|\| !remoteOk\) continue;/,
+    'a partial failure must leave the id in the registry to retry'
+  );
+});

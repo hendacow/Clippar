@@ -168,14 +168,33 @@ export async function sweepTutorialRounds(): Promise<number> {
       // for. A row that exists but is NOT a tutorial round means the id was
       // recycled or the registry is wrong; leave it alone.
       if (row && row.course_name !== TUTORIAL_COURSE_NAME) continue;
-      await deleteLocalRound(id).catch(() => {});
-      await deleteRound(id).catch(() => {});
+
+      // Both halves must actually succeed before the id is retired. The
+      // registry is now the ONLY record of a tutorial round — the orphan scan
+      // that used to rediscover one is gone, deliberately — so forgetting an
+      // id after a failed delete strands that round forever. deleteRound is a
+      // network call and throws when it fails, which at app start (opening the
+      // app on the course with no signal) is routine rather than exotic:
+      // swallowing that and dropping the id would leave the round on the
+      // server with nothing left to retry it. Both are safe to repeat —
+      // deleting rows that are already gone is a no-op — so a failure just
+      // means the next launch tries again.
+      const localOk = await deleteLocalRound(id).then(
+        () => true,
+        () => false
+      );
+      const remoteOk = await deleteRound(id).then(
+        () => true,
+        () => false
+      );
+      if (!localOk || !remoteOk) continue;
       sweptIds.add(id);
       swept += 1;
     }
 
-    // Drop what we swept so the registry does not grow for the life of the
-    // install. Anything skipped above stays, so it is not silently forgotten.
+    // Drop only what was fully cleaned, so the registry does not grow for the
+    // life of the install. Anything skipped or partly failed stays, so it is
+    // retried rather than silently forgotten.
     await writeCreatedIds(created.filter((id) => !sweptIds.has(id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
