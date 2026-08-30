@@ -61,7 +61,11 @@ export async function resolveAssetUri(uri: string): Promise<string> {
       // Extract the asset id. ph://<uuid>/L0/001 → <uuid>
       const match = uri.match(/ph:\/\/([\w-]+)/);
       const assetId = match ? match[1] : uri;
-      const info = await MediaLibrary.getAssetInfoAsync(assetId);
+      // shouldDownloadFromNetwork: iCloud-only assets have no local file
+      // until someone fetches it. Photos streams them on demand; without
+      // this flag we refused to, and told the user to go download manually
+      // (reported from the range, 31 Aug). This IS the fetch.
+      const info = await MediaLibrary.getAssetInfoAsync(assetId, { shouldDownloadFromNetwork: true });
       if (info?.localUri && info.localUri.startsWith('file://')) {
         return info.localUri;
       }

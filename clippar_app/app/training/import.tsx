@@ -35,22 +35,34 @@ export default function TrainingImportScreen() {
     setBusy(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
+      // preferredAssetRepresentationMode 'current' hands over the original
+      // file instead of forcing an AVFoundation transcode — the transcode is
+      // the slow step that makes big iCloud videos stall out of the picker.
+      const pickerOptions = {
+        mediaTypes: ['videos'] as import('expo-image-picker').MediaType[],
+        allowsMultipleSelection: true,
+        quality: 1,
+        preferredAssetRepresentationMode:
+          ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
+      };
       let result: Awaited<ReturnType<typeof ImagePicker.launchImageLibraryAsync>>;
       try {
-        result = await ImagePicker.launchImageLibraryAsync({
-          mediaTypes: ['videos'],
-          allowsMultipleSelection: true,
-          quality: 1,
-        });
-      } catch {
-        // iCloud-only assets can fail to stream down (PHPhotosErrorDomain
-        // 3164) — the same failure app/round/import.tsx handles. Say what to
-        // do rather than presenting a generic error.
-        Alert.alert(
-          'Video stored in iCloud',
-          'Open the Photos app and download the videos to your phone first, then import them here.'
-        );
-        return;
+        result = await ImagePicker.launchImageLibraryAsync(pickerOptions);
+      } catch (firstErr) {
+        // The picker downloads iCloud assets itself and resumes a partial
+        // download on retry — so retry once before involving the user at
+        // all. The first version of this catch told the user to go download
+        // in Photos manually: the app refusing to do something it is allowed
+        // to do, and a guess at the cause besides (the same mistake as the
+        // record screen's old 'check your free storage' — rebuilt here the
+        // same day it was fixed there, caught by Henry within hours).
+        try {
+          result = await ImagePicker.launchImageLibraryAsync(pickerOptions);
+        } catch (err) {
+          const reason = err instanceof Error && err.message ? err.message : String(firstErr ?? err);
+          Alert.alert('Could not fetch those videos', `${reason}\n\nTap Choose videos to try again — iCloud downloads resume where they left off.`);
+          return;
+        }
       }
       if (result.canceled || result.assets.length === 0) return;
       const saved = await importShotsToSession(

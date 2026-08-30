@@ -133,3 +133,17 @@ test('Practice is reachable from the record chooser', () => {
   const before = chooser.slice(0, idx);
   assert.match(before, /IDLE STATE: Mode chooser/, 'the card lives on the no-active-round chooser');
 });
+
+// Reported from the range, 31 Aug: "my phone plays them instantly in Photos
+// but it keeps saying that" — the import alert told him to go download in
+// Photos manually. The app must fetch, not refuse.
+test('import fetches iCloud videos instead of refusing', () => {
+  const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  const media = readFileSync(join(root, 'lib/media.ts'), 'utf8');
+  assert.match(media, /shouldDownloadFromNetwork: true/, 'MediaLibrary fallback actually downloads');
+  assert.match(imp, /preferredAssetRepresentationMode/, 'no forced transcode on big iCloud videos');
+  assert.doesNotMatch(imp, /Open the Photos app and download/, 'the go-do-it-yourself alert is gone');
+  const catches = imp.match(/catch \(firstErr\)[\s\S]*?return;/)?.[0] ?? '';
+  assert.match(catches, /launchImageLibraryAsync\(pickerOptions\)/, 'retries once — iCloud downloads resume');
+  assert.match(catches, /reason/, 'the alert reports the real error, not a guessed cause');
+});
