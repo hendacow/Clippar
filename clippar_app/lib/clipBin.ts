@@ -232,8 +232,22 @@ async function drainLegacyBin(): Promise<void> {
       // Same trust boundary as readBinAt — these entries feed purgeEntry.
       // A malformed entry is neither purged nor written back: it cannot be
       // trusted to name a file we should unlink, and carrying it forward
-      // would keep an unreadable blob alive for the life of the install. Any
-      // real files it pinned are caught by wipeLocalUserData's clips/ sweep.
+      // would keep an unreadable blob alive for the life of the install.
+      //
+      // This USED to claim wipeLocalUserData's clips/ sweep catches any real
+      // files such an entry pinned. That is only half true and the half it
+      // misses is the one that matters: wipeLocalUserData does sweep clips/
+      // (localWipe.ts:108), but removeLocalMediaForCurrentUser — "remove my
+      // videos from this phone", a caller this branch added — does not. It
+      // walks owned rounds and calls removeTemporaryExports, and a binned clip
+      // has no local_clips row for that walk to reach. So on the one screen
+      // whose whole purpose is erasure there is NO fallback, and a malformed
+      // entry's videos stay on disk with nothing pointing at them.
+      //
+      // Left as-is deliberately rather than silently widened: unlinking from
+      // an entry that failed validation means deleting paths named by a blob
+      // we just declined to trust, and purgeEntry's file:// check is a prefix
+      // test rather than a containment one. That trade is Henry's to make.
       if (!isValidEntry(entry)) continue;
       const owned = await getLocalRound(entry.roundId).catch(() => null);
       (owned ? mine : others).push(entry);
@@ -403,6 +417,13 @@ export async function purgeAllBinnedClips(): Promise<number> {
       if (entries.length === 0) return 0;
       // Clear the list first: if a file unlink stalls, the entries must not be
       // left pointing at videos the user has already asked us to remove.
+      //
+      // KNOWN GAP, deliberately not closed here (see the drainLegacyBin note
+      // above): readBinAt filters malformed entries out, and this writes []
+      // over the WHOLE key — so a malformed entry's metadata is erased while
+      // its files are never unlinked. They survive the one action that
+      // promises to remove them, unreachable. Closing it means unlinking paths
+      // named by a blob that failed validation, which is a trade, not a fix.
       await writeBinAt(key, []);
       for (const entry of entries) await purgeEntry(entry);
       return entries.length;
