@@ -175,12 +175,20 @@ async function migrateEditorColumns() {
 // ────────────────────────────────────────────────────────────
 
 /**
- * Last user id we successfully resolved this process. Used ONLY to answer a
- * transient getSession() failure (a Keychain-busy window, say) without hiding
- * a golfer's own round from them mid-round. It is overwritten with `null` on a
- * clean signed-out read, so it can never serve a departed user's id to the
- * next account: signing in as B necessarily produced a successful getSession
- * that set this to B.
+ * Process-lifetime fallback for a transient `getSession()` failure (a
+ * Keychain-busy window, say), so a momentary error does not hide a golfer's
+ * own round from them mid-round.
+ *
+ * ⚠️ **Not an ownership signal. Do not build a gate on it, and do not change
+ * when it is written or cleared**, without first reading finding 32 in
+ * `org/cto/SECURITY-2026-08-30-unfixed.md` (private company-brain repo).
+ *
+ * **The reasoning is deliberately kept out of this file.** It is public and the
+ * finding is unfixed and live in shipped code. An earlier version of this block
+ * asserted a safety property this value does not have, and gates were built
+ * while that sentence stood — the same failure as the docstring on
+ * `currentSessionUserId` below. A note that reassures is worse than no note,
+ * because it is read as evidence.
  *
  * @guarded 32 */
 let lastKnownUserId: string | null = null;

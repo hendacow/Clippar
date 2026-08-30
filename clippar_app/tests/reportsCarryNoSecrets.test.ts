@@ -297,16 +297,46 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     sentinel: 'Why is deliberately not written here.',
     sha256: '79b005f1839edef170c7501a57503fe5f1af774350bffaabf7eed761079e367e',
   },
+  {
+    // The docstring ON the guarded declaration itself, ~480 lines above the
+    // entry that pins `currentSessionUserId`. It was uncovered, and what sat
+    // there was a REASSURANCE: it asserted the safety property finding 32 says
+    // this value does not have, directly under the marker that identifies it.
+    // Same defect as the docstring already fixed below, in its sibling, found
+    // by a reviewer rather than by me carrying the fix across.
+    file: 'clippar_app/lib/storage.ts',
+    sentinel: 'The reasoning is deliberately kept out of this file.',
+    sha256: '9e30dec5b45ac2f2d8bbe1ca1d58d42d94525e0bd512b17b7fdc7a459a2c77fa',
+  },
+  {
+    // `localWipe.ts` had no coverage at all. `GUARDED` exempts a home file for
+    // its own identifier by construction, so nothing constrained what could be
+    // written beside `@guarded 12` — now or later.
+    file: 'clippar_app/lib/localWipe.ts',
+    sentinel: 'is deliberately not spelled out here',
+    sha256: '517f8e8ca5e957d897735ce6a5074e1273897975edfc26b99f07b0df49f9a0af',
+  },
 ];
 
-/** The doc-comment block containing `sentinel`, or null if it is gone. */
+/**
+ * The contiguous run of comment lines containing `sentinel`, or null if it is
+ * gone.
+ *
+ * Line-based rather than `/** … *​/`-delimited, because one of the pointers is
+ * a `//` run inside a function body rather than a docstring. A delimiter search
+ * there walks backwards past the closing of an unrelated block and pins a
+ * region spanning most of the file — green, enormous, and meaningless.
+ */
 function pointerBlock(src: string, sentinel: string): string | null {
-  const at = src.indexOf(sentinel);
+  const lines = src.split('\n');
+  const at = lines.findIndex((l) => l.includes(sentinel));
   if (at === -1) return null;
-  const start = src.lastIndexOf('/**', at);
-  const end = src.indexOf('*/', at);
-  if (start === -1 || end === -1) return null;
-  return src.slice(start, end + 2);
+  const isComment = (l: string) => /^\s*(\/\/|\/?\*)/.test(l);
+  let first = at;
+  let last = at;
+  while (first > 0 && isComment(lines[first - 1])) first--;
+  while (last < lines.length - 1 && isComment(lines[last + 1])) last++;
+  return lines.slice(first, last + 1).join('\n');
 }
 
 test('the home files point at the tracker instead of explaining the finding', () => {
@@ -438,6 +468,41 @@ const REDACTED_HEADING_SHA256: Record<string, string> = {
   '12': 'b1a3a909509b5fcb3d6bbdd85efc82f20ddd1eefcd70484d2e5cebd63f988540',
   '32': 'd51651e0e1bb3aba8e38a314fc61585712e6749278d9ce986bbe6660f2e32eeb',
 };
+
+/**
+ * The SUMMARY-TABLE rows for the same findings, pinned the same way.
+ *
+ * The headings test looks at `### <n>.` and nothing else. The severity table
+ * two hundred lines above it carried the full mechanism for both findings — for
+ * 32, the defect, the trigger and "LIVE IN PRODUCTION" in one bold row — while
+ * this file reported green over it. Sixth recurrence of "stated a property,
+ * enforced a place", inside the control.
+ *
+ * The miss is worth recording precisely: the previous pass neutralised finding
+ * 12's row and not finding 32's, because I searched for the wording I remembered
+ * writing rather than for the property. A pin does not care what I remember.
+ */
+const REDACTED_TABLE_SHA256: Record<string, string> = {
+  '12': '9689af43da0c23eef8d07ea2d74cba38ffbe6d6957555a258e471af5da97cef5',
+  '32': 'e69b3fdf46d898c33e887a91bdcf8c5c2181dc3da50ddac9c19a1016803641fa',
+};
+
+test('the redacted findings’ summary-table rows stay neutral', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  for (const [num, digest] of Object.entries(REDACTED_TABLE_SHA256)) {
+    const m = report.match(new RegExp(`^\\| ${num} \\| (.+?) \\|`, 'm'));
+    assert.notEqual(
+      m,
+      null,
+      `finding ${num}'s summary-table row is gone — if it was renumbered or removed, update REDACTED_TABLE_SHA256 deliberately`
+    );
+    assert.equal(
+      createHash('sha256').update(m![1], 'utf8').digest('hex'),
+      digest,
+      `finding ${num}'s summary-table row changed. It summarises an unfixed, live-in-shipped-code defect in a public repo, so the row is part of the redaction — and it is the line that carried the mechanism while the section body said "Detail withheld". If the new wording still withholds it, regenerate the digest in the same commit.`
+    );
+  }
+});
 
 test('the redacted findings’ headings stay neutral', () => {
   const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
