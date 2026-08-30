@@ -154,6 +154,33 @@ async function readRegistry(): Promise<TrainingSessionRef[]> {
   }
 }
 
+/**
+ * Drop one account's entries on wipe, keeping everyone else's.
+ *
+ * `training.sessions.v1` is device-wide, and this branch is what gave its
+ * entries an owner — so account deletion left the departing user's id, every
+ * practice round id and every start timestamp sitting in plaintext in
+ * `local_settings`, on the one action whose whole purpose is erasure. Nothing
+ * pruned them later either: `listTrainingSessions` only ever filters, and a
+ * deleted account never signs in again, so they were permanent.
+ *
+ * Lives here rather than in `clearLocalDatabase` deliberately: this is the
+ * module that owns the entry shape, so it cannot rot when the shape changes.
+ *
+ * A blanket delete of the key is the wrong fix and is the mistake already
+ * caught for the legacy bin row — the key is shared, so dropping it destroys
+ * the other account's sessions.
+ */
+export async function forgetTrainingSessionsFor(userId: string): Promise<void> {
+  try {
+    const kept = (await readRegistry()).filter((s) => s.userId !== userId);
+    await setSetting(TRAINING_REGISTRY_KEY, kept.length ? JSON.stringify(kept) : null);
+  } catch {
+    // A wipe must never throw: a stale registry entry is not worth blocking
+    // the sign-out and redirect that follow it.
+  }
+}
+
 /** Newest first, and only the signed-in account's own sessions. */
 export async function listTrainingSessions(): Promise<TrainingSessionRef[]> {
   // Fails closed, then requires BOTH gates — see TrainingSessionRef.userId.

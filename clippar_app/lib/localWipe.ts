@@ -1,5 +1,5 @@
 import { Platform } from 'react-native';
-import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting } from './storage';
+import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting, currentSessionUserId } from './storage';
 import { clearRoundPrefetch } from './roundPrefetch';
 
 /**
@@ -120,6 +120,31 @@ export async function wipeLocalUserData(): Promise<void> {
     await purgeAllBinnedClips();
   } catch (err) {
     console.warn('[localWipe] purgeAllBinnedClips failed', err);
+  }
+
+  // Two device-wide local_settings registries this branch made
+  // account-attributable. clearLocalDatabase's scoped-delete list was extended
+  // in the same branch and these two were missed, so account deletion left the
+  // departing user's id, every practice round id with its start timestamp, and
+  // every tutorial round id in plaintext on the handset — permanently, since
+  // both are only ever pruned for the account that is signed in.
+  //
+  // Scrubbed through the owning modules rather than by key here: they are
+  // shared rows, so a blanket delete would destroy the other account's
+  // entries, and the filter belongs where the entry shape is defined.
+  //
+  // Before signOut (see above), so the session still resolves to the departing
+  // account. No session means nothing to attribute, so nothing is removed.
+  try {
+    const me = await currentSessionUserId();
+    if (me) {
+      const training = require('./training') as typeof import('./training');
+      const tutorial = require('./tutorialRound') as typeof import('./tutorialRound');
+      await training.forgetTrainingSessionsFor(me);
+      await tutorial.forgetCreatedRoundsFor(me);
+    }
+  } catch (err) {
+    console.warn('[localWipe] registry scrub failed', err);
   }
 
   try {

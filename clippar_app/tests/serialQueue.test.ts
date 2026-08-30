@@ -429,3 +429,47 @@ test('both wipe paths purge the bin, and before the metadata is dropped', () => 
     'and must not depend on the wholesale directory sweep to reclaim the files'
   );
 });
+
+// This branch gave two device-wide local_settings registries an owner stamp
+// (training.sessions.v1, tutorial.created_round_ids) AND extended
+// clearLocalDatabase's scoped-delete list — and did not add these two to the
+// list it extended. So account deletion left the departing user's id, every
+// practice round id with its start timestamp, and every tutorial round id in
+// plaintext on the handset. Permanently: both registries are only ever pruned
+// for the account that is currently signed in, and a deleted account never
+// signs in again.
+//
+// The scrub has to be a filter, not a key delete: the rows are shared, so
+// dropping either key destroys the other account's entries — the same mistake
+// already caught for the legacy bin row.
+test('account deletion scrubs the departing account from both registries', () => {
+  const wipe = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
+  const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  const tutorial = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
+
+  const body = wipe.match(/export async function wipeLocalUserData[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'wipeLocalUserData should still exist');
+  assert.match(body, /forgetTrainingSessionsFor\(me\)/, 'practice sessions must be scrubbed');
+  assert.match(body, /forgetCreatedRoundsFor\(me\)/, 'tutorial round ids must be scrubbed');
+
+  // Must resolve the departing account BEFORE clearLocalDatabase — after it,
+  // there is nothing left to attribute the entries to.
+  assert.ok(
+    body.indexOf('forgetTrainingSessionsFor') < body.indexOf('await clearLocalDatabase()'),
+    'the scrub must run while the session still resolves'
+  );
+
+  // Filter, never a blanket delete of the shared key.
+  for (const [src, fn, name] of [
+    [training, 'forgetTrainingSessionsFor', 'training.sessions.v1'],
+    [tutorial, 'forgetCreatedRoundsFor', 'tutorial.created_round_ids'],
+  ] as const) {
+    const helper = src.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.notEqual(helper, '', `${fn} should exist in the module that owns the entry shape`);
+    assert.match(
+      helper,
+      /\.filter\(\((?:s|e)\) => (?:s|e)\.userId !== userId\)/,
+      `${name} must be filtered by owner, not deleted wholesale`
+    );
+  }
+});

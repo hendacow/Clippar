@@ -93,6 +93,23 @@ async function writeCreatedIds(entries: CreatedTutorialRound[]): Promise<void> {
   } catch {}
 }
 
+/**
+ * Drop one account's entries on wipe, keeping everyone else's.
+ *
+ * Same reasoning as `training.forgetTrainingSessionsFor`: `CREATED_KEY` is
+ * device-wide, this branch gave its entries an owner, and account deletion
+ * left the departing user's id and every tutorial round id behind. The sweep
+ * only retires ids stamped with the SIGNED-IN account, and a deleted account
+ * never signs in again — so without this they were permanent.
+ *
+ * Legacy bare-string entries have `userId: null` and are kept: unattributable,
+ * so not ours to delete under anyone. Same trade as the sweep makes.
+ */
+export async function forgetCreatedRoundsFor(userId: string): Promise<void> {
+  // writeCreatedIds already swallows its own failures; a wipe must not throw.
+  await writeCreatedIds((await readCreatedIds()).filter((e) => e.userId !== userId));
+}
+
 export async function setTutorialPending(pending: boolean): Promise<void> {
   try {
     await setSetting(PENDING_KEY, pending ? '1' : null);
