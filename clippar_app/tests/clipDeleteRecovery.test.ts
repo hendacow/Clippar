@@ -94,10 +94,22 @@ test('all five entry paths go through the ownership predicate', () => {
     assert.notEqual(body, '', `${fn} should still exist`);
     assert.match(body, /entryOwnedBy\(/, `${fn} must gate on the shared ownership predicate`);
   }
-  // The predicate must stay null-tolerant, or gating the read path DOES
-  // recreate findings 34/41 — an entry outliving its round would vanish.
   const pred = bin.match(/async function entryOwnedBy[\s\S]*?\n}/)?.[0] ?? '';
-  assert.match(pred, /round == null \|\|/, 'a round that is gone must still pass, or recovery breaks');
+  // Two properties, and the second is why this test changed shape.
+  //
+  // 1. Null-tolerant for a round that is GONE, or gating the read path DOES
+  //    recreate findings 34/41 — an entry outliving its round would vanish.
+  assert.match(pred, /owner === undefined\) return true/, 'a gone round must still pass');
+  // 2. It must NOT ask the scoped read. `getLocalRound` filters on user_id and
+  //    post-filters with isRowVisible, so a round owned by ANOTHER account comes
+  //    back null — indistinguishable from gone, and admitted by (1). Built that
+  //    way, the predicate's advertised exclusion set was empty.
+  assert.doesNotMatch(
+    pred,
+    /getLocalRound\(/,
+    'the scoped read collapses "gone" and "owned by someone else" into null'
+  );
+  assert.match(pred, /return owner === userId/, 'a foreign owner must be refused');
 });
 
 test('the restore refusal mutates nothing', () => {

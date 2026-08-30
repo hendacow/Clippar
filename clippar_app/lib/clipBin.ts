@@ -16,7 +16,7 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, getLocalClipRound, SQL_IDENTIFIER, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, getLocalRoundOwner, getLocalClipRound, SQL_IDENTIFIER, type LocalClipRow } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 import { createSerialQueue } from '@/lib/serialQueue';
 
@@ -430,10 +430,18 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
  * earlier version of this docstring argued the opposite three lines above the
  * clause that refutes it.** It said gating them would make an entry outliving
  * its round invisible and unrestorable — findings 34/41 recreated. It would
- * not: such an entry has `round == null` and passes. The predicate excludes
- * only entries whose round still EXISTS and belongs to somebody else, which is
- * the case that should never be listed or restored. The rationale was written
- * before this predicate existed and was never re-priced when it arrived.
+ * not: a genuinely gone round passes.
+ *
+ * **The same docstring then made a second claim that was false**: that the
+ * predicate excludes entries whose round exists and belongs to somebody else.
+ * Built on the scoped `getLocalRound`, that set was empty — a foreign round
+ * reads as `null` and was admitted by the tolerance above. It now reads the
+ * owner stamp UNSCOPED, so "gone" and "foreign" are finally different answers
+ * and the claim is true for the first time.
+ *
+ * **What it still does not do:** both this and the caller's `userId` come from
+ * the same session primitive, so a resolution that is wrong is wrong for both.
+ * This binds two independent reads; it does not make either of them right.
  *
  * **Defence in depth, stated plainly:** `local_rounds.user_id` is itself
  * reassignable (finding 23, private tracker), so this does not make the
@@ -441,11 +449,26 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
  * than one, which is strictly better than resting on the resolution alone.
  */
 async function entryOwnedBy(entry: BinnedClip, userId: string): Promise<boolean> {
-  const round = await getLocalRound(entry.roundId).catch(() => null);
-  // getLocalRound scopes to ITS OWN resolution of the session, so comparing
-  // that row's owner against the id that built the key is what binds the two
-  // halves together — the same line as the deleteClipToBin gate.
-  return round == null || round.user_id === userId;
+  // UNSCOPED read, and that is the whole point. The previous version asked
+  // `getLocalRound`, which filters on `user_id = ?` and post-filters with
+  // `isRowVisible` — so a round owned by ANOTHER account comes back as `null`,
+  // indistinguishable from a round that does not exist, and the null-tolerance
+  // below then admitted it. The docstring claimed this predicate excluded
+  // "entries whose round exists and belongs to somebody else"; that set was
+  // EMPTY BY CONSTRUCTION. The only thing it ever rejected was the narrow
+  // split-resolution case, which is not what it advertised.
+  const owner = await getLocalRoundOwner(entry.roundId).catch(() => undefined);
+  // Genuinely GONE stays allowed: refusing here strands the files the entry
+  // pins, which is findings 34/41 and is what the null-tolerance protects.
+  if (owner === undefined) return true;
+  // A pre-migration row the backfill has not claimed yet (see
+  // shouldClaimLegacyRows) is claimable by the first signed-in user of the
+  // launch, so it is not another account's round yet.
+  if (owner === null) return true;
+  // Round EXISTS and is stamped to somebody else: refuse. This branch is new —
+  // it is the one the old docstring promised and the scoped read made
+  // unreachable.
+  return owner === userId;
 }
 
 export async function purgeClipFromBin(clipId: number): Promise<void> {

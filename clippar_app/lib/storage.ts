@@ -262,6 +262,40 @@ export async function getLocalClipRound(clipId: number): Promise<string | null> 
 }
 
 /**
+ * A round's owner stamp, read WITHOUT scoping — deliberately, and for the same
+ * reason `getLocalClipRound` above is unscoped.
+ *
+ * A caller deciding whether it may DESTROY something has to tell "no such
+ * round" apart from "a round owned by another account", and the scoped read
+ * cannot: `getLocalRound` filters on `user_id = ?` and post-filters with
+ * `isRowVisible`, so a foreign round comes back as `null` — identical to a
+ * round that does not exist. A gate built on it therefore admits the foreign
+ * case it believes it is rejecting.
+ *
+ * Return values are three-way ON PURPOSE:
+ *   undefined — no such round. Callers that must not strand files treat this
+ *               as allowed (findings 34/41 depend on that tolerance).
+ *   null      — a pre-migration row the backfill has not claimed yet. Claimable
+ *               by the first signed-in user of the launch, so not another
+ *               account's round yet.
+ *   string    — the owning account.
+ *
+ * NOT a general-purpose read. It exists so a destructive gate can bind, and it
+ * must never be used to fetch a round for display or edit; those go through the
+ * scoped `getLocalRound`.
+ */
+export async function getLocalRoundOwner(
+  roundId: string
+): Promise<string | null | undefined> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ user_id: string | null }>(
+    'SELECT user_id FROM local_rounds WHERE id = ?',
+    roundId
+  );
+  return row == null ? undefined : row.user_id;
+}
+
+/**
  * Resolve the signed-in user for a scoped read, claiming any pre-migration
  * rows for them first (see shouldClaimLegacyRows). Doing the backfill here —
  * on the read path — rather than in a background task means a scoped query can

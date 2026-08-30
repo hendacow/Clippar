@@ -202,11 +202,12 @@ test('each queued job resolves the owning account exactly once', () => {
 test('every bin path binds ownership, and the predicate stays null-tolerant', () => {
   const helper = bin.match(/async function entryOwnedBy[\s\S]*?\n}/)?.[0] ?? '';
   assert.notEqual(helper, '', 'the shared ownership gate should exist');
-  assert.match(
-    helper,
-    /round == null \|\| round\.user_id === userId/,
-    'a genuinely missing round stays purgeable; a foreign one does not'
-  );
+  // "a foreign one does not" was FALSE while this pinned the scoped read: that
+  // read returns null for a foreign round, which the gone-tolerance admits. The
+  // assertion passed and the property it named did not hold.
+  assert.match(helper, /owner === undefined\) return true/, 'a genuinely missing round stays purgeable');
+  assert.match(helper, /return owner === userId/, 'and a foreign one does not — now actually reachable');
+  assert.doesNotMatch(helper, /getLocalRound\(/, 'must read the owner unscoped to tell gone from foreign');
 
   for (const fn of ['purgeClipFromBin', 'purgeAllBinnedClips']) {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
