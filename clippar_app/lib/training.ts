@@ -22,6 +22,7 @@
  */
 import { getSetting, setSetting, saveLocalRound, getClipsForRound, updateLocalRound, getLocalRound, currentSessionUserId } from '@/lib/storage';
 import { createRound } from '@/lib/api';
+import { createSerialQueue } from '@/lib/serialQueue';
 
 /**
  * Does the signed-in account own this round?
@@ -153,6 +154,34 @@ export interface TrainingSessionRef {
   userId: string | null;
 }
 
+/**
+ * One queue for `TRAINING_REGISTRY_KEY`, mirroring `binQueue` in clipBin and
+ * `registryQueue` in tutorialRound. `serialQueue.ts` names this registry in its
+ * own docstring as a module doing read → mutate → write over a single
+ * `local_settings` row; the queue was wired into clipBin only.
+ *
+ * The interleaving that survives without it restores a deleted account's id,
+ * round ids and session start timestamps after `forgetTrainingSessionsFor` has
+ * scrubbed them — permanently, since only the signed-in account prunes them.
+ * The mirror loses a just-written entry, and a session missing from this
+ * registry fails `ownsRound`'s stamp check, so the golfer's own practice
+ * session becomes unlistable and unplayable.
+ *
+ * ⚠️ **No reentrancy guard** — see the note in tutorialRound. No caller of the
+ * queued functions is itself inside a queued block; checked.
+ */
+const registryQueue = createSerialQueue();
+
+/** Read-modify-write the registry under the queue. The only way to write it. */
+async function mutateRegistry(
+  change: (entries: TrainingSessionRef[]) => TrainingSessionRef[]
+): Promise<void> {
+  await registryQueue.run(async () => {
+    const next = change(await readRegistry());
+    await setSetting(TRAINING_REGISTRY_KEY, next.length ? JSON.stringify(next) : null);
+  });
+}
+
 async function readRegistry(): Promise<TrainingSessionRef[]> {
   try {
     const raw = await getSetting(TRAINING_REGISTRY_KEY);
@@ -183,8 +212,7 @@ async function readRegistry(): Promise<TrainingSessionRef[]> {
  */
 export async function forgetTrainingSessionsFor(userId: string): Promise<void> {
   try {
-    const kept = (await readRegistry()).filter((s) => s.userId !== userId);
-    await setSetting(TRAINING_REGISTRY_KEY, kept.length ? JSON.stringify(kept) : null);
+    await mutateRegistry((entries) => entries.filter((s) => s.userId !== userId));
   } catch {
     // A wipe must never throw: a stale registry entry is not worth blocking
     // the sign-out and redirect that follow it.
@@ -227,9 +255,10 @@ export async function startTrainingSession(): Promise<string> {
   // undone by the write — restoring a deleted account's id and session
   // timestamps permanently, since only the signed-in account prunes them.
   const owner = await currentSessionUserId().catch(() => null);
-  const entries = await readRegistry();
-  entries.push({ roundId: round.id, startedAt: new Date().toISOString(), userId: owner });
-  await setSetting(TRAINING_REGISTRY_KEY, JSON.stringify(entries));
+  await mutateRegistry((entries) => [
+    ...entries,
+    { roundId: round.id, startedAt: new Date().toISOString(), userId: owner },
+  ]);
   return round.id;
 }
 

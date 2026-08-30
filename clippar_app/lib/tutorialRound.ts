@@ -17,6 +17,7 @@
  */
 import { getSetting, setSetting, saveLocalRound, deleteLocalRound, getClipsForRound, getLocalRound, saveLocalClip, currentSessionUserId } from '@/lib/storage';
 import { createRound, deleteRound } from '@/lib/api';
+import { createSerialQueue } from '@/lib/serialQueue';
 import { persistAsset } from '@/lib/media';
 
 export const TUTORIAL_COURSE_NAME = 'Tutorial round';
@@ -63,6 +64,35 @@ interface CreatedTutorialRound {
   userId: string | null;
 }
 
+/**
+ * Same reasoning as `binQueue` in clipBin: `CREATED_KEY` is ONE
+ * `local_settings` row and every writer does read → mutate in JS → write, with
+ * no transaction between. `serialQueue.ts`'s own docstring names this registry
+ * as a victim; the queue was then wired into clipBin only.
+ *
+ * Re-reading before the write (which `sweepTutorialRounds` does) narrows the
+ * window to the gap between two adjacent settings ops. It does not close it,
+ * because `readCreatedIds` itself awaits. The interleaving that survives is
+ * `sweep read → scrub read → scrub write → sweep write`, which restores a
+ * deleted account's ids — permanently, since only the signed-in account prunes
+ * them and that account never signs in again.
+ *
+ * ⚠️ **`createSerialQueue` has no reentrancy guard.** A queued job that calls
+ * another queued function on THIS queue deadlocks — and the sweep is fired
+ * unawaited at app start, so a deadlock there hangs silently. Only the
+ * read-modify-write tail is queued, never the network delete loop, and no
+ * caller of the queued functions is itself inside a queued block (checked:
+ * `app/_layout.tsx`, `endTutorial`, `app/tutorial.tsx`, `localWipe`).
+ */
+const registryQueue = createSerialQueue();
+
+/** Read-modify-write CREATED_KEY under the queue. The only way to write it. */
+async function mutateCreatedIds(
+  change: (entries: CreatedTutorialRound[]) => CreatedTutorialRound[]
+): Promise<void> {
+  await registryQueue.run(async () => writeCreatedIds(change(await readCreatedIds())));
+}
+
 async function readCreatedIds(): Promise<CreatedTutorialRound[]> {
   try {
     const raw = await getSetting(CREATED_KEY);
@@ -107,7 +137,7 @@ async function writeCreatedIds(entries: CreatedTutorialRound[]): Promise<void> {
  */
 export async function forgetCreatedRoundsFor(userId: string): Promise<void> {
   // writeCreatedIds already swallows its own failures; a wipe must not throw.
-  await writeCreatedIds((await readCreatedIds()).filter((e) => e.userId !== userId));
+  await mutateCreatedIds((entries) => entries.filter((e) => e.userId !== userId));
 }
 
 export async function setTutorialPending(pending: boolean): Promise<void> {
@@ -139,7 +169,7 @@ export async function createTutorialRound(): Promise<string> {
   // Registered before anything else can fail, so the sweep can always find it,
   // stamped with the account that created it so no other account sweeps it.
   const owner = await currentSessionUserId().catch(() => null);
-  await writeCreatedIds([...(await readCreatedIds()), { id: round.id, userId: owner }]);
+  await mutateCreatedIds((entries) => [...entries, { id: round.id, userId: owner }]);
   await saveLocalRound({ id: round.id, course_name: TUTORIAL_COURSE_NAME, holes_played: 9 });
   await setSetting(ACTIVE_KEY, round.id);
   await setTutorialPending(false);
@@ -299,7 +329,9 @@ export async function sweepTutorialRounds(): Promise<number> {
     // Removing the swept ids from whatever the registry holds NOW is also just
     // more correct: the intent is "drop these ids", not "replace the list with
     // a stale copy minus these ids".
-    await writeCreatedIds((await readCreatedIds()).filter((e) => !sweptIds.has(e.id)));
+    // Queued — and ONLY this tail. The delete loop above awaits a network call
+    // and must never hold the queue.
+    await mutateCreatedIds((entries) => entries.filter((e) => !sweptIds.has(e.id)));
     if (active) await setSetting(ACTIVE_KEY, null).catch(() => {});
   } catch {}
   return swept;

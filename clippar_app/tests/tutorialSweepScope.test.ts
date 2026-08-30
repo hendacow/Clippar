@@ -32,7 +32,7 @@ test('candidates come from the created-id registry', () => {
   assert.match(sweep, /readCreatedIds\(\)/, 'the sweep must work from ids the app itself created');
   assert.match(
     tutorial,
-    /export async function createTutorialRound[\s\S]*?writeCreatedIds/,
+    /export async function createTutorialRound[\s\S]*?mutateCreatedIds/,
     'createTutorialRound must register the id it created'
   );
 });
@@ -45,7 +45,7 @@ test('the course-name check survives as a second gate', () => {
 
 // The registry must not grow for the life of the install.
 test('swept ids are dropped from the registry', () => {
-  assert.match(sweep, /writeCreatedIds\(/);
+  assert.match(sweep, /mutateCreatedIds\(/);
 });
 
 // local_settings is device-wide, so a bare id list accumulates rounds from
@@ -82,11 +82,37 @@ test('another account’s entries survive a sweep, and legacy entries are never 
   // including the account-deletion scrub. Fixing it turned this red. Fourth
   // assertion tonight watching the shape of the code rather than the property.
   assert.match(sweep, /\.filter\(\(e\) => !sweptIds\.has\(e\.id\)\)/);
-  // And the list written must be read AFTER the awaits, not before them.
+  // The write must read AFTER the awaits, not before them — and the whole
+  // read-modify-write must be serialised, which is strictly stronger. Re-reading
+  // narrowed the window between the sweep and the account-deletion scrub; the
+  // queue closes it. Every writer of the key goes through the same helper: a
+  // lock one writer skips is not a lock.
   assert.match(
     sweep,
-    /await writeCreatedIds\(\(await readCreatedIds\(\)\)\.filter/,
-    'the write must re-read, or a concurrent scrub is silently reverted'
+    /await mutateCreatedIds\(\(entries\) => entries\.filter/,
+    'the tail must re-read under the queue, or a concurrent scrub is reverted'
+  );
+  const tutorial2 = readFileSync(join(root, 'lib/tutorialRound.ts'), 'utf8');
+  assert.match(
+    tutorial2,
+    /async function mutateCreatedIds[\s\S]*?registryQueue\.run\(async \(\) => writeCreatedIds\(change\(await readCreatedIds\(\)\)\)\)/,
+    'the helper must read and write inside ONE queued job'
+  );
+  // writeCreatedIds is the unqueued primitive: only the helper may call it.
+  const writers = [...tutorial2.matchAll(/await writeCreatedIds\(/g)].length;
+  assert.equal(writers, 0, 'every write must go through mutateCreatedIds, or the queue is bypassed');
+  // The network delete loop must NOT hold the queue — serialQueue has no
+  // reentrancy guard and the sweep is fired unawaited at app start, so a
+  // deadlock there hangs silently.
+  const sweepBody = tutorial2.match(/export async function sweepTutorialRounds[\s\S]*?\n}/)?.[0] ?? '';
+  assert.ok(
+    sweepBody.indexOf('await deleteRound(') < sweepBody.indexOf('await mutateCreatedIds('),
+    'the queued tail must come after the network loop, never wrap it'
+  );
+  assert.doesNotMatch(
+    sweepBody,
+    /registryQueue\.run\([\s\S]*await deleteRound\(/,
+    'the network delete must never run inside the queue'
   );
   // The previous string[] shape has no known owner; keep it, never sweep it.
   assert.match(tutorial, /typeof v === 'string'\) return \[\{ id: v, userId: null \}\]/);
