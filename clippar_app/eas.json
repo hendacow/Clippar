@@ -1,5 +1,8 @@
 {
-  "cli": { "version": ">= 12.0.0", "appVersionSource": "remote" },
+  "cli": {
+    "version": ">= 12.0.0",
+    "appVersionSource": "remote"
+  },
   "build": {
     "development": {
       "developmentClient": true,
@@ -8,6 +11,20 @@
       "environment": "development",
       "ios": {
         "simulator": false
+      },
+      "env": {
+        "APP_VARIANT": "development"
+      }
+    },
+    "dev-standalone": {
+      "_comment": "Clippar Dev as a normal app: dev bundle id and dev backend, but NO dev client - the JS is embedded, so it opens and runs with no Metro server and no laptop. Subscribes to the development update channel so OTA publishes still reach it.",
+      "distribution": "internal",
+      "channel": "development",
+      "environment": "development",
+      "prebuildCommand": "expo prebuild --clean --no-install",
+      "ios": {
+        "simulator": false,
+        "buildConfiguration": "Release"
       },
       "env": {
         "APP_VARIANT": "development"
@@ -61,8 +78,12 @@
       "channel": "production",
       "environment": "production",
       "prebuildCommand": "expo prebuild --clean --no-install",
-      "ios": { "buildConfiguration": "Release" },
-      "android": { "buildType": "app-bundle" },
+      "ios": {
+        "buildConfiguration": "Release"
+      },
+      "android": {
+        "buildType": "app-bundle"
+      },
       "autoIncrement": true
     }
   },
