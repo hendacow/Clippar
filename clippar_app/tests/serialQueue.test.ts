@@ -235,6 +235,34 @@ test('the legacy drain destroys only the signed-in account’s own entries', () 
   assert.doesNotMatch(body, /legacyDrained/, 'no latch: later accounts still need their drain');
 });
 
+// The splice is guarded where the splicing happens. Deferring this rested on
+// "it changes a shared primitive with a caller outside the diff" — but all
+// three call sites pass rows from `SELECT * FROM local_clips`, whose every
+// column (schema + 25 ALTER TABLE migrations) is plain snake_case, so no
+// existing caller's behaviour moves at all.
+test('restoreLocalClip validates the identifiers it splices, not its callers', () => {
+  const store = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  const body = store.match(/export async function restoreLocalClip[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'restoreLocalClip should still exist');
+  assert.match(store, /export const SQL_IDENTIFIER = \/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*\$\//);
+  assert.match(body, /columns\.every\(\(c\) => SQL_IDENTIFIER\.test\(c\)\)/);
+  // The check must precede the interpolation, or it guards nothing.
+  assert.ok(
+    body.indexOf('SQL_IDENTIFIER.test') < body.indexOf('columns.join'),
+    'validate before splicing'
+  );
+  // A refusal must NOT return false. `false` already means "the row is
+  // already back, nothing to undo", and restoreClipFromBin drops the bin entry
+  // on it — so overloading false with "I refused" would destroy the clip.
+  assert.match(body, /throw new Error\('restoreLocalClip: refusing/);
+  const restoreFromBin = bin.match(/export async function restoreClipFromBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(
+    restoreFromBin,
+    /const restored = await restoreLocalClip\(entry\.row\);\s*\n\s*await writeBinAt/,
+    'the entry is dropped after a false return — which is why a refusal throws'
+  );
+});
+
 // restoreLocalClip interpolates Object.keys(row) into INSERT ... unescaped,
 // justified by a docstring saying the keys "come from the row the database
 // itself handed us". This module broke that invariant by persisting the row as
@@ -247,8 +275,16 @@ test('bin entries are validated where the JSON blob re-enters', () => {
 
   const validator = bin.match(/function isValidEntry[\s\S]*?\n}/)?.[0] ?? '';
   // Column names reach SQL as identifiers, so they get an identifier check.
-  assert.match(bin, /const SQL_IDENTIFIER = \/\^\[A-Za-z_\]\[A-Za-z0-9_\]\*\$\//);
+  // The source-side check stays because isValidEntry also gates PURGING, which
+  // unlinks files without ever reaching restoreLocalClip — but the regex is
+  // imported, not redeclared, so the two halves cannot drift.
   assert.match(validator, /SQL_IDENTIFIER\.test\(c\)/);
+  assert.doesNotMatch(
+    bin,
+    /const SQL_IDENTIFIER = /,
+    'one definition, imported — two copies drift into two ideas of "safe"'
+  );
+  assert.match(bin, /import \{[^}]*SQL_IDENTIFIER[^}]*\} from '@\/lib\/storage'/);
   // fileUris reach a file delete, so the file:// prefix is re-checked.
   assert.match(validator, /startsWith\('file:\/\/'\)/);
   // The ownership decision is made on e.roundId; everything destructive acts

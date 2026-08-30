@@ -16,7 +16,7 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, getLocalClipRound, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, currentSessionUserId, getLocalRound, getLocalClipRound, SQL_IDENTIFIER, type LocalClipRow } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 import { createSerialQueue } from '@/lib/serialQueue';
 
@@ -120,17 +120,21 @@ export interface BinnedClip {
  * attacker can write the database directly — so this is not an exploit path
  * so much as an invariant this feature quietly broke and nothing recorded.
  *
- * Column names are checked against the SQL identifier SHAPE rather than an
- * allow-list of known columns: `local_clips` has picked up 25 columns through
- * `ALTER TABLE` migrations, so a hardcoded list would drift and start
- * silently refusing valid restores. The shape check is what closes the
- * injection; an unknown-but-well-formed column just fails at INSERT.
+ * `restoreLocalClip` now applies the same `SQL_IDENTIFIER` check itself, and
+ * that is the one that closes the injection — a sink guards its own splice, so
+ * a future caller cannot reopen this by forgetting. The check stays here as
+ * well, and not merely for belt and braces: `isValidEntry` decides whether an
+ * entry may be PURGED, not only whether it may be restored, and purging
+ * unlinks video files without going near `restoreLocalClip`. Deleting this
+ * would leave the destructive half of the boundary unguarded.
+ *
+ * The regex is imported rather than redeclared so the two halves cannot drift
+ * apart into two different definitions of "safe".
  *
  * `fileUris` is re-checked for the `file://` prefix that `deleteLocalClip`
  * applied on the way IN, because `purgeEntry` unlinks them on the way out and
  * was not re-applying it.
  */
-const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function isValidEntry(v: unknown): v is BinnedClip {
   if (!v || typeof v !== 'object') return false;
@@ -247,6 +251,22 @@ async function drainLegacyBin(): Promise<void> {
       // an entry that failed validation means deleting paths named by a blob
       // we just declined to trust, and purgeEntry's file:// check is a prefix
       // test rather than a containment one. That trade is Henry's to make.
+      //
+      // And the trade above is stated in FILES, which is only one half of what
+      // `continue` does. The other half is the RECORD: an entry dropped here
+      // is not written back to `others` either, so when this account has any
+      // entry of its own the row is rewritten without it and a malformed entry
+      // belonging to ANOTHER account is destroyed under us. `others.push(entry)`
+      // is the one-line alternative and it was deliberately not taken — it
+      // would push an unvalidated value into a `BinnedClip[]`, and the entry is
+      // already unreachable by every reader (`readBinAt` filters on the same
+      // `isValidEntry`), so what survives would be an unreadable blob kept for
+      // the life of the install rather than a recoverable clip. Nothing is lost
+      // that any code path could have restored.
+      //
+      // Recorded rather than fixed because it is a judgement call on an
+      // unreachable path, not a defect: the legacy key has never been written
+      // by a released build. Do not "fix" it without settling the type lie.
       if (!isValidEntry(entry)) continue;
       const owned = await getLocalRound(entry.roundId).catch(() => null);
       (owned ? mine : others).push(entry);

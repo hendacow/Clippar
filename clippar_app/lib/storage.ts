@@ -1320,17 +1320,25 @@ export type LocalClipRow = {
  * and hands them back after a `JSON.parse`, so the keys are only as trustworthy
  * as that blob.
  *
- * What actually holds today is one caller's discipline, not anything here:
- * `clipBin.isValidEntry` shape-checks every key against `SQL_IDENTIFIER` before
- * a JSON-sourced row can reach this function, and the other callers pass rows
- * straight from SQLite. **If you are adding a caller that did not come from a
- * `SELECT *`, validate the keys or move that check into this function** —
- * relocating it to the sink is escalated as finding 25 (nine independent
- * reports) and is not done here only because it is a behaviour change to a
- * shared primitive with a caller outside this diff.
+ * So the identifier check now lives HERE, at the sink that does the splicing,
+ * instead of resting on one caller's discipline. It was deferred once on the
+ * grounds that moving it changes a shared primitive with a caller outside the
+ * diff. That premise was wrong and checking it took one command: all three
+ * call sites pass rows originating in `SELECT * FROM local_clips`, and every
+ * column in that table's schema plus its 25 `ALTER TABLE` migrations is plain
+ * snake_case. No existing caller's behaviour changes; what changes is that the
+ * next one cannot get it wrong silently.
+ *
+ * A rejected key THROWS rather than returning false, and that is not a style
+ * choice. `false` already means "a row with that id exists, so there is
+ * nothing to undo", and `restoreClipFromBin` acts on it by dropping the bin
+ * entry — correct when the clip is back in the table, destructive if `false`
+ * could also mean "I refused". Throwing leaves the entry in the bin.
  *
  * Returns false if a row with that id already exists (nothing to undo).
  */
+export const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
   const database = await getDatabase();
   const existing = await database.getFirstAsync<{ id: number }>(
@@ -1341,6 +1349,13 @@ export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
 
   const columns = Object.keys(row);
   if (columns.length === 0) return false;
+  // Checked against the identifier SHAPE, not an allow-list of known columns:
+  // `local_clips` grows by ALTER TABLE, so a hardcoded list would drift and
+  // start refusing valid restores. The shape is what closes the splice; an
+  // unknown-but-well-formed column still fails at INSERT, harmlessly.
+  if (!columns.every((c) => SQL_IDENTIFIER.test(c))) {
+    throw new Error('restoreLocalClip: refusing to splice a non-identifier column name');
+  }
   const placeholders = columns.map(() => '?').join(', ');
   const values = columns.map((c) => (row[c] as never) ?? null);
 
