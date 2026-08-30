@@ -297,3 +297,43 @@ function textFilesUnder(dir: string): string[] {
   walk(dir);
   return out;
 }
+
+/**
+ * The headings of the unfixed-and-live findings, pinned verbatim.
+ *
+ * The guard above checks an IDENTIFIER. A heading can state the same mechanism
+ * in plain English and the identifier never appears — which is exactly what
+ * happened: finding 32's heading read as a one-line statement of the defect,
+ * directly above a body saying "Detail withheld", and this file was green the
+ * whole time. That is the "stated a property, enforced a place" error (finding
+ * 68) reappearing inside the control added to stop it, for the third time.
+ *
+ * A word blacklist would be the fourth. Instead these headings are pinned
+ * exactly: change one and this goes red, so re-wording a redacted finding
+ * becomes a deliberate act with a re-approval attached rather than a drift.
+ *
+ * Naming the finding numbers here discloses nothing new — the report already
+ * says which findings are escalated and live; that is the severity half, kept
+ * on purpose so Henry can rank them. What is withheld is the mechanism.
+ */
+const REDACTED_HEADINGS: Record<string, string> = {
+  '12': "HIGH — account deletion destroys the other account's videos (out of diff, NOT fixed)",
+  '32': 'HIGH — the session-identity primitive every ownership gate reads (escalated, authentication code)',
+};
+
+test('the redacted findings’ headings stay neutral', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  for (const [num, expected] of Object.entries(REDACTED_HEADINGS)) {
+    const m = report.match(new RegExp(`^### ${num}\\. (.+)$`, 'm'));
+    assert.notEqual(
+      m,
+      null,
+      `finding ${num}'s heading is gone — if it was renumbered or removed, update REDACTED_HEADINGS deliberately`
+    );
+    assert.equal(
+      m![1],
+      expected,
+      `finding ${num}'s heading changed. It describes an unfixed, live-in-shipped-code defect in a public repo, so the heading is part of the redaction. If the new wording is deliberate and still withholds the mechanism, update REDACTED_HEADINGS in the same commit.`
+    );
+  }
+});
