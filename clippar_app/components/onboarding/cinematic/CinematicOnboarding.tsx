@@ -38,11 +38,14 @@ const VIDEOS = {
   shot1: require('@/assets/onboarding/shot1.mp4'),
   shot2: require('@/assets/onboarding/shot2.mp4'),
   shot3: require('@/assets/onboarding/shot3.mp4'),
-  // Henry's real screen-recording of putting a reel on his own story —
-  // retimed from a 5s timelapse to 8.2s (0.6x, motion-interpolated back to
-  // 30fps; text stays crisp because the UI chrome is static). Screened
-  // frame-accurately before bundling: all 150 source frames' top strips
-  // tiled and inspected — no notification, no DMs, no other accounts.
+  // Henry's real screen-recording of sharing a reel to his own story. Cut
+  // from the full 83s real-time capture (30 Aug, superseding an earlier 4s
+  // timelapse fragment): composer with his clip -> music picker -> lyric
+  // sticker -> the karaoke story, 8.5s, hard cuts. Two sections of the raw
+  // recording are deliberately EXCLUDED and must never ship: the iOS share
+  // sheet (his personal contacts are visible) and the Instagram home screen
+  // (other accounts' stories). Screened frame-accurately on the OUTPUT:
+  // every frame's top strip tiled and inspected - no notifications, no DMs.
   igstory: require('@/assets/onboarding/igstory.mp4'),
 } as const;
 
