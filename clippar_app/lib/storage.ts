@@ -1316,8 +1316,25 @@ export type LocalClipRow = {
  * editor, the upload queue) lines back up. Powers "Undo delete" on the
  * recording screen.
  *
- * Column names come from the row the database itself handed us, so the
- * dynamic SQL is built from DB-controlled identifiers, not user input.
+ * ⚠️ **Column names are interpolated into the INSERT unescaped** — SQLite has no
+ * placeholder for an identifier, so they cannot be bound. Values are bound;
+ * identifiers are spliced.
+ *
+ * This used to say the identifiers are DB-controlled because the row came
+ * straight from a `SELECT *`. **That is no longer true and it is my change that
+ * broke it:** `lib/clipBin.ts` persists whole rows as JSON in `local_settings`
+ * and hands them back after a `JSON.parse`, so the keys are only as trustworthy
+ * as that blob.
+ *
+ * What actually holds today is one caller's discipline, not anything here:
+ * `clipBin.isValidEntry` shape-checks every key against `SQL_IDENTIFIER` before
+ * a JSON-sourced row can reach this function, and the other callers pass rows
+ * straight from SQLite. **If you are adding a caller that did not come from a
+ * `SELECT *`, validate the keys or move that check into this function** —
+ * relocating it to the sink is escalated as finding 25 (nine independent
+ * reports) and is not done here only because it is a behaviour change to a
+ * shared primitive with a caller outside this diff.
+ *
  * Returns false if a row with that id already exists (nothing to undo).
  */
 export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
