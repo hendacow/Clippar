@@ -124,10 +124,57 @@ test('app.py fallback credentials are discoverable, so this test has teeth', () 
   );
 });
 
-test('no report quotes a fallback credential instead of citing its line', () => {
+/**
+ * Copies of a guarded value that exist ON PURPOSE, each with its reason.
+ *
+ * This list is the point, not a loophole. `EXPO_PUBLIC_PIPELINE_API_KEY` in
+ * the env example is the CLIENT half of the same shared secret `app.py` falls
+ * back to — it is already embedded in every shipped bundle by design (see
+ * `clippar_app/CLAUDE.md`, "Secret keys ship in the client"), so the example
+ * file is not where that exposure lives and deleting it here would hide a
+ * known problem rather than fix it. It is also a developer-setup decision
+ * rather than a security one, so it is recorded for Henry instead of changed
+ * unilaterally.
+ *
+ * **The consequence that matters is in the report:** rotating the server-side
+ * value requires shipping a new app build, because the client carries the
+ * matching one.
+ *
+ * A named copy with a reason beats a directory that happens not to be scanned.
+ */
+const ALLOWED_COPIES = new Set(['clippar_app/.env.development.local.example']);
+
+/**
+ * Widened from `reports/` to the tree, because the rule was written as a
+ * PROPERTY and enforced as a PLACE — the exact mistake catalogued as finding
+ * 52, in the control meant to embody the lesson. A tracked copy of a guarded
+ * value was sitting outside the scanned directory the whole time, and dotfiles
+ * were skipped besides, so widening the directory alone would not have found
+ * it either.
+ */
+function scannableFiles(): string[] {
+  const out = [
+    ...markdownFilesUnder(join(repoRoot, 'reports')),
+    ...textFilesUnder(join(repoRoot, 'clippar_app')),
+  ];
+  // The env examples: dotfiles, so every generic walker skips them, which is
+  // why this copy stayed invisible.
+  for (const name of ['.env.development.local.example', '.env.staging.local.example']) {
+    const full = join(repoRoot, 'clippar_app', name);
+    try {
+      statSync(full);
+      out.push(full);
+    } catch {
+      // absent is fine
+    }
+  }
+  return out;
+}
+
+test('no tracked file quotes a fallback credential instead of citing its line', () => {
   const literals = fallbackLiteralsInAppPy();
-  const files = markdownFilesUnder(join(repoRoot, 'reports'));
-  assert.ok(files.length > 0, 'expected to find report files to scan');
+  const files = scannableFiles();
+  assert.ok(files.length > 0, 'expected to find files to scan');
 
   // Name the offending FILE, never the matched line — the same rule this test
   // enforces applies to its own failure output.
@@ -136,12 +183,13 @@ test('no report quotes a fallback credential instead of citing its line', () => 
       const body = readFileSync(file, 'utf8');
       return literals.some((secret) => body.includes(secret));
     })
-    .map((file) => file.slice(repoRoot.length + 1));
+    .map((file) => file.slice(repoRoot.length + 1))
+    .filter((rel) => !ALLOWED_COPIES.has(rel));
 
   assert.deepEqual(
     offenders,
     [],
-    `these reports quote a credential; cite the location (e.g. app.py:31) instead:\n${offenders.join('\n')}`
+    `these files quote a credential; cite the location (e.g. app.py:31) instead:\n${offenders.join('\n')}`
   );
 });
 
