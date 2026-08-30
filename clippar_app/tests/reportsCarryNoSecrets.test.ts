@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -259,7 +260,7 @@ function deriveGuarded(src: string, tag: string): string[] {
 const GUARDED_CODE_REFS = new Set(['clippar_app/tests/serialQueue.test.ts']);
 
 /**
- * The pointer blocks in the HOME files, pinned verbatim.
+ * The pointer blocks in the HOME files, pinned BY DIGEST.
  *
  * `GUARDED` filters `rel !== home`, so a home file is exempt for its own
  * identifier by construction — the check only ever answers "is this named
@@ -267,57 +268,60 @@ const GUARDED_CODE_REFS = new Set(['clippar_app/tests/serialQueue.test.ts']);
  * state the property and the unfixed status in the same block as the
  * implementation fifteen lines below, which is synthesis rather than citation.
  *
- * Fifth recurrence of "stated a property, enforced a place", one level up
- * inside the control. Same remedy as REDACTED_HEADINGS: pin the text, so
- * re-wording it is a deliberate act with a re-approval attached rather than a
- * drift. A phrase list would have been the sixth recurrence.
+ * This used to be a list of the sentences CUT from that docstring for being too
+ * revealing — written out verbatim, in a tracked file, in a public repo, each
+ * one annotated with why it was too revealing. The guard only ever asked
+ * whether an identifier appeared elsewhere, so it stayed green while it was
+ * itself the second copy of the thing it existed to withhold. The file's own
+ * comment warned that "a phrase list would have been the sixth recurrence" and
+ * a phrase list is what it shipped.
+ *
+ * A digest carries none of that and is strictly stronger in the direction that
+ * matters: a phrase list catches only the four sentences someone thought of,
+ * while the digest goes red on ANY regrowth of the block. What it gives up is
+ * reach — it pins this block rather than searching the whole file, so a cut
+ * sentence reappearing elsewhere in `storage.ts` is not caught. That is the
+ * honest limit, stated rather than papered over.
+ *
+ * To regenerate after a deliberate re-wording: run this test, and paste the
+ * digest it reports as "actual". `pointerBlock` below defines the extent
+ * exactly, so there is no second implementation to drift from it.
  */
-const HOME_POINTERS: { file: string; mustContain: string; mustNotContain: string[] }[] = [
+const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
   {
     file: 'clippar_app/lib/storage.ts',
-    mustContain: 'Why is deliberately not written here.',
-    // Property statements, not warnings. A warning says "do not build on this";
-    // these say what the failure IS, which is the tracker's job.
-    //
-    // The array written IS the array that runs. A `.slice(0, 2)` used to sit on
-    // the closing line, dropping a third phrase — and that phrase was the only
-    // one of the three that actually matched the file. So this assertion was
-    // green because it had been trimmed to miss, which is a security test
-    // weakened to pass: the thing this review spent the night criticising,
-    // written by me, undocumented, in the control added to stop it.
-    //
-    // Deliberately NOT listed: "unfixed and live in shipped code". That is the
-    // STATUS, not the mechanism, and the status is the half kept on purpose —
-    // a pointer that will not say the finding is unfixed reads as ordinary
-    // caution and gets ignored. Same call as the pinned heading of finding 12,
-    // which states the effect and withholds the how.
-    mustNotContain: [
-      'account other than the one currently signed in',
-      'null is not the only failure mode',
-      // Cut in the sixth redaction pass: this characterises WHICH failure mode
-      // is the wrong one to guard against, which narrows the search for anyone
-      // reading the implementation a few lines below.
-      'necessary but NOT sufficient',
-      // Blast radius. "Four destructive gates are built on a function
-      // documented as unsafe" is a map, not a warning.
-      'four destructive gates were built on top of it',
-    ],
+    // The kept half, and it discloses nothing on its own: it says the reasoning
+    // is elsewhere. A pointer that will not admit the finding is real and open
+    // reads as generic caution and gets skipped — which is how the sentence it
+    // replaced did its damage.
+    sentinel: 'Why is deliberately not written here.',
+    sha256: '79b005f1839edef170c7501a57503fe5f1af774350bffaabf7eed761079e367e',
   },
 ];
 
+/** The doc-comment block containing `sentinel`, or null if it is gone. */
+function pointerBlock(src: string, sentinel: string): string | null {
+  const at = src.indexOf(sentinel);
+  if (at === -1) return null;
+  const start = src.lastIndexOf('/**', at);
+  const end = src.indexOf('*/', at);
+  if (start === -1 || end === -1) return null;
+  return src.slice(start, end + 2);
+}
+
 test('the home files point at the tracker instead of explaining the finding', () => {
-  for (const { file, mustContain, mustNotContain } of HOME_POINTERS) {
-    const body = readFileSync(join(repoRoot, file), 'utf8');
-    assert.ok(
-      body.includes(mustContain),
+  for (const { file, sentinel, sha256 } of HOME_POINTERS) {
+    const block = pointerBlock(readFileSync(join(repoRoot, file), 'utf8'), sentinel);
+    assert.notEqual(
+      block,
+      null,
       `${file} lost its "why is withheld" pointer — the warning without it reads as an oversight rather than a decision`
     );
-    for (const phrase of mustNotContain) {
-      assert.ok(
-        !body.includes(phrase),
-        `${file} states the withheld property ("${phrase}") in the same file as the implementation. Point at the tracker instead.`
-      );
-    }
+    assert.equal(
+      createHash('sha256').update(block!, 'utf8').digest('hex'),
+      sha256,
+      `${file}'s pointer block changed. It is the block that withholds an unfixed, live-in-shipped-code mechanism in a public repo, so its wording is part of the redaction. If the new wording still points at the tracker rather than explaining the finding, regenerate the digest in the same commit.`
+    );
   }
 });
 
@@ -413,32 +417,41 @@ function textFilesUnder(dir: string): string[] {
  * whole time. That is the "stated a property, enforced a place" error (finding
  * 68) reappearing inside the control added to stop it, for the third time.
  *
- * A word blacklist would be the fourth. Instead these headings are pinned
- * exactly: change one and this goes red, so re-wording a redacted finding
+ * A word blacklist would be the fourth. Instead these headings are pinned BY
+ * DIGEST: change one and this goes red, so re-wording a redacted finding
  * becomes a deliberate act with a re-approval attached rather than a drift.
+ *
+ * Pinned by digest rather than verbatim, because the verbatim version restated
+ * both headings in a tracked public file — and one of them still carried the
+ * blast radius, the same category of sentence that had already been cut from
+ * `storage.ts` for being a map rather than a warning. A guard that has to quote
+ * the text to protect it has become the second copy.
  *
  * Naming the finding numbers here discloses nothing new — the report already
  * says which findings are escalated and live; that is the severity half, kept
  * on purpose so Henry can rank them. What is withheld is the mechanism.
+ *
+ * Regenerate with:
+ *   node -e 'console.log(require("crypto").createHash("sha256").update(process.argv[1]).digest("hex"))' '<heading text after the number>'
  */
-const REDACTED_HEADINGS: Record<string, string> = {
-  '12': "HIGH — account deletion destroys the other account's videos (out of diff, NOT fixed)",
-  '32': 'HIGH — the session-identity primitive every ownership gate reads (escalated, authentication code)',
+const REDACTED_HEADING_SHA256: Record<string, string> = {
+  '12': 'b1a3a909509b5fcb3d6bbdd85efc82f20ddd1eefcd70484d2e5cebd63f988540',
+  '32': 'd51651e0e1bb3aba8e38a314fc61585712e6749278d9ce986bbe6660f2e32eeb',
 };
 
 test('the redacted findings’ headings stay neutral', () => {
   const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
-  for (const [num, expected] of Object.entries(REDACTED_HEADINGS)) {
+  for (const [num, digest] of Object.entries(REDACTED_HEADING_SHA256)) {
     const m = report.match(new RegExp(`^### ${num}\\. (.+)$`, 'm'));
     assert.notEqual(
       m,
       null,
-      `finding ${num}'s heading is gone — if it was renumbered or removed, update REDACTED_HEADINGS deliberately`
+      `finding ${num}'s heading is gone — if it was renumbered or removed, update REDACTED_HEADING_SHA256 deliberately`
     );
     assert.equal(
-      m![1],
-      expected,
-      `finding ${num}'s heading changed. It describes an unfixed, live-in-shipped-code defect in a public repo, so the heading is part of the redaction. If the new wording is deliberate and still withholds the mechanism, update REDACTED_HEADINGS in the same commit.`
+      createHash('sha256').update(m![1], 'utf8').digest('hex'),
+      digest,
+      `finding ${num}'s heading changed. It heads an unfixed, live-in-shipped-code defect in a public repo, so the heading is part of the redaction. If the new wording is deliberate and still withholds the mechanism, regenerate its digest in the same commit.`
     );
   }
 });
