@@ -265,11 +265,23 @@ const HOME_POINTERS: { file: string; mustContain: string; mustNotContain: string
     mustContain: 'Why is deliberately not written here.',
     // Property statements, not warnings. A warning says "do not build on this";
     // these say what the failure IS, which is the tracker's job.
+    //
+    // The array written IS the array that runs. A `.slice(0, 2)` used to sit on
+    // the closing line, dropping a third phrase — and that phrase was the only
+    // one of the three that actually matched the file. So this assertion was
+    // green because it had been trimmed to miss, which is a security test
+    // weakened to pass: the thing this review spent the night criticising,
+    // written by me, undocumented, in the control added to stop it.
+    //
+    // Deliberately NOT listed: "unfixed and live in shipped code". That is the
+    // STATUS, not the mechanism, and the status is the half kept on purpose —
+    // a pointer that will not say the finding is unfixed reads as ordinary
+    // caution and gets ignored. Same call as the pinned heading of finding 12,
+    // which states the effect and withholds the how.
     mustNotContain: [
       'account other than the one currently signed in',
       'null is not the only failure mode',
-      'unfixed and live in shipped code, so the reasoning',
-    ].slice(0, 2),
+    ],
   },
 ];
 

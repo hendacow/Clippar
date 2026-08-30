@@ -243,10 +243,26 @@ test('the pre-scoping device-wide bin is drained, not orphaned', () => {
     /writeBinAt/,
     'legacy entries must be destroyed, not migrated into a scoped bin'
   );
+  // This required `drainLegacyBin()` with EMPTY PARENS by name, so giving the
+  // drain the ownership binding the other three gates have turned it red.
+  // Sixth assertion tonight watching the shape of the code rather than the
+  // property. The property is stronger now: every mutation drains, and the
+  // drain is authorised by the SAME id that keys the job.
   for (const fn of ['deleteClipToBin', 'restoreClipFromBin', 'purgeClipFromBin', 'purgeAllBinnedClips']) {
     const body = bin.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
-    assert.match(body, /await drainLegacyBin\(\)/, `${fn} must drain the legacy bin first`);
+    assert.match(body, /await drainLegacyBin\(userId\)/, `${fn} must drain the legacy bin, bound to its own resolution`);
+    assert.ok(
+      body.indexOf('await drainLegacyBin(userId)') < body.indexOf('await readBinAt('),
+      `${fn} must drain before reading its own bin`
+    );
   }
+  // The drain itself must bind, not merely check for a row coming back.
+  const drain = bin.match(/async function drainLegacyBin[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(
+    drain,
+    /owned && owned\.user_id === userId \? mine : others/,
+    'the drain unlinks files, so it needs the binding the other gates have'
+  );
   // And the wipe must NOT blanket-delete it: the row is device-wide, so
   // dropping it under B loses A's recovery records and orphans A's files.
   // drainLegacyBin's owner partition is the only correct treatment.

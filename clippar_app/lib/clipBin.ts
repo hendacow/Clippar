@@ -219,7 +219,7 @@ const LEGACY_BIN_KEY = 'clips.bin.v1';
  * for whoever signs in next. It is a single settings read when the key is
  * absent, which is the steady state after the first drain.
  */
-async function drainLegacyBin(): Promise<void> {
+async function drainLegacyBin(userId: string): Promise<void> {
   try {
     const raw = await getSetting(LEGACY_BIN_KEY);
     if (!raw) return;
@@ -269,7 +269,12 @@ async function drainLegacyBin(): Promise<void> {
       // by a released build. Do not "fix" it without settling the type lie.
       if (!isValidEntry(entry)) continue;
       const owned = await getLocalRound(entry.roundId).catch(() => null);
-      (owned ? mine : others).push(entry);
+      // BIND, same as the other three gates. `getLocalRound` resolves the
+      // session itself, once per entry, across awaits — so `!= null` alone
+      // only says "somebody's row came back", and `mine` goes straight to
+      // purgeEntry, which unlinks video files with no bin entry and no undo.
+      // This was the last destructive gate in the module without the binding.
+      (owned && owned.user_id === userId ? mine : others).push(entry);
     }
     if (mine.length === 0) return;
     // Shrink the list BEFORE unlinking, so a stalled delete cannot leave an
@@ -293,7 +298,6 @@ async function drainLegacyBin(): Promise<void> {
  */
 export async function deleteClipToBin(clipId: number, roundId: string): Promise<BinnedClip | null> {
   return binQueue.run(async () => {
-    await drainLegacyBin();
     // Resolved ONCE, and BEFORE the row is touched. Once, so every read and
     // write below belongs to this account even if the session changes
     // underneath us. Before, because with no session there is nowhere to
@@ -316,6 +320,7 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     const userId = await currentSessionUserId().catch(() => null);
     if (!userId) return null;
     const key = BIN_KEY_PREFIX + userId;
+    await drainLegacyBin(userId);
     // Ownership is decided by the CLIP'S OWN round, never by the caller's.
     //
     // The first version of this gate checked `roundId` and then deleted
@@ -371,9 +376,11 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
 /** Put a binned clip back. Returns false if its row already exists again. */
 export async function restoreClipFromBin(clipId: number): Promise<boolean> {
   return binQueue.run(async () => {
-    await drainLegacyBin();
-    const key = await binKey();
-    if (!key) return false;
+    // One resolution decides the drain and the key alike.
+    const userId = await currentSessionUserId().catch(() => null);
+    if (!userId) return false;
+    const key = BIN_KEY_PREFIX + userId;
+    await drainLegacyBin(userId);
     const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return false;
@@ -434,12 +441,13 @@ async function entryPurgeableBy(entry: BinnedClip, userId: string): Promise<bool
 
 export async function purgeClipFromBin(clipId: number): Promise<void> {
   return binQueue.run(async () => {
-    await drainLegacyBin();
-    // Resolved once and inline, so the SAME id builds the key and closes the
-    // gate below — the reason deleteClipToBin stopped using binKey().
+    // Resolved once and inline, so the SAME id builds the key, closes the gate
+    // below AND authorises the drain — the reason deleteClipToBin stopped
+    // using binKey().
     const userId = await currentSessionUserId().catch(() => null);
     if (!userId) return;
     const key = BIN_KEY_PREFIX + userId;
+    await drainLegacyBin(userId);
     const entries = await readBinAt(key);
     const entry = entries.find((e) => Number(e.row?.id) === clipId);
     if (!entry) return;
@@ -463,11 +471,11 @@ export async function purgeAllBinnedClips(): Promise<number> {
     try {
       // Pre-scoping entries are this action's responsibility too — they are
       // exactly the videos it promises to remove.
-      await drainLegacyBin();
       // Same single inline resolution as purgeClipFromBin, for the same reason.
       const userId = await currentSessionUserId().catch(() => null);
       if (!userId) return 0;
       const key = BIN_KEY_PREFIX + userId;
+      await drainLegacyBin(userId);
       const entries = await readBinAt(key);
       if (entries.length === 0) return 0;
       // Partition rather than blanking the key. An entry this account cannot
