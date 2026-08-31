@@ -19,16 +19,33 @@ const player = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
  * gates on the scoped getLocalRound); the player was not.
  */
 
-test('getClipsForRound really is unscoped, which is why callers must gate', () => {
+test('getClipsForRound still exists for the gated helpers to call', () => {
   const body = storage.match(/export async function getClipsForRound[\s\S]*?\n}/)?.[0] ?? '';
   assert.notEqual(body, '', 'getClipsForRound should still exist');
-  assert.match(
-    body,
-    /SELECT \* FROM local_clips WHERE round_id = \?/,
-    'no ownership predicate here — the gate has to live in the caller'
-  );
-  assert.doesNotMatch(body, /ownedRoundsClause|currentScopeUserId/);
 });
+
+/**
+ * **This test used to require the ownership predicate to STAY MISSING.**
+ *
+ * It pinned the literal `SELECT` and asserted `doesNotMatch(/ownedRoundsClause|
+ * currentScopeUserId/)`, with the message "no ownership predicate here — the
+ * gate has to live in the caller". So the next engineer who correctly decided to
+ * fail closed at the data layer — the move this branch made for `clipBin` and
+ * `tutorialRound`, and the move the whole review argues for — got a red build
+ * telling them not to, and the cheapest way back to green was to drop the
+ * predicate rather than rewrite a test.
+ *
+ * That matters because `getClipsForRound` has callers that do NOT route through
+ * `ownsRound` — `hooks/useEditorState.ts`, `hooks/useRound.ts` and
+ * `app/(tabs)/index.tsx` — so hardening the store is a real defence, not a
+ * redundant one.
+ *
+ * **Eleventh test of mine tonight pinning a SHAPE rather than a property, and
+ * the third that actively held a security fix in place.** The property is
+ * covered without either pin: the two tests below go red if a caller-side gate
+ * is removed, and stay green if someone additionally hardens the store — which
+ * is the direction that must never be blocked.
+ */
 
 test('the player reads clips through the gated helper, not the raw store', () => {
   assert.match(player, /listTrainingClips/);
