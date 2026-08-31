@@ -582,13 +582,13 @@ test('the redacted findings’ summary-table rows stay neutral', () => {
  * ambiguity fails loudly instead of pinning the wrong item.
  */
 const REDACTED_NEEDS_HENRY_SHA256: Record<string, string> = {
-  '12': '3403696a8e19075715f9fc939cdc2435ba8fc5bce6798b34d612ae197a215f09',
-  '23': '881eba071c394dd1ab79d3c9199d93c7835dba3025e730a12de8503bdb4d8c92',
+  '12': '2076eb3a341f41e6d0223ad4b3583dfd2f26b072cef8589cd311beb3d8a8cbfd',
+  '23': 'c223c6f367c98708520fa828903485f5777e42ac641fd0875eed8d3b7aee5b48',
   // 23 and 29 share one item ("Finding 23/29 — …"), so they share its digest.
   // Both are listed rather than one: the derived coverage check asks per
   // finding, and a shared surface is still a surface each of them has.
-  '29': '881eba071c394dd1ab79d3c9199d93c7835dba3025e730a12de8503bdb4d8c92',
-  '32': 'e249dad81c945592498d78a8fdb18efd233179aa7e40d1aa81271b58316753f3',
+  '29': 'c223c6f367c98708520fa828903485f5777e42ac641fd0875eed8d3b7aee5b48',
+  '32': '7abb12c7fc16a84451a1234dc1c0c97529d166a0e59ac846d335c62a75c486be',
 };
 
 /** The one `## Needs Henry` item whose FIRST LINE names `finding`, or null. */
@@ -598,7 +598,14 @@ function needsHenryItem(report: string, finding: string): string | null {
   const items = report.slice(at).split(/\n(?=\d+\. )/).slice(1);
   const re = new RegExp(`\\bfindings? [\\d/]*\\b${finding}\\b`, 'i');
   const hits = items.filter((i) => re.test(i.split('\n')[0]));
-  return hits.length === 1 ? hits[0].trimEnd() : null;
+  // Strip the ordinal. The digest is over the WORDING, which is what carries the
+  // redaction; an item's position in the list is not part of it. Pinning both
+  // meant inserting an unrelated item higher up went red on a live finding's
+  // redaction digest with nothing about that finding having changed — and a
+  // digest you regenerate as routine is a digest you have stopped reading.
+  // Markdown renumbers ordered lists anyway, so the ordinal is not even what a
+  // reader sees.
+  return hits.length === 1 ? hits[0].replace(/^\d+\. /, '').trimEnd() : null;
 }
 
 test('the Needs Henry items for redacted findings stay neutral', () => {
