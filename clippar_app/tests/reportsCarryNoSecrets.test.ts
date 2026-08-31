@@ -601,6 +601,55 @@ function liveUnfixedFindings(report: string): string[] {
     .map((m) => m[1]);
 }
 
+/**
+ * The whole BODY of each LIVE finding, not only its heading.
+ *
+ * The heading, the table row and the Needs Henry item were pinned; the section
+ * body under the heading was not, so prose could regrow anywhere inside it and
+ * every guard stayed green. Narrower than it sounds — those bodies are short by
+ * design — but it is one fewer place that depends on someone remembering.
+ *
+ * **What this does NOT reach, stated because the gap is the point.** Finding
+ * 102 was a mechanism written in plain English inside a DIFFERENT finding's
+ * body, while explaining why an unrelated fix was safe. No digest over LIVE
+ * bodies sees that, and neither does an identifier check — `GUARDED` compares a
+ * symbol, and a paraphrase never uses it. The only mechanical option offered was
+ * a mechanism-verb blacklist, which is the shape rejected at finding 72 and
+ * would fail the same way. **Paraphrase anywhere in a 2,600-line document is not
+ * mechanically catchable; that is an argument for finding 33, not for a check
+ * that looks like one.**
+ *
+ * Only findings with a `### n.` section appear here — 23 and 29 share a row and
+ * a Needs Henry item but have no body of their own, and the derived coverage
+ * check below asks per surface, so their absence is correct rather than a hole.
+ */
+const REDACTED_BODY_SHA256: Record<string, string> = {
+  '12': 'a4922fd8364a5665c9c5fc3c1bfbcc9bb48b074eebe12c39c002f66f83f986ae',
+  '32': '686b4b4a2d0eb5a0475ff0386484061911061555ac6b706d9638252ce5dc3df9',
+};
+
+/** The `### n.` section, up to the next heading of any level. */
+function findingBody(report: string, finding: string): string | null {
+  const start = report.search(new RegExp(`^### ${finding}\\. `, 'm'));
+  if (start === -1) return null;
+  const rest = report.slice(start);
+  const end = rest.search(/\n#{2,3} /);
+  return (end === -1 ? rest : rest.slice(0, end)).trimEnd();
+}
+
+test('the redacted findings\u2019 section bodies stay neutral', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  for (const [num, digest] of Object.entries(REDACTED_BODY_SHA256)) {
+    const body = findingBody(report, num);
+    assert.notEqual(body, null, `finding ${num}'s section is gone \u2014 update REDACTED_BODY_SHA256 deliberately`);
+    assert.equal(
+      createHash('sha256').update(body!, 'utf8').digest('hex'),
+      digest,
+      `finding ${num}'s section body changed. It describes an unfixed, live-in-shipped-code defect in a public repo. Re-read the whole body for mechanism, trigger and blast radius before regenerating this digest.`
+    );
+  }
+});
+
 test('every finding marked LIVE has all of its public surfaces pinned', () => {
   const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
   const live = liveUnfixedFindings(report);
