@@ -7,7 +7,7 @@
  * the editor auto-trims them through the same detection pass when review
  * opens, so imported shots get swing-centred like everything else.
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, Pressable, ScrollView, Alert, ActivityIndicator } from 'react-native';
 import { router, Stack, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -15,6 +15,7 @@ import * as Haptics from 'expo-haptics';
 import { ChevronLeft, FolderOpen } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { CLUBS, importShotsToSession, type TrainingClub } from '@/lib/training';
+import { pickVideosWithDeadline, ICLOUD_TIMEOUT_TITLE, ICLOUD_TIMEOUT_BODY } from '@/lib/videoPicker';
 
 const ImagePicker = (() => {
   try {
@@ -29,6 +30,15 @@ export default function TrainingImportScreen() {
   const insets = useSafeAreaInsets();
   const [club, setClub] = useState<TrainingClub>(CLUBS[7]); // 7 iron default, same as capture
   const [busy, setBusy] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (!busy) {
+      setElapsed(0);
+      return;
+    }
+    const iv = setInterval(() => setElapsed((e) => e + 1), 1000);
+    return () => clearInterval(iv);
+  }, [busy]);
 
   const pick = useCallback(async () => {
     if (!ImagePicker || !roundId || busy) return;
@@ -55,25 +65,21 @@ export default function TrainingImportScreen() {
         preferredAssetRepresentationMode:
           ImagePicker.UIImagePickerPreferredAssetRepresentationMode.Current,
       };
-      let result: Awaited<ReturnType<typeof ImagePicker.launchImageLibraryAsync>>;
-      try {
-        result = await ImagePicker.launchImageLibraryAsync(pickerOptions);
-      } catch (firstErr) {
-        // The picker downloads iCloud assets itself and resumes a partial
-        // download on retry — so retry once before involving the user at
-        // all. The first version of this catch told the user to go download
-        // in Photos manually: the app refusing to do something it is allowed
-        // to do, and a guess at the cause besides (the same mistake as the
-        // record screen's old 'check your free storage' — rebuilt here the
-        // same day it was fixed there, caught by Henry within hours).
-        try {
-          result = await ImagePicker.launchImageLibraryAsync(pickerOptions);
-        } catch (err) {
-          const reason = err instanceof Error && err.message ? err.message : String(firstErr ?? err);
-          Alert.alert('Could not fetch those videos', `${reason}\n\nTap Choose videos to try again — iCloud downloads resume where they left off.`);
-          return;
-        }
+      // The pick ALWAYS ends (lib/videoPicker): raced against a deadline so a
+      // slow iCloud download can never spin forever, with elapsed seconds on
+      // screen so slow is distinguishable from hung. Retry is the user's
+      // explicit act — downloads resume, so retrying is cheap and honest.
+      const outcome = await pickVideosWithDeadline(pickerOptions);
+      if (outcome.kind === 'cancelled') return;
+      if (outcome.kind === 'timeout') {
+        Alert.alert(ICLOUD_TIMEOUT_TITLE, ICLOUD_TIMEOUT_BODY);
+        return;
       }
+      if (outcome.kind === 'error') {
+        Alert.alert('Could not fetch those videos', `${outcome.message}\n\nTap Choose videos to try again — iCloud downloads resume where they left off.`);
+        return;
+      }
+      const result = outcome.result;
       if (result.canceled || result.assets.length === 0) return;
       const saved = await importShotsToSession(
         roundId,
@@ -152,7 +158,11 @@ export default function TrainingImportScreen() {
           >
             {busy ? <ActivityIndicator color="#fff" /> : <FolderOpen size={20} color="#fff" />}
             <Text style={{ color: '#fff', fontSize: 16, fontWeight: '700' }}>
-              Choose videos — {club.label}
+              {busy
+                ? elapsed >= 3
+                  ? `Fetching from iCloud… ${elapsed}s`
+                  : 'Opening…'
+                : `Choose videos — ${club.label}`}
             </Text>
           </Pressable>
 

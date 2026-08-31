@@ -140,15 +140,28 @@ test('Practice is reachable from the record chooser', () => {
 // Reported from the range, 31 Aug: "my phone plays them instantly in Photos
 // but it keeps saying that" — the import alert told him to go download in
 // Photos manually. The app must fetch, not refuse.
-test('import fetches iCloud videos instead of refusing', () => {
+// Round 3 of the iCloud fight: with the fetch fixed, a big video spun the
+// import forever. The contract now: every pick ENDS — picked, cancelled,
+// timeout or error — with elapsed feedback while it runs, and retry is the
+// user's explicit act (the silent auto-retry is gone: it never fires when
+// attempt one hangs, and after a timeout it would double the wait unseen).
+test('a video pick always ends, on both import screens', () => {
+  const vp = readFileSync(join(root, 'lib/videoPicker.ts'), 'utf8');
+  assert.match(vp, /Promise\.race\(\[ImagePicker\.launchImageLibraryAsync\(options\), deadline\]\)/);
+  assert.match(vp, /kind: 'timeout'/);
   const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  const ri = readFileSync(join(root, 'app/round/import.tsx'), 'utf8');
+  for (const [name, src] of [['training', imp], ['round', ri]] as const) {
+    assert.match(src, /pickVideosWithDeadline/, `${name} import uses the deadline`);
+    assert.match(src, /ICLOUD_TIMEOUT_TITLE/, `${name} import ends a timeout honestly`);
+    assert.doesNotMatch(src, /Open the Photos app/, `${name} import never says go-do-it-yourself`);
+  }
+  assert.doesNotMatch(imp, /catch \(firstErr\)/, 'the silent auto-retry is gone');
+  assert.match(imp, /Fetching from iCloud… \$\{elapsed\}s/, 'slow is visibly different from hung');
   const media = readFileSync(join(root, 'lib/media.ts'), 'utf8');
-  assert.match(media, /shouldDownloadFromNetwork: true/, 'MediaLibrary fallback actually downloads');
-  assert.match(imp, /preferredAssetRepresentationMode/, 'no forced transcode on big iCloud videos');
-  assert.doesNotMatch(imp, /Open the Photos app and download/, 'the go-do-it-yourself alert is gone');
-  const catches = imp.match(/catch \(firstErr\)[\s\S]*?return;/)?.[0] ?? '';
-  assert.match(catches, /launchImageLibraryAsync\(pickerOptions\)/, 'retries once — iCloud downloads resume');
-  assert.match(catches, /reason/, 'the alert reports the real error, not a guessed cause');
+  assert.match(media, /shouldDownloadFromNetwork: true/, 'the MediaLibrary fallback still downloads');
+  const patch = readFileSync(join(root, 'patches/expo-image-picker+17.0.10.patch'), 'utf8');
+  assert.match(patch, /180_000_000_000/, 'the native fetch is capped, never unbounded');
 });
 
 // Henry, 31 Aug: previewing practice in the editor "should be exactly like

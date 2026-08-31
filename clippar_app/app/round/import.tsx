@@ -56,6 +56,7 @@ import {
   getCloudBackupEnabled,
 } from '@/lib/storage';
 import { resolveAssetUri, persistAsset } from '@/lib/media';
+import { pickVideosWithDeadline, ICLOUD_TIMEOUT_TITLE, ICLOUD_TIMEOUT_BODY } from '@/lib/videoPicker';
 import { mirrorClipToPhotos } from '@/lib/photosMirror';
 import { enqueueRoundUpload } from '@/lib/uploadQueue';
 import { supabase } from '@/lib/supabase';
@@ -91,28 +92,24 @@ async function pickVideosSafely(
   options: Parameters<NonNullable<typeof ImagePicker>['launchImageLibraryAsync']>[0]
 ): Promise<Awaited<ReturnType<NonNullable<typeof ImagePicker>['launchImageLibraryAsync']>> | null> {
   if (!ImagePicker) return null;
-  try {
-    return await ImagePicker.launchImageLibraryAsync(options);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const looksLikeICloudFailure =
-      /PHPhotosError/i.test(msg) ||
-      /3164/.test(msg) ||
-      /operation couldn.t be completed/i.test(msg);
-    console.warn('[import] picker failed:', msg);
-    if (looksLikeICloudFailure) {
-      Alert.alert(
-        'Video stored in iCloud',
-        "iOS couldn't download one of the videos you picked. Open the Photos app, tap the video so it downloads to your phone, then come back and try the import again.",
-      );
-    } else {
-      Alert.alert(
-        "Couldn't open videos",
-        'Something went wrong picking videos. Try again, or restart the app if it keeps happening.',
-      );
-    }
+  // The pick ALWAYS ends (lib/videoPicker): a slow iCloud download is raced
+  // against a deadline, so this screen can never spin forever — the failure
+  // Henry hit on 31 Aug after the fetch itself was fixed. Timeout and error
+  // both end in honest, actionable copy; iCloud downloads resume, so "pick
+  // it again" genuinely continues where it left off.
+  const outcome = await pickVideosWithDeadline(options ?? {});
+  if (outcome.kind === 'picked') return outcome.result;
+  if (outcome.kind === 'cancelled') return null;
+  if (outcome.kind === 'timeout') {
+    Alert.alert(ICLOUD_TIMEOUT_TITLE, ICLOUD_TIMEOUT_BODY);
     return null;
   }
+  console.warn('[import] picker failed:', outcome.message);
+  Alert.alert(
+    "Couldn't fetch those videos",
+    `${outcome.message}\n\nTry again — iCloud downloads resume where they left off.`,
+  );
+  return null;
 }
 
 // Gap (ms) between consecutive clip creationTimes that signals a new hole.
@@ -970,9 +967,9 @@ export default function ImportRoundScreen() {
                   lineHeight: 18,
                 }}
               >
-                Videos stored in iCloud need to be downloaded to your phone
-                first. Open the Photos app and tap each clip so it caches
-                locally before importing.
+                Videos stored in iCloud download automatically when you pick
+                them — big clips can take a minute or two, and the download
+                resumes if you retry.
               </Text>
             </View>
 

@@ -1,8 +1,8 @@
 diff --git a/node_modules/expo-image-picker/ios/MediaHandler.swift b/node_modules/expo-image-picker/ios/MediaHandler.swift
-index 6e4fbe1..eead8c8 100644
+index 6e4fbe1..2a7d301 100644
 --- a/node_modules/expo-image-picker/ios/MediaHandler.swift
 +++ b/node_modules/expo-image-picker/ios/MediaHandler.swift
-@@ -375,33 +375,46 @@ internal struct MediaHandler {
+@@ -375,33 +375,64 @@ internal struct MediaHandler {
      // asset as *adjusted* and will re-render a temporary file for us. Copying the resource bytes
      // ourselves is dramatically faster because it just streams the already-existing file.
  
@@ -52,9 +52,27 @@ index 6e4fbe1..eead8c8 100644
 +            let destinationUrl = try generateUrl(withFileExtension: fileExtension)
 +
 +            // Stream the resource into our cache directory, allowing iCloud download.
++            // CLIPPAR PATCH round 2: the download can legitimately take minutes on
++            // a big video — but it must never run unbounded (field report: the
++            // import spun forever with no end). Cap it; on timeout we throw, the
++            // outer catch falls through, and the JS layer's own race ends the
++            // wait with an honest message either way.
 +            let resourceOptions = PHAssetResourceRequestOptions()
 +            resourceOptions.isNetworkAccessAllowed = true
-+            try await PHAssetResourceManager.default().writeData(for: resource, toFile: destinationUrl, options: resourceOptions)
++            resourceOptions.progressHandler = { progress in
++              print("[expo-image-picker patch] iCloud fetch progress: \(Int(progress * 100))%")
++            }
++            try await withThrowingTaskGroup(of: Void.self) { group in
++              group.addTask {
++                try await PHAssetResourceManager.default().writeData(for: resource, toFile: destinationUrl, options: resourceOptions)
++              }
++              group.addTask {
++                try await Task.sleep(nanoseconds: 180_000_000_000) // 3 min cap
++                throw NSError(domain: "ClipparPickerPatch", code: 408, userInfo: [NSLocalizedDescriptionKey: "iCloud download timed out after 3 minutes"])
++              }
++              try await group.next()
++              group.cancelAll()
++            }
 +
 +            // Build and return the result using the helper.
 +            let mimeType = getMimeType(from: destinationUrl.pathExtension)
