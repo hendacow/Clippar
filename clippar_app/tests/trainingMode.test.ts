@@ -268,3 +268,18 @@ test('training select mode selects individual shots; club header selects all of 
   assert.match(ed, /'Select shots'/);
   assert.match(ed, /Share this shot/, 'single-shot share from the clip menu');
 });
+
+// 1 Sep: the clicker comes to the range — the SAME shutter apparatus that
+// fixed presses-acting-as-volume on the live round, not a reimplementation.
+test('training capture uses the real shutter with the range gesture grammar', () => {
+  const rec = readFileSync(join(root, 'app/training/record.tsx'), 'utf8');
+  assert.match(rec, /useShutter\(\{ armed: isFocused \}\)/, 'focus-gated: volume is normal off this screen');
+  assert.match(rec, /shutter\.armVolumeGrace\(\)/, 'phantom volume events on mount are swallowed, as on the round');
+  const press = rec.match(/shutter\.onPress\(\(\) => \{([\s\S]*?)\}\);/)?.[1] ?? '';
+  assert.match(press, /clearPendingClicks/, 'instant stop cannot resolve into a restart');
+  const click = rec.match(/shutter\.onClick\(\(\{ count \}\) => \{([\s\S]*?)\}\);/)?.[1] ?? '';
+  assert.match(click, /count === 1/, 'single = start\/stop');
+  assert.match(click, /count === 2[\s\S]*?CLUBS\[\(i \+ 1\) % CLUBS\.length\]/, 'double = next club, wrapping');
+  assert.match(click, /count === 3[\s\S]*?selectionAsync/, 'triple acknowledged, no penalty at the range');
+  assert.match(rec, /Clicker ✓.*No Clicker|shutter\.connected \? 'Clicker ✓' : 'No Clicker'/, 'connection state is visible before the first swing');
+});

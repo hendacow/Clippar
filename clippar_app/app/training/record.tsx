@@ -22,6 +22,8 @@ import * as Haptics from 'expo-haptics';
 import { X, ListVideo, Undo2 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { useCamera } from '@/hooks/useCamera';
+import { useShutter } from '@/hooks/useShutter';
+import { useIsFocused } from '@react-navigation/native';
 import { CLUBS, listTrainingClips, type TrainingClub } from '@/lib/training';
 import { deleteClipToBin } from '@/lib/clipBin';
 
@@ -80,6 +82,61 @@ export default function TrainingRecordScreen() {
   }, [roundId]);
 
   const recordingBusy = camera.isRecording || camera.isFinalizing;
+
+  // The BLE clicker, brought across from the live round (Henry, 1 Sep: "use
+  // whatever changes you made in the actual live round"). This is the SAME
+  // useShutter that fixed clicker-presses-acting-as-volume-buttons there —
+  // volume/key interception plus BLE, resolved in the 1s click window.
+  // `armed` is focus-gated: pushing the editor or playback over this screen
+  // disarms interception, so volume buttons do their normal job everywhere
+  // that isn't an armed capture surface (including ASMR playback).
+  const isFocused = useIsFocused();
+  const shutter = useShutter({ armed: isFocused });
+
+  // Range gesture grammar, chosen not silently mapped: 1 press = start/stop
+  // the shot (identical to the course); 2 presses = NEXT CLUB (the range's
+  // analogue of next hole); 3 presses = nothing — there are no penalties at
+  // the range, so a triple gets a soft acknowledgement rather than a
+  // surprise. clubRef keeps the handler on the current club without
+  // resubscribing per selection.
+  useEffect(() => {
+    if (!isFocused) return;
+    shutter.clearPendingClicks();
+    shutter.armVolumeGrace();
+  }, [isFocused, shutter.clearPendingClicks, shutter.armVolumeGrace]);
+
+  useEffect(() => {
+    if (!isFocused) return;
+    // Instant stop channel — identical contract to the round screen: a press
+    // mid-recording stops NOW, and clearPendingClicks stops the same press
+    // resolving into a "start" a second later.
+    return shutter.onPress(() => {
+      if (camera.isRecording) {
+        shutter.clearPendingClicks();
+        camera.toggleRecording();
+      } else {
+        Haptics.selectionAsync();
+      }
+    });
+  }, [isFocused, shutter.onPress, shutter.clearPendingClicks, camera.isRecording, camera.toggleRecording]);
+
+  useEffect(() => {
+    if (!isFocused) return;
+    return shutter.onClick(({ count }) => {
+      if (camera.isRecording) return; // onPress already stopped it
+      if (camera.isFinalizing) return; // same swallow as the round screen
+      if (count === 1) {
+        camera.toggleRecording();
+      } else if (count === 2) {
+        const i = CLUBS.findIndex((c) => c.key === clubRef.current.key);
+        const next = CLUBS[(i + 1) % CLUBS.length];
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+        setClub(next);
+      } else if (count === 3) {
+        Haptics.selectionAsync(); // no penalties at the range — acknowledged, nothing else
+      }
+    });
+  }, [isFocused, shutter.onClick, camera.isRecording, camera.isFinalizing, camera.toggleRecording]);
 
   const switchClub = useCallback(
     (next: TrainingClub) => {
@@ -189,6 +246,9 @@ export default function TrainingRecordScreen() {
           <Text style={styles.chipSub}>
             Shot {shotsThisClub + (camera.isRecording ? 1 : 0) || 1} · {totalShots} total
           </Text>
+        </View>
+        <View style={[styles.chip, { backgroundColor: shutter.connected ? 'rgba(27,94,32,0.75)' : 'rgba(0,0,0,0.55)' }]}>
+          <Text style={styles.chipSub}>{shutter.connected ? 'Clicker ✓' : 'No Clicker'}</Text>
         </View>
         <Pressable onPress={handleEnd} hitSlop={10} style={styles.chip}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
