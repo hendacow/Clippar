@@ -112,10 +112,13 @@ export async function wipeLocalUserData(): Promise<void> {
   // going red — a security fix quietly reintroducing a data-remanence bug. Now
   // this holds by construction.
   //
-  // Why that sweep must change is deliberately not spelled out here: this file
-  // is public and the finding is unfixed and live in shipped code. Read finding
-  // 12 in the private tracker
-  // before touching it.
+  // The ordering of the steps in this function interacts with an open finding.
+  // Read finding 12 in the private tracker before reordering anything below.
+  //
+  // Nothing further is written here on purpose. The previous wording paired a
+  // functional pointer with a status — which function, and that it is still
+  // open — and this repository is public. Neither guard could see that: the
+  // identifier check compares a SYMBOL and this names none.
   //
   // Runs before signOut (see above), so the session still resolves and the
   // purge finds the departing account's bin rather than none.

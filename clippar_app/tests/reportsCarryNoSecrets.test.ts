@@ -499,8 +499,8 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     // its own identifier by construction, so nothing constrained what could be
     // written beside `@guarded 12` — now or later.
     file: 'clippar_app/lib/localWipe.ts',
-    sentinel: 'is deliberately not spelled out here',
-    sha256: '6946a8183c8ae113ff19db81319c8a24a4dcb7b2a5384d14eca17adec1c9b39f',
+    sentinel: 'Nothing further is written here on purpose.',
+    sha256: 'f58e34dd7fc680359654eee07940e6e8d86be5e3c3ac60a655951d151a4039d4',
   },
 ];
 
