@@ -407,7 +407,15 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
       await restoreLocalClip(row).catch(() => {});
       throw err;
     }
-    for (const old of evicted) await purgeEntry(old);
+    // Same gate as every other path that unlinks files. Evicted entries are
+    // this account's own by construction today — but that is an argument about
+    // `local_rounds`, not about this module, and an emptiness argument resting
+    // on another module's invariant is what finding 67 was. Asserted, not
+    // assumed. `entryOwnedBy` allows a genuinely gone round, so this does not
+    // strand an evicted entry (no 34/41 regression).
+    for (const old of evicted) {
+      if (await entryOwnedBy(old, userId)) await purgeEntry(old);
+    }
     return entry;
   });
 }
@@ -486,8 +494,11 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
  *
  * `binKey()` alone decided this before, so the key was the only thing naming
  * whose footage got read, restored or unlinked, with nothing cross-checking it
- * the way `deleteClipToBin` does. **All five paths that touch an entry now go
- * through here** — the two destructive ones, the read and the restore.
+ * the way `deleteClipToBin` does. **All SIX paths that touch an entry now go
+ * through here** — the two destructive ones, the read, the restore, the legacy
+ * drain (which binds equivalently via `getLocalRound`) and the eviction purge.
+ * This said "all five" and omitted eviction, which was ungated: a docstring
+ * asserting total coverage that a reader takes as evidence is finding 45.
  *
  * A round that is genuinely GONE has no owner to compare, so it is allowed
  * through: refusing there would make the entry permanently unpurgeable and
