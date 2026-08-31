@@ -302,7 +302,14 @@ export function ClipTrimModal({
     <Modal
       visible={visible}
       animationType="slide"
-      presentationStyle="pageSheet"
+      // fullScreen ON PURPOSE (was pageSheet): a pageSheet is drag-to-dismiss,
+      // and trimming is an inherently draggy interaction — a slight downward
+      // slip while holding a handle pulled the whole sheet away (reported
+      // from the field, 31 Aug, "no matter what I pull when I'm using the
+      // trimmer"). This modal is the app's ONE shared trim surface (editor,
+      // round detail, training playback), so this single change fixes the
+      // class app-wide. Dismissal is the explicit close control only.
+      presentationStyle="fullScreen"
       onRequestClose={onDismiss}
     >
       <View

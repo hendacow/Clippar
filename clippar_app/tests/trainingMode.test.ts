@@ -197,12 +197,38 @@ test('the auto window centres on the strike, not the clip middle', () => {
 
 // "Once you edit a video that video will stay exactly the same and won't
 // change until you edit it again."
-test('a manually trimmed clip is pinned: it ignores the per-shot length', () => {
+test('a manually trimmed clip is pinned: registry ONLY, and it ignores the per-shot length', () => {
   const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
-  assert.match(pl, /isPinned\(current\)/);
-  assert.match(pl, /pinnedIds\.has\(c\.id\) \|\| c\.trimStartMs > 0 \|\| c\.trimEndMs !== -1/);
-  const pinnedBranch = pl.match(/if \(isPinned\(current\)\) \{([\s\S]*?)\} else \{/)?.[1] ?? '';
+  // The bounds heuristic (trimStart>0) silently skipped six of nine shots in
+  // the field — auto-trim stores ORIGINAL-timeline bounds on trimmed files.
+  // Pinned is decided by the registry both editors write, nothing else.
+  assert.match(pl, /const isPinned = useCallback\(\(c: TrainingClip\) => pinnedIds\.has\(c\.id\), \[pinnedIds\]\);/);
+  assert.doesNotMatch(pl, /c\.trimStartMs > 0 \|\| c\.trimEndMs !== -1/);
+  const pinnedBranch = pl.match(/if \(isPinned\(current\) && pinnedSane\) \{([\s\S]*?)\} else \{/)?.[1] ?? '';
   assert.doesNotMatch(pinnedBranch, /playLengthRef/, 'pinned playback never reads the selector');
+});
+
+// The field bug, pinned as a contract: a clip can never play for zero
+// seconds. Degenerate windows (stale bounds past the file's end, unready
+// metadata) fall back to playing the clip — silent skip hides real shots.
+test('a zero-length playback window is impossible by construction', () => {
+  const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
+  assert.match(pl, /pinnedSane = dur > 0 && pinnedStart < dur - 0\.2/);
+  assert.match(pl, /NEVER play for zero/i);
+  assert.match(pl, /dur > 0 \? dur \* 1000 : 9000/, 'unready metadata gets a generous timer, not a skip');
+});
+
+// Trimming must own its drags: the shared trim modal is fullScreen, because
+// pageSheet's drag-to-dismiss stole the handle gesture app-wide.
+test('the shared trim surface cannot be dragged away mid-trim', () => {
+  const modal = readFileSync(join(root, 'components/editor/ClipTrimModal.tsx'), 'utf8');
+  assert.match(modal, /presentationStyle="fullScreen"/);
+  assert.doesNotMatch(modal, /"pageSheet"/);
+});
+
+test('the kit link points at the live product page', () => {
+  const cfg = readFileSync(join(root, 'constants/config.ts'), 'utf8');
+  assert.match(cfg, /clippargolf\.com\/products\/clippar-golf-kit/);
 });
 
 // One stored trim per clip, two places to edit it. The preview's save goes

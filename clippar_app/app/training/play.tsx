@@ -101,10 +101,14 @@ export default function TrainingPlayScreen() {
     getPinnedClipIds().then(setPinnedIds).catch(() => {});
   }, [roundId, club]);
 
-  const isPinned = useCallback(
-    (c: TrainingClip) => pinnedIds.has(c.id) || c.trimStartMs > 0 || c.trimEndMs !== -1,
-    [pinnedIds]
-  );
+  // Pinned = the REGISTRY only. The bounds heuristic (trimStart>0) shipped
+  // in the first build and silently skipped six of nine shots in the field:
+  // live-recorded clips carry ORIGINAL-timeline trim bounds written after
+  // auto-trim (useCamera stores result.trimStartMs ≈ 7000ms on a row whose
+  // file is the already-trimmed 4s clip), so "play the stored bounds" sought
+  // past the end of the file and the clip ended instantly. Both editors
+  // write the registry on every manual trim, so the registry is the truth.
+  const isPinned = useCallback((c: TrainingClip) => pinnedIds.has(c.id), [pinnedIds]);
 
   const current = clips?.[index] ?? null;
 
@@ -157,16 +161,20 @@ export default function TrainingPlayScreen() {
         await player.replaceAsync(current.fileUri);
         if (cancelled) return;
         const dur = Number.isFinite(player.duration) ? player.duration : 0;
-        if (isPinned(current)) {
+        // Compute the window; by construction a clip can NEVER play for zero
+        // seconds — any degenerate window falls back to playing the whole
+        // clip. Silent skip hides shots he filmed; it is the wrong failure.
+        const pinnedStart = current.trimStartMs / 1000;
+        const pinnedEnd = current.trimEndMs === -1 ? dur : Math.min(dur, current.trimEndMs / 1000);
+        const pinnedSane = dur > 0 && pinnedStart < dur - 0.2 && pinnedEnd - pinnedStart >= 0.3;
+        if (isPinned(current) && pinnedSane) {
           // Pinned: play the clip's OWN stored in/out points, full length —
           // the global per-shot length does not apply until it is edited
           // again. Same columns the editor reads: one trim, two editors.
-          const start = current.trimStartMs / 1000;
-          const end = current.trimEndMs === -1 ? dur : Math.min(dur, current.trimEndMs / 1000);
-          const lenMs = Math.max(100, (end - start) * 1000);
-          windowStartSec.current = start;
+          const lenMs = (pinnedEnd - pinnedStart) * 1000;
+          windowStartSec.current = pinnedStart;
           windowLenMs.current = lenMs;
-          player.currentTime = start;
+          player.currentTime = pinnedStart;
           if (!pausedRef.current) {
             player.play();
             armWindowTimer(lenMs);
@@ -176,14 +184,17 @@ export default function TrainingPlayScreen() {
           // trim puts impact at ~62.5% of the file (impactFractionInFile),
           // so a middle-centred 0.5s window showed the strike at its edge.
           const L = playLengthRef.current / 1000;
-          const center = dur * impactFractionInFile(current);
-          const start = dur > L ? Math.min(Math.max(0, center - L / 2), dur - L) : 0;
+          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - L / 2), dur - L) : 0;
+          // dur can be 0 briefly if metadata isn't ready — play the whole
+          // clip on a generous timer rather than skipping (playToEnd still
+          // advances at the true end).
+          const lenMs = dur > L ? playLengthRef.current : Math.max(playLengthRef.current, dur > 0 ? dur * 1000 : 9000);
           windowStartSec.current = start;
-          windowLenMs.current = playLengthRef.current;
+          windowLenMs.current = lenMs;
           player.currentTime = start;
           if (!pausedRef.current) {
             player.play();
-            armWindowTimer(playLengthRef.current);
+            armWindowTimer(lenMs);
           }
         }
       } catch {}

@@ -94,7 +94,8 @@ export const config = {
     // Physical Clippar Mount kit (phone mount + Bluetooth clicker + portable
     // charger), sold on the website. Physical goods must NOT go through IAP
     // (App Review 3.1.3(e)) — every in-app surface links out to Safari.
-    mountUrl: 'https://clippargolf.com/mount',
+    // The LIVE product page (Active and selling as of 31 Aug 2026).
+    mountUrl: 'https://clippargolf.com/products/clippar-golf-kit',
     mountPriceLabel: '$99',
     // Master switch for the mount cross-sell surfaces (post-signup offer +
     // record-tab card). OFF until the page's Stripe Payment Link is LIVE
