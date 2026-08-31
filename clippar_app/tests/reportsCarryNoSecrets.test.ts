@@ -231,6 +231,59 @@ test('tracked env examples carry placeholders, never real credentials', () => {
   );
 });
 
+/**
+ * The credential-shaped getenv defaults that already exist in `app.py`.
+ *
+ * **This list is not an approval, and it must only ever shrink.** All three are
+ * finding 5's open exposure: a deploy that forgets the env var authenticates
+ * against a value printed in a public repository, so **rotating the secret does
+ * not close it** — the fallback survives the rotation and the next unconfigured
+ * deploy is authenticated by the public value again. Removing the fallbacks is
+ * the fix, and it is Henry's call on a service he may simply delete.
+ *
+ * **Why a ratchet rather than a check that goes red on them.** A test asserting
+ * "no credential-shaped default exists" would fail the build today, and the
+ * standing rule is never to open a red PR. A test asserting the set equals these
+ * three would go red the moment somebody REMOVES one — which is the exact defect
+ * already fixed once tonight, where a security test punished the security fix
+ * and whoever did the right thing had to delete a test to get green.
+ *
+ * So this checks for **new** ones only: adding a fourth fails, removing any of
+ * these three stays green. That is a genuine regression guard and it is
+ * deliberately not a claim that the tree is clean.
+ *
+ * **By DIGEST, and the first draft of this was by value.** I wrote the three
+ * literals out here — in the file whose opening docstring says the values are
+ * derived from `app.py` precisely so this file does not become the extra copy it
+ * exists to prevent. That is finding 86 exactly: the safeguard becoming the
+ * second copy of what it hides. Caught before it was committed, which is the
+ * only reason it is a note rather than a finding of its own.
+ *
+ * A digest works identically here: a fourth default's digest is not in the set,
+ * and a removed one is simply never looked up.
+ */
+const KNOWN_APP_PY_FALLBACK_SHA256 = new Set([
+  '104f6cb1d689ef34105d69d2f733540dfb575e501a7001ecb97b179c7d19a123',
+  '98b786d2e652e7dd24bb14f22848dc52f732ca692b8a3184ed96d32e6b16c290',
+  '618a12278d66221ff3acd9a008144332bc618a07ed56955021db838b29f92fb0',
+]);
+
+test('app.py gains no NEW credential-shaped getenv fallback', () => {
+  const source = appPySource();
+  if (source == null) return; // service removed — the best outcome, not a failure
+  const offenders = fallbackLiterals(source, LOOSE_FALLBACK).filter(
+    (literal) =>
+      !KNOWN_APP_PY_FALLBACK_SHA256.has(createHash('sha256').update(literal, 'utf8').digest('hex'))
+  );
+  // Name the VARIABLE's absence, never the value — same rule as everywhere else
+  // in this file, and the count is enough to find it.
+  assert.equal(
+    offenders.length,
+    0,
+    `app.py gained ${offenders.length} new credential-shaped getenv default(s). A hardcoded fallback authenticates any deploy that forgets the env var, against a value in a public repo — and rotating the secret does not close it. Remove the fallback and let it fail to start instead.`
+  );
+});
+
 test('no tracked file quotes a fallback credential instead of citing its line', () => {
   const literals = fallbackLiteralsInAppPy();
   const files = scannableFiles();

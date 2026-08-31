@@ -165,7 +165,23 @@ async function writeCreatedIds(entries: CreatedTutorialRound[]): Promise<void> {
  * so not ours to delete under anyone. Same trade as the sweep makes.
  */
 export async function forgetCreatedRoundsFor(userId: string): Promise<void> {
-  // writeCreatedIds already swallows its own failures; a wipe must not throw.
+  // THIS CAN THROW, and the comment here used to say it could not.
+  //
+  // It said "writeCreatedIds already swallows its own failures; a wipe must not
+  // throw" — naming the wrong function, and describing a guarantee that stopped
+  // existing in this same change: `mutateCreatedIds` now REFUSES an unreadable
+  // registry rather than overwriting a shared key with a filtered empty list.
+  // That refusal is correct and is deliberately not softened here.
+  //
+  // What catches it is `wipeLocalUserData`'s try around both scrubs — one level
+  // up, in another file. That is a weaker guarantee than "cannot throw", and the
+  // difference is load-bearing: the two scrubs share one try, so anything added
+  // after this call inside it is skipped when this throws. Stated here because
+  // the next person needs it at the call, not in localWipe.
+  //
+  // The failure is also SILENT and PERMANENT — nothing retries, and a deleted
+  // account never signs in again to prune. That is a recorded finding on the
+  // single pass through `wipeLocalUserData`, not something to patch alone.
   await mutateCreatedIds((entries) => entries.filter((e) => e.userId !== userId));
 }
 
