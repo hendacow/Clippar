@@ -63,10 +63,12 @@ test('the playback knob is per-shot play length, not a gap between clips', () =>
   assert.match(play, /per shot/);
 });
 
-test('long clips play a window centred on the middle, sized by the player, not SQLite', () => {
-  assert.match(play, /dur \/ 2 - L \/ 2/);
-  // duration_seconds records the REQUESTED trim width, not the produced
-  // file — the reel-scorecard lesson. The window must come from the player.
+test('the window is sized by the player, never by SQLite duration', () => {
+  // (Centring moved from clip-middle to the strike on 31 Aug — see the
+  // impact-centring test below. This test keeps the other half of the
+  // original claim: duration_seconds records the REQUESTED trim width, not
+  // the produced file — the reel-scorecard lesson — so the window must be
+  // computed from the player's own reading of the file.)
   assert.match(play, /player\.duration/);
   const loadBlock = play.match(/replaceAsync[\s\S]{0,700}/)?.[0] ?? '';
   assert.doesNotMatch(loadBlock, /durationSeconds/);
@@ -113,7 +115,8 @@ test('in training mode the editor moves clips between ALL clubs, labelled as clu
 // but only if the words change with it.
 test('the editor in training mode says clubs, never holes', () => {
   assert.match(editor, /trainingHoleLabel/);
-  assert.match(editor, /isTraining \? 'Select clubs' : 'Select holes'/);
+  // Retitled 31 Aug when selection became clip-level: shots, not clubs.
+  assert.match(editor, /isTraining \? 'Select shots' : 'Select holes'/);
   const header = editor.match(/\{training \? trainingHoleLabel[\s\S]{0,900}/)?.[0] ?? '';
   assert.match(header, /!training && \(/, 'Par and Score are hidden for a range session');
 });
@@ -175,4 +178,54 @@ test('import asks for library permission so the fast path can run at all', () =>
   const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
   assert.match(imp, /MediaLibrary\.requestPermissionsAsync/);
   assert.match(imp, /denial is not a blocker/i);
+});
+
+// 31 Aug, session review batch. Henry's geometric acceptance test: at any
+// per-shot length the STRIKE sits at the centre of the played window. The
+// trim puts impact at ~62.5% of the file (preRoll 2500 / postRoll 1500), so
+// centring on the clip middle showed the strike at the window's edge — his
+// "+0.2s" ask was a workaround for that; the fix is centring on impact.
+test('the auto window centres on the strike, not the clip middle', () => {
+  const tr = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
+  assert.match(tr, /export function impactFractionInFile/);
+  assert.match(tr, /impactTimeMs - clip\.autoTrimStartMs/, 'anchored to the stored impact');
+  assert.match(tr, /return 0\.625;/, 'fallback assumes the trim shape, not the middle');
+  assert.match(pl, /dur \* impactFractionInFile\(current\)/);
+  assert.doesNotMatch(pl, /dur \/ 2 - L \/ 2/, 'the middle-centred window is gone');
+});
+
+// "Once you edit a video that video will stay exactly the same and won't
+// change until you edit it again."
+test('a manually trimmed clip is pinned: it ignores the per-shot length', () => {
+  const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
+  assert.match(pl, /isPinned\(current\)/);
+  assert.match(pl, /pinnedIds\.has\(c\.id\) \|\| c\.trimStartMs > 0 \|\| c\.trimEndMs !== -1/);
+  const pinnedBranch = pl.match(/if \(isPinned\(current\)\) \{([\s\S]*?)\} else \{/)?.[1] ?? '';
+  assert.doesNotMatch(pinnedBranch, /playLengthRef/, 'pinned playback never reads the selector');
+});
+
+// One stored trim per clip, two places to edit it. The preview's save goes
+// through the SAME columns the editor's updateTrim writes — after removeClip
+// and durationMs, nothing ships that persists to one store and not the other.
+test('a trim written from preview is exactly what the editor reads back', () => {
+  const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
+  const hook = readFileSync(join(root, 'hooks/useEditorState.ts'), 'utf8');
+  assert.match(pl, /ClipTrimModal/, 'the REAL trimmer, not a lookalike');
+  assert.match(pl, /updateClipEditorState\(c\.id, updates\)/, 'same persistence call');
+  assert.match(pl, /trim_start_ms: trimStartMs,\s*\n\s*trim_end_ms: trimEndMs,/);
+  assert.match(pl, /updates\.file_uri = sourceOverride\.sourceUri;/, 'same sourceOverride shape');
+  // and editing in the MAIN editor pins too — either editor counts
+  assert.match(hook, /markClipManuallyTrimmed\(numId\)/);
+});
+
+// Export: whole club in one tap, or arbitrary individual shots across clubs.
+test('training select mode selects individual shots; club header selects all of a club', () => {
+  const ed = readFileSync(join(root, 'app/round/editor.tsx'), 'utf8');
+  assert.match(ed, /toggleClipSelected/);
+  assert.match(ed, /toggleClubClipsSelected/);
+  assert.match(ed, /isTraining \? toggleClubClipsSelected/);
+  assert.match(ed, /selectedClips\.has\(c\.id\)/, 'collect gathers the picked shots');
+  assert.match(ed, /'Select shots'/);
+  assert.match(ed, /Share this shot/, 'single-shot share from the clip menu');
 });

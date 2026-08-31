@@ -124,6 +124,69 @@ export interface TrainingClip {
   fileUri: string;
   timestamp: string;
   durationSeconds: number | null;
+  /** Manual in/out points within fileUri. 0 / -1 = whole file. */
+  trimStartMs: number;
+  trimEndMs: number;
+  /** Impact in the ORIGINAL video's timeline (detector estimate). */
+  impactTimeMs: number | null;
+  /** Where the auto-trim cut the original — impact-in-file = impact - this. */
+  autoTrimStartMs: number | null;
+  originalFileUri: string | null;
+  autoTrimmed: boolean;
+}
+
+/**
+ * Where the strike sits inside this clip's FILE, as a fraction of duration.
+ * Auto-trim cuts [impact - preRoll, impact + postRoll], so impact is NOT the
+ * middle of a trimmed clip — with the fullSwing window (2500/1500) it sits at
+ * 62.5%. The ASMR window used to centre on the middle, which at 0.5s/shot
+ * put the strike on the window's trailing edge — Henry's "only catching just
+ * at impact" report, 31 Aug. Centre on THIS instead.
+ */
+export function impactFractionInFile(clip: TrainingClip): number {
+  if (
+    clip.impactTimeMs != null &&
+    clip.autoTrimStartMs != null &&
+    clip.durationSeconds != null &&
+    clip.durationSeconds > 0
+  ) {
+    const inFileMs = clip.impactTimeMs - clip.autoTrimStartMs;
+    const frac = inFileMs / (clip.durationSeconds * 1000);
+    if (frac > 0 && frac < 1) return frac;
+  }
+  // No stored anchor (old rows, imports mid-process): assume the fullSwing
+  // window shape rather than the middle — closer for every trimmed clip.
+  return 0.625;
+}
+
+// ---------------------------------------------------------------------------
+// Pinned trims — "once you edit a video, that video stays exactly the same"
+// ---------------------------------------------------------------------------
+// A manually-trimmed clip stops following the global per-shot length: it
+// plays its own stored in/out points until it is edited again. The trim
+// itself lives in the SAME columns the editor reads (trim_start_ms /
+// trim_end_ms — one stored trim, two places to edit it); this registry only
+// records THAT a manual edit happened, because bounds alone can't always
+// say so (a re-trim that replaces the file resets bounds to 0/-1).
+
+const PINNED_KEY = 'clips.pinned_trim.v1';
+
+export async function getPinnedClipIds(): Promise<Set<number>> {
+  try {
+    const raw = await getSetting(PINNED_KEY);
+    const arr = raw ? (JSON.parse(raw) as number[]) : [];
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export async function markClipManuallyTrimmed(clipId: number): Promise<void> {
+  try {
+    const ids = await getPinnedClipIds();
+    ids.add(clipId);
+    await setSetting(PINNED_KEY, JSON.stringify([...ids].slice(-500)));
+  } catch {}
 }
 
 /** All of a session's shots, oldest first (the order they were hit). */
@@ -138,6 +201,12 @@ export async function listTrainingClips(roundId: string, clubHole?: number): Pro
       fileUri: r.file_uri,
       timestamp: r.timestamp,
       durationSeconds: r.duration_seconds,
+      trimStartMs: r.trim_start_ms ?? 0,
+      trimEndMs: r.trim_end_ms ?? -1,
+      impactTimeMs: r.impact_time_ms ?? null,
+      autoTrimStartMs: r.auto_trim_start_ms ?? null,
+      originalFileUri: r.original_file_uri ?? null,
+      autoTrimmed: r.auto_trimmed === 1,
     }))
     .sort((a, b) => (a.timestamp < b.timestamp ? -1 : 1));
 }

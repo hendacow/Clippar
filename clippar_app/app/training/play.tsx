@@ -32,8 +32,33 @@ import {
   PLAY_LENGTH_OPTIONS_MS,
   playLengthLabel,
   listTrainingClips,
+  impactFractionInFile,
+  getPinnedClipIds,
+  markClipManuallyTrimmed,
   type TrainingClip,
 } from '@/lib/training';
+import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
+import type { EditorClip } from '@/types/editor';
+import { updateClipEditorState } from '@/lib/storage';
+
+/** The trimmer speaks EditorClip; adapt without inventing fields. */
+function toEditorClip(c: TrainingClip): EditorClip {
+  return {
+    id: String(c.id),
+    type: 'shot',
+    holeNumber: c.holeNumber,
+    shotNumber: c.shotNumber,
+    sourceUri: c.fileUri,
+    storagePath: null,
+    trimStartMs: c.trimStartMs,
+    trimEndMs: c.trimEndMs,
+    durationMs: c.durationSeconds ? c.durationSeconds * 1000 : 5000,
+    autoTrimmed: c.autoTrimmed,
+    impactTimeMs: c.impactTimeMs ?? undefined,
+    autoTrimStartMs: c.autoTrimStartMs ?? undefined,
+    originalUri: c.originalFileUri ?? undefined,
+  };
+}
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 const ExpoVideo = isNative ? (require('expo-video') as typeof import('expo-video')) : null;
@@ -47,11 +72,16 @@ export default function TrainingPlayScreen() {
   const [paused, setPaused] = useState(false);
   const [playLengthMs, setPlayLengthMsState] = useState(1000);
   const [finished, setFinished] = useState(false);
+  // "Once you edit a video, that video stays exactly the same": pinned clips
+  // play their OWN stored in/out points and ignore the per-shot length.
+  const [pinnedIds, setPinnedIds] = useState<Set<number>>(new Set());
+  const [trimClip, setTrimClip] = useState<TrainingClip | null>(null);
 
   // The per-shot window timer. Pausing must cancel it (and resume must
   // restart it with the REMAINING time) or a pause still advances mid-gaze.
   const windowTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const windowStartSec = useRef(0);
+  const windowLenMs = useRef(1000);
   const indexRef = useRef(index);
   indexRef.current = index;
   const pausedRef = useRef(paused);
@@ -68,7 +98,13 @@ export default function TrainingPlayScreen() {
       .then(setClips)
       .catch(() => setClips([]));
     getPlayLengthMs().then(setPlayLengthMsState).catch(() => {});
+    getPinnedClipIds().then(setPinnedIds).catch(() => {});
   }, [roundId, club]);
+
+  const isPinned = useCallback(
+    (c: TrainingClip) => pinnedIds.has(c.id) || c.trimStartMs > 0 || c.trimEndMs !== -1,
+    [pinnedIds]
+  );
 
   const current = clips?.[index] ?? null;
 
@@ -120,14 +156,35 @@ export default function TrainingPlayScreen() {
       try {
         await player.replaceAsync(current.fileUri);
         if (cancelled) return;
-        const L = playLengthRef.current / 1000;
         const dur = Number.isFinite(player.duration) ? player.duration : 0;
-        const start = dur > L ? Math.max(0, dur / 2 - L / 2) : 0;
-        windowStartSec.current = start;
-        player.currentTime = start;
-        if (!pausedRef.current) {
-          player.play();
-          armWindowTimer(playLengthRef.current);
+        if (isPinned(current)) {
+          // Pinned: play the clip's OWN stored in/out points, full length —
+          // the global per-shot length does not apply until it is edited
+          // again. Same columns the editor reads: one trim, two editors.
+          const start = current.trimStartMs / 1000;
+          const end = current.trimEndMs === -1 ? dur : Math.min(dur, current.trimEndMs / 1000);
+          const lenMs = Math.max(100, (end - start) * 1000);
+          windowStartSec.current = start;
+          windowLenMs.current = lenMs;
+          player.currentTime = start;
+          if (!pausedRef.current) {
+            player.play();
+            armWindowTimer(lenMs);
+          }
+        } else {
+          // Auto window: centred on the STRIKE, not the clip middle — the
+          // trim puts impact at ~62.5% of the file (impactFractionInFile),
+          // so a middle-centred 0.5s window showed the strike at its edge.
+          const L = playLengthRef.current / 1000;
+          const center = dur * impactFractionInFile(current);
+          const start = dur > L ? Math.min(Math.max(0, center - L / 2), dur - L) : 0;
+          windowStartSec.current = start;
+          windowLenMs.current = playLengthRef.current;
+          player.currentTime = start;
+          if (!pausedRef.current) {
+            player.play();
+            armWindowTimer(playLengthRef.current);
+          }
         }
       } catch {}
     })();
@@ -136,7 +193,7 @@ export default function TrainingPlayScreen() {
       if (windowTimer.current) clearTimeout(windowTimer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [current?.id]);
+  }, [current?.id, current?.trimStartMs, current?.trimEndMs, playLengthMs, pinnedIds]);
 
   // A clip shorter than the window ends naturally before the timer — advance
   // then too, so short clips don't hang as freeze-frames.
@@ -163,7 +220,7 @@ export default function TrainingPlayScreen() {
         // Resume with the REMAINING window, not a fresh one.
         const elapsedMs = Math.max(0, (player.currentTime - windowStartSec.current) * 1000);
         player.play();
-        armWindowTimer(playLengthRef.current - elapsedMs);
+        armWindowTimer(windowLenMs.current - elapsedMs);
       }
       return next;
     });
@@ -186,10 +243,44 @@ export default function TrainingPlayScreen() {
   }, []);
 
   const openInEditor = useCallback(() => {
+    // The REAL trimmer, inline — same component the round editor opens.
+    if (!current) return;
     player.pause();
     setPaused(true);
-    router.push(`/round/editor?roundId=${roundId}&review=1&training=1`);
-  }, [player, roundId]);
+    if (windowTimer.current) clearTimeout(windowTimer.current);
+    setTrimClip(current);
+  }, [player, current]);
+
+  // Persist EXACTLY the way the editor's own updateTrim does — same columns,
+  // same sourceOverride shape — so a trim written here is what the main
+  // editor reads back (one stored trim per clip, two places to edit it).
+  const handleTrimSave = useCallback(
+    async (trimStartMs: number, trimEndMs: number, sourceOverride?: { sourceUri: string; durationMs: number }) => {
+      const c = trimClip;
+      setTrimClip(null);
+      if (!c) return;
+      const updates: Parameters<typeof updateClipEditorState>[1] = {
+        trim_start_ms: trimStartMs,
+        trim_end_ms: trimEndMs,
+      };
+      if (sourceOverride) {
+        updates.file_uri = sourceOverride.sourceUri;
+        updates.duration_seconds = sourceOverride.durationMs / 1000;
+      }
+      await updateClipEditorState(c.id, updates).catch(() => {});
+      await markClipManuallyTrimmed(c.id);
+      // Re-read from SQLite so this screen shows what was actually stored.
+      const clubHole = club ? parseInt(club, 10) : undefined;
+      const [fresh, pins] = await Promise.all([
+        listTrainingClips(roundId ?? '', Number.isNaN(clubHole as number) ? undefined : clubHole),
+        getPinnedClipIds(),
+      ]);
+      setClips(fresh);
+      setPinnedIds(pins);
+      setPaused(false);
+    },
+    [trimClip, roundId, club]
+  );
 
   const currentClub = current ? clubForHole(current.holeNumber) : null;
 
@@ -271,6 +362,16 @@ export default function TrainingPlayScreen() {
             </Pressable>
           </View>
         </View>
+
+        <ClipTrimModal
+          visible={trimClip !== null}
+          clip={trimClip ? toEditorClip(trimClip) : null}
+          onSave={(start, end, override) => void handleTrimSave(start, end, override)}
+          onDismiss={() => {
+            setTrimClip(null);
+            setPaused(false);
+          }}
+        />
       </View>
     </>
   );

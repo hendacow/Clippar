@@ -16,6 +16,7 @@ import {
 import { config, resolveEffectiveTrimWindow, type TrimWindow } from '@/constants/config';
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 import { deleteClipToBin, restoreClipFromBin } from '@/lib/clipBin';
+import { markClipManuallyTrimmed } from '@/lib/training';
 
 const DEFAULT_PAR = 4;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -506,6 +507,10 @@ export function useEditorState(roundId: string | undefined) {
           dbUpdates.duration_seconds = sourceOverride.durationMs / 1000;
         }
         storage.updateClipEditorState(numId, dbUpdates).catch(() => {});
+        // Pin: a manual trim stops following training playback's global
+        // per-shot length until edited again (lib/training). No-op for
+        // round clips — nothing outside training playback reads the pin.
+        void markClipManuallyTrimmed(numId);
         // Mark this round's reel as stale so the round detail page
         // surfaces a "Re-compose reel" button — the user's trim
         // edits won't be in the saved reel until they re-compose.

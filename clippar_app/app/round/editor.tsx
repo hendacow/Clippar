@@ -13,7 +13,7 @@ import {
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { getProStatus } from '@/lib/subscription';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, ArrowLeft, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle } from 'lucide-react-native';
+import { X, ArrowLeft, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle , CheckCircle2 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -103,6 +103,8 @@ function ClipCard({
   onDownload,
   disabled = false,
   onPressWhenDisabled,
+  selectable = false,
+  selected = false,
 }: {
   clip: EditorClip;
   onEdit: () => void;
@@ -112,6 +114,10 @@ function ClipCard({
   /** Select mode: per-clip actions are inert; a tap toggles the hole. */
   disabled?: boolean;
   onPressWhenDisabled?: () => void;
+  /** Training select mode: the clip ITSELF is the selectable unit —
+      "select individual shots, including multiple different ones". */
+  selectable?: boolean;
+  selected?: boolean;
 }) {
   const [thumbnail, setThumbnail] = useState<string | null>(clip.thumbnailUri ?? null);
 
@@ -126,7 +132,21 @@ function ClipCard({
   const duration = formatDuration(clip.durationMs);
 
   return (
-    <View style={{ width: 100, marginRight: 10 }}>
+    <View
+      style={{
+        width: 100,
+        marginRight: 10,
+        borderRadius: theme.radius.md,
+        borderWidth: selectable ? 2 : 0,
+        borderColor: selectable && selected ? theme.colors.primary : 'transparent',
+        opacity: selectable && !selected ? 0.75 : 1,
+      }}
+    >
+      {selectable && selected && (
+        <View style={{ position: 'absolute', top: 22, left: 4, zIndex: 2, backgroundColor: theme.colors.primary, borderRadius: 10, padding: 2 }}>
+          <CheckCircle2 size={14} color="#fff" />
+        </View>
+      )}
       {/* Stroke label */}
       <Text
         style={{
@@ -372,6 +392,8 @@ function HoleSection({
   selected,
   onToggleSelect,
   training,
+  selectedClipIds,
+  onToggleClipSelect,
 }: {
   hole: EditorHoleSection;
   onClipEdit: (clip: EditorClip) => void;
@@ -387,6 +409,9 @@ function HoleSection({
   training: boolean;
   selected: boolean;
   onToggleSelect: () => void;
+  /** Training select mode: per-clip selection instead of per-hole. */
+  selectedClipIds?: Set<string>;
+  onToggleClipSelect?: (clipId: string) => void;
 }) {
   // F17: clips mid-tracer-render are excluded the same way untrimmed clips
   // are — their arc would be missing from the stitched output.
@@ -539,9 +564,14 @@ function HoleSection({
             onLongPress={() => onClipLongPress(clip)}
             onDownload={() => onClipDownload(clip)}
             // In select mode tapping anywhere on the hole toggles the
-            // whole hole, so per-clip edit/remove/long-press are inert.
+            // whole hole — EXCEPT in training, where the clip itself is the
+            // selectable unit (Henry: pick arbitrary individual shots).
             disabled={selectMode}
-            onPressWhenDisabled={onToggleSelect}
+            onPressWhenDisabled={
+              training && onToggleClipSelect ? () => onToggleClipSelect(clip.id) : onToggleSelect
+            }
+            selectable={selectMode && training}
+            selected={selectedClipIds?.has(clip.id) ?? false}
           />
         ))}
 
@@ -792,6 +822,17 @@ export default function EditorScreen() {
   // buttons — a multi-hole reel is just a wider list of clip URIs.
   const [selectMode, setSelectMode] = useState(false);
   const [selectedHoles, setSelectedHoles] = useState<number[]>([]);
+  // Training select mode selects CLIPS; a club header tap toggles all of its
+  // clips at once (select-the-whole-club is still one tap).
+  const [selectedClips, setSelectedClips] = useState<Set<string>>(new Set());
+  const toggleClipSelected = useCallback((clipId: string) => {
+    setSelectedClips((prev) => {
+      const next = new Set(prev);
+      if (next.has(clipId)) next.delete(clipId);
+      else next.add(clipId);
+      return next;
+    });
+  }, []);
   const [selectionBusy, setSelectionBusy] = useState(false);
 
   const exitSelectMode = useCallback(() => {
@@ -808,9 +849,38 @@ export default function EditorScreen() {
     );
   }, []);
 
+  const toggleClubClipsSelected = useCallback(
+    (holeNumber: number) => {
+      const hole = state.holes.find((h) => h.holeNumber === holeNumber);
+      if (!hole) return;
+      setSelectedClips((prev) => {
+        const next = new Set(prev);
+        const ids = hole.clips.map((c) => c.id);
+        const allIn = ids.every((id) => next.has(id));
+        for (const id of ids) {
+          if (allIn) next.delete(id);
+          else next.add(id);
+        }
+        return next;
+      });
+    },
+    [state.holes]
+  );
+
   // Gather the usable clip URIs for the selected holes, in hole then shot
   // order. Excluded / still-trimming clips are skipped.
   const collectSelectedUris = useCallback((): string[] => {
+    if (isTraining) {
+      // Clip-level selection, in club order then shot order.
+      const uris: string[] = [];
+      for (const hole of state.holes) {
+        hole.clips
+          .filter((c) => selectedClips.has(c.id))
+          .filter((c) => !c.isExcluded && c.sourceUri && !c.needsTrim && c.tracerStatus !== 'pending')
+          .forEach((c) => uris.push(c.sourceUri!));
+      }
+      return uris;
+    }
     const order = [...selectedHoles].sort((a, b) => a - b);
     const uris: string[] = [];
     for (const hn of order) {
@@ -821,7 +891,7 @@ export default function EditorScreen() {
         .forEach((c) => uris.push(c.sourceUri!));
     }
     return uris;
-  }, [selectedHoles, state.holes]);
+  }, [selectedHoles, state.holes, isTraining, selectedClips]);
 
   const handleSaveSelected = useCallback(async () => {
     // F17: wait for tracer renders before building a multi-hole highlight.
@@ -843,7 +913,9 @@ export default function EditorScreen() {
       if (ok) {
         Alert.alert(
           'Saved',
-          `Highlight saved to Photos — ${selectedHoles.length} hole${selectedHoles.length > 1 ? 's' : ''}, ${uris.length} clip${uris.length > 1 ? 's' : ''}.`,
+          isTraining
+            ? `Saved to Photos — ${uris.length} shot${uris.length > 1 ? 's' : ''}.`
+            : `Highlight saved to Photos — ${selectedHoles.length} hole${selectedHoles.length > 1 ? 's' : ''}, ${uris.length} clip${uris.length > 1 ? 's' : ''}.`,
         );
         exitSelectMode();
       } else {
@@ -852,7 +924,7 @@ export default function EditorScreen() {
     } finally {
       setSelectionBusy(false);
     }
-  }, [collectSelectedUris, selectedHoles.length, exitSelectMode, isTracing]);
+  }, [collectSelectedUris, selectedHoles.length, isTraining, exitSelectMode, isTracing]);
 
   const handleShareSelected = useCallback(async () => {
     // F17: wait for tracer renders before building a multi-hole highlight.
@@ -875,12 +947,14 @@ export default function EditorScreen() {
         Alert.alert('Share Failed', 'Could not build the highlight. Try again.');
         return;
       }
-      const label = [...selectedHoles].sort((a, b) => a - b).join(', ');
-      await shareClip(stitched, `Holes ${label} – ${state.courseName || 'Round'}`);
+      const label = isTraining
+        ? `${collectSelectedUris().length} shots`
+        : `Holes ${[...selectedHoles].sort((a, b) => a - b).join(', ')}`;
+      await shareClip(stitched, `${label} – ${state.courseName || 'Round'}`);
     } finally {
       setSelectionBusy(false);
     }
-  }, [collectSelectedUris, selectedHoles, state.courseName, isTracing]);
+  }, [collectSelectedUris, selectedHoles, state.courseName, isTraining, isTracing]);
 
   const handlePreviewAll = useCallback(() => {
     if (hasUntrimmedClips) {
@@ -1507,11 +1581,11 @@ export default function EditorScreen() {
             }}
             numberOfLines={1}
           >
-            {selectMode ? (isTraining ? 'Select clubs' : 'Select holes') : state.courseName || 'Edit Reel'}
+            {selectMode ? (isTraining ? 'Select shots' : 'Select holes') : state.courseName || 'Edit Reel'}
           </Text>
           <Text style={{ color: theme.colors.textTertiary, fontSize: 11 }}>
             {selectMode
-              ? `${selectedHoles.length} selected`
+              ? (isTraining ? `${selectedClips.size} shot${selectedClips.size === 1 ? '' : 's'} selected` : `${selectedHoles.length} selected`)
               : `${totalClips} clips · ${state.holes.length} ${isTraining ? 'clubs' : 'holes'}`}
           </Text>
         </View>
@@ -1726,8 +1800,12 @@ export default function EditorScreen() {
             busyHoleNumber={busyHoleNumber}
             selectMode={selectMode}
             selected={selectedHoles.includes(hole.holeNumber)}
-            onToggleSelect={() => toggleHoleSelected(hole.holeNumber)}
+            onToggleSelect={() =>
+              isTraining ? toggleClubClipsSelected(hole.holeNumber) : toggleHoleSelected(hole.holeNumber)
+            }
             training={isTraining}
+            selectedClipIds={isTraining ? selectedClips : undefined}
+            onToggleClipSelect={isTraining ? toggleClipSelected : undefined}
           />
         ))}
 
@@ -2004,6 +2082,21 @@ export default function EditorScreen() {
                   <XCircle size={18} color={theme.colors.textSecondary} />
                   <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}>
                     {movingClip.isExcluded ? 'Include in reel' : 'Exclude from reel'}
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    const c = movingClip;
+                    setMovingClip(null);
+                    if (c.sourceUri) {
+                      void shareClip(c.sourceUri, `${isTraining ? trainingHoleLabel(c.holeNumber) : `Hole ${c.holeNumber}`} · Shot ${c.shotNumber}`);
+                    }
+                  }}
+                  style={menuRowStyle}
+                >
+                  <Share2 size={18} color={theme.colors.textPrimary} />
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}>
+                    Share this shot
                   </Text>
                 </Pressable>
                 <Pressable
