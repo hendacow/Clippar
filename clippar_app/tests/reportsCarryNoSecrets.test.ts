@@ -129,20 +129,29 @@ test('app.py fallback credentials are discoverable, so this test has teeth', () 
 /**
  * Copies of a guarded value that exist ON PURPOSE, each with its reason.
  *
- * This list is the point, not a loophole. `EXPO_PUBLIC_PIPELINE_API_KEY` in
- * the env example is the CLIENT half of the same shared secret `app.py` falls
- * back to — it is already embedded in every shipped bundle by design (see
- * `clippar_app/CLAUDE.md`, "Secret keys ship in the client"), so the example
- * file is not where that exposure lives and deleting it here would hide a
- * known problem rather than fix it. It is also a developer-setup decision
- * rather than a security one, so it is recorded for Henry instead of changed
- * unilaterally.
+ * This list is the point, not a loophole.
+ *
+ * **It used to carry `.env.development.local.example` too, and that entry was
+ * wrong.** The reason written for it was that the value is the CLIENT half of a
+ * secret already embedded in every shipped bundle by design, so the example file
+ * is not where that exposure lives — and that it was a developer-setup decision
+ * rather than a security one. **The first half was incomplete and the second was
+ * false.** `app.py` supplies the same literal as a getenv DEFAULT (finding 109),
+ * so the published string authenticates against any pipeline deploy whose env
+ * var is unset — not just the developer's. That makes it a working credential
+ * for a misconfigured deploy, which is a security decision by any reading.
+ *
+ * The staging sibling was placeholdered two rounds earlier on exactly this
+ * logic, and the two files then disagreed about the same key. They agree now,
+ * the entry is gone rather than merely unused, and the real dotfiles are
+ * gitignored, so only a fresh clone pays anything for it.
  *
  * **The consequence that matters is in the report:** rotating the server-side
  * value requires shipping a new app build, because the client carries the
  * matching one.
  *
- * A named copy with a reason beats a directory that happens not to be scanned.
+ * A named copy with a reason beats a directory that happens not to be scanned —
+ * but a reason that has stopped being true is worse than either.
  */
 const ALLOWED_COPIES = new Set([
   // The HOME of these literals — where they are defined, not a copy of them.
@@ -150,7 +159,6 @@ const ALLOWED_COPIES = new Set([
   // which is an accident rather than a decision. Widening the scan surfaced it
   // immediately, which is the argument for scanning the tracked tree.
   'app.py',
-  'clippar_app/.env.development.local.example',
 ]);
 
 /**
@@ -225,8 +233,20 @@ const URL_INLINE_CREDENTIAL = /:\/\/[^/\s:@]+:[^/\s@]+@/;
  * and this file.** Its staging sibling was assumed to be covered by it and was
  * not — different value, never allow-listed, never decided on by anybody.
  */
-const ALLOWED_ENV_LITERALS = new Set([
-  'clippar_app/.env.development.local.example:EXPO_PUBLIC_PIPELINE_API_KEY',
+const ALLOWED_ENV_LITERALS = new Set<string>([
+  // EMPTY ON PURPOSE. A tracked env example holds a placeholder, without
+  // exception — the two files now agree about one rule instead of disagreeing
+  // about the same key.
+  //
+  // The entry that was here exempted the development sibling of the staging
+  // token, on the reason written at ALLOWED_COPIES: it is the client half of a
+  // secret already in every shipped bundle by design, so the example file is
+  // not where that exposure lives. **That reason was incomplete.** Because
+  // `app.py` supplies the same literal as a getenv DEFAULT (finding 109), the
+  // published string authenticates against any pipeline deploy whose env var is
+  // unset — not just the dev one. So it is not merely a copy of a bundled
+  // value; it is a working credential for a misconfigured deploy, and this
+  // exemption guaranteed the one control that would flag it stayed green.
 ]);
 
 test('tracked env examples carry placeholders, never real credentials', () => {
