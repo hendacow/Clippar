@@ -68,7 +68,21 @@ export function isRowVisible(
  * this migration (it was unscoped for everyone), and the alternative —
  * orphaning a real round forever — is worse. Everything written after the
  * migration is stamped at insert time and is never claimable.
- */
+ *
+ * **This paragraph is the mechanism of an open finding, and it is on `main`.**
+ * It predates the review that flagged it. It is left in place deliberately: it
+ * is the only written explanation of why this trade-off was made, sitting on
+ * the function that makes it, and a maintainer who removes the reasoning is
+ * more likely to break the behaviour than one who reads it. Removing it is a
+ * change to shipped code that this review does not own, so it is Henry's call
+ * rather than a fix — see the private tracker.
+ *
+ * What the marker below DOES buy is that no *further* copy of this reasoning
+ * can be added anywhere else in the tree. The guard exempts this file by
+ * construction, so it constrains the copies, not the original. That limit is
+ * the point of writing it down.
+ *
+ * @guarded 23 */
 export function shouldClaimLegacyRows(
   sessionUserId: SessionUserId,
   alreadyClaimed: boolean

@@ -210,23 +210,36 @@ test('no tracked file quotes a fallback credential instead of citing its line', 
  */
 
 /**
- * Identifiers that name an UNFIXED, LIVE finding, and the one file each may
- * appear in.
+ * Which findings must be guarded — DERIVED from the report, not written here.
  *
- * A table rather than one hard-coded derivation, because the single-identifier
- * version guarded finding 32's cache and nothing else — so finding 12's
- * mechanism was published in six other places while this file stayed green.
- * Third recurrence of "stated a property, enforced a place", and the fix is not
- * a longer list of places: one entry per guarded thing, checked over every
- * tracked file.
+ * This was a hand-written two-row table while four findings were marked
+ * `🔴 LIVE`, so two of them were guarded and two were not, and nothing said so.
+ * Fourth recurrence of **"stated a property, enforced a place"** — the property
+ * is *every finding live in shipped code has its identifier guarded*, and a
+ * literal list is a snapshot of which ones someone remembered. Finding 93
+ * already fixed exactly this one table below, for the report surfaces; the copy
+ * up here survived because the fix was applied where it was found rather than
+ * where it applied.
  *
- * Each identifier is DERIVED from its home file, never written here. A guard
- * that restates what it protects has become the leak.
+ * So the set comes from the same `🔴 LIVE` markers finding 93 reads, and the
+ * home file is found by scanning the tree for the marker rather than declared.
+ * Neither half can be quietly disabled: dropping a row here is impossible
+ * (there are no rows), and dropping the marker fails the finding loudly.
  */
-const GUARDED: { home: string; tag: string }[] = [
-  { home: 'clippar_app/lib/storage.ts', tag: '32' },   // see the private tracker
-  { home: 'clippar_app/lib/localWipe.ts', tag: '12' }, // see the private tracker
-];
+function guardedTags(report: string): string[] {
+  return [...new Set(liveUnfixedFindings(report).map((n) => LIVE_TAG_ALIASES[n] ?? n))].sort();
+}
+
+/**
+ * Findings that share one mechanism, and therefore one marker.
+ *
+ * 29 is finding 23 re-rated, on the same code. Requiring a distinct
+ * `@guarded 29` would mean either a second marker on the same declaration
+ * (ambiguous — finding 65) or a second declaration invented to carry it. The
+ * alias is written down so the collapse is a decision that can be argued with,
+ * rather than 29 silently never being checked.
+ */
+const LIVE_TAG_ALIASES: Record<string, string> = { '29': '23' };
 
 /**
  * Derive the guarded identifier from an explicit `@guarded <n>` marker in its
@@ -236,7 +249,7 @@ const GUARDED: { home: string; tag: string }[] = [
  * this replaces reconstructed what they were hiding — one spelled the guarded
  * name to within a word, in the guard whose entire job is keeping that name
  * out of every file but its home. The table's comments described the
- * mechanism in English besides. `GUARDED` only asks whether the identifier
+ * mechanism in English besides. The guard only asks whether the identifier
  * appears elsewhere, so it stayed green while its own annotations published
  * what it protects. A finding NUMBER discloses nothing; a description does.
  *
@@ -244,25 +257,47 @@ const GUARDED: { home: string; tag: string }[] = [
  * guarding the wrong name because a second declaration matched the same shape.
  * An explicit tag cannot drift onto something else.
  */
-function deriveGuarded(src: string, tag: string): string[] {
+function deriveGuarded(tag: string): { file: string; name: string }[] {
   const pattern = new RegExp(
     `@guarded ${tag} \\*/\\s*(?:export\\s+)?(?:let|const|async function|function)\\s+([A-Za-z_$][\\w$]*)`,
     'g'
   );
-  return [...src.matchAll(pattern)].map((m) => m[1]);
+  // Tree-wide, not "read the home file named in a table". The marker's location
+  // IS the home file, so there is nowhere left to record a wrong one.
+  return trackedTextFiles().flatMap((file) =>
+    [...readFileSync(join(repoRoot, file), 'utf8').matchAll(pattern)].map((m) => ({
+      file,
+      name: m[1],
+    }))
+  );
 }
 /**
  * Files that reference a guarded symbol AS CODE rather than explaining it. An
  * assertion naming the function it pins is not a disclosure; a sentence saying
  * why that function is dangerous is. Explicit and reasoned, so the next one is
  * a decision rather than a directory that happens not to be scanned.
+ *
+ * **Keyed `<tag>:<file>`, not by file alone.** Finding 23's symbol is an
+ * ordinary exported helper that `lib/storage.ts` imports and calls, so it needs
+ * an exemption there — and a file-only key would have exempted `storage.ts`
+ * from finding 32's guard at the same time, which is the file that *defines*
+ * 32's identifier and the one place its mechanism could most plausibly regrow.
+ * One over-broad exemption silently cancelling a different finding's guard is
+ * the failure this key shape exists to prevent.
  */
-const GUARDED_CODE_REFS = new Set(['clippar_app/tests/serialQueue.test.ts']);
+const GUARDED_CODE_REFS = new Set([
+  '12:clippar_app/tests/serialQueue.test.ts',
+  // Both predate this review: an import, a call site and a unit test of an
+  // ordinary exported helper. Code, not commentary — and see the note on the
+  // declaration itself for why the original reasoning stays in its home file.
+  '23:clippar_app/lib/storage.ts',
+  '23:clippar_app/tests/localScope.test.ts',
+]);
 
 /**
  * The pointer blocks in the HOME files, pinned BY DIGEST.
  *
- * `GUARDED` filters `rel !== home`, so a home file is exempt for its own
+ * The guard filters `rel !== home`, so a home file is exempt for its own
  * identifier by construction — the check only ever answers "is this named
  * elsewhere", never "is the mechanism explained here". That gap let a docstring
  * state the property and the unfixed status in the same block as the
@@ -309,7 +344,7 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     sha256: '9e30dec5b45ac2f2d8bbe1ca1d58d42d94525e0bd512b17b7fdc7a459a2c77fa',
   },
   {
-    // `localWipe.ts` had no coverage at all. `GUARDED` exempts a home file for
+    // `localWipe.ts` had no coverage at all. The guard exempts a home file for
     // its own identifier by construction, so nothing constrained what could be
     // written beside `@guarded 12` — now or later.
     file: 'clippar_app/lib/localWipe.ts',
@@ -355,30 +390,42 @@ test('the home files point at the tracker instead of explaining the finding', ()
   }
 });
 
-for (const { home, tag } of GUARDED) {
-  test(`${home}: guarded identifiers are named only where they are defined`, () => {
-    const names = deriveGuarded(readFileSync(join(repoRoot, home), 'utf8'), tag);
-    // Loudly, in both directions: none means the derivation broke or the finding
-    // was fixed away; more than one means it may be guarding the wrong name.
+test('every finding live in shipped code has exactly one guarded identifier', () => {
+  const report = readFileSync(join(repoRoot, 'reports/cto/2026-08-30.md'), 'utf8');
+  const tags = guardedTags(report);
+  // A reshaped table or a renamed marker would otherwise leave this checking
+  // nothing at all, green — the same vacuous pass an empty file list gives.
+  assert.ok(tags.length > 0, 'no finding derived as live — the 🔴 LIVE marker or the summary table changed shape');
+
+  for (const tag of tags) {
+    const found = deriveGuarded(tag);
+    // Loudly in BOTH directions. Zero means a finding is marked live in the
+    // report with nothing guarding its identifier — the state this test was
+    // added to make impossible, and the state the repo was actually in for
+    // findings 23 and 29. Two or more is finding 65: an ambiguous derivation
+    // that may be guarding the wrong name.
     assert.equal(
-      names.length,
+      found.length,
       1,
-      names.length === 0
-        ? `no @guarded ${tag} marker resolved in ${home} — if the finding is fixed and the marker is gone, remove its GUARDED entry deliberately`
-        : `the derivation is ambiguous: ${names.length} matches in ${home}`
+      found.length === 0
+        ? `finding ${tag} is marked 🔴 LIVE in the report but no @guarded ${tag} marker exists anywhere in the tree. Either mark the declaration whose name must not spread, or — if it is fixed — take the LIVE marker off its row deliberately.`
+        : `@guarded ${tag} resolves to ${found.length} declarations (${found
+            .map((f) => `${f.file}:${f.name}`)
+            .join(', ')}) — ambiguous, so it may be guarding the wrong one`
     );
-    const name = names[0];
+
+    const { file: home, name } = found[0];
     const offenders = trackedTextFiles()
       .filter((rel) => rel !== home)
-      .filter((rel) => !GUARDED_CODE_REFS.has(rel))
+      .filter((rel) => !GUARDED_CODE_REFS.has(`${tag}:${rel}`))
       .filter((rel) => readFileSync(join(repoRoot, rel), 'utf8').includes(name));
     assert.deepEqual(
       offenders,
       [],
-      `these files name a guarded identifier outside the file that defines it — point at the private tracker instead of restating the mechanism:\n${offenders.join('\n')}`
+      `these files name finding ${tag}'s guarded identifier outside ${home}, which defines it — point at the private tracker instead of restating the mechanism:\n${offenders.join('\n')}`
     );
-  });
-}
+  }
+});
 
 /**
  * Every tracked file, so both guards are properties of the REPOSITORY rather
@@ -524,7 +571,7 @@ test('the redacted findings’ summary-table rows stay neutral', () => {
  *
  * **All four existing guards missed it by construction**, which is the general
  * lesson rather than an oversight: a numbered list item is not an `### <n>.`
- * heading and not a `| <n> |` table row, and `GUARDED` compares an IDENTIFIER —
+ * heading and not a `| <n> |` table row, and the guard compares an IDENTIFIER —
  * it cannot see a paraphrase, and a paraphrase is what a reader actually needs.
  * Tenth recurrence of "stated a property, enforced a place".
  *
@@ -612,7 +659,7 @@ function liveUnfixedFindings(report: string): string[] {
  * **What this does NOT reach, stated because the gap is the point.** Finding
  * 102 was a mechanism written in plain English inside a DIFFERENT finding's
  * body, while explaining why an unrelated fix was safe. No digest over LIVE
- * bodies sees that, and neither does an identifier check — `GUARDED` compares a
+ * bodies sees that, and neither does an identifier check — the guard compares a
  * symbol, and a paraphrase never uses it. The only mechanical option offered was
  * a mechanism-verb blacklist, which is the shape rejected at finding 72 and
  * would fail the same way. **Paraphrase anywhere in a 2,600-line document is not
