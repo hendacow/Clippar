@@ -35,6 +35,16 @@ export default function TrainingImportScreen() {
     setBusy(true);
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     try {
+      // Ask for Photos library access BEFORE the picker: with it, the picker
+      // takes its fast path (PHAssetResourceManager streaming — patched to
+      // allow iCloud download, see patches/expo-image-picker) instead of the
+      // loadFileRepresentation path that threw PHPhotosError 3164 on Henry's
+      // offloaded videos. A denial is not a blocker — the picker still works
+      // for on-device videos without it.
+      try {
+        const MediaLibrary = require('expo-media-library') as typeof import('expo-media-library');
+        await MediaLibrary.requestPermissionsAsync();
+      } catch {}
       // preferredAssetRepresentationMode 'current' hands over the original
       // file instead of forcing an AVFoundation transcode — the transcode is
       // the slow step that makes big iCloud videos stall out of the picker.

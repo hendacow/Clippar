@@ -158,3 +158,21 @@ test('editor preview for a practice session IS the watch mode', () => {
   assert.match(block, /\/training\/play\?roundId=/);
   assert.match(block, /'\/round\/preview'/, 'round previews still use the round player');
 });
+
+// Round two of the iCloud fight, 31 Aug: the fix that passed tests failed on
+// the device — PHPhotosError 3164 and a silently-bouncing picker. Root cause
+// found in the vendored picker source: its fast path streamed originals with
+// network access DISALLOWED (`options: nil`), and its "graceful fallback"
+// comment lied — a writeData throw errored the whole picker.
+test('the picker patch allows iCloud download and makes the fallback real', () => {
+  const patch = readFileSync(join(root, 'patches/expo-image-picker+17.0.10.patch'), 'utf8');
+  assert.match(patch, /isNetworkAccessAllowed = true/);
+  assert.match(patch, /\+.*do \{/, 'fast path wrapped so failure falls through');
+  assert.match(patch, /loadFileRepresentation"?\)?/);
+});
+
+test('import asks for library permission so the fast path can run at all', () => {
+  const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  assert.match(imp, /MediaLibrary\.requestPermissionsAsync/);
+  assert.match(imp, /denial is not a blocker/i);
+});

@@ -1,0 +1,75 @@
+diff --git a/node_modules/expo-image-picker/ios/MediaHandler.swift b/node_modules/expo-image-picker/ios/MediaHandler.swift
+index 6e4fbe1..eead8c8 100644
+--- a/node_modules/expo-image-picker/ios/MediaHandler.swift
++++ b/node_modules/expo-image-picker/ios/MediaHandler.swift
+@@ -375,33 +375,46 @@ internal struct MediaHandler {
+     // asset as *adjusted* and will re-render a temporary file for us. Copying the resource bytes
+     // ourselves is dramatically faster because it just streams the already-existing file.
+ 
++    // CLIPPAR PATCH (see patches/expo-image-picker): two fixes to this fast path.
++    // 1. `writeData` was called with `options: nil`, which means NETWORK ACCESS
++    //    DISALLOWED — an iCloud-offloaded original can never be fetched, even
++    //    though Photos itself streams it on demand. isNetworkAccessAllowed=true
++    //    makes this path download exactly the way Photos does.
++    // 2. The comment below claimed failures "gracefully fall back", but the bare
++    //    `try await` propagated any error out of handleVideo and errored the whole
++    //    picker (PHPhotosErrorDomain 3164 in the field). The fast path is now
++    //    genuinely best-effort: any failure falls through to loadFileRepresentation.
+     if options.videoExportPreset == .passthrough, let assetId = selectedVideo.assetIdentifier {
+-      let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
+-      if let asset = fetchResult.firstObject {
+-        // Prefer the full-size resource when available, otherwise fall back to the default `.video`.
+-        let resources = PHAssetResource.assetResources(for: asset)
+-        if let resource = resources.first(where: { $0.type == .fullSizeVideo }) ??
+-          resources.first(where: { $0.type == .video }) {
+-          // Determine the file extension from the original filename so we preserve it (e.g. .MOV / .MP4)
+-          let originalFilename = resource.originalFilename
+-          let fileExtension = getFileExtension(from: originalFilename)
+-          let destinationUrl = try generateUrl(withFileExtension: fileExtension)
+-
+-          // Stream the resource into our cache directory. This API is asynchronous but doesn't require
+-          // a temporary file like `loadFileRepresentation`.
+-          try await PHAssetResourceManager.default().writeData(for: resource, toFile: destinationUrl, options: nil)
+-
+-          // Build and return the result using the helper.
+-          let mimeType = getMimeType(from: destinationUrl.pathExtension)
+-          return try buildVideoResult(
+-            for: destinationUrl,
+-            withName: originalFilename,
+-            mimeType: mimeType,
+-            assetId: assetId
+-          )
++      do {
++        let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: [assetId], options: nil)
++        if let asset = fetchResult.firstObject {
++          // Prefer the full-size resource when available, otherwise fall back to the default `.video`.
++          let resources = PHAssetResource.assetResources(for: asset)
++          if let resource = resources.first(where: { $0.type == .fullSizeVideo }) ??
++            resources.first(where: { $0.type == .video }) {
++            // Determine the file extension from the original filename so we preserve it (e.g. .MOV / .MP4)
++            let originalFilename = resource.originalFilename
++            let fileExtension = getFileExtension(from: originalFilename)
++            let destinationUrl = try generateUrl(withFileExtension: fileExtension)
++
++            // Stream the resource into our cache directory, allowing iCloud download.
++            let resourceOptions = PHAssetResourceRequestOptions()
++            resourceOptions.isNetworkAccessAllowed = true
++            try await PHAssetResourceManager.default().writeData(for: resource, toFile: destinationUrl, options: resourceOptions)
++
++            // Build and return the result using the helper.
++            let mimeType = getMimeType(from: destinationUrl.pathExtension)
++            return try buildVideoResult(
++              for: destinationUrl,
++              withName: originalFilename,
++              mimeType: mimeType,
++              assetId: assetId
++            )
++          }
+         }
++      } catch {
++        log.warn("expo-image-picker fast path failed (\(error.localizedDescription)) — falling back to loadFileRepresentation")
+       }
+-      // If anything above fails we'll gracefully fall back to the existing (slower) path below.
+     }
+ 
+     let videoUrl = try await VideoUtils.loadVideoRepresentation(
