@@ -640,3 +640,24 @@ test('blanket clearing is scoped to the ownerless preference keys only', () => {
     assert.match(body, /\.filter\(/, `${name}: registries must partition — they name rounds and pin video files`);
   }
 });
+
+// wipeLocalUserData's docstring promises it never throws, and the caller has
+// already deleted the account server-side by the time it runs — so an
+// unguarded await skips the database, the video directories, the temporary
+// exports and the secure-store keys, leaving the deleted golfer's footage on a
+// handset the next person signs into.
+//
+// The two unguarded awaits that remain are private helpers written for this
+// function with catch-alls inside them. clearAccountLinkedCaches is exported
+// and has another caller, so its no-throw property is not local to this file's
+// use of it — that is the difference, and why only this one is pinned.
+test('the account-deletion wipe cannot be aborted by its own cache clear', () => {
+  const wipeSrc = readFileSync(join(root, 'lib/localWipe.ts'), 'utf8');
+  const body = wipeSrc.match(/export async function wipeLocalUserData[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'wipeLocalUserData should still exist');
+  assert.match(
+    body,
+    /try \{\s*await clearAccountLinkedCaches\(\);\s*\} catch/,
+    'the exported cache clear must be guarded, or a rejection skips the rest of the wipe'
+  );
+});

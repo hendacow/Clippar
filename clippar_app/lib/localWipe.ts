@@ -167,7 +167,21 @@ export async function wipeLocalUserData(): Promise<void> {
   // sign-out: they cost nothing to re-enter, which is exactly why blanket
   // clearing is right here and wrong for the registries — those name rounds and
   // pin video files.
-  await clearAccountLinkedCaches();
+  //
+  // Guarded like every other step, even though this cannot reject today
+  // (`clearRoundPrefetch` is a synchronous clear and each `setSetting` is
+  // individually caught). The contract above says this function never throws,
+  // and an unguarded await would skip EVERYTHING below it — the database, the
+  // video directories, the temporary exports, the secure-store keys — after the
+  // caller has already deleted the account server-side. Relying on the current
+  // body of an exported function with its own other caller is the same "that
+  // worked, and it was the wrong thing to rely on" mistake this function warns
+  // about fifteen lines above.
+  try {
+    await clearAccountLinkedCaches();
+  } catch (err) {
+    console.warn('[localWipe] clearAccountLinkedCaches failed', err);
+  }
 
   try {
     await clearLocalDatabase();
