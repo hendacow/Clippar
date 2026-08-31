@@ -569,6 +569,35 @@ export async function getCloudBackupEnabled(): Promise<boolean> {
   return (await getSetting(SETTING_CLOUD_BACKUP)) === '1';
 }
 
+const SETTING_UPLOAD_CELLULAR = 'upload_over_cellular';
+
+export async function getUploadOverCellular(): Promise<boolean> {
+  // Wifi-only by DEFAULT: what uploads is video, and a metered plan is a
+  // stranger's money spent silently. Every comparable product (Photos,
+  // Dropbox) defaults wifi-only; this is what makes backup-on-by-default
+  // defensible. '1' = the user explicitly allowed cellular.
+  return (await getSetting(SETTING_UPLOAD_CELLULAR)) === '1';
+}
+
+export async function setUploadOverCellular(enabled: boolean): Promise<void> {
+  await setSetting(SETTING_UPLOAD_CELLULAR, enabled ? '1' : '0');
+}
+
+/**
+ * Give abandoned uploads another life when the network comes back. The
+ * queue caps a clip at 6 attempts — right for a genuinely bad file, wrong
+ * for six wifi flaps: without this, a clip crossed the cap during a bad
+ * connectivity spell and was then skipped FOREVER, silently — the same
+ * silent-loss class as everything else fixed on 1 Sep. Resetting on
+ * reconnect turns "6 strikes ever" into "6 strikes per connectivity spell".
+ */
+export async function resetUploadRetryCounts(): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_clips SET upload_retry_count = 0 WHERE uploaded = 0 AND upload_retry_count > 0'
+  );
+}
+
 export async function getCloudBackupEffective(): Promise<boolean> {
   const raw = await getSetting(SETTING_CLOUD_BACKUP);
   if (raw === '0') return false;

@@ -9,6 +9,8 @@ import {
   setMirrorClipsToPhotos,
   getCloudBackupEnabled,
   setCloudBackupEnabled,
+  getUploadOverCellular,
+  setUploadOverCellular,
   getClipMirrorStats,
 } from '@/lib/storage';
 import {
@@ -27,6 +29,10 @@ export default function StorageSettingsScreen() {
 
   const [mirrorClips, setMirrorClips] = useState(false);
   const [cloudBackup, setCloudBackup] = useState(false);
+  const [cellularUpload, setCellularUpload] = useState(false);
+  useEffect(() => {
+    getUploadOverCellular().then(setCellularUpload).catch(() => {});
+  }, []);
   const [clearing, setClearing] = useState(false);
   // What is TRUE about this device, as opposed to what the switches are set
   // to. The recovery card below is read by people deciding whether it is safe
@@ -199,6 +205,23 @@ export default function StorageSettingsScreen() {
             trackColor={{ false: theme.colors.surfaceBorder, true: '#2196F3' }}
             thumbColor="#fff"
           />
+
+        {/* Mobile-data uploads — wifi-only by default. What uploads is video;
+            a metered plan is the user's money. Explicit opt-in only. */}
+        <SettingRow
+          icon={<Cloud size={18} color={theme.colors.textSecondary} />}
+          tint={theme.colors.textSecondary}
+          title="Upload over mobile data"
+          subtitle="Off by default — backups wait for wi-fi. Turn on to upload anywhere; golf video can use a lot of data."
+        >
+          <Switch
+            value={cellularUpload}
+            onValueChange={async (v) => {
+              setCellularUpload(v);
+              await setUploadOverCellular(v);
+            }}
+          />
+        </SettingRow>
         </SettingRow>
 
         {/* Recovery explainer */}

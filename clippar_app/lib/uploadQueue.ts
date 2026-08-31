@@ -303,7 +303,16 @@ export function initializeUploadQueueProcessor(): void {
   try {
     NetInfo.addEventListener((state: any) => {
       if (state?.isConnected) {
-        void processUploadQueue();
+        // Reconnect amnesty first: clips abandoned at the 6-attempt cap
+        // during a bad connectivity spell get their counters back, so the
+        // cap means "6 strikes per spell", never "gone forever, silently".
+        void (async () => {
+          try {
+            const { resetUploadRetryCounts } = await import('@/lib/storage');
+            await resetUploadRetryCounts();
+          } catch {}
+          await processUploadQueue();
+        })();
       }
     });
   } catch (err) {
@@ -321,7 +330,17 @@ async function isConnected(): Promise<boolean> {
   }
   try {
     const state = await NetInfo.fetch();
-    return state?.isConnected !== false;
+    if (state?.isConnected === false) return false;
+    // Wifi-only by default: video on a metered plan is someone else's money
+    // spent silently. Cellular uploads only when the user explicitly allowed
+    // them (storage-settings toggle). A cellular-blocked queue is treated
+    // exactly like an offline one — it defers without touching retry counts,
+    // and the NetInfo listener re-drains the moment wifi returns.
+    if (state?.type === 'cellular') {
+      const { getUploadOverCellular } = await import('@/lib/storage');
+      return await getUploadOverCellular();
+    }
+    return true;
   } catch {
     return true;
   }

@@ -62,3 +62,27 @@ test('storage settings says both sentences of the two-losses framing', () => {
   assert.match(settings, /does NOT protect against losing your phone/i);
   assert.match(settings, /survive a LOST or replaced phone/);
 });
+
+// CEO's call, 1 Sep: wifi-only by default — video on a metered plan is a
+// stranger's money spent silently. Cellular is explicit opt-in.
+test('uploads are wifi-only unless the user explicitly allows cellular', () => {
+  const st = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  assert.match(st, /getSetting\(SETTING_UPLOAD_CELLULAR\)\) === '1'/, 'default is wifi-only');
+  const q = readFileSync(join(root, 'lib/uploadQueue.ts'), 'utf8');
+  assert.match(q, /state\?\.type === 'cellular'/);
+  assert.match(q, /getUploadOverCellular/);
+  const sset = readFileSync(join(root, 'app/profile/storage-settings.tsx'), 'utf8');
+  assert.match(sset, /Upload over mobile data/);
+});
+
+// Leaving wifi mid-round must pause-and-resume, never silently drop. Two
+// halves: a cellular-blocked queue defers exactly like an offline one
+// (retry counts untouched), and clips that crossed the 6-attempt cap in a
+// bad spell get their counters back when connectivity returns.
+test('a wifi drop pauses uploads; reconnect grants retry amnesty', () => {
+  const q = readFileSync(join(root, 'lib/uploadQueue.ts'), 'utf8');
+  assert.match(q, /defers without touching retry counts/);
+  assert.match(q, /resetUploadRetryCounts/);
+  const st = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+  assert.match(st, /SET upload_retry_count = 0 WHERE uploaded = 0/);
+});
