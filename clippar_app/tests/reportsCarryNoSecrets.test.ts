@@ -165,6 +165,72 @@ function scannableFiles(): string[] {
   return trackedTextFiles().map((rel) => join(repoRoot, rel));
 }
 
+/**
+ * Credential-shaped assignments in a tracked env example, and what an
+ * acceptable value looks like.
+ *
+ * **Why this is a separate check rather than a wider scan.** The check below
+ * derives its literals from `app.py`'s getenv defaults, so the rule it actually
+ * enforces is "no tracked file quotes *a dev fallback that happens to be
+ * hardcoded in app.py*" — not "no tracked file quotes a credential". Finding 68
+ * widened the scanned SURFACE to the whole tree and left the INPUT a place.
+ * That is finding 52 one level in, and it is the fifth time.
+ *
+ * It hid a real one. `.env.staging.local.example` carried a live-shaped bearer
+ * token that is not an app.py default, so it could never enter `literals` and
+ * `body.includes()` could never match it — invisible by construction, in a
+ * public repo, through every pass of this control. A shape check has no such
+ * blind spot: it does not need to know the value in advance, which is the whole
+ * point.
+ */
+const ENV_CREDENTIAL = /^([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD))\s*=\s*(.+)$/;
+const ENV_PLACEHOLDER = /^(?:YOUR_|<|\.\.\.|pk_test_|sk_test_|appl_YOUR|\$\{)/;
+
+/**
+ * The ONE env-example credential that is deliberately a real value, keyed by
+ * `<file>:<KEY>` rather than by file — same reasoning as `GUARDED_CODE_REFS`,
+ * so exempting one key never silently exempts its neighbours in the same file.
+ *
+ * The reason is written out at `ALLOWED_COPIES` above: it is the client half of
+ * a secret already embedded in every shipped bundle by design, so the example
+ * file is not where that exposure lives. **That reason is specific to this key
+ * and this file.** Its staging sibling was assumed to be covered by it and was
+ * not — different value, never allow-listed, never decided on by anybody.
+ */
+const ALLOWED_ENV_LITERALS = new Set([
+  'clippar_app/.env.development.local.example:EXPO_PUBLIC_PIPELINE_API_KEY',
+]);
+
+test('tracked env examples carry placeholders, never real credentials', () => {
+  const examples = trackedTextFiles().filter(
+    (rel) => rel.includes('.env.') && rel.endsWith('.example')
+  );
+  // Vacuous-green guard, same as everywhere else in this file: no examples means
+  // the glob drifted or they were renamed, not that they are all clean.
+  assert.ok(examples.length > 0, 'no tracked .env*.example files found — the filter drifted');
+
+  const offenders: string[] = [];
+  for (const rel of examples) {
+    readFileSync(join(repoRoot, rel), 'utf8')
+      .split('\n')
+      .forEach((line, i) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) return;
+        const m = ENV_CREDENTIAL.exec(trimmed);
+        if (!m) return;
+        if (ALLOWED_ENV_LITERALS.has(`${rel}:${m[1]}`)) return;
+        // Name the FILE:LINE, never the value — this test enforces that rule on
+        // the reports, so its own output has to obey it.
+        if (!ENV_PLACEHOLDER.test(m[2].trim())) offenders.push(`${rel}:${i + 1}`);
+      });
+  }
+  assert.deepEqual(
+    offenders,
+    [],
+    `these tracked example files hold a real credential rather than a placeholder. Replace the value, and ROTATE it at the service it authenticates to — the git history keeps the old one whatever this file says now:\n${offenders.join('\n')}`
+  );
+});
+
 test('no tracked file quotes a fallback credential instead of citing its line', () => {
   const literals = fallbackLiteralsInAppPy();
   const files = scannableFiles();
