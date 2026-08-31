@@ -27,6 +27,8 @@
  */
 import { Platform } from 'react-native';
 import { getMirrorClipsToPhotos, setClipPhotosAssetId } from '@/lib/storage';
+
+export const CLIPPAR_ALBUM = 'Clippar';
 import {
   resolveMirrorPlan,
   resolvePersistedAssetId,
@@ -163,6 +165,20 @@ export async function mirrorClipToPhotos(
     }
 
     const asset = await MediaLibrary!.createAssetAsync(fileUri);
+    // File into the "Clippar" album — the album IS the reinstall index
+    // (durability plan §6): after a delete-and-reinstall the app rebuilds
+    // rounds by scanning it. Album failure never fails the mirror; the
+    // asset still exists in the library.
+    try {
+      const album = await MediaLibrary!.getAlbumAsync(CLIPPAR_ALBUM);
+      if (album) {
+        await MediaLibrary!.addAssetsToAlbumAsync([asset], album, false);
+      } else if (asset) {
+        await MediaLibrary!.createAlbumAsync(CLIPPAR_ALBUM, asset, false);
+      }
+    } catch (albumErr) {
+      console.warn(`[photosMirror] ${label}: asset saved but album filing failed:`, albumErr);
+    }
     return resolvePersistedAssetId(plan, asset?.id ?? null);
   } catch (err) {
     // Library full, iCloud stall, sandbox refusal — the clip and its row are

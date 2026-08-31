@@ -301,6 +301,10 @@ export async function importShotsToSession(
       needs_trim: 1,
       auto_trimmed: 0,
     });
+    // Durability metadata row (lib/restore) — fire-and-forget.
+    void (require('@/lib/restore') as typeof import('@/lib/restore'))
+      .syncShotMetadata({ roundId, holeNumber: clubHole, shotNumber: shot })
+      .catch(() => {});
     saved += 1;
   }
   return saved;

@@ -131,9 +131,13 @@ function ensureClipsDir(): Promise<string> {
  * a false here means the clips ARE still being backed up, and no caller may
  * report otherwise on its behalf.
  *
- * Still uncovered (different owning modules, not reachable from here):
- * documentDirectory/exports/ written by lib/clipShare.ts, and the clippar.db
- * SQLite file with its per-shot GPS columns.
+ * DELIBERATE, as of the durability plan (1 Sep, Henry ratified): clippar.db
+ * and exports/ STAY IN device backup on purpose. The database restoring is
+ * what lets a restored phone keep its rounds/scores/trims (the app then
+ * detects the missing clip files honestly and offers the Photos re-link —
+ * lib/restore.ts); exports/ are the user's finished reels. Only raw clips/
+ * are excluded, guarding the privacy promise above. Do not "fix" this
+ * asymmetry — it is the design.
  *
  * Failure here is never fatal: losing the exclusion must not stop a user from
  * saving their round.

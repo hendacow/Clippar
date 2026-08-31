@@ -18,6 +18,7 @@ import { enqueueClipUpload } from '@/lib/uploadQueue';
 import { persistAsset } from '@/lib/media';
 import { videoExtension } from '@/lib/clipPaths';
 import { mirrorRecordedClip } from '@/lib/photosMirror';
+import { syncShotMetadata } from '@/lib/restore';
 import { logDetection } from '@/lib/detectionLog';
 import { visionDetectAndTrim } from '@/lib/visionTrim';
 import {
@@ -542,6 +543,19 @@ export function useCamera({
           trim_end_ms: -1,
         });
         savedClipId = clipId ?? null;
+        // Durability: a lightweight server-side shots row for EVERY clip
+        // (no video bytes) — what lets a reinstall know which clips existed
+        // and where they belonged. Fire-and-forget; the Pro upload upserts
+        // onto the same row later. lib/restore.ts carries the Pro boundary.
+        InteractionManager.runAfterInteractions(() => {
+          void syncShotMetadata({
+            roundId: rid,
+            holeNumber: hole,
+            shotNumber: shot,
+            gpsLatitude: gps?.latitude,
+            gpsLongitude: gps?.longitude,
+          });
+        });
 
         // Run the SAME native detect+trim pipeline as imports in background.
         // This produces a trimmed passthrough file, persists boundaries relative

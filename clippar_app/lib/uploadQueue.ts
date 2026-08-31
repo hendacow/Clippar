@@ -61,8 +61,8 @@ export async function enqueueRoundUpload(
   // we'll never drain. Callers that want the row in case the user enables
   // backup later should call enqueueRoundForUpload directly.
   try {
-    const { getCloudBackupEnabled } = await import('@/lib/storage');
-    const cloudBackupOn = await getCloudBackupEnabled();
+    const { getCloudBackupEffective } = await import('@/lib/storage');
+    const cloudBackupOn = await getCloudBackupEffective();
     if (!cloudBackupOn) return;
   } catch {
     // If reading the setting fails, fall through and treat as "off".
@@ -93,9 +93,9 @@ export async function processUploadQueue(): Promise<void> {
       // any queued rows untouched (they'll drain if the user re-enables)
       // and skip the network entirely so free-tier users never hit
       // Supabase Storage.
-      const { getCloudBackupEnabled } = await import('@/lib/storage');
+      const { getCloudBackupEffective } = await import('@/lib/storage');
       const { getProStatus } = await import('@/lib/subscription');
-      const cloudBackupOn = await getCloudBackupEnabled();
+      const cloudBackupOn = await getCloudBackupEffective();
       if (!cloudBackupOn) {
         return;
       }

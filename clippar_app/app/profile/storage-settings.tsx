@@ -102,7 +102,7 @@ export default function StorageSettingsScreen() {
     if (val && !isSubscribed) {
       Alert.alert(
         'Pro feature',
-        'Cloud backup keeps your raw clips safe in the cloud so they survive an app reinstall. Available on Clippar Pro.',
+        'Photos keeps your shots if you delete the app. Cloud backup keeps them if you lose the phone. They protect against different things — Cloud backup is the Pro one.',
         [
           { text: 'Not now', style: 'cancel' },
           // Was router.push('/profile') — the tab this alert is already on top
@@ -165,7 +165,7 @@ export default function StorageSettingsScreen() {
           icon={<Camera size={18} color={theme.colors.primary} />}
           tint={theme.colors.primary}
           title="Save raw clips to Photos"
-          subtitle="Copy every clip you record or import to your iPhone's camera roll, from the moment you turn this on. Clips already on your phone stay as they are. Off by default to save space."
+          subtitle="Every shot is also saved to a Clippar album in your Photos. If you ever delete the app, your shots are still there and your rounds can restore from them. On by default. This does NOT protect against losing your phone — that's Cloud backup."
         >
           <Switch
             value={mirrorClips}
@@ -188,7 +188,7 @@ export default function StorageSettingsScreen() {
           title={isSubscribed ? 'Cloud backup' : 'Cloud backup (Pro)'}
           subtitle={
             isSubscribed
-              ? 'Upload raw clips to the cloud as a safety net. Required to recover clips after reinstall on devices without Photos mirroring.'
+              ? 'Your clips upload in the background and survive a LOST or replaced phone — the one thing your camera roll cannot do. On by default with Pro; turn it off any time.'
               : 'Available on Clippar Pro. Tap the switch to learn more.'
           }
         >

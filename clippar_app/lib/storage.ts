@@ -550,7 +550,10 @@ const SETTING_MIRROR_CLIPS = 'mirror_raw_clips_to_photos';
 const SETTING_CLOUD_BACKUP = 'cloud_backup_enabled';
 
 export async function getMirrorClipsToPhotos(): Promise<boolean> {
-  return (await getSetting(SETTING_MIRROR_CLIPS)) === '1';
+  // Default ON (durability plan, ratified 1 Sep): a never-touched setting
+  // mirrors, so every user's shots survive delete-and-reinstall via Photos.
+  // An explicit OFF ('0') is always respected.
+  return (await getSetting(SETTING_MIRROR_CLIPS)) !== '0';
 }
 
 export async function setMirrorClipsToPhotos(enabled: boolean): Promise<void> {
@@ -558,7 +561,24 @@ export async function setMirrorClipsToPhotos(enabled: boolean): Promise<void> {
 }
 
 export async function getCloudBackupEnabled(): Promise<boolean> {
+  // Raw setting only ('1' = on). Most callers want the EFFECTIVE state —
+  // getCloudBackupEffective below — where a Pro subscriber who never touched
+  // the toggle defaults ON: cloud backup is the paid feature, and a default
+  // that leaves it dormant was the audit's cheapest commercial bug. An
+  // explicit OFF ('0') is always respected, subscriber or not.
   return (await getSetting(SETTING_CLOUD_BACKUP)) === '1';
+}
+
+export async function getCloudBackupEffective(): Promise<boolean> {
+  const raw = await getSetting(SETTING_CLOUD_BACKUP);
+  if (raw === '0') return false;
+  if (raw === '1') return true;
+  try {
+    const { getProStatus } = require('@/lib/subscription') as typeof import('@/lib/subscription');
+    return await getProStatus();
+  } catch {
+    return false;
+  }
 }
 
 export async function setCloudBackupEnabled(enabled: boolean): Promise<void> {
@@ -858,6 +878,7 @@ export async function getClipsForRound(roundId: string) {
     tracer_file_uri: string | null;
     tracer_status: string | null;
     tracer_meta: string | null;
+    photos_asset_id: string | null;
   }>(
     'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, sort_order, shot_number',
     roundId

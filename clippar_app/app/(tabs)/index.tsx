@@ -37,6 +37,8 @@ import { Play, X } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { getPendingHomeMoment, markHomeMomentSeen } from '@/lib/kitMoments';
+import { detectMissingMedia, restoreRoundFromPhotos, type MissingMedia } from '@/lib/restore';
+import { getCloudBackupEffective } from '@/lib/storage';
 import { config } from '@/constants/config';
 import { HeroReel } from '@/components/library/HeroReel';
 import { RoundListCard } from '@/components/library/RoundListCard';
@@ -233,6 +235,48 @@ export default function HomeScreen() {
     if (kitMoment) void markHomeMomentSeen(kitMoment.kind);
     setKitMoment(null);
   }, [kitMoment]);
+
+  // The honest answer to the mixed-restore trap (durability plan): a device
+  // restore brings the database back without the clip files (deliberate —
+  // privacy promise). Rather than rounds that look restored and play
+  // nothing, detect it and say it, with the re-link as the way forward.
+  const [missingMedia, setMissingMedia] = useState<MissingMedia[]>([]);
+  const [restoring, setRestoring] = useState(false);
+  const [backingUp, setBackingUp] = useState(false);
+  useEffect(() => {
+    getCloudBackupEffective().then(setBackingUp).catch(() => {});
+  }, []);
+  useEffect(() => {
+    if (rounds.length === 0) return;
+    detectMissingMedia(rounds.slice(0, 10).map((r) => r.id))
+      .then(setMissingMedia)
+      .catch(() => {});
+  }, [rounds.length]);
+  const handleRestoreMissing = useCallback(async () => {
+    setRestoring(true);
+    try {
+      let relinked = 0;
+      let stillMissing = 0;
+      for (const m of missingMedia) {
+        const r = await restoreRoundFromPhotos(m.roundId);
+        relinked += r.relinked;
+        stillMissing += r.missing;
+      }
+      Alert.alert(
+        relinked > 0 ? `${relinked} video${relinked === 1 ? '' : 's'} restored` : 'Nothing to restore from Photos',
+        stillMissing > 0
+          ? `${stillMissing} video${stillMissing === 1 ? ' is' : 's are'} not in your Photos library. ` +
+            'Clips backed up with Clippar Pro can be re-downloaded from the round screen.'
+          : relinked > 0
+            ? 'Re-linked from your Clippar album in Photos.'
+            : 'These videos are not in your Photos library on this phone.'
+      );
+      const fresh = await detectMissingMedia(missingMedia.map((m) => m.roundId));
+      setMissingMedia(fresh);
+    } finally {
+      setRestoring(false);
+    }
+  }, [missingMedia]);
 
   const roundsRef = useRef<HomeRound[]>([]);
 
@@ -554,6 +598,30 @@ export default function HomeScreen() {
         }
         contentContainerStyle={{ paddingTop: insets.top, paddingBottom: 120 }}
       >
+        {missingMedia.length > 0 && (
+          <View style={{ marginHorizontal: theme.spacing.md, marginBottom: theme.spacing.md, borderRadius: theme.radius.lg, backgroundColor: theme.colors.surface, borderWidth: 1, borderColor: theme.colors.bogey, padding: 16, gap: 6 }}>
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700' }}>
+              Some round videos aren't on this phone
+            </Text>
+            <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+              This happens after restoring a phone backup — your rounds came back, but the video
+              files aren't included in phone backups. They may still be in your Photos library.
+            </Text>
+            <Pressable
+              onPress={handleRestoreMissing}
+              disabled={restoring}
+              style={{ backgroundColor: theme.colors.primary, borderRadius: 10, paddingVertical: 10, alignItems: 'center', marginTop: 6, opacity: restoring ? 0.6 : 1 }}
+            >
+              <Text style={{ color: '#fff', fontWeight: '700' }}>{restoring ? 'Restoring…' : 'Restore from Photos'}</Text>
+            </Pressable>
+          </View>
+        )}
+        {backingUp && (
+          <View style={{ marginHorizontal: theme.spacing.md, marginBottom: 6, flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+            <View style={{ width: 7, height: 7, borderRadius: 4, backgroundColor: theme.colors.primary }} />
+            <Text style={{ color: theme.colors.textTertiary, fontSize: 12 }}>Cloud backup on — rounds survive a lost phone</Text>
+          </View>
+        )}
         {kitMoment && <KitMomentCard moment={kitMoment} onDismiss={dismissKitMoment} />}
         {/* ---- HEADER (56pt): compact logo mark + greeting ---- */}
         <View style={styles.header}>
