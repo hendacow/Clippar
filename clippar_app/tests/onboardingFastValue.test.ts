@@ -19,6 +19,7 @@ test('first-run path is the five-step fast-to-value funnel', () => {
 test('the funnel promises value first and offers a permission-free sample path', () => {
   assert.match(screens, /Turn every round into a reel worth keeping/);
   assert.match(screens, /Make my first reel/);
-  assert.match(aha, /Try the 60-second sample instead/);
+  // Renamed 31 Aug when the sample became the interactive par-5 round (§13.5).
+  assert.match(aha, /Play the sample round instead/);
   assert.match(aha, /No course setup needed/);
 });

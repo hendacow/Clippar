@@ -52,6 +52,7 @@ import {
 import { FlowButton } from '../sales/primitives';
 import { FlowScreen, Rise, H1, Sub } from './FlowKit';
 import { MockReel } from './MockReel';
+import { SampleRound } from './SampleRound';
 import {
   computeFallbackTrimWindow,
   computeOverallBuildTimeoutMs,
@@ -262,6 +263,20 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
     return <BuildingReel answers={answers} progress={phase.progress} />;
   }
 
+  if (phase.name === 'playback' && phase.outcome === 'sample') {
+    // The par-5 sample round (plan §13.5): press through Henry's five real
+    // shots and watch them become a reel — replaces the passive MockReel on
+    // this path. Same honest contract: it never claims the reel is yours.
+    return (
+      <SampleRound
+        onDone={() => {
+          setAhaOutcome('sample');
+          onNext();
+        }}
+      />
+    );
+  }
+
   if (phase.name === 'playback') {
     return (
       <ReelPlayback
@@ -287,7 +302,7 @@ export function AhaScreen({ answers, setAnswers, setAhaOutcome, onNext }: FlowSc
         <>
           <FlowButton label="Build from my clips" onPress={pickClip} />
           <Pressable onPress={watchSample} hitSlop={8} style={{ alignSelf: 'center' }}>
-            <Text style={styles.link}>Try the 60-second sample instead</Text>
+            <Text style={styles.link}>Play the sample round instead</Text>
           </Pressable>
         </>
       }

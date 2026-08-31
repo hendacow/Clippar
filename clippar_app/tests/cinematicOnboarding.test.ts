@@ -28,7 +28,9 @@ test('tutorial videos ride the binary, within budget', () => {
   assert.match(cin, /require\('@\/assets\/onboarding\/montage\.mp4'\)/);
   const dir = join(root, 'assets/onboarding');
   const total = readdirSync(dir).reduce((sum, f) => sum + statSync(join(dir, f)).size, 0);
-  assert.ok(total < 20 * 1024 * 1024, `onboarding assets ${Math.round(total / 1e6)}MB exceed the 20MB budget`);
+  // Budget raised to 35MB for the par-5 sample round (plan §13.5) — five
+  // raw-capture clips, five strike posters and the stitched reel.
+  assert.ok(total < 35 * 1024 * 1024, `onboarding assets ${Math.round(total / 1e6)}MB exceed the 35MB budget`);
 });
 
 // A stalled video must never wedge onboarding.
@@ -77,4 +79,18 @@ test('variant defaults: production v1, dev v2, override honoured', () => {
 test('a killed run resumes at the top of its scene', () => {
   assert.match(cin, /SCENE_KEY/);
   assert.match(cin, /saved !== 'MONTAGE'/);
+});
+
+// Plan §13.5 — the sample round. Frame-verified inputs (one hole, strikes
+// pinned at 9.9/6.9/10.0/5.9/4.2s), raw-feel clips in, offline reel out.
+test('the sample round is five presses that become a reel', () => {
+  const sr = readFileSync(join(root, 'components/onboarding/flow/SampleRound.tsx'), 'utf8');
+  assert.match(sr, /sample1\.mp4/);
+  assert.match(sr, /sample_reel\.mp4/);
+  assert.match(sr, /playToEnd/, 'clips land when they end');
+  assert.match(sr, /setTimeout\(\(\) => land\(idx\), 9000\)/, 'wedge guard on every raw clip');
+  assert.match(sr, /never claims the reel is yours|Yours will look like this/, 'honest sample copy');
+  const aha = readFileSync(join(root, 'components/onboarding/flow/AhaScreen.tsx'), 'utf8');
+  assert.match(aha, /<SampleRound/, 'wired into the aha sample path');
+  assert.match(aha, /setAhaOutcome\('sample'\)/, 'preserves the outcome contract');
 });
