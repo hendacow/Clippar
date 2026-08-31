@@ -1,0 +1,237 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import test from 'node:test';
+
+const root = join(import.meta.dirname, '..');
+const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+const storage = readFileSync(join(root, 'lib/storage.ts'), 'utf8');
+const player = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
+
+/**
+ * The bug, stated as a test.
+ *
+ * `training.sessions.v1` is a device-wide `local_settings` row and
+ * `getClipsForRound` has no ownership predicate. Together: B signs in on A's
+ * handset, opens Practice, sees A's sessions with true per-club shot counts,
+ * taps Watch, and app/training/play.tsx plays A's swing videos. The editor
+ * route off the same screen was already safe (useEditorState.loadFromLocal
+ * gates on the scoped getLocalRound); the player was not.
+ */
+
+test('getClipsForRound still exists for the gated helpers to call', () => {
+  const body = storage.match(/export async function getClipsForRound[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(body, '', 'getClipsForRound should still exist');
+});
+
+/**
+ * **This test used to require the ownership predicate to STAY MISSING.**
+ *
+ * It pinned the literal `SELECT` and asserted `doesNotMatch(/ownedRoundsClause|
+ * currentScopeUserId/)`, with the message "no ownership predicate here — the
+ * gate has to live in the caller". So the next engineer who correctly decided to
+ * fail closed at the data layer — the move this branch made for `clipBin` and
+ * `tutorialRound`, and the move the whole review argues for — got a red build
+ * telling them not to, and the cheapest way back to green was to drop the
+ * predicate rather than rewrite a test.
+ *
+ * That matters because `getClipsForRound` has callers that do NOT route through
+ * `ownsRound` — `hooks/useEditorState.ts`, `hooks/useRound.ts` and
+ * `app/(tabs)/index.tsx` — so hardening the store is a real defence, not a
+ * redundant one.
+ *
+ * **Eleventh test of mine tonight pinning a SHAPE rather than a property, and
+ * the third that actively held a security fix in place.** The property is
+ * covered without either pin: the two tests below go red if a caller-side gate
+ * is removed, and stay green if someone additionally hardens the store — which
+ * is the direction that must never be blocked.
+ */
+
+test('the player reads clips through the gated helper, not the raw store', () => {
+  assert.match(player, /listTrainingClips/);
+  assert.doesNotMatch(
+    player,
+    /getClipsForRound/,
+    'the player must not reach past the ownership gate'
+  );
+});
+
+test('every training read and write gates on ownership', () => {
+  // This used to assert `getLocalRound(roundId)) != null` VERBATIM, which
+  // pinned the weaker form in place: `!= null` only says somebody's row came
+  // back, and getLocalRound resolves the session on its own, so the stamp and
+  // the row were authorised by two answers nothing compared. Strengthening the
+  // gate turned this assertion red — the test was holding the defect.
+  //
+  // Same shape as the `startsWith('file://')` pin and the call-site count: the
+  // assertion watched the shape of the code rather than the property.
+  assert.match(
+    training,
+    /async function ownsRound[\s\S]*?round != null && round\.user_id === me/,
+    'ownership needs the scoped read AND the row bound back to this resolution'
+  );
+
+  for (const fn of ['listTrainingClips', 'trainingShotCounts', 'importShotsToSession']) {
+    const body = training.match(new RegExp(`export async function ${fn}[\\s\\S]*?\\n}`))?.[0] ?? '';
+    assert.notEqual(body, '', `${fn} should still exist`);
+    assert.match(body, /await ownsRound\(roundId\)/, `${fn} must gate on ownership`);
+  }
+});
+
+// The capture screen got the deep-link gate; its sibling did not. Both take
+// roundId from the URL, and import.tsx opens the OS photo library — the same
+// privacy prompt the capture fix moved behind the check.
+test('the import screen is gated too, not just capture', () => {
+  const imp = readFileSync(join(root, 'app/training/import.tsx'), 'utf8');
+  assert.match(imp, /ownsTrainingRound/, 'the import screen must check ownership');
+  assert.match(
+    imp,
+    /const owned: boolean \| null = !roundId\s*\?\s*false\s*:\s*verdict\?\.roundId === roundId/,
+    'derived in render, same shape as record.tsx — a stale verdict must not survive a param change'
+  );
+  assert.match(
+    imp,
+    /if \(!ImagePicker \|\| !roundId \|\| owned !== true \|\| busy\) return;/,
+    'the photo library must not open for a round nothing has verified'
+  );
+  // importShotsToSession fails closed and returns 0 for BOTH "not yours" and
+  // "no session". Reporting that as a success told a golfer their own import
+  // had worked when it had not.
+  assert.match(imp, /if \(saved === 0\) \{/, 'a refused or failed import must not report success');
+  const pick = imp.match(/const pick = useCallback[\s\S]*?\}, \[roundId, club, busy, owned\]\);/)?.[0] ?? '';
+  assert.notEqual(pick, '', 'pick must re-run when the ownership verdict resolves');
+  assert.ok(
+    pick.indexOf('owned !== true') < pick.indexOf('launchImageLibraryAsync'),
+    'the ownership check must precede the picker, not follow it'
+  );
+});
+
+test('the session list only offers the signed-in account’s own sessions', () => {
+  const body = training.match(/export async function listTrainingSessions[\s\S]*?\n}/)?.[0] ?? '';
+  assert.match(body, /await ownsRound\(s\.roundId\)/);
+});
+
+// Shots enter a session two ways. Gating the import and leaving live capture
+// open protects one of them — the same half-covered mistake the reads had.
+// app/training/record.tsx takes roundId from the URL, app.config.js registers a
+// URL scheme, and useCamera's save path is a bare saveLocalClip({ round_id })
+// with no ownership predicate.
+test('live capture is gated too, not just the import path', () => {
+  const record = readFileSync(join(root, 'app/training/record.tsx'), 'utf8');
+  assert.match(record, /ownsTrainingRound/, 'the capture screen must check ownership');
+  assert.match(training, /export async function ownsTrainingRound/);
+  // The camera is armed on mount while the check is still resolving, so the
+  // binding is gated, not merely the render.
+  assert.match(
+    record,
+    /roundId: owned === true \? \(roundId \?\? ''\) : ''/,
+    'the useCamera binding must not carry an unverified round id'
+  );
+  assert.match(record, /if \(owned === false\)/, 'an unowned session must not render the camera');
+  // The verdict must not outlive the id it was made for: expo-router updates
+  // params in place, so a second deep link re-renders rather than remounting.
+  //
+  // Resetting it from an effect is not enough — effects run after the render
+  // commits, so one painted frame carried the previous round's `true` against
+  // the new, unverified id, and the camera binding above read it. The verdict
+  // therefore carries the id it was computed for and `owned` is derived during
+  // render, which invalidates a stale answer in the same commit as the new id.
+  assert.doesNotMatch(
+    record,
+    /setOwned\(/,
+    'a verdict held in plain state can be read one render before its reset lands'
+  );
+  assert.match(
+    record,
+    /setVerdict\(\{ roundId, owned: ok \}\)/,
+    'the stored verdict must be stamped with the id it was computed for'
+  );
+  assert.match(
+    record,
+    /const owned: boolean \| null = !roundId\s*\?\s*false\s*:\s*verdict\?\.roundId === roundId\s*\?\s*verdict\.owned\s*:\s*null;/,
+    'owned must be derived in render from a verdict matching the CURRENT roundId'
+  );
+  const effect = record.match(/useEffect\(\(\) => \{[\s\S]*?\}, \[roundId\]\);/)?.[0] ?? '';
+  // The permission prompt must sit behind the check too — effects run after
+  // the first render, so gating the hydrate effect on roundId alone fired the
+  // OS camera prompt for a round nothing had verified.
+  assert.match(record, /if \(!roundId \|\| owned !== true\) return;/, 'hydrate must wait for ownership');
+  assert.match(record, /\}, \[roundId, owned\]\);/, 'and re-run when it resolves');
+  assert.match(effect, /ownsTrainingRound\(roundId\)/, 'the ownership effect should still exist');
+  assert.doesNotMatch(
+    effect,
+    /setVerdict\((?!\{ roundId,)/,
+    'every write from this effect must stamp the id, including the catch path'
+  );
+});
+
+// The writer half of the same rule.
+//
+// Every READ gate on this branch fails closed on an unresolvable session:
+// listTrainingSessions returns [], ownsRound returns false, the sweep returns
+// 0. The two registry WRITERS did the opposite — they stamped `userId: null`
+// and carried on. Null is read everywhere as "legacy, unattributable", so such
+// an entry is never listed to the golfer who recorded it, and never removed by
+// forgetTrainingSessionsFor — leaving the round id and the session's start
+// timestamp in device-wide local_settings after account deletion. A writer
+// that fails open hands the gates a value they cannot act on.
+test('startTrainingSession refuses an unresolvable session instead of stamping null', () => {
+  const start = training.match(/export async function startTrainingSession[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(start, '', 'startTrainingSession should still exist');
+  assert.match(start, /if \(!owner\) throw/, 'an unresolvable session must refuse, not stamp null');
+  assert.ok(
+    start.indexOf('if (!owner) throw') < start.indexOf('await createRound('),
+    'the refusal must precede the remote create, so a refusal leaves no round behind'
+  );
+  assert.match(start, /userId: owner/, 'the stamp must carry the value that was checked');
+  assert.equal(
+    (start.match(/currentSessionUserId\(\)/g) ?? []).length,
+    1,
+    'resolve once and reuse it — a second read can answer differently'
+  );
+});
+
+// The read side must keep tolerating null, or genuinely pre-stamp rows written
+// by a shipped build become unreadable. The property is only that no NEW one
+// can be minted.
+test('legacy null-owner entries are still tolerated on read', () => {
+  assert.match(
+    training,
+    /userId: string \| null/,
+    'the entry type must still admit null for rows written before the stamp existed'
+  );
+});
+
+// The two registries are the same device-wide local_settings list under two
+// keys. `tutorialRound.readCreatedIds` validated each entry; this one cast the
+// parsed array straight through — same PR, same pattern, one guard.
+//
+// It matters because of one caller. `forgetTrainingSessionsFor` filters on
+// `s.userId`, so a null element throws inside the change function, rejecting
+// mutateRegistry — which that function swallows on purpose and localWipe only
+// warns about. One malformed entry therefore makes the account-deletion scrub a
+// silent, permanent no-op while the golfer is shown a successful deletion.
+test('registry entries are validated on read, so no caller inherits an unchecked value', () => {
+  const read = training.match(/async function readRegistry[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(read, '', 'readRegistry should still exist');
+  assert.doesNotMatch(
+    read,
+    /parsed as TrainingSessionRef\[\]/,
+    'a bare cast lets a malformed element reach the account-deletion scrub'
+  );
+  assert.match(
+    read,
+    /typeof e\.roundId !== 'string'/,
+    'every element must be type-checked before it escapes this function'
+  );
+});
+
+// The scrub is the caller whose failure is invisible, so pin that it still
+// filters rather than blanket-deleting, and that its failure stays swallowed
+// (blocking a sign-out on a cache write is worse than a stale entry).
+test('the account-deletion scrub filters and never throws', () => {
+  const scrub = training.match(/export async function forgetTrainingSessionsFor[\s\S]*?\n}/)?.[0] ?? '';
+  assert.notEqual(scrub, '', 'forgetTrainingSessionsFor should still exist');
+  assert.match(scrub, /entries\.filter\(/, 'filter — a blanket delete destroys the other account’s sessions');
+  assert.match(scrub, /catch/, 'a wipe must never throw');
+});

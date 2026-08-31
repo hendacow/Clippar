@@ -175,13 +175,22 @@ async function migrateEditorColumns() {
 // ────────────────────────────────────────────────────────────
 
 /**
- * Last user id we successfully resolved this process. Used ONLY to answer a
- * transient getSession() failure (a Keychain-busy window, say) without hiding
- * a golfer's own round from them mid-round. It is overwritten with `null` on a
- * clean signed-out read, so it can never serve a departed user's id to the
- * next account: signing in as B necessarily produced a successful getSession
- * that set this to B.
- */
+ * Process-lifetime fallback for a transient `getSession()` failure (a
+ * Keychain-busy window, say), so a momentary error does not hide a golfer's
+ * own round from them mid-round.
+ *
+ * ⚠️ **Not an ownership signal. Do not build a gate on it, and do not change
+ * when it is written or cleared**, without first reading finding 32 in
+ * the private tracker.
+ *
+ * **The reasoning is deliberately kept out of this file.** It is public and the
+ * finding is unfixed and live in shipped code. An earlier version of this block
+ * asserted a safety property this value does not have, and gates were built
+ * while that sentence stood — the same failure as the docstring on
+ * `currentSessionUserId` below. A note that reassures is worse than no note,
+ * because it is read as evidence.
+ *
+ * @guarded 32 */
 let lastKnownUserId: string | null = null;
 let legacyRoundsClaimed = false;
 
@@ -197,6 +206,92 @@ async function sessionUserId(): Promise<string | null> {
   } catch {
     return lastKnownUserId;
   }
+}
+
+/**
+ * The signed-in user id, for callers outside this module that must scope a
+ * `local_settings` entry to an account rather than the handset.
+ *
+ * `local_settings` has no owner column and most of it is genuinely device
+ * preference (trim window, playback speed) that should survive a change of
+ * account — so per-account entries are distinguished by KEY, the convention
+ * `pro.status_cache.<userId>` established and `clips.bin.v1.<userId>` follows.
+ * Callers must fail closed on null: one shared key is exactly the cross-account
+ * leak `lib/localScope.ts` exists to prevent.
+ *
+ * ⚠️ **NOT SAFE AS AN OWNERSHIP GATE ON ITS OWN. Do not build a new
+ * destructive gate on this function, and do not change it**, without first
+ * reading finding 32 in the private tracker. There are constraints on both, including one change
+ * that must not be paired with it. An earlier version of this docstring said
+ * the opposite, and gates were built on that sentence.
+ *
+ * **Why is deliberately not written here.** This file is public and the finding
+ * is unfixed and live in shipped code, so the reasoning lives in the tracker
+ * and this is a pointer to it. Two sentences were cut from this block for that
+ * reason: one characterised which failure mode is the wrong one to guard
+ * against, and one gave the blast radius. Both narrowed the search for anyone
+ * reading the implementation a few lines above. The status stays — a warning
+ * that will not say the finding is real and open reads as generic caution and
+ * gets ignored, which is how the sentence this replaced did its damage.
+ */
+export async function currentSessionUserId(): Promise<string | null> {
+  return sessionUserId();
+}
+
+/**
+ * The round a clip belongs to, read off the clip itself.
+ *
+ * For callers deciding whether they may destroy a clip. `deleteLocalClip` is
+ * `DELETE FROM local_clips WHERE id = ?` with no ownership predicate, so a
+ * gate that validates a round id the CALLER supplied proves nothing about the
+ * clip id it then deletes — the two are independent. This lets the gate be
+ * built from the clip's real round instead.
+ *
+ * Deliberately unscoped: it returns the round id for any clip, and the caller
+ * passes that to the scoped `getLocalRound` to decide. Returning null here for
+ * a foreign clip would be indistinguishable from "no such clip".
+ */
+export async function getLocalClipRound(clipId: number): Promise<string | null> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ round_id: string }>(
+    'SELECT round_id FROM local_clips WHERE id = ?',
+    clipId
+  );
+  return row?.round_id ?? null;
+}
+
+/**
+ * A round's owner stamp, read WITHOUT scoping — deliberately, and for the same
+ * reason `getLocalClipRound` above is unscoped.
+ *
+ * A caller deciding whether it may DESTROY something has to tell "no such
+ * round" apart from "a round owned by another account", and the scoped read
+ * cannot: `getLocalRound` filters on `user_id = ?` and post-filters with
+ * `isRowVisible`, so a foreign round comes back as `null` — identical to a
+ * round that does not exist. A gate built on it therefore admits the foreign
+ * case it believes it is rejecting.
+ *
+ * Return values are three-way ON PURPOSE:
+ *   undefined — no such round. Callers that must not strand files treat this
+ *               as allowed (findings 34/41 depend on that tolerance).
+ *   null      — a pre-migration row the backfill has not claimed yet. Claimable
+ *               by the first signed-in user of the launch, so not another
+ *               account's round yet.
+ *   string    — the owning account.
+ *
+ * NOT a general-purpose read. It exists so a destructive gate can bind, and it
+ * must never be used to fetch a round for display or edit; those go through the
+ * scoped `getLocalRound`.
+ */
+export async function getLocalRoundOwner(
+  roundId: string
+): Promise<string | null | undefined> {
+  const database = await getDatabase();
+  const row = await database.getFirstAsync<{ user_id: string | null }>(
+    'SELECT user_id FROM local_rounds WHERE id = ?',
+    roundId
+  );
+  return row == null ? undefined : row.user_id;
 }
 
 /**
@@ -1258,10 +1353,35 @@ export type LocalClipRow = {
  * editor, the upload queue) lines back up. Powers "Undo delete" on the
  * recording screen.
  *
- * Column names come from the row the database itself handed us, so the
- * dynamic SQL is built from DB-controlled identifiers, not user input.
+ * ⚠️ **Column names are interpolated into the INSERT unescaped** — SQLite has no
+ * placeholder for an identifier, so they cannot be bound. Values are bound;
+ * identifiers are spliced.
+ *
+ * This used to say the identifiers are DB-controlled because the row came
+ * straight from a `SELECT *`. **That is no longer true and it is my change that
+ * broke it:** `lib/clipBin.ts` persists whole rows as JSON in `local_settings`
+ * and hands them back after a `JSON.parse`, so the keys are only as trustworthy
+ * as that blob.
+ *
+ * So the identifier check now lives HERE, at the sink that does the splicing,
+ * instead of resting on one caller's discipline. It was deferred once on the
+ * grounds that moving it changes a shared primitive with a caller outside the
+ * diff. That premise was wrong and checking it took one command: all three
+ * call sites pass rows originating in `SELECT * FROM local_clips`, and every
+ * column in that table's schema plus its 25 `ALTER TABLE` migrations is plain
+ * snake_case. No existing caller's behaviour changes; what changes is that the
+ * next one cannot get it wrong silently.
+ *
+ * A rejected key THROWS rather than returning false, and that is not a style
+ * choice. `false` already means "a row with that id exists, so there is
+ * nothing to undo", and `restoreClipFromBin` acts on it by dropping the bin
+ * entry — correct when the clip is back in the table, destructive if `false`
+ * could also mean "I refused". Throwing leaves the entry in the bin.
+ *
  * Returns false if a row with that id already exists (nothing to undo).
  */
+export const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
 export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
   const database = await getDatabase();
   const existing = await database.getFirstAsync<{ id: number }>(
@@ -1272,6 +1392,13 @@ export async function restoreLocalClip(row: LocalClipRow): Promise<boolean> {
 
   const columns = Object.keys(row);
   if (columns.length === 0) return false;
+  // Checked against the identifier SHAPE, not an allow-list of known columns:
+  // `local_clips` grows by ALTER TABLE, so a hardcoded list would drift and
+  // start refusing valid restores. The shape is what closes the splice; an
+  // unknown-but-well-formed column still fails at INSERT, harmlessly.
+  if (!columns.every((c) => SQL_IDENTIFIER.test(c))) {
+    throw new Error('restoreLocalClip: refusing to splice a non-identifier column name');
+  }
   const placeholders = columns.map(() => '?').join(', ');
   const values = columns.map((c) => (row[c] as never) ?? null);
 
@@ -1696,6 +1823,39 @@ export async function clearLocalDatabase(): Promise<void> {
     // subscription.ts keys as `pro.status_cache.<userId>`, so remove exactly
     // that and leave the rest alone.
     ['DELETE FROM local_settings     WHERE key = ?', [`pro.status_cache.${ownerUserId}`]],
+    // Same reasoning, second per-account entry: the recently-deleted clip bin
+    // (lib/clipBin.ts, keyed `clips.bin.v1.<userId>`) holds whole clip rows for
+    // this user. This drops the metadata only — and the files are unlinked by
+    // `purgeAllBinnedClips`, which `wipeLocalUserData` now calls BEFORE this.
+    //
+    // That ordering is load-bearing, so do not reorder it: once this row is
+    // gone, nothing names those files. Two earlier versions of this comment
+    // were wrong in opposite directions — one claimed a bin walk that did not
+    // exist, and its correction then leaned on localWipe's directory sweep
+    // instead. Changing that sweep correctly would have silently orphaned these
+    // files. The purge call is what makes this true by construction rather than
+    // by depending on the sweep's current shape. (See finding 12 in the private
+    // tracker before changing the ordering here. Nothing further on purpose.)
+    ['DELETE FROM local_settings     WHERE key = ?', [`clips.bin.v1.${ownerUserId}`]],
+    // The PRE-SCOPING bin key (`clips.bin.v1`, no user suffix) is deliberately
+    // NOT deleted here. An earlier version of this list dropped it outright,
+    // which contradicted the rule clipBin's own `drainLegacyBin` establishes in
+    // the same breath: that row is DEVICE-WIDE, so acting on it wholesale
+    // destroys the other account's entries. A blanket delete under B loses A's
+    // recovery records with no undo AND orphans the files they pinned, because
+    // nothing can reach them once the metadata is gone. `drainLegacyBin`
+    // partitions it by round ownership instead — this account's entries purged
+    // and their files unlinked, everyone else's written back for them to drain
+    // when they next sign in — and that is the only correct treatment.
+    //
+    // The tutorial's active-round marker. app/_layout only runs the tutorial
+    // sweep when this is EMPTY, so an account that signs out mid-tutorial would
+    // leave it set and silently disable tutorial cleanup for every account
+    // afterwards. It is device-wide and owner-less, so it may hold a round
+    // belonging to a DIFFERENT account than the one being wiped — clearing it
+    // is still right, because the sweep no longer takes candidates from it, so
+    // the worst case is one uncollected tutorial round rather than a delete.
+    ['DELETE FROM local_settings     WHERE key = ?', ['tutorial.active_round']],
   ];
   for (const [sql, params] of scopedDeletes) {
     try {

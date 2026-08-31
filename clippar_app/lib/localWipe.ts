@@ -1,5 +1,5 @@
 import { Platform } from 'react-native';
-import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting } from './storage';
+import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting, currentSessionUserId } from './storage';
 import { clearRoundPrefetch } from './roundPrefetch';
 
 /**
@@ -47,6 +47,7 @@ const ACCOUNT_LINKED_SETTING_KEYS = [
  */
 const OWNED_MEDIA_DIRS = ['clips/', 'exports/'];
 
+/** @guarded 12 */
 async function removeOwnedMediaDirectories(): Promise<void> {
   if (Platform.OS === 'web') return;
   try {
@@ -99,6 +100,92 @@ async function removeTemporaryExports(): Promise<void> {
  * redirect that follow it.
  */
 export async function wipeLocalUserData(): Promise<void> {
+  // FIRST, and for the same reason as in removeLocalMediaForCurrentUser: a
+  // binned clip has no local_clips row, so nothing below reaches its video
+  // files by walking rounds. It must also precede clearLocalDatabase, which
+  // deletes this account's bin key — once that metadata is gone, the only
+  // record naming those files is gone with it.
+  //
+  // This used to be left to the directory sweep further down. That worked, and
+  // it was the wrong thing to rely on: whoever changes that sweep would have
+  // silently stopped reclaiming a deleted account's binned videos, with no test
+  // going red — a security fix quietly reintroducing a data-remanence bug. Now
+  // this holds by construction.
+  //
+  // The ordering of the steps in this function interacts with an open finding.
+  // Read finding 12 in the private tracker before reordering anything below.
+  //
+  // Nothing further is written here on purpose. The previous wording paired a
+  // functional pointer with a status — which function, and that it is still
+  // open — and this repository is public. Neither guard could see that: the
+  // identifier check compares a SYMBOL and this names none.
+  //
+  // Runs before signOut (see above), so the session still resolves and the
+  // purge finds the departing account's bin rather than none.
+  try {
+    const { purgeAllBinnedClips } =
+      require('./clipBin') as typeof import('./clipBin');
+    await purgeAllBinnedClips();
+  } catch (err) {
+    console.warn('[localWipe] purgeAllBinnedClips failed', err);
+  }
+
+  // Two device-wide local_settings registries this branch made
+  // account-attributable. clearLocalDatabase's scoped-delete list was extended
+  // in the same branch and these two were missed, so account deletion left the
+  // departing user's id, every practice round id with its start timestamp, and
+  // every tutorial round id in plaintext on the handset — permanently, since
+  // both are only ever pruned for the account that is signed in.
+  //
+  // Scrubbed through the owning modules rather than by key here: they are
+  // shared rows, so a blanket delete would destroy the other account's
+  // entries, and the filter belongs where the entry shape is defined.
+  //
+  // Before signOut (see above), so the session still resolves to the departing
+  // account. No session means nothing to attribute, so nothing is removed.
+  try {
+    const me = await currentSessionUserId();
+    if (me) {
+      const training = require('./training') as typeof import('./training');
+      const tutorial = require('./tutorialRound') as typeof import('./tutorialRound');
+      await training.forgetTrainingSessionsFor(me);
+      await tutorial.forgetCreatedRoundsFor(me);
+    }
+  } catch (err) {
+    console.warn('[localWipe] registry scrub failed', err);
+  }
+
+  // The onboarding and sales answers — ACCOUNT_LINKED_SETTING_KEYS above, which
+  // this file's own docstring calls "ANSWERS ABOUT A PERSON rather than app
+  // state". Sign-out clears them via clearAccountLinkedCaches(), but account
+  // deletion does not route through finishSignOut(), and clearLocalDatabase
+  // deliberately drops only three named keys — so nothing on this path reached
+  // them. They outlived the account permanently (a deleted account never signs
+  // in again to prune them) and pre-filled the next golfer's onboarding with
+  // the previous one's home course, handicap and age range.
+  //
+  // Unlike the two registries above, these keys carry NO owner, so this clears
+  // them for whoever wrote them rather than partitioning. That is deliberate
+  // and is the same trade clearAccountLinkedCaches already makes on every
+  // sign-out: they cost nothing to re-enter, which is exactly why blanket
+  // clearing is right here and wrong for the registries — those name rounds and
+  // pin video files.
+  //
+  // Guarded like every other step, even though this cannot reject today
+  // (`clearRoundPrefetch` is a synchronous clear and each `setSetting` is
+  // individually caught). The contract above says this function never throws,
+  // and an unguarded await would skip EVERYTHING below it — the database, the
+  // video directories, the temporary exports, the secure-store keys — after the
+  // caller has already deleted the account server-side. Relying on the current
+  // body of an exported function with its own other caller is the same "that
+  // worked, and it was the wrong thing to rely on" mistake this function warns
+  // about fifteen lines above.
+  try {
+    await clearAccountLinkedCaches();
+  } catch (err) {
+    console.warn('[localWipe] clearAccountLinkedCaches failed', err);
+  }
+
   try {
     await clearLocalDatabase();
   } catch (err) {
@@ -173,6 +260,17 @@ export async function clearAccountLinkedCaches(): Promise<void> {
  */
 export async function removeLocalMediaForCurrentUser(): Promise<number> {
   let removed = 0;
+  // Before the rounds, because a binned clip no longer has a local_clips row:
+  // deleteLocalRound below would never reach its video files, so up to 30 of
+  // them would survive the one action whose whole purpose is removing them.
+  // Lazy require for the same import-cycle reason as the shot-detector calls.
+  try {
+    const { purgeAllBinnedClips } =
+      require('./clipBin') as typeof import('./clipBin');
+    await purgeAllBinnedClips();
+  } catch (err) {
+    console.warn('[localWipe] purgeAllBinnedClips failed', err);
+  }
   try {
     const roundIds = await listLocalRoundIdsForCurrentUser();
     for (const id of roundIds) {

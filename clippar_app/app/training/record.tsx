@@ -22,7 +22,7 @@ import * as Haptics from 'expo-haptics';
 import { X, ListVideo, Undo2 } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { useCamera } from '@/hooks/useCamera';
-import { CLUBS, listTrainingClips, type TrainingClub } from '@/lib/training';
+import { CLUBS, listTrainingClips, ownsTrainingRound, type TrainingClub } from '@/lib/training';
 import { deleteClipToBin } from '@/lib/clipBin';
 
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -41,13 +41,52 @@ export default function TrainingRecordScreen() {
   const [counts, setCounts] = useState<Map<number, number>>(new Map());
   const [lastClipId, setLastClipId] = useState<number | null>(null);
 
+  // Does the signed-in account own this session? `roundId` comes from the URL
+  // and app.config.js registers a URL scheme, so this route is externally
+  // reachable — and useCamera's save path is a bare saveLocalClip({ round_id })
+  // with no ownership predicate. Without this, a link carrying someone else's
+  // round id would film B's swings into A's session, silently: the reads are
+  // gated now, so the shot counter would show zero and the screen would look
+  // like a fresh session rather than an error.
+  //
+  // null = still checking, false = not ours.
+  //
+  // The verdict carries the id it was computed for, and `owned` is DERIVED
+  // during render rather than reset from an effect. expo-router updates params
+  // in place on a mounted screen, so a second deep link to this route
+  // re-renders rather than remounting — and an effect that resets the verdict
+  // runs after that render has already committed. That left one painted frame
+  // in which `roundId` was the new, unverified id while the answer still read
+  // true from the previous round: the camera binding below and both render
+  // gates all passed. Deriving it closes the window instead of shrinking it —
+  // a new id invalidates the old answer in the same commit that introduces it.
+  const [verdict, setVerdict] = useState<{ roundId: string; owned: boolean } | null>(null);
+  const owned: boolean | null = !roundId
+    ? false
+    : verdict?.roundId === roundId
+      ? verdict.owned
+      : null;
+  useEffect(() => {
+    if (!roundId) return;
+    let alive = true;
+    ownsTrainingRound(roundId)
+      .then((ok) => alive && setVerdict({ roundId, owned: ok }))
+      .catch(() => alive && setVerdict({ roundId, owned: false }));
+    return () => {
+      alive = false;
+    };
+  }, [roundId]);
+
   const countsRef = useRef(counts);
   countsRef.current = counts;
   const clubRef = useRef(club);
   clubRef.current = club;
 
   const camera = useCamera({
-    roundId: roundId ?? '',
+    // The camera is armed on mount while `owned` is still resolving, so the
+    // binding is gated too, not just the render below. An empty round id
+    // writes an orphan row rather than into somebody else's round.
+    roundId: owned === true ? (roundId ?? '') : '',
     holeNumber: club.holeNumber,
     shotNumber: (counts.get(club.holeNumber) ?? 0) + 1,
     onClipSaved: (clip) => {
@@ -65,7 +104,14 @@ export default function TrainingRecordScreen() {
   // spec-5.6 rule record.tsx follows: ask at the moment capture starts, not
   // when a tab renders.
   useEffect(() => {
-    if (!roundId) return;
+    // Gated on `owned`, not just `roundId`. Effects run after the first
+    // render — which is the ownership spinner — so keying this on roundId
+    // alone fired the OS camera prompt for a round nothing had checked yet,
+    // reachable from a clippar:// link to somebody else's session. No footage
+    // crossed, but the comment below the gate claimed the check came first and
+    // it did not, and a gate that reads stronger than it is was the thing this
+    // whole review kept catching.
+    if (!roundId || owned !== true) return;
     listTrainingClips(roundId)
       .then((clips) => {
         const m = new Map<number, number>();
@@ -77,7 +123,7 @@ export default function TrainingRecordScreen() {
       .catch(() => {});
     void camera.requestPermission();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [roundId]);
+  }, [roundId, owned]);
 
   const recordingBusy = camera.isRecording || camera.isFinalizing;
 
@@ -156,6 +202,29 @@ export default function TrainingRecordScreen() {
       },
     ]);
   }, [recordingBusy, roundId]);
+
+  // Ownership decides before the camera is offered at all — checked ahead of
+  // the permission prompt so a link to somebody else's session never gets as
+  // far as asking for the camera.
+  if (owned === null) {
+    return (
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <ActivityIndicator color={theme.colors.primary} />
+      </View>
+    );
+  }
+  if (owned === false) {
+    return (
+      <View style={[styles.center, { backgroundColor: theme.colors.background }]}>
+        <Text style={{ color: theme.colors.textPrimary, fontSize: 16, marginBottom: 16, textAlign: 'center' }}>
+          That practice session isn't available on this account.
+        </Text>
+        <Pressable onPress={() => router.replace('/training')} style={styles.retryBtn}>
+          <Text style={{ color: '#fff', fontWeight: '700' }}>Back to practice</Text>
+        </Pressable>
+      </View>
+    );
+  }
 
   if (isNative && camera.hasPermission === false) {
     return (
