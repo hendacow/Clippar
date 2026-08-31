@@ -1,3 +1,33 @@
+/**
+ * ── THE ENTITLEMENT RULES — read before adding any gate ──────────────────
+ * Set by Henry (via the CEO), 1 Sep 2026, while explicitly NOT deciding
+ * pricing. They bind any future paywall built in or around this file:
+ *
+ * 1. NEVER gate access to content a user already has. Gate new capability
+ *    only. The dangerous case is cloud backup: a user whose clips exist
+ *    only in the cloud (restored phone, cleared storage) must ALWAYS be
+ *    able to download their own footage — the download path
+ *    (api.getSignedClipUrls and everything above it) carries no
+ *    subscription check TODAY and must never gain one. Only the UPLOAD of
+ *    new clips (lib/uploadQueue) is entitlement-gated. A lapsed
+ *    subscriber keeps everything they ever backed up.
+ *
+ * 2. An app update never removes access. Entitlements and data survive
+ *    updates and reinstalls; RevenueCat/Apple restore purchases.
+ *
+ * 3. Early users get grandfathered. The mechanism, decided now so nobody
+ *    re-litigates it at paywall time: Supabase stamps a server-side
+ *    created_at on every account by construction (email and Apple sign-in
+ *    both create auth.users rows; there is no guest path), so the
+ *    pre-paywall cohort is identifiable forever with zero schema work
+ *    today. IF a paywall ships, grant an explicit boolean entitlement to
+ *    that cohort in a one-time backfill at that moment — a flag granted
+ *    once is unambiguous forever, where date arithmetic against a policy
+ *    that later changes is how people get wrongly locked out. Until then,
+ *    nothing to build.
+ * ─────────────────────────────────────────────────────────────────────────
+ */
+
 import { supabase } from './supabase';
 import { iap } from './iap';
 import { currentVariant, getDevProOverride } from './devPro';
