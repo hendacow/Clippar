@@ -42,9 +42,9 @@ import { createSerialQueue } from '@/lib/serialQueue';
  * round belonging to anybody else reads as null.
  *
  * BOTH conditions are required, not just the row. `local_rounds.user_id` is a
- * single input that another account's sign-in can reassign — see
- * `TrainingSessionRef.userId` for the NULL-owner backfill chain — so the
- * registry stamp has to agree as well. Every training read and write goes
+ * single input that is not proof of ownership on its own — **why is
+ * deliberately not written here; see finding 23 in the private tracker** — so
+ * the registry stamp has to agree as well. Every training read and write goes
  * through here, so they all inherit it rather than each screen remembering to
  * ask twice.
  */
@@ -141,8 +141,8 @@ export interface TrainingSessionRef {
    * never listed, never played.
    *
    * **Ownership needs BOTH this stamp and the row.** `local_rounds.user_id`
-   * alone is not sufficient: it is reassignable by another account's sign-in,
-   * so a scoped read is not proof of ownership on a shared handset.
+   * alone is not sufficient, and a scoped read is not proof of ownership on a
+   * shared handset.
    * `lib/tutorialRound.ts` does the same thing with its created-id registry,
    * for the same reason. **Do not drop either half.**
    *

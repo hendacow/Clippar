@@ -510,10 +510,11 @@ async function purgeEntry(entry: BinnedClip): Promise<void> {
  * the same session primitive, so a resolution that is wrong is wrong for both.
  * This binds two independent reads; it does not make either of them right.
  *
- * **Defence in depth, stated plainly:** `local_rounds.user_id` is itself
- * reassignable (finding 23, private tracker), so this does not make the
- * destructive paths sound. It makes them require two things to go wrong rather
- * than one, which is strictly better than resting on the resolution alone.
+ * **Defence in depth, stated plainly:** `local_rounds.user_id` is not proof of
+ * ownership on its own (finding 23, private tracker — unfixed and live, so the
+ * reason is not written here), so this does not make the destructive paths
+ * sound. It makes them require two things to go wrong rather than one, which is
+ * strictly better than resting on the resolution alone.
  */
 async function entryOwnedBy(entry: BinnedClip, userId: string): Promise<boolean> {
   // UNSCOPED read, and that is the whole point. The previous version asked
@@ -528,9 +529,10 @@ async function entryOwnedBy(entry: BinnedClip, userId: string): Promise<boolean>
   // Genuinely GONE stays allowed: refusing here strands the files the entry
   // pins, which is findings 34/41 and is what the null-tolerance protects.
   if (owner === undefined) return true;
-  // A pre-migration row the backfill has not claimed yet (see
-  // shouldClaimLegacyRows) is claimable by the first signed-in user of the
-  // launch, so it is not another account's round yet.
+  // A pre-migration row that nothing has claimed yet is not another account's
+  // round yet, so it passes. The rule that decides when it stops being
+  // unclaimed is finding 23 — unfixed and live — and is named in the private
+  // tracker rather than here.
   if (owner === null) return true;
   // Round EXISTS and is stamped to somebody else: refuse. This branch is new —
   // it is the one the old docstring promised and the scoped read made
