@@ -28,6 +28,7 @@ import {
   Platform,
   Image,
   StyleSheet,
+  Linking,
 } from 'react-native';
 import { router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -35,6 +36,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Play, X } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
+import { getPendingHomeMoment, markHomeMomentSeen } from '@/lib/kitMoments';
+import { config } from '@/constants/config';
 import { HeroReel } from '@/components/library/HeroReel';
 import { RoundListCard } from '@/components/library/RoundListCard';
 import { RoundStatusCard } from '@/components/shared/RoundStatusCard';
@@ -166,6 +169,50 @@ function isBirdieRound(r: HomeRound): boolean {
 // ============================================================
 // MAIN SCREEN
 // ============================================================
+/**
+ * Earned kit moment card (lib/kitMoments) — an OBSERVATION about the user's
+ * own round, never a pitch. Shows at most one, dismissible, weekly-capped
+ * for the walkback variant. Links out to the storefront in Safari
+ * (physical goods — App Review 3.1.3(e), same as the record tab's card).
+ */
+function KitMomentCard({ moment, onDismiss }: { moment: NonNullable<import('@/lib/kitMoments').HomeKitMoment>; onDismiss: () => void }) {
+  const walk = moment.kind === 'walkback';
+  return (
+    <View
+      style={{
+        marginHorizontal: theme.spacing.md,
+        marginBottom: theme.spacing.md,
+        borderRadius: theme.radius.lg,
+        backgroundColor: theme.colors.surface,
+        borderWidth: 1,
+        borderColor: theme.colors.surfaceBorder,
+      }}
+    >
+      <Pressable
+        onPress={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          Linking.openURL(config.shop.mountUrl).catch(() => {});
+        }}
+        style={({ pressed }) => ({ padding: 16, paddingRight: 40, opacity: pressed ? 0.85 : 1, gap: 4 })}
+      >
+        <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700' }}>
+          {walk
+            ? `You walked back to your phone ${(moment as { shots: number }).shots} times this round.`
+            : 'That round was filmed holding your phone.'}
+        </Text>
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+          {walk
+            ? 'The clicker stays on your glove. The phone stays on the bag.'
+            : "Henry films his with the phone on the bag and a clicker on his glove. Here's the rig."}
+        </Text>
+      </Pressable>
+      <Pressable onPress={onDismiss} hitSlop={10} style={{ position: 'absolute', top: 10, right: 10 }}>
+        <X size={16} color={theme.colors.textTertiary} />
+      </Pressable>
+    </View>
+  );
+}
+
 export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { compose } = useUploadContext();
@@ -178,6 +225,14 @@ export default function HomeScreen() {
   const [activeTile, setActiveTile] = useState<TileKey | null>(null);
   const [compilingCategory, setCompilingCategory] = useState<StatCategoryKey | null>(null);
   const [showHeroShare, setShowHeroShare] = useState(false);
+  const [kitMoment, setKitMoment] = useState<import('@/lib/kitMoments').HomeKitMoment>(null);
+  useEffect(() => {
+    getPendingHomeMoment().then(setKitMoment).catch(() => {});
+  }, []);
+  const dismissKitMoment = useCallback(() => {
+    if (kitMoment) void markHomeMomentSeen(kitMoment.kind);
+    setKitMoment(null);
+  }, [kitMoment]);
 
   const roundsRef = useRef<HomeRound[]>([]);
 
@@ -499,6 +554,7 @@ export default function HomeScreen() {
         }
         contentContainerStyle={{ paddingTop: insets.top, paddingBottom: 120 }}
       >
+        {kitMoment && <KitMomentCard moment={kitMoment} onDismiss={dismissKitMoment} />}
         {/* ---- HEADER (56pt): compact logo mark + greeting ---- */}
         <View style={styles.header}>
           <Image

@@ -25,7 +25,9 @@ test('freeze-frame and playbackRate replace purpose-filmed footage', () => {
 
 // First cold start cannot depend on the update channel (5s fallback window).
 test('tutorial videos ride the binary, within budget', () => {
-  assert.match(cin, /require\('@\/assets\/onboarding\/montage\.mp4'\)/);
+  // Montage replaced by the frame-verified last-hole hero (§13.1); retired
+  // assets live in assets/onboarding-archive, outside the bundled dir.
+  assert.match(cin, /require\('@\/assets\/onboarding\/hero\.mp4'\)/);
   const dir = join(root, 'assets/onboarding');
   const total = readdirSync(dir).reduce((sum, f) => sum + statSync(join(dir, f)).size, 0);
   // Budget raised to 35MB for the par-5 sample round (plan §13.5) — five
@@ -48,18 +50,16 @@ test('v2 hands off into the v1 stepper at the Aha step', () => {
   assert.match(v2block, /onSkip/);
 });
 
-// The fake export never claims a real post happened. Checked against the
-// USER-FACING strings only — a code comment may say "posting" (this file's
-// does, describing Henry's real screen-recording); a golfer must never read
-// it. Third self-defeating-grep of the day; this time a test caught it.
-test('the export beat is marked EXAMPLE and its visible text never says post', () => {
+// §13.4: the IG framing is retired — the export beat is the lift-off, with
+// anonymous slots and no social branding. Nothing may claim a real post
+// happened; "Anywhere you post" names the user's own future act.
+test('the export beat fakes nothing: no IG asset, anonymous slots, honest gag', () => {
   const exportScene = cin.match(/function ExportScene[\s\S]*?\n\}/)?.[0] ?? '';
-  assert.match(exportScene, /EXAMPLE/);
-  assert.match(exportScene, /VIDEOS\.igstory/, 'the beat plays the real story recording');
-  assert.match(exportScene, /VIDEOS\.igstory/, 'the beat plays the real story recording');
+  assert.doesNotMatch(cin, /igstory/i, 'the story recording is fully retired from onboarding');
+  assert.match(exportScene, /appSlot/);
+  assert.match(exportScene, /That was the whole export/);
   const visible = [...exportScene.matchAll(/<Text[^>]*>([\s\S]*?)<\/Text>/g)].map((m) => m[1]).join(' ');
-  assert.ok(visible.length > 0, 'export scene should render text');
-  assert.doesNotMatch(visible, /[Pp]ost(ed)?\b/);
+  assert.doesNotMatch(visible, /[Pp]osted\b/, 'never claims a post happened');
 });
 
 // v1 finally has funnel telemetry, so the comparison has a baseline.
@@ -93,4 +93,23 @@ test('the sample round is five presses that become a reel', () => {
   const aha = readFileSync(join(root, 'components/onboarding/flow/AhaScreen.tsx'), 'utf8');
   assert.match(aha, /<SampleRound/, 'wired into the aha sample path');
   assert.match(aha, /setAhaOutcome\('sample'\)/, 'preserves the outcome contract');
+});
+
+// §13.6 as ratified: NO kit content in onboarding; earned observations only.
+test('onboarding is kit-free and the earned moments are observations, not pitches', () => {
+  assert.doesNotMatch(cin, /\bbuy\b|\bpurchase\b|order now|\bshop\b/i, 'no sell language in onboarding');
+  const km = readFileSync(join(root, 'lib/kitMoments.ts'), 'utf8');
+  assert.match(km, /no fact, no card/);
+  const home = readFileSync(join(root, 'app/(tabs)/index.tsx'), 'utf8');
+  assert.match(home, /walked back to your phone \$\{/, 'the number is interpolated from real facts');
+  assert.doesNotMatch(home.match(/function KitMomentCard[\s\S]*?\n\}/)?.[0] ?? '', /buy|Buy|purchase|% off/, 'observation copy only');
+  const rec = readFileSync(join(root, 'app/(tabs)/record.tsx'), 'utf8');
+  assert.match(rec, /recordRoundFacts\(roundState\.clips\.length, shutter\.connected\)/, 'facts are genuinely derived');
+});
+
+// The hero stamps the REAL wordmark at the contact frame — no styled text.
+test('the hero uses the real logo, stamped at contact', () => {
+  assert.match(cin, /clippar-logo-wordmark\.png/);
+  assert.doesNotMatch(cin, /styles\.brand[^W]/, 'the styled-text brand is gone');
+  assert.match(cin, /CONTACT_MS = 800/);
 });

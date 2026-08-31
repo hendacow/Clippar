@@ -6,12 +6,15 @@
  * summarises shots per club, and tapping through opens either the ASMR
  * player (watch) or the editor in training mode (work).
  */
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { View, Text, ScrollView, Pressable, Alert, ActivityIndicator } from 'react-native';
 import { router, Stack, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
-import { Play, ListVideo, Plus, ChevronLeft, FolderOpen } from 'lucide-react-native';
+import { Play, ListVideo, Plus, ChevronLeft, FolderOpen, X } from 'lucide-react-native';
+import { isPracticeSetupSeen, markPracticeSetupSeen } from '@/lib/kitMoments';
+import { Linking } from 'react-native';
+import { config } from '@/constants/config';
 import { theme } from '@/constants/theme';
 import {
   CLUBS,
@@ -49,6 +52,13 @@ export default function TrainingHubScreen() {
   // narrows to sessions where that club was hit, and the row summary leads
   // with it. This is the "see how your 7-irons were looking" view.
   const [filterHole, setFilterHole] = useState<number | null>(null);
+  // Earned kit moment (lib/kitMoments): the range setup, shown once after a
+  // real session exists — an observation about how this footage gets made,
+  // not a pitch. Dismiss is permanent.
+  const [showSetupCard, setShowSetupCard] = useState(false);
+  useEffect(() => {
+    isPracticeSetupSeen().then((seen) => setShowSetupCard(!seen)).catch(() => {});
+  }, []);
 
   const refresh = useCallback(() => {
     let alive = true;
@@ -217,6 +227,32 @@ export default function TrainingHubScreen() {
                 </Pressable>
               ))}
             </ScrollView>
+          )}
+
+          {showSetupCard && rows !== null && rows.length > 0 && (
+            <View style={{ borderRadius: theme.radius.lg, backgroundColor: theme.colors.surface, borderWidth: 1, borderColor: theme.colors.surfaceBorder, marginBottom: 14 }}>
+              <Pressable
+                onPress={() => Linking.openURL(config.shop.mountUrl).catch(() => {})}
+                style={({ pressed }) => ({ padding: 16, paddingRight: 40, gap: 4, opacity: pressed ? 0.85 : 1 })}
+              >
+                <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700' }}>
+                  Phone on the bag. Clicker in the glove.
+                </Text>
+                <Text style={{ color: theme.colors.textSecondary, fontSize: 13 }}>
+                  That's the whole rig Henry films these with — nothing to hold, nothing to tap.
+                </Text>
+              </Pressable>
+              <Pressable
+                onPress={() => {
+                  setShowSetupCard(false);
+                  void markPracticeSetupSeen();
+                }}
+                hitSlop={10}
+                style={{ position: 'absolute', top: 10, right: 10 }}
+              >
+                <X size={16} color={theme.colors.textTertiary} />
+              </Pressable>
+            </View>
           )}
 
           {rows === null ? (

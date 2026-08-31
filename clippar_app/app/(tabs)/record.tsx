@@ -62,6 +62,7 @@ import {
 } from '@/lib/roundSetup';
 import { isCaptureArmed } from '@/lib/captureArming';
 import { previousHoleTarget } from '@/lib/liveRecordingLogic';
+import { recordRoundFacts } from '@/lib/kitMoments';
 import { useOnboardingTarget } from '@/hooks/useOnboardingTarget';
 import type { PenaltyType, ClipMetadata, HoleData } from '@/types/round';
 import type { CoursePreset } from '@/types/preset';
@@ -1659,6 +1660,10 @@ export default function RecordScreen() {
               console.log('[EndRound] tapped — bundle endround-v1, navigating to editor');
               const roundId = roundState.roundId;
               const courseNameSnapshot = roundState.courseName;
+              // Earned kit moments (lib/kitMoments): record the FACTS of this
+              // round — real shot count, whether a clicker was connected —
+              // so the home card's number is genuinely theirs, never a guess.
+              void recordRoundFacts(roundState.clips.length, shutter.connected);
               round.endRound();
               // Mirror import flow: silent background upload only if cloud
               // backup is on, then drop the user on the editor (trim/preview)
