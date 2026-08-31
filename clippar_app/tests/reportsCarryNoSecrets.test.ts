@@ -183,8 +183,36 @@ function scannableFiles(): string[] {
  * blind spot: it does not need to know the value in advance, which is the whole
  * point.
  */
-const ENV_CREDENTIAL = /^([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD))\s*=\s*(.+)$/;
-const ENV_PLACEHOLDER = /^(?:YOUR_|<|\.\.\.|pk_test_|sk_test_|appl_YOUR|\$\{)/;
+const ENV_CREDENTIAL =
+  /^([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|PASSWD|PWD|CREDENTIALS|DSN))\s*=\s*(.+)$/;
+
+/**
+ * **Every arm here must describe a PLACEHOLDER, never a credential prefix.**
+ *
+ * Two arms were `pk_test_` and `sk_test_` — prefixes, not shapes — so a real
+ * Stripe test-mode secret key passed this check, in the guard whose own comment
+ * says a shape check "does not need to know the value in advance, which is the
+ * whole point". It had exactly that blind spot, for the secret half of the pair,
+ * one round after it was written to catch a pasted key. The literal placeholders
+ * in the tree are `pk_test_...` and `sk_test_...`, so the `...` is required.
+ *
+ * A test-mode secret key is a live credential — full test-mode API access, and
+ * usually the same key everyone on a team holds. `pk_test_` is publishable by
+ * design and is still only allowed in its placeholder form, because the rule is
+ * about the shape of an example file, not about which key is harmless.
+ */
+const ENV_PLACEHOLDER = /^(?:YOUR_|<|\.\.\.|(?:pk|sk)_test_\.\.\.$|appl_YOUR|\$\{)/;
+
+/**
+ * A credential inlined into a connection string — `scheme://user:secret@host`.
+ *
+ * Checked on EVERY line regardless of the variable's name, because
+ * `ENV_CREDENTIAL` keys off four nouns and a `DATABASE_URL` spells none of them.
+ * Widening the name list to `_URL` would be wrong: the `_URL` values in these
+ * files are legitimate hostnames. The property is "a value that authenticates";
+ * a name list is a place.
+ */
+const URL_INLINE_CREDENTIAL = /:\/\/[^/\s:@]+:[^/\s@]+@/;
 
 /**
  * The ONE env-example credential that is deliberately a real value, keyed by
@@ -216,6 +244,10 @@ test('tracked env examples carry placeholders, never real credentials', () => {
       .forEach((line, i) => {
         const trimmed = line.trim();
         if (!trimmed || trimmed.startsWith('#')) return;
+        if (URL_INLINE_CREDENTIAL.test(trimmed)) {
+          offenders.push(`${rel}:${i + 1}`);
+          return;
+        }
         const m = ENV_CREDENTIAL.exec(trimmed);
         if (!m) return;
         if (ALLOWED_ENV_LITERALS.has(`${rel}:${m[1]}`)) return;
