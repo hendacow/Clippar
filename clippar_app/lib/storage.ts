@@ -181,7 +181,7 @@ async function migrateEditorColumns() {
  *
  * ⚠️ **Not an ownership signal. Do not build a gate on it, and do not change
  * when it is written or cleared**, without first reading finding 32 in
- * `org/cto/SECURITY-2026-08-30-unfixed.md` (private company-brain repo).
+ * the private tracker.
  *
  * **The reasoning is deliberately kept out of this file.** It is public and the
  * finding is unfixed and live in shipped code. An earlier version of this block
@@ -221,8 +221,7 @@ async function sessionUserId(): Promise<string | null> {
  *
  * ⚠️ **NOT SAFE AS AN OWNERSHIP GATE ON ITS OWN. Do not build a new
  * destructive gate on this function, and do not change it**, without first
- * reading finding 32 in `org/cto/SECURITY-2026-08-30-unfixed.md` (private
- * company-brain repo). There are constraints on both, including one change
+ * reading finding 32 in the private tracker. There are constraints on both, including one change
  * that must not be paired with it. An earlier version of this docstring said
  * the opposite, and gates were built on that sentence.
  *

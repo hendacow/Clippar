@@ -114,7 +114,7 @@ export async function wipeLocalUserData(): Promise<void> {
   //
   // Why that sweep must change is deliberately not spelled out here: this file
   // is public and the finding is unfixed and live in shipped code. Read finding
-  // 12 in `org/cto/SECURITY-2026-08-30-unfixed.md` (private company-brain repo)
+  // 12 in the private tracker
   // before touching it.
   //
   // Runs before signOut (see above), so the session still resolves and the

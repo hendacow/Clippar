@@ -96,11 +96,12 @@ export interface BinnedClip {
  * Each mutation used to resolve the owner up to three times across await
  * points — the guard, then `readBin`, then `writeBin` — and `binQueue`
  * serialises jobs against each other, not against auth changes.
- * The session resolver can also disagree with itself across await points, so
- * consecutive calls inside one job are not guaranteed to return the same
- * account — which on a shared handset is a cross-account destruction path.
- * Mechanism not spelled out here (public file, unfixed finding): see findings
- * 31 and 32 in `org/cto/SECURITY-2026-08-30-unfixed.md`, private repo.
+ *
+ * Why resolving more than once is not sufficient here is findings 31 and 32 in
+ * the private tracker. **Deliberately not restated:** this repository is public
+ * and both are unfixed and live in shipped code. The three lines that used to
+ * sit here gave the failure mode, its trigger and its cost — directly above the
+ * sentence saying they were withheld.
  *
  * So every queued job resolves the key ONCE and threads it through.
  */
@@ -343,8 +344,7 @@ export async function deleteClipToBin(clipId: number, roundId: string): Promise<
     // guaranteed to agree. Because they authorise different halves of one
     // operation, a divergence made this LOOSER rather than stricter.
     //
-    // Why they can disagree is finding 32 in the private tracker
-    // (`org/cto/SECURITY-2026-08-30-unfixed.md`, company-brain). Deliberately
+    // Why they can disagree is finding 32 in the private tracker. Deliberately
     // not restated here: it is unfixed and live in shipped code, and this
     // repository is public.
     const userId = await currentSessionUserId().catch(() => null);

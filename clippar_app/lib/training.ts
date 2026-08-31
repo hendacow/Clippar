@@ -148,7 +148,7 @@ export interface TrainingSessionRef {
    *
    * Mechanism deliberately not spelled out here — this file is public and the
    * underlying problem is unfixed and live. See finding 23 in
-   * `org/cto/SECURITY-2026-08-30-unfixed.md` in the private company-brain repo
+   * the private tracker
    * before changing this or the claim path it defends against.
    */
   userId: string | null;

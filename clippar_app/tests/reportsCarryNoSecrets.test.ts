@@ -481,7 +481,7 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     // reads as generic caution and gets skipped — which is how the sentence it
     // replaced did its damage.
     sentinel: 'Why is deliberately not written here.',
-    sha256: '79b005f1839edef170c7501a57503fe5f1af774350bffaabf7eed761079e367e',
+    sha256: '8dfc18ea3d4ba8c8f28ed36ca116f8ae72fce369b04976acc77e73d6e9e5b40d',
   },
   {
     // The docstring ON the guarded declaration itself, ~480 lines above the
@@ -492,7 +492,7 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     // by a reviewer rather than by me carrying the fix across.
     file: 'clippar_app/lib/storage.ts',
     sentinel: 'The reasoning is deliberately kept out of this file.',
-    sha256: '9e30dec5b45ac2f2d8bbe1ca1d58d42d94525e0bd512b17b7fdc7a459a2c77fa',
+    sha256: '136795cf1a0dd147358783f3e6077529cd0b84a24df47222c8511a53987e7c5e',
   },
   {
     // `localWipe.ts` had no coverage at all. The guard exempts a home file for
@@ -500,7 +500,7 @@ const HOME_POINTERS: { file: string; sentinel: string; sha256: string }[] = [
     // written beside `@guarded 12` — now or later.
     file: 'clippar_app/lib/localWipe.ts',
     sentinel: 'is deliberately not spelled out here',
-    sha256: '517f8e8ca5e957d897735ce6a5074e1273897975edfc26b99f07b0df49f9a0af',
+    sha256: '6946a8183c8ae113ff19db81319c8a24a4dcb7b2a5384d14eca17adec1c9b39f',
   },
 ];
 
