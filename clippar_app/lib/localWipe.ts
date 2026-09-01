@@ -53,11 +53,33 @@ async function removeOwnedMediaDirectories(): Promise<void> {
     const FS = require('expo-file-system/legacy') as typeof import('expo-file-system/legacy');
     const root = FS.documentDirectory;
     if (!root) return;
+    // ORPHANS ONLY. This used to delete the whole clips/ and exports/ trees —
+    // and clearLocalDatabase is scoped to the departing account, so its
+    // per-row unlink correctly spares another user's files, but THIS sweep
+    // then deleted the entire directory and destroyed them anyway. On a
+    // shared handset that is a second user losing footage that can never be
+    // re-recorded. The sweep's real job is only genuine orphans (files with
+    // no DB row — lost to a failed migration or a crash mid-export), so it
+    // now deletes exactly those: a file is removed only if NO surviving clip
+    // row across ANY account references it.
+    const { allReferencedClipFileUris } = require('@/lib/storage') as typeof import('@/lib/storage');
+    const referenced = await allReferencedClipFileUris();
     for (const dir of OWNED_MEDIA_DIRS) {
+      const dirUri = `${root}${dir}`;
+      let names: string[] = [];
       try {
-        await FS.deleteAsync(`${root}${dir}`, { idempotent: true });
+        names = await FS.readDirectoryAsync(dirUri);
       } catch {
-        // A locked or already-absent directory must not abort the wipe.
+        continue; // directory absent — nothing to sweep
+      }
+      for (const name of names) {
+        const fileUri = `${dirUri}${name}`;
+        if (referenced.has(fileUri)) continue; // a live row points here — keep
+        try {
+          await FS.deleteAsync(fileUri, { idempotent: true });
+        } catch {
+          // A locked or already-absent file must not abort the wipe.
+        }
       }
     }
   } catch {

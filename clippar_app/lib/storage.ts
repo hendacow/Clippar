@@ -1674,6 +1674,34 @@ export async function listLocalRoundIdsForCurrentUser(): Promise<string[]> {
  * copied into every subsequent iCloud backup — after we told them "everything
  * in your Clippar account is erased forever". Mirrors deleteLocalRound above.
  */
+/**
+ * Every file:// URI still referenced by ANY clip row, across ALL accounts on
+ * this device. The orphan sweep in localWipe uses this to delete only files
+ * NOTHING points at — so a departing user's directory cleanup can never take
+ * another signed-in user's still-referenced video with it.
+ */
+export async function allReferencedClipFileUris(): Promise<Set<string>> {
+  const database = await getDatabase();
+  const set = new Set<string>();
+  try {
+    const rows = await database.getAllAsync<{
+      file_uri: string | null;
+      trimmed_file_uri: string | null;
+      original_file_uri: string | null;
+      tracer_file_uri: string | null;
+    }>('SELECT file_uri, trimmed_file_uri, original_file_uri, tracer_file_uri FROM local_clips');
+    for (const r of rows) {
+      for (const u of [r.file_uri, r.trimmed_file_uri, r.original_file_uri, r.tracer_file_uri]) {
+        if (u && u.startsWith('file://')) set.add(u);
+      }
+    }
+  } catch {
+    // Older schema / missing table — an empty set means the sweep deletes
+    // nothing rather than risking a live file, which is the safe direction.
+  }
+  return set;
+}
+
 export async function clearLocalDatabase(): Promise<void> {
   const database = await getDatabase();
 
