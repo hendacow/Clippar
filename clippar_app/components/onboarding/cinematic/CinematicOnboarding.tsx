@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, Image, Pressable, StyleSheet, Platform, Animated as RNAnimated } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
-import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withDelay, Easing, runOnJS } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withDelay, Easing, runOnJS } from 'react-native-reanimated';
 import { CLICK_WINDOW_MS } from '@/hooks/useShutter';
 import { logFunnel } from '@/lib/onboardingFunnel';
 import { getSetting, setSetting } from '@/lib/storage';
@@ -33,7 +33,7 @@ const ExpoVideo = isNative ? (require('expo-video') as typeof import('expo-video
 
 // Bundled real footage — see assets/onboarding/. montage is 12s cut from a
 // real exported reel; shots 1-3 are detector-trimmed swings (~5s each).
-const WORDMARK = require('@/assets/images/clippar-logo-wordmark.png');
+const WORDMARK = require('@/assets/images/clippar-logo-wordmark-black.png');
 
 const VIDEOS = {
   // The cold-open hero (plan §13.1/§13.7a): frame 1 is Henry mid-downswing on
@@ -55,8 +55,7 @@ const SCENES = [
   'RECORD_SHOT',
   'NEXT_HOLE',
   'PENALTY',
-  'PREVIEW',
-  'EXPORT',
+  'STORYLINE',
 ] as const;
 export type Scene = (typeof SCENES)[number];
 
@@ -70,8 +69,7 @@ const SCENE_TIMEOUT_MS: Record<Scene, number> = {
   RECORD_SHOT: 40_000,
   NEXT_HOLE: 30_000,
   PENALTY: 30_000,
-  PREVIEW: 15_000,
-  EXPORT: 15_000,
+  STORYLINE: 45_000,
 };
 
 export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
@@ -180,8 +178,7 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
         title="Double-tap = next hole" sub="Two quick taps on the clicker moves your round along." confirm="Hole 2 →" onNext={advance} />}
       {scene === 'PENALTY' && <MultiTapScene key="pen" taps={3} video={VIDEOS.shot3}
         title="Found trouble? Triple-tap" sub="Three taps adds a penalty stroke — honesty, automated." confirm="+1 penalty" onNext={advance} />}
-      {scene === 'PREVIEW' && <PreviewScene onNext={advance} />}
-      {scene === 'EXPORT' && <ExportScene onNext={advance} />}
+      {scene === 'STORYLINE' && <StorylineScene onNext={advance} />}
 
       {/* The travelling ball (plan §13.7): one white dot that persists across
           every beat — the putt at rest, the pulse over the clicker, the
@@ -208,8 +205,7 @@ const BALL_ANCHORS: Record<Scene, { x: number; y: number; s: number }> = {
   RECORD_SHOT: { x: 0.5, y: 0.9, s: 1.2 },    // the record dot's orbit
   NEXT_HOLE: { x: 0.5, y: 0.56, s: 1.2 },
   PENALTY: { x: 0.5, y: 0.56, s: 1.2 },
-  PREVIEW: { x: 0.12, y: 0.82, s: 1 },        // tucks by the caption
-  EXPORT: { x: 0.5, y: 0.34, s: 0.9 },        // ends as the full stop
+  STORYLINE: { x: 0.5, y: 0.5, s: 1 },        // rides the stitch
 };
 
 function TravellingBall({ scene }: { scene: Scene }) {
@@ -313,54 +309,66 @@ function GhostRing() {
 }
 
 function MontageScene({ onNext }: { onNext: () => void }) {
-  // Cold open ON the strike (plan §13.7a): frame 1 is mid-downswing; contact
-  // lands at CONTACT_MS (frame-verified against the cut). One Heavy haptic
-  // and the REAL wordmark stamps in on that exact frame — no styled text
-  // (the old brand line was a Text element; Henry: use the actual logo).
-  const CONTACT_MS = 800;
-  const [beat, setBeat] = useState(0);
+  // Henry's spec (plan §13.7 rev 2 Sep): the hero is the last hole, four
+  // shots from the tee (drive → approach → chip → putt). Over it, the line
+  // "Every shot remembered" arrives ONE WORD AT A TIME with a haptic as each
+  // slams in; the words and the black wordmark then resolve TOGETHER onto the
+  // video's end frame. No mid-clip value lines any more.
+  const WORDS = ['Every', 'shot', 'remembered'];
+  const [wordCount, setWordCount] = useState(0);
+  const [resolved, setResolved] = useState(false);
   const pRef = useRef<import('expo-video').VideoPlayer | null>(null);
-  const logoScale = useSharedValue(1.6);
   const logoOpacity = useSharedValue(0);
+  const logoScale = useSharedValue(1.4);
   const logoStyle = useAnimatedStyle(() => ({
     opacity: logoOpacity.value,
     transform: [{ scale: logoScale.value }],
   }));
 
+  // Slam the words in across the first ~2.4s — each with its own Heavy tick.
   useEffect(() => {
-    const stamp = setTimeout(() => {
-      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-      logoOpacity.value = withTiming(1, { duration: 120 });
-      logoScale.value = withTiming(1, { duration: 250, easing: Easing.out(Easing.back(1.5)) });
-    }, CONTACT_MS);
-    // Value lines ride the back half — no separate explainer scene.
-    const beats = [setTimeout(() => setBeat(1), 4000), setTimeout(() => setBeat(2), 6300), setTimeout(() => setBeat(3), 8600)];
-    return () => {
-      clearTimeout(stamp);
-      beats.forEach(clearTimeout);
-    };
+    const timers = WORDS.map((_, i) =>
+      setTimeout(() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
+        setWordCount(i + 1);
+      }, 700 + i * 850)
+    );
+    return () => timers.forEach(clearTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Watch the clip: when it reaches its final frame, hold there and resolve
+  // the wordmark in alongside the (already-shown) words. onNext fires after
+  // a beat on that end frame — "words, logo, and the video end… like that".
   useEffect(() => {
     const iv = setInterval(() => {
       const p = pRef.current;
-      if (p && p.duration > 0 && p.currentTime >= p.duration - 0.15) onNext();
-    }, 250);
+      if (!p || p.duration <= 0) return;
+      if (!resolved && p.currentTime >= p.duration - 0.25) {
+        setResolved(true);
+        p.pause();
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+        logoOpacity.value = withTiming(1, { duration: 300 });
+        logoScale.value = withTiming(1, { duration: 400, easing: Easing.out(Easing.back(1.6)) });
+        setTimeout(onNext, 1400);
+      }
+    }, 120);
     return () => clearInterval(iv);
-  }, [onNext]);
-  const lines = ['', 'Films every shot. Keeps the good ones.', 'Cuts your round into a reel.', 'No editing. Ever.'];
+  }, [resolved, onNext, logoOpacity, logoScale]);
+
   return (
     <View style={styles.fill}>
       <SceneVideo source={VIDEOS.hero} playerRef={(p) => (pRef.current = p)} />
-      {beat > 0 && (
-        <Animated.View key={beat} entering={FadeIn.duration(350)} exiting={FadeOut.duration(200)} style={styles.beatWrap}>
-          <Text style={styles.beatText}>{lines[beat]}</Text>
+      {/* Logo + words TOGETHER at the top (Henry's end-frame screenshot): the
+          black wordmark resolves in above the line, and "Every shot
+          remembered" builds one word at a time beneath it — both held on the
+          video's final frame. */}
+      <View style={styles.topStack} pointerEvents="none">
+        <Animated.View style={logoStyle}>
+          <Image source={WORDMARK} style={styles.wordmark} resizeMode="contain" />
         </Animated.View>
-      )}
-      <Animated.View style={[styles.brandWrap, logoStyle]}>
-        <Image source={WORDMARK} style={styles.wordmark} resizeMode="contain" />
-      </Animated.View>
+        <Text style={styles.bigWord}>{WORDS.slice(0, wordCount).join(' ')}</Text>
+      </View>
     </View>
   );
 }
@@ -567,106 +575,128 @@ function PenaltyChip() {
   );
 }
 
-function PreviewScene({ onNext }: { onNext: () => void }) {
-  // The three shots just "recorded", 2s each; tap hurries it along.
-  const clips = [VIDEOS.shot1, VIDEOS.shot2, VIDEOS.shot3];
-  const [i, setI] = useState(0);
-  useEffect(() => {
-    const t = setTimeout(() => (i < clips.length - 1 ? setI(i + 1) : onNext()), 2000);
-    return () => clearTimeout(t);
-  }, [i, onNext, clips.length]);
-  return (
-    <Pressable style={styles.fill} onPress={() => (i < clips.length - 1 ? setI(i + 1) : onNext())}>
-      <SceneVideo key={i} source={clips[i]} muted />
-      <View style={styles.beatWrap}>
-        <Text style={styles.beatText}>Your round, cut to the good bits · {i + 1}/3</Text>
-      </View>
-    </Pressable>
-  );
-}
+function StorylineScene({ onNext }: { onNext: () => void }) {
+  // "Create your own reel" as ONE continuous storyline (Henry, 2 Sep). His
+  // beats, in order: four shots sit at the bottom → they move over each other
+  // in the middle → vibrate → become one, all with the narration —
+  // "recorded videos are long and hard to edit" → "AI trims everything into
+  // the few seconds that matter" → the trimmer shortens to the 3s that
+  // matter → the stitch → reel ready to share. Built from his real par-5
+  // clips (posters for the pieces, the offline-stitched reel for the payoff).
+  type Beat = 'gather' | 'merge' | 'trim' | 'stitch' | 'reel';
+  const [beat, setBeat] = useState<Beat>('gather');
+  const SAMPLE_POSTERS = [
+    require('@/assets/onboarding/sample1_poster.jpg'),
+    require('@/assets/onboarding/sample2_poster.jpg'),
+    require('@/assets/onboarding/sample3_poster.jpg'),
+    require('@/assets/onboarding/sample4_poster.jpg'),
+  ];
 
-function ExportScene({ onNext }: { onNext: () => void }) {
-  // "The reel lifts off" (plan §13.4/§13.7e). Opens with the export gag —
-  // the bar fills in 400ms flat, because there is no rendering purgatory —
-  // then the sample reel shrinks to a card over a row of ANONYMOUS grey app
-  // slots (no logos: reads as "everywhere", fakes nothing) and swipes itself
-  // upward the way the user's own reels will. No social branding anywhere.
-  const [stage, setStage] = useState<'exporting' | 'card' | 'gone'>('exporting');
-  const progress = useRef(new RNAnimated.Value(0)).current;
-  const cardScale = useSharedValue(1);
-  const cardY = useSharedValue(0);
-  const cardRadius = useSharedValue(0);
-  const cardStyle = useAnimatedStyle(() => ({
-    transform: [{ scale: cardScale.value }, { translateY: cardY.value }],
-    borderRadius: cardRadius.value,
-  }));
-  const { useVideoPlayer, VideoView } = ExpoVideo!;
-  const player = useVideoPlayer(VIDEOS.reel, (p) => {
-    p.loop = true;
-    p.muted = true;
-    p.play();
-  });
+  // Four tiles: from a row along the bottom, into a converging stack in the
+  // middle, vibrate, then collapse into one.
+  const converge = useSharedValue(0); // 0 = spread at bottom, 1 = stacked centre
+  const buzz = useSharedValue(0);
+  const merge = useSharedValue(0);    // 0 = four tiles, 1 = fused single
+  const trimW = useSharedValue(1);    // 1 = full, → 0.32 (the 3s that matter)
+  const reelScale = useSharedValue(0.9);
+  const reelOpacity = useSharedValue(0);
+
+  const { useVideoPlayer, VideoView } = ExpoVideo ?? { useVideoPlayer: null, VideoView: null };
+  // eslint-disable-next-line react-hooks/rules-of-hooks
+  const player = ExpoVideo ? ExpoVideo.useVideoPlayer(VIDEOS.reel, (p) => { p.loop = true; p.muted = true; }) : null;
 
   useEffect(() => {
-    RNAnimated.timing(progress, { toValue: 1, duration: 400, useNativeDriver: false }).start(() => {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      setStage('card');
-      cardScale.value = withTiming(0.62, { duration: 450, easing: Easing.out(Easing.cubic) });
-      cardRadius.value = withTiming(24, { duration: 450 });
-      // Hold the card for a beat, then it posts itself — upward, gone.
-      cardY.value = withDelay(
-        2200,
-        withTiming(-900, { duration: 500, easing: Easing.in(Easing.cubic) }, (f) => {
-          if (f) runOnJS(finishLift)();
-        })
-      );
-    });
+    // gather → merge
+    converge.value = withDelay(300, withTiming(1, { duration: 900, easing: Easing.inOut(Easing.cubic) }, (f) => {
+      if (f) runOnJS(setBeat)('merge');
+    }));
+    // buzz + fuse
+    buzz.value = withDelay(1400, withRepeat(withTiming(1, { duration: 60 }), 8, true));
+    merge.value = withDelay(1400, withTiming(1, { duration: 700 }, (f) => {
+      if (f) {
+        runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Heavy);
+        runOnJS(setBeat)('trim');
+      }
+    }));
+    // trim down to the 3s that matter
+    trimW.value = withDelay(2600, withTiming(0.32, { duration: 900, easing: Easing.out(Easing.cubic) }, (f) => {
+      if (f) runOnJS(setBeat)('stitch');
+    }));
+    // stitch → reel
+    reelOpacity.value = withDelay(4000, withTiming(1, { duration: 400 }));
+    reelScale.value = withDelay(4000, withTiming(1, { duration: 500 }, (f) => {
+      if (f) {
+        runOnJS(setBeat)('reel');
+        if (player) runOnJS(playReel)();
+      }
+    }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function finishLift() {
-    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-    setStage('gone');
+  function playReel() {
+    player?.play();
   }
+
+  const NARRATION: Record<Beat, string> = {
+    gather: 'Recorded videos are long and hard to edit.',
+    merge: 'Recorded videos are long and hard to edit.',
+    trim: 'AI trims everything into the few seconds that matter.',
+    stitch: 'Then stitches them into one reel.',
+    reel: 'Reel ready to share.',
+  };
+
+  const tileStyle = (i: number) =>
+    useAnimatedStyle(() => {
+      const spreadX = (i - 1.5) * 92; // bottom row spacing
+      const x = spreadX * (1 - converge.value);
+      const y = (1 - converge.value) * 230; // start low, rise to centre
+      const jitter = buzz.value * (i % 2 === 0 ? 3 : -3);
+      const w = i === 0 ? 84 : 84 * (1 - merge.value); // others collapse into the first
+      return {
+        opacity: i === 0 ? 1 : 1 - merge.value,
+        width: Math.max(2, i === 0 ? 84 * trimW.value * 1 + 84 * (1 - trimW.value) * 0 + 84 : w) === 0 ? 2 : (i === 0 ? 84 : w),
+        transform: [{ translateX: x + jitter }, { translateY: y }],
+      };
+    });
+
+  // The surviving tile also carries the trim shave once merged.
+  const firstTileWidth = useAnimatedStyle(() => ({ width: 84 }));
 
   return (
     <View style={[styles.fill, { backgroundColor: '#0A0A0F' }]}>
-      {stage === 'exporting' && (
-        <View style={[styles.fill, styles.center, { padding: 32 }]}>
-          <View style={{ width: '80%', gap: 14, alignItems: 'center' }}>
-            <Text style={styles.h1}>Exporting your reel…</Text>
-            <View style={styles.progressTrack}>
-              <RNAnimated.View style={[styles.progressFill, { width: progress.interpolate({ inputRange: [0, 1], outputRange: ['0%', '100%'] }) }]} />
-            </View>
-            <Text style={styles.sub}>That was the whole export.</Text>
-          </View>
-        </View>
-      )}
-      {stage === 'card' && (
+      {beat === 'reel' && player && VideoView ? (
+        <Animated.View style={[StyleSheet.absoluteFillObject, useAnimatedStyle(() => ({ opacity: reelOpacity.value, transform: [{ scale: reelScale.value }] }))]}>
+          <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />
+        </Animated.View>
+      ) : (
         <View style={[styles.fill, styles.center]}>
-          <View style={styles.slotRow}>
-            {[0, 1, 2, 3, 4].map((i) => (
-              <View key={i} style={styles.appSlot} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 140 }}>
+            {SAMPLE_POSTERS.map((src, i) => (
+              <Animated.View key={i} style={[styles.storyTile, tileStyle(i), i === 0 && beat === 'trim' ? { overflow: 'hidden' } : null]}>
+                <Image source={src} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+              </Animated.View>
             ))}
           </View>
-          <Animated.View style={[styles.reelCard, cardStyle]}>
-            <VideoView player={player} style={{ flex: 1 }} contentFit="cover" nativeControls={false} />
-          </Animated.View>
         </View>
       )}
-      {stage === 'gone' && (
-        <Animated.View entering={FadeIn.duration(300)} style={[styles.fill, styles.center, { padding: 32 }]}>
-          <View style={{ alignItems: 'center', gap: 16 }}>
-            <Text style={styles.h1}>One tap. Anywhere you post.</Text>
-            <Pressable onPress={onNext} style={styles.cta}>
-              <Text style={styles.ctaText}>Now make YOURS</Text>
-            </Pressable>
-          </View>
+
+      <View style={styles.narrationWrap} pointerEvents="none">
+        <Animated.Text key={NARRATION[beat]} entering={FadeIn.duration(300)} style={styles.narration}>
+          {NARRATION[beat]}
+        </Animated.Text>
+      </View>
+
+      {beat === 'reel' && (
+        <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
+          <Pressable onPress={onNext} style={styles.cta}>
+            <Text style={styles.ctaText}>Now make YOURS</Text>
+          </Pressable>
         </Animated.View>
       )}
     </View>
   );
 }
+
 
 const styles = StyleSheet.create({
   fill: { flex: 1 },
@@ -681,7 +711,9 @@ const styles = StyleSheet.create({
   beatWrap: { position: 'absolute', bottom: 130, left: 24, right: 24, alignItems: 'center' },
   beatText: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   brandWrap: { position: 'absolute', top: 70, left: 0, right: 0, alignItems: 'center' },
-  wordmark: { width: 190, height: 54 },
+  wordmark: { width: 200, height: 58 },
+  topStack: { position: 'absolute', top: 70, left: 24, right: 24, alignItems: 'center', gap: 14 },
+  bigWord: { color: '#fff', fontSize: 26, fontWeight: '900', textAlign: 'center', letterSpacing: 0.5, textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 10 },
   ghostRing: { position: 'absolute', bottom: -6, width: 96, height: 96, borderRadius: 48, borderWidth: 3, borderColor: '#fff' },
   ball: { position: 'absolute', top: 0, left: 0, width: 10, height: 10, borderRadius: 5, backgroundColor: '#fff', shadowColor: '#fff', shadowOpacity: 0.8, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } },
   clicker: { width: 84, height: 84, borderRadius: 42, backgroundColor: '#1B5E20', borderWidth: 4, borderColor: '#4CAF50', alignItems: 'center', justifyContent: 'center', shadowColor: '#4CAF50', shadowOpacity: 0.6, shadowRadius: 16, shadowOffset: { width: 0, height: 0 } },
@@ -691,6 +723,10 @@ const styles = StyleSheet.create({
   hudTop: { position: 'absolute', top: 60, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between' },
   hudChip: { backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
   hudChipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  storyTile: { height: 132, marginHorizontal: 4, borderRadius: 8, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.06)' },
+  narrationWrap: { position: 'absolute', bottom: 150, left: 24, right: 24, alignItems: 'center' },
+  narration: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
+  storyCta: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
   penaltyChip: { backgroundColor: 'rgba(211,47,47,0.95)', borderRadius: 18, paddingHorizontal: 28, paddingVertical: 18 },
   confirmCard: { backgroundColor: 'rgba(76,175,80,0.95)', borderRadius: 18, paddingHorizontal: 28, paddingVertical: 18 },
   confirmText: { color: '#fff', fontSize: 22, fontWeight: '800' },

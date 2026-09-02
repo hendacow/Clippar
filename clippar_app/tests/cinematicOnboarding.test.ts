@@ -50,16 +50,16 @@ test('v2 hands off into the v1 stepper at the Aha step', () => {
   assert.match(v2block, /onSkip/);
 });
 
-// §13.4: the IG framing is retired — the export beat is the lift-off, with
-// anonymous slots and no social branding. Nothing may claim a real post
-// happened; "Anywhere you post" names the user's own future act.
-test('the export beat fakes nothing: no IG asset, anonymous slots, honest gag', () => {
-  const exportScene = cin.match(/function ExportScene[\s\S]*?\n\}/)?.[0] ?? '';
-  assert.doesNotMatch(cin, /igstory/i, 'the story recording is fully retired from onboarding');
-  assert.match(exportScene, /appSlot/);
-  assert.match(exportScene, /That was the whole export/);
-  const visible = [...exportScene.matchAll(/<Text[^>]*>([\s\S]*?)<\/Text>/g)].map((m) => m[1]).join(' ');
-  assert.doesNotMatch(visible, /[Pp]osted\b/, 'never claims a post happened');
+// Rework 2 Sep: EXPORT lift-off replaced by the create-your-own STORYLINE
+// (one continuous beat: four shots gather → merge → trim → stitch → reel).
+// The kit-free / no-fake-post guarantees survive at the component level.
+test('the create-your-own beat is a single storyline, no fake social UI', () => {
+  assert.match(cin, /function StorylineScene/);
+  assert.match(cin, /Recorded videos are long and hard to edit/);
+  assert.match(cin, /AI trims everything into the few seconds that matter/);
+  assert.match(cin, /Reel ready to share/);
+  assert.doesNotMatch(cin, /igstory/i, 'the story recording stays retired');
+  assert.doesNotMatch(cin, /function ExportScene|function PreviewScene/, 'the scrapped scenes are gone');
 });
 
 // v1 finally has funnel telemetry, so the comparison has a baseline.
@@ -107,9 +107,13 @@ test('onboarding is kit-free and the earned moments are observations, not pitche
   assert.match(rec, /recordRoundFacts\(roundState\.clips\.length, shutter\.connected\)/, 'facts are genuinely derived');
 });
 
-// The hero stamps the REAL wordmark at the contact frame — no styled text.
-test('the hero uses the real logo, stamped at contact', () => {
-  assert.match(cin, /clippar-logo-wordmark\.png/);
-  assert.doesNotMatch(cin, /styles\.brand[^W]/, 'the styled-text brand is gone');
-  assert.match(cin, /CONTACT_MS = 800/);
+// Rework 2 Sep: the hero holds on its final frame with the BLACK wordmark
+// and "Every shot remembered" building one word at a time (haptic each),
+// logo + words resolving together at the top. No mid-clip contact stamp.
+test('the hero resolves black logo + word beats on the end frame', () => {
+  assert.match(cin, /clippar-logo-wordmark-black\.png/);
+  assert.match(cin, /const WORDS = \['Every', 'shot', 'remembered'\]/);
+  assert.match(cin, /ImpactFeedbackStyle\.Heavy/, 'a haptic per word');
+  assert.match(cin, /currentTime >= p\.duration - 0\.25/, 'resolves on the final frame, not a timer');
+  assert.doesNotMatch(cin, /CONTACT_MS/, 'the old mid-downswing stamp is gone');
 });
