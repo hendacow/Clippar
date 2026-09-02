@@ -610,6 +610,7 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
   const flash = useSharedValue(0);  // white flash at the fuse instant
   const trimL = useSharedValue(0);  // left handle 0→1 closes in
   const trimR = useSharedValue(0);  // right handle 0→1 closes in
+  const stitchP = useSharedValue(0);  // 0 = segments apart, 1 = locked into a strip
   const reelOpacity = useSharedValue(0);
   const reelScale = useSharedValue(0.92);
 
@@ -663,6 +664,22 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
   const rightHandleStyle = useAnimatedStyle(() => ({ right: `${trimR.value * 19}%` as unknown as number }));
   const reelStyle = useAnimatedStyle(() => ({ opacity: reelOpacity.value, transform: [{ scale: reelScale.value }] }));
 
+  // The stitch strip: three segments slide together and lock edge-to-edge.
+  // The middle one is the clip we just trimmed, so the kept moment visibly
+  // becomes part of the reel rather than the picture simply not changing.
+  const SEG_W = 112;
+  const SEG_H = 150;
+  const segStyle = (i: number) =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useAnimatedStyle(() => ({
+      opacity: i === 1 ? 1 : stitchP.value,
+      transform: [{ translateX: (i - 1) * 96 * (1 - stitchP.value) }],
+    }));
+  const g0 = segStyle(0);
+  const g1 = segStyle(1);
+  const g2 = segStyle(2);
+  const segs = [g0, g1, g2];
+
   useEffect(() => {
     // 0.0–1.6s: four LARGE shots sit along the bottom. "recorded videos…"
     rise.value = withDelay(1400, withTiming(1, { duration: 1100, easing: Easing.out(Easing.cubic) }, (f) => {
@@ -689,6 +706,8 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
         runOnJS(setBeat)('stitch');
       }
     }));
+    // 6.9s: the three segments converge and lock — the stitch itself.
+    stitchP.value = withDelay(6900, withTiming(1, { duration: 600, easing: Easing.out(Easing.cubic) }));
     // 7.2s: stitch → reel.
     reelOpacity.value = withDelay(7600, withTiming(1, { duration: 500 }));
     reelScale.value = withDelay(7600, withTiming(1, { duration: 700 }, (f) => {
@@ -714,7 +733,8 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
   };
 
   const showTiles = beat === 'gather' || beat === 'stack' || beat === 'fuse';
-  const showCard = beat === 'fuse' || beat === 'trim' || beat === 'stitch';
+  const showCard = beat === 'fuse' || beat === 'trim';
+  const showStrip = beat === 'stitch';
 
   return (
     <View style={[styles.fill, { backgroundColor: '#0A0A0F' }]}>
@@ -727,7 +747,7 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
 
       {/* The four tiles: bottom row → risen stack → fade into the fused card. */}
       {showTiles && (
-        <View style={[styles.fill, styles.center]} pointerEvents="none">
+        <View style={[styles.fill, styles.center, styles.contentLift]} pointerEvents="none">
           <View style={{ width: 300, height: 320, alignItems: 'center', justifyContent: 'center' }}>
             {POSTERS.map((src, i) => (
               <Animated.View key={i} style={[styles.storyBigTile, { width: TILE_W, height: TILE_H }, tiles[i]]}>
@@ -742,7 +762,7 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
           margins appear only while trimming ('trim'); on 'stitch' the trim is
           done so the card is a clean kept clip, matching the caption. */}
       {showCard && (
-        <View style={[styles.fill, styles.center]} pointerEvents="none">
+        <View style={[styles.fill, styles.center, styles.contentLift]} pointerEvents="none">
           <Animated.View style={[styles.fusedCard, { width: CARD_W, height: CARD_H }, cardStyle]}>
             <Image source={TRIM_FRAME} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
             {beat === 'trim' && (
@@ -759,6 +779,21 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
               <Text style={styles.secondsPillText}>the 3s that matter</Text>
             </Animated.View>
           )}
+        </View>
+      )}
+
+      {/* The stitch: three segments converge and lock edge-to-edge. Distinct
+          from the trim beat by construction — if this rendered the same card
+          again, two consecutive beats would look frozen. */}
+      {showStrip && (
+        <View style={[styles.fill, styles.center, styles.contentLift]} pointerEvents="none">
+          <View style={{ flexDirection: 'row' }}>
+            {[POSTERS[0], TRIM_FRAME, POSTERS[2]].map((src, i) => (
+              <Animated.View key={i} style={[styles.stripSeg, { width: SEG_W, height: SEG_H }, segs[i]]}>
+                <Image source={src} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+              </Animated.View>
+            ))}
+          </View>
         </View>
       )}
 
@@ -824,7 +859,15 @@ const styles = StyleSheet.create({
   secondsPillText: { color: '#0A0A0F', fontSize: 15, fontWeight: '900' },
   reelNarrationBand: { position: 'absolute', top: 90, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 18, paddingVertical: 10 },
   reelNarrationText: { color: '#fff', fontSize: 18, fontWeight: '800', textAlign: 'center' },
-  narrationWrap: { position: 'absolute', bottom: 150, left: 24, right: 24, alignItems: 'center' },
+  // Content sat dead-centre of the full screen, which left the top ~37% empty
+  // and pushed everything into the lower two-thirds. Lifting it is one padding.
+  contentLift: { paddingBottom: 200 },
+  stripSeg: { borderRadius: 8, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: 'rgba(255,255,255,0.75)' },
+  // The caption is scrimmed, not just shadowed: while the four tiles rise from
+  // the bottom edge they pass straight through this band, and white-on-grass
+  // with only a text shadow left "to edit." close to unreadable. Invisible
+  // over the black beats, load-bearing over the tiles — same fix as the reel.
+  narrationWrap: { position: 'absolute', bottom: 140, left: 24, right: 24, alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.62)', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14 },
   narration: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   storyCta: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
   penaltyChip: { backgroundColor: 'rgba(211,47,47,0.95)', borderRadius: 18, paddingHorizontal: 28, paddingVertical: 18 },
