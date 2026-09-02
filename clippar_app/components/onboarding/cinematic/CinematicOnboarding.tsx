@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, Image, Pressable, StyleSheet, Platform, Animated as RNAnimated } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
-import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withDelay, Easing, runOnJS } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
 import { CLICK_WINDOW_MS } from '@/hooks/useShutter';
 import { logFunnel } from '@/lib/onboardingFunnel';
 import { getSetting, setSetting } from '@/lib/storage';
@@ -576,85 +576,115 @@ function PenaltyChip() {
 }
 
 function StorylineScene({ onNext }: { onNext: () => void }) {
-  // "Create your own reel" as ONE continuous storyline (Henry, 2 Sep):
-  // four shots at the bottom → converge in the middle → vibrate → fuse into
-  // one → trim to the seconds that matter → stitch → reel ready to share,
-  // narrated in his order. Built from his real par-5 posters + stitched reel.
+  // "Create your own reel" as ONE continuous storyline, rebuilt to Henry's
+  // exact spec (2 Sep): four LARGE shots sit along the bottom → rise and
+  // stack over each other in the middle → vibrate → FUSE into one (flash +
+  // haptic) → a real TRIMMER with handles closes in to the seconds that
+  // matter → stitch → the reel plays, ready to share. His words, and the
+  // three things the first pass got wrong: tiles too small/mid-screen, the
+  // fuse didn't read, and the "trimmer" was a strip not a trimmer.
   //
-  // Rules-of-hooks: every useAnimatedStyle is declared ONCE at the top,
-  // unconditionally and in fixed count — an earlier version called them in a
-  // .map() and inside the reel branch, which crashed on the beat flip (caught
-  // in the 2 Sep sim pass).
-  type Beat = 'gather' | 'merge' | 'trim' | 'stitch' | 'reel';
+  // Rules-of-hooks: every animated style is a top-level hook, fixed count —
+  // the crash the sim caught came from a conditional/looped useAnimatedStyle.
+  type Beat = 'gather' | 'stack' | 'fuse' | 'trim' | 'stitch' | 'reel';
   const [beat, setBeat] = useState<Beat>('gather');
-  const SAMPLE_POSTERS = [
+  const POSTERS = [
     require('@/assets/onboarding/sample1_poster.jpg'),
     require('@/assets/onboarding/sample2_poster.jpg'),
     require('@/assets/onboarding/sample3_poster.jpg'),
     require('@/assets/onboarding/sample4_poster.jpg'),
   ];
 
-  const converge = useSharedValue(0);
-  const buzz = useSharedValue(0);
-  const merge = useSharedValue(0);
-  const trimW = useSharedValue(1);
-  const reelScale = useSharedValue(0.9);
+  // Timeline drivers.
+  const rise = useSharedValue(0);   // 0 = row at bottom, 1 = risen to centre
+  const stack = useSharedValue(0);  // 0 = fanned row, 1 = overlapping stack
+  const buzz = useSharedValue(0);   // vibration amplitude
+  const fuse = useSharedValue(0);   // 0 = four cards, 1 = one card
+  const flash = useSharedValue(0);  // white flash at the fuse instant
+  const trimL = useSharedValue(0);  // left handle 0→1 closes in
+  const trimR = useSharedValue(0);  // right handle 0→1 closes in
   const reelOpacity = useSharedValue(0);
+  const reelScale = useSharedValue(0.92);
 
   const { useVideoPlayer, VideoView } = ExpoVideo ?? { useVideoPlayer: null, VideoView: null };
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const player = ExpoVideo ? ExpoVideo.useVideoPlayer(VIDEOS.reel, (p) => { p.loop = true; p.muted = true; }) : null;
 
-  // Fixed, top-level animated styles — one per tile, plus the reel container.
-  const makeTile = (i: number) =>
+  const TILE_W = 128;
+  const TILE_H = 184;
+  const ROW_GAP = 92; // < TILE_W so the bottom row overlaps into a fan
+
+  // Four tile styles, always declared, fixed order.
+  const tileStyle = (i: number) =>
     // eslint-disable-next-line react-hooks/rules-of-hooks
     useAnimatedStyle(() => {
-      const spreadX = (i - 1.5) * 92;
-      const x = spreadX * (1 - converge.value);
-      const y = (1 - converge.value) * 230;
-      const jitter = buzz.value * (i % 2 === 0 ? 3 : -3);
-      // Tile 0 survives and carries the trim shave; the others collapse in.
-      const width = i === 0 ? 84 * (trimW.value * 0.6 + 0.4) : 84 * (1 - merge.value);
+      const fromX = (i - 1.5) * ROW_GAP;        // fanned row spread
+      const x = fromX * (1 - stack.value);       // → 0 as they stack centre
+      const y = (1 - rise.value) * 300;          // start 300px low, rise to centre
+      const jitter = buzz.value * (i % 2 === 0 ? 4 : -4);
+      const rot = (i - 1.5) * 6 * stack.value * (1 - fuse.value); // deck tilt, straightens on fuse
+      // Non-lead tiles fade and slide into the lead as they fuse.
+      const fadeOut = i === 0 ? 0 : fuse.value;
       return {
-        opacity: i === 0 ? 1 : 1 - merge.value,
-        width: Math.max(2, width),
-        transform: [{ translateX: x + jitter }, { translateY: y }],
+        opacity: 1 - fadeOut,
+        transform: [
+          { translateX: x + jitter - fromX * fuse.value * 0 },
+          { translateY: y },
+          { rotate: `${rot}deg` },
+          { scale: 1 - 0.04 * (3 - i) * stack.value * (1 - fuse.value) },
+        ],
       };
     });
-  const tile0 = makeTile(0);
-  const tile1 = makeTile(1);
-  const tile2 = makeTile(2);
-  const tile3 = makeTile(3);
-  const tileStyles = [tile0, tile1, tile2, tile3];
-  const reelStyle = useAnimatedStyle(() => ({
-    opacity: reelOpacity.value,
-    transform: [{ scale: reelScale.value }],
+  const t0 = tileStyle(0);
+  const t1 = tileStyle(1);
+  const t2 = tileStyle(2);
+  const t3 = tileStyle(3);
+  const tiles = [t0, t1, t2, t3];
+
+  // The fused card grows from the lead tile; the trimmer lives on it.
+  const cardStyle = useAnimatedStyle(() => ({
+    opacity: fuse.value,
+    width: TILE_W + (250 - TILE_W) * fuse.value,
+    height: TILE_H + (150 - 0) * 0 + (TILE_H) * 0, // height fixed via style; width grows
+    transform: [{ translateY: (1 - rise.value) * 300 }],
   }));
+  const flashStyle = useAnimatedStyle(() => ({ opacity: flash.value }));
+  // Trim handles + dimmed margins (fractions of the fused card width).
+  const leftDimStyle = useAnimatedStyle(() => ({ width: `${trimL.value * 34}%` as unknown as number }));
+  const rightDimStyle = useAnimatedStyle(() => ({ width: `${trimR.value * 34}%` as unknown as number }));
+  const leftHandleStyle = useAnimatedStyle(() => ({ left: `${trimL.value * 34}%` as unknown as number }));
+  const rightHandleStyle = useAnimatedStyle(() => ({ right: `${trimR.value * 34}%` as unknown as number }));
+  const reelStyle = useAnimatedStyle(() => ({ opacity: reelOpacity.value, transform: [{ scale: reelScale.value }] }));
 
   useEffect(() => {
-    // Timings stretched deliberately (2 Sep sim pass): at the first pace the
-    // whole story blew past in ~4s and the convergence never read — three
-    // burst captures at 0.7s only ever landed on the reel. Each beat now
-    // holds long enough to be a beat.
-    // 0.0–1.6s: four shots sit low, "recorded videos are long..."
-    converge.value = withDelay(1200, withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.cubic) }, (f) => {
-      if (f) runOnJS(setBeat)('merge');
+    // 0.0–1.6s: four LARGE shots sit along the bottom. "recorded videos…"
+    rise.value = withDelay(1400, withTiming(1, { duration: 1100, easing: Easing.out(Easing.cubic) }, (f) => {
+      if (f) runOnJS(setBeat)('stack');
     }));
-    // ~2.6s: they gather centre, vibrate, and fuse into one (haptic)
-    buzz.value = withDelay(2700, withRepeat(withTiming(1, { duration: 70 }), 10, true));
-    merge.value = withDelay(2900, withTiming(1, { duration: 1000 }, (f) => {
+    // 2.5s: they slide over each other into a stack in the middle.
+    stack.value = withDelay(2500, withTiming(1, { duration: 1000, easing: Easing.inOut(Easing.cubic) }, (f) => {
+      if (f) runOnJS(setBeat)('fuse');
+    }));
+    // 3.6s: vibrate, then FUSE — flash + heavy haptic, four → one.
+    buzz.value = withDelay(3600, withRepeat(withTiming(1, { duration: 55 }), 12, true));
+    fuse.value = withDelay(4300, withTiming(1, { duration: 650, easing: Easing.out(Easing.cubic) }, (f) => {
       if (f) {
         runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Heavy);
         runOnJS(setBeat)('trim');
       }
     }));
-    // ~4.4s: "AI trims..." then the shave to the seconds that matter
-    trimW.value = withDelay(4600, withTiming(0.3, { duration: 1400, easing: Easing.out(Easing.cubic) }, (f) => {
-      if (f) runOnJS(setBeat)('stitch');
+    flash.value = withDelay(4300, withSequence(withTiming(0.85, { duration: 120 }), withTiming(0, { duration: 320 })));
+    // 5.2s: "AI trims…" — the trimmer handles close in to the seconds that matter.
+    trimL.value = withDelay(5400, withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.cubic) }));
+    trimR.value = withDelay(5400, withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.cubic) }, (f) => {
+      if (f) {
+        runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Medium);
+        runOnJS(setBeat)('stitch');
+      }
     }));
-    // ~6.2s: stitch → reel
-    reelOpacity.value = withDelay(6400, withTiming(1, { duration: 500 }));
-    reelScale.value = withDelay(6400, withTiming(1, { duration: 700 }, (f) => {
+    // 7.2s: stitch → reel.
+    reelOpacity.value = withDelay(7600, withTiming(1, { duration: 500 }));
+    reelScale.value = withDelay(7600, withTiming(1, { duration: 700 }, (f) => {
       if (f) {
         runOnJS(setBeat)('reel');
         runOnJS(playReel)();
@@ -669,33 +699,58 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
 
   const NARRATION: Record<Beat, string> = {
     gather: 'Recorded videos are long and hard to edit.',
-    merge: 'Recorded videos are long and hard to edit.',
+    stack: 'Recorded videos are long and hard to edit.',
+    fuse: 'Recorded videos are long and hard to edit.',
     trim: 'AI trims everything into the few seconds that matter.',
     stitch: 'Then stitches them into one reel.',
     reel: 'Reel ready to share.',
   };
 
+  const showTiles = beat === 'gather' || beat === 'stack' || beat === 'fuse';
+  const showCard = beat === 'fuse' || beat === 'trim' || beat === 'stitch';
+
   return (
     <View style={[styles.fill, { backgroundColor: '#0A0A0F' }]}>
-      {/* Reel container is ALWAYS mounted (opacity-driven) so no hook count
-          changes when the beat flips. */}
+      {/* Reel always mounted (opacity-driven), so hook count never changes. */}
       {player && VideoView && (
         <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, reelStyle]}>
           <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />
         </Animated.View>
       )}
 
-      {beat !== 'reel' && (
-        <View style={[styles.fill, styles.center]}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 140 }}>
-            {SAMPLE_POSTERS.map((src, i) => (
-              <Animated.View key={i} style={[styles.storyTile, tileStyles[i]]}>
+      {/* The four tiles: bottom row → risen stack → fade into the fused card. */}
+      {showTiles && (
+        <View style={[styles.fill, styles.center]} pointerEvents="none">
+          <View style={{ width: 300, height: 320, alignItems: 'center', justifyContent: 'center' }}>
+            {POSTERS.map((src, i) => (
+              <Animated.View key={i} style={[styles.storyBigTile, { width: TILE_W, height: TILE_H }, tiles[i]]}>
                 <Image source={src} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
               </Animated.View>
             ))}
           </View>
         </View>
       )}
+
+      {/* The fused card + trimmer. Grows from the lead tile at fuse. */}
+      {showCard && (
+        <View style={[styles.fill, styles.center]} pointerEvents="none">
+          <Animated.View style={[styles.fusedCard, { height: TILE_H }, cardStyle]}>
+            <Image source={POSTERS[2]} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
+            {/* dimmed trimmed-off margins */}
+            <Animated.View style={[styles.trimDim, { left: 0 }, leftDimStyle]} />
+            <Animated.View style={[styles.trimDim, { right: 0 }, rightDimStyle]} />
+            {/* the two handles closing in */}
+            <Animated.View style={[styles.trimHandle, leftHandleStyle]} />
+            <Animated.View style={[styles.trimHandle, rightHandleStyle]} />
+          </Animated.View>
+          {(beat === 'trim' || beat === 'stitch') && (
+            <Animated.Text entering={FadeIn.duration(200)} style={styles.trimSeconds}>3s</Animated.Text>
+          )}
+        </View>
+      )}
+
+      {/* White fuse flash */}
+      <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: '#fff' }, flashStyle]} />
 
       <View style={styles.narrationWrap} pointerEvents="none">
         <Animated.Text key={NARRATION[beat]} entering={FadeIn.duration(300)} style={styles.narration}>
@@ -740,7 +795,11 @@ const styles = StyleSheet.create({
   hudTop: { position: 'absolute', top: 60, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between' },
   hudChip: { backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
   hudChipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
-  storyTile: { height: 132, marginHorizontal: 4, borderRadius: 8, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.06)' },
+  storyBigTile: { position: 'absolute', borderRadius: 12, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } },
+  fusedCard: { position: 'absolute', borderRadius: 12, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: '#fff' },
+  trimDim: { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.62)' },
+  trimHandle: { position: 'absolute', top: 0, bottom: 0, width: 8, backgroundColor: '#FFD54F', borderRadius: 3 },
+  trimSeconds: { position: 'absolute', color: '#FFD54F', fontSize: 22, fontWeight: '900' },
   narrationWrap: { position: 'absolute', bottom: 150, left: 24, right: 24, alignItems: 'center' },
   narration: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   storyCta: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
