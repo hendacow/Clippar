@@ -49,6 +49,10 @@ const VIDEOS = {
   reel: require('@/assets/onboarding/sample_reel.mp4'),
 } as const;
 
+// Landscape frame for the trimmer card: portrait golf posters cover-crop to
+// sky in a wide card, so the trim beat needs a frame that stays a golf clip.
+const TRIM_FRAME = require('@/assets/onboarding/trim_frame.jpg');
+
 const SCENES = [
   'MONTAGE',
   'CLICKER_INTRO',
@@ -735,7 +739,7 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
       {showCard && (
         <View style={[styles.fill, styles.center]} pointerEvents="none">
           <Animated.View style={[styles.fusedCard, { height: TILE_H }, cardStyle]}>
-            <Image source={POSTERS[2]} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
+            <Image source={TRIM_FRAME} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
             {/* dimmed trimmed-off margins */}
             <Animated.View style={[styles.trimDim, { left: 0 }, leftDimStyle]} />
             <Animated.View style={[styles.trimDim, { right: 0 }, rightDimStyle]} />
