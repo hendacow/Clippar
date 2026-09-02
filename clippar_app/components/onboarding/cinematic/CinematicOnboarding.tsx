@@ -576,13 +576,15 @@ function PenaltyChip() {
 }
 
 function StorylineScene({ onNext }: { onNext: () => void }) {
-  // "Create your own reel" as ONE continuous storyline (Henry, 2 Sep). His
-  // beats, in order: four shots sit at the bottom → they move over each other
-  // in the middle → vibrate → become one, all with the narration —
-  // "recorded videos are long and hard to edit" → "AI trims everything into
-  // the few seconds that matter" → the trimmer shortens to the 3s that
-  // matter → the stitch → reel ready to share. Built from his real par-5
-  // clips (posters for the pieces, the offline-stitched reel for the payoff).
+  // "Create your own reel" as ONE continuous storyline (Henry, 2 Sep):
+  // four shots at the bottom → converge in the middle → vibrate → fuse into
+  // one → trim to the seconds that matter → stitch → reel ready to share,
+  // narrated in his order. Built from his real par-5 posters + stitched reel.
+  //
+  // Rules-of-hooks: every useAnimatedStyle is declared ONCE at the top,
+  // unconditionally and in fixed count — an earlier version called them in a
+  // .map() and inside the reel branch, which crashed on the beat flip (caught
+  // in the 2 Sep sim pass).
   type Beat = 'gather' | 'merge' | 'trim' | 'stitch' | 'reel';
   const [beat, setBeat] = useState<Beat>('gather');
   const SAMPLE_POSTERS = [
@@ -592,12 +594,10 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
     require('@/assets/onboarding/sample4_poster.jpg'),
   ];
 
-  // Four tiles: from a row along the bottom, into a converging stack in the
-  // middle, vibrate, then collapse into one.
-  const converge = useSharedValue(0); // 0 = spread at bottom, 1 = stacked centre
+  const converge = useSharedValue(0);
   const buzz = useSharedValue(0);
-  const merge = useSharedValue(0);    // 0 = four tiles, 1 = fused single
-  const trimW = useSharedValue(1);    // 1 = full, → 0.32 (the 3s that matter)
+  const merge = useSharedValue(0);
+  const trimW = useSharedValue(1);
   const reelScale = useSharedValue(0.9);
   const reelOpacity = useSharedValue(0);
 
@@ -605,29 +605,59 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
   // eslint-disable-next-line react-hooks/rules-of-hooks
   const player = ExpoVideo ? ExpoVideo.useVideoPlayer(VIDEOS.reel, (p) => { p.loop = true; p.muted = true; }) : null;
 
+  // Fixed, top-level animated styles — one per tile, plus the reel container.
+  const makeTile = (i: number) =>
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useAnimatedStyle(() => {
+      const spreadX = (i - 1.5) * 92;
+      const x = spreadX * (1 - converge.value);
+      const y = (1 - converge.value) * 230;
+      const jitter = buzz.value * (i % 2 === 0 ? 3 : -3);
+      // Tile 0 survives and carries the trim shave; the others collapse in.
+      const width = i === 0 ? 84 * (trimW.value * 0.6 + 0.4) : 84 * (1 - merge.value);
+      return {
+        opacity: i === 0 ? 1 : 1 - merge.value,
+        width: Math.max(2, width),
+        transform: [{ translateX: x + jitter }, { translateY: y }],
+      };
+    });
+  const tile0 = makeTile(0);
+  const tile1 = makeTile(1);
+  const tile2 = makeTile(2);
+  const tile3 = makeTile(3);
+  const tileStyles = [tile0, tile1, tile2, tile3];
+  const reelStyle = useAnimatedStyle(() => ({
+    opacity: reelOpacity.value,
+    transform: [{ scale: reelScale.value }],
+  }));
+
   useEffect(() => {
-    // gather → merge
-    converge.value = withDelay(300, withTiming(1, { duration: 900, easing: Easing.inOut(Easing.cubic) }, (f) => {
+    // Timings stretched deliberately (2 Sep sim pass): at the first pace the
+    // whole story blew past in ~4s and the convergence never read — three
+    // burst captures at 0.7s only ever landed on the reel. Each beat now
+    // holds long enough to be a beat.
+    // 0.0–1.6s: four shots sit low, "recorded videos are long..."
+    converge.value = withDelay(1200, withTiming(1, { duration: 1400, easing: Easing.inOut(Easing.cubic) }, (f) => {
       if (f) runOnJS(setBeat)('merge');
     }));
-    // buzz + fuse
-    buzz.value = withDelay(1400, withRepeat(withTiming(1, { duration: 60 }), 8, true));
-    merge.value = withDelay(1400, withTiming(1, { duration: 700 }, (f) => {
+    // ~2.6s: they gather centre, vibrate, and fuse into one (haptic)
+    buzz.value = withDelay(2700, withRepeat(withTiming(1, { duration: 70 }), 10, true));
+    merge.value = withDelay(2900, withTiming(1, { duration: 1000 }, (f) => {
       if (f) {
         runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Heavy);
         runOnJS(setBeat)('trim');
       }
     }));
-    // trim down to the 3s that matter
-    trimW.value = withDelay(2600, withTiming(0.32, { duration: 900, easing: Easing.out(Easing.cubic) }, (f) => {
+    // ~4.4s: "AI trims..." then the shave to the seconds that matter
+    trimW.value = withDelay(4600, withTiming(0.3, { duration: 1400, easing: Easing.out(Easing.cubic) }, (f) => {
       if (f) runOnJS(setBeat)('stitch');
     }));
-    // stitch → reel
-    reelOpacity.value = withDelay(4000, withTiming(1, { duration: 400 }));
-    reelScale.value = withDelay(4000, withTiming(1, { duration: 500 }, (f) => {
+    // ~6.2s: stitch → reel
+    reelOpacity.value = withDelay(6400, withTiming(1, { duration: 500 }));
+    reelScale.value = withDelay(6400, withTiming(1, { duration: 700 }, (f) => {
       if (f) {
         runOnJS(setBeat)('reel');
-        if (player) runOnJS(playReel)();
+        runOnJS(playReel)();
       }
     }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -645,34 +675,21 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
     reel: 'Reel ready to share.',
   };
 
-  const tileStyle = (i: number) =>
-    useAnimatedStyle(() => {
-      const spreadX = (i - 1.5) * 92; // bottom row spacing
-      const x = spreadX * (1 - converge.value);
-      const y = (1 - converge.value) * 230; // start low, rise to centre
-      const jitter = buzz.value * (i % 2 === 0 ? 3 : -3);
-      const w = i === 0 ? 84 : 84 * (1 - merge.value); // others collapse into the first
-      return {
-        opacity: i === 0 ? 1 : 1 - merge.value,
-        width: Math.max(2, i === 0 ? 84 * trimW.value * 1 + 84 * (1 - trimW.value) * 0 + 84 : w) === 0 ? 2 : (i === 0 ? 84 : w),
-        transform: [{ translateX: x + jitter }, { translateY: y }],
-      };
-    });
-
-  // The surviving tile also carries the trim shave once merged.
-  const firstTileWidth = useAnimatedStyle(() => ({ width: 84 }));
-
   return (
     <View style={[styles.fill, { backgroundColor: '#0A0A0F' }]}>
-      {beat === 'reel' && player && VideoView ? (
-        <Animated.View style={[StyleSheet.absoluteFillObject, useAnimatedStyle(() => ({ opacity: reelOpacity.value, transform: [{ scale: reelScale.value }] }))]}>
+      {/* Reel container is ALWAYS mounted (opacity-driven) so no hook count
+          changes when the beat flips. */}
+      {player && VideoView && (
+        <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, reelStyle]}>
           <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />
         </Animated.View>
-      ) : (
+      )}
+
+      {beat !== 'reel' && (
         <View style={[styles.fill, styles.center]}>
           <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', height: 140 }}>
             {SAMPLE_POSTERS.map((src, i) => (
-              <Animated.View key={i} style={[styles.storyTile, tileStyle(i), i === 0 && beat === 'trim' ? { overflow: 'hidden' } : null]}>
+              <Animated.View key={i} style={[styles.storyTile, tileStyles[i]]}>
                 <Image source={src} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
               </Animated.View>
             ))}
