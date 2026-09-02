@@ -110,10 +110,24 @@ test('onboarding is kit-free and the earned moments are observations, not pitche
 // Rework 2 Sep: the hero holds on its final frame with the BLACK wordmark
 // and "Every shot remembered" building one word at a time (haptic each),
 // logo + words resolving together at the top. No mid-clip contact stamp.
-test('the hero resolves black logo + word beats on the end frame', () => {
-  assert.match(cin, /clippar-logo-wordmark-black\.png/);
-  assert.match(cin, /const WORDS = \['Every', 'shot', 'remembered'\]/);
+test('the hero resolves the white lockup + stamped two-tone headline on the end frame', () => {
+  // The WHITE variant is a measured decision, not a preference: on this sky
+  // the black lockup put its green GOLF at 1.43:1 where large text needs
+  // 3.0:1, and only one 5%-wide scrim window cleared 3.0 on both black and
+  // green at once. White and green both want the same dark ground. Swapping
+  // back to black looks like a harmless brand tweak and silently reintroduces
+  // that, so this test exists to make it fail loudly instead.
+  assert.match(cin, /clippar-logo-stacked-white\.png/);
+  assert.doesNotMatch(cin, /clippar-logo-stacked-black\.png/, 'black reintroduces the 1.43:1 green');
+  assert.doesNotMatch(cin, /clippar-logo-wordmark-black\.png/, 'the slab wordmark is not the logo');
+
+  // The website treatment: two stacked lines, two-tone, full stops included.
+  assert.match(cin, /const WORDS = \['EVERY', 'SHOT\.', 'REMEMBERED\.'\]/);
+  assert.match(cin, /bigWordGreen/, 'REMEMBERED. is the brand green, not white');
+
   assert.match(cin, /ImpactFeedbackStyle\.Heavy/, 'a haptic per word');
   assert.match(cin, /currentTime >= p\.duration - 0\.25/, 'resolves on the final frame, not a timer');
+  assert.match(cin, /if \(!resolved\) return;/, 'the words stamp on the END frame, not during the clip');
+  assert.match(cin, /setTimeout\(onNext, 3000\)/, 'auto-advances once the last word has held');
   assert.doesNotMatch(cin, /CONTACT_MS/, 'the old mid-downswing stamp is gone');
 });

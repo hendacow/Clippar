@@ -24,7 +24,7 @@ import { View, Text, Image, Pressable, StyleSheet, Platform, Animated as RNAnima
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
+import Animated, { FadeIn, FadeOut, ZoomIn, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
 import { CLICK_WINDOW_MS } from '@/hooks/useShutter';
 import { logFunnel } from '@/lib/onboardingFunnel';
 import { getSetting, setSetting } from '@/lib/storage';
@@ -34,13 +34,20 @@ const ExpoVideo = isNative ? (require('expo-video') as typeof import('expo-video
 
 // Bundled real footage — see assets/onboarding/. montage is 12s cut from a
 // real exported reel; shots 1-3 are detector-trimmed swings (~5s each).
-// The real stacked lockup in its black variant — C-with-flag mark, CLIPPAR,
-// and GOLF letterspaced beneath — NOT a typeface set to resemble it. The
-// previous asset here was clippar-logo-wordmark-black.png, which is a heavy
-// slab wordmark in a different face from the brand lockup entirely.
-// Artwork as supplied: black elements, the mark's flag and GOLF in the
-// artwork's own green (#A4C71C). Not recoloured to the site's CSS green.
-const WORDMARK = require('@/assets/images/clippar-logo-stacked-black.png');
+// The real stacked lockup — C-with-flag mark, CLIPPAR, GOLF letterspaced
+// beneath — NOT a typeface set to resemble it.
+//
+// WHITE, and that was a measured decision, not a preference. On this end
+// frame's sky the BLACK variant put CLIPPAR at 7.32:1 but the green GOLF at
+// 1.43:1, where large text needs 3.0:1. Black wants a bright background and
+// the green wants a dark one, so a scrim trades one for the other and only a
+// single 5%-wide window cleared 3.0:1 on both — with nothing to spare.
+// White removes the conflict entirely: white and green both want the same
+// dark ground, so the scrim helps both at once.
+// DO NOT swap this back to the black variant without re-measuring; it looks
+// like a harmless brand choice and it is not.
+// Artwork as supplied; its green is #A4C71C, not the site's CSS #A8E63D.
+const WORDMARK = require('@/assets/images/clippar-logo-stacked-white.png');
 
 const VIDEOS = {
   // The cold-open hero (plan §13.1/§13.7a): frame 1 is Henry mid-downswing on
@@ -328,7 +335,10 @@ function MontageScene({ onNext }: { onNext: () => void }) {
   // "Every shot remembered" arrives ONE WORD AT A TIME with a haptic as each
   // slams in; the words and the black wordmark then resolve TOGETHER onto the
   // video's end frame. No mid-clip value lines any more.
-  const WORDS = ['Every', 'shot', 'remembered'];
+  // The website treatment: two stacked lines, heavy condensed uppercase, with
+  // "REMEMBERED." in the brand green. Three stamps, the last one landing on
+  // its own line.
+  const WORDS = ['EVERY', 'SHOT.', 'REMEMBERED.'];
   const [wordCount, setWordCount] = useState(0);
   const [resolved, setResolved] = useState(false);
   const pRef = useRef<import('expo-video').VideoPlayer | null>(null);
@@ -339,17 +349,20 @@ function MontageScene({ onNext }: { onNext: () => void }) {
     transform: [{ scale: logoScale.value }],
   }));
 
-  // Slam the words in across the first ~2.4s — each with its own Heavy tick.
+  // The stamps fire on the END FRAME, not during the clip — Henry's "should
+  // stamp in one word at a time at the very end". They used to run in the
+  // first 2.4s and were long finished before the video stopped.
   useEffect(() => {
+    if (!resolved) return;
     const timers = WORDS.map((_, i) =>
       setTimeout(() => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
         setWordCount(i + 1);
-      }, 700 + i * 850)
+      }, 260 + i * 620)
     );
     return () => timers.forEach(clearTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [resolved]);
 
   // Watch the clip: when it reaches its final frame, hold there and resolve
   // the wordmark in alongside the (already-shown) words. onNext fires after
@@ -364,7 +377,10 @@ function MontageScene({ onNext }: { onNext: () => void }) {
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         logoOpacity.value = withTiming(1, { duration: 300 });
         logoScale.value = withTiming(1, { duration: 400, easing: Easing.out(Easing.back(1.6)) });
-        setTimeout(onNext, 1400);
+        // Advance on its own once the last word has stamped and held —
+        // "then it automatically goes to the next screen once finished".
+        // Last stamp lands at 260 + 2*620 = 1500ms; hold it for 1.5s.
+        setTimeout(onNext, 3000);
       }
     }, 120);
     return () => clearInterval(iv);
@@ -373,22 +389,24 @@ function MontageScene({ onNext }: { onNext: () => void }) {
   return (
     <View style={styles.fill}>
       <SceneVideo source={VIDEOS.hero} playerRef={(p) => (pRef.current = p)} />
-      {/* Title scrim. MEASURED, not judged by eye: the lockup's green GOLF is
-          #A1C41A and the sky behind it is #6B9BD9 — 1.43:1, where large text
-          needs 3.0:1. The black mark and CLIPPAR are fine at 7.27:1; it is
-          only the green that fails. A top-down gradient fixes it without
-          recolouring Henry's artwork and without a hard panel over the frame
-          he wanted to end on: it is dark where the lockup sits and gone by
-          the time it reaches the golfer. Measured on device: 1.43:1 before, 4.4:1 after.
-          (Do NOT "fix" this with the dim green #6FA828 — against this sky it
-          measures 1.00:1, i.e. it disappears completely. The comfortable
-          answer is the WHITE lockup on this scrim, 7.61:1 / 3.78:1, which is
-          also what the website reference actually shows — but Henry asked
-          for black, so that is his call and not this file's.) */}
+      {/* Title scrim. MEASURED, not judged by eye.
+
+          With the WHITE lockup the old black-vs-green tension is gone: white
+          and green both want a dark ground, so the scrim helps both at once
+          and there is no knife-edge value any more. It runs 380pt — far
+          enough to carry the two-line headline, which sits much lower and
+          larger than the old single line, and finished before it reaches the
+          golfer so the frame Henry wanted to end on survives.
+
+          Kept for whoever revisits this: with the BLACK lockup the same sky
+          gave CLIPPAR 7.32:1 and GOLF 1.43:1, and only one 5%-wide scrim
+          window cleared 3.0:1 on both. Do not reintroduce black here without
+          re-measuring. And never "fix" faint green with the dim green
+          #6FA828 — against this sky it measures 1.00:1 and vanishes. */}
       <LinearGradient
         pointerEvents="none"
-        colors={['rgba(0,0,0,0.55)', 'rgba(0,0,0,0.38)', 'rgba(0,0,0,0)']}
-        locations={[0, 0.6, 1]}
+        colors={['rgba(0,0,0,0.72)', 'rgba(0,0,0,0.55)', 'rgba(0,0,0,0)']}
+        locations={[0, 0.72, 1]}
         style={styles.titleScrim}
       />
       {/* Logo + words TOGETHER at the top (Henry's end-frame screenshot): the
@@ -399,7 +417,27 @@ function MontageScene({ onNext }: { onNext: () => void }) {
         <Animated.View style={logoStyle}>
           <Image source={WORDMARK} style={styles.wordmark} resizeMode="contain" />
         </Animated.View>
-        <Text style={styles.bigWord}>{WORDS.slice(0, wordCount).join(' ')}</Text>
+        <View style={{ alignItems: 'center' }}>
+          <View style={{ flexDirection: 'row' }}>
+            {WORDS.slice(0, Math.min(wordCount, 2)).map((w, i) => (
+              <Animated.Text
+                key={w}
+                entering={ZoomIn.duration(260).springify().damping(13)}
+                style={[styles.bigWord, i === 1 && { marginLeft: 12 }]}
+              >
+                {w}
+              </Animated.Text>
+            ))}
+          </View>
+          {wordCount >= 3 && (
+            <Animated.Text
+              entering={ZoomIn.duration(260).springify().damping(13)}
+              style={[styles.bigWord, styles.bigWordGreen]}
+            >
+              {WORDS[2]}
+            </Animated.Text>
+          )}
+        </View>
       </View>
     </View>
   );
@@ -865,9 +903,20 @@ const styles = StyleSheet.create({
   beatText: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   brandWrap: { position: 'absolute', top: 70, left: 0, right: 0, alignItems: 'center' },
   wordmark: { width: 176, height: 111 },  // 967x609 artwork aspect
-  titleScrim: { position: 'absolute', top: 0, left: 0, right: 0, height: 320 },
+  titleScrim: { position: 'absolute', top: 0, left: 0, right: 0, height: 380 },
   topStack: { position: 'absolute', top: 70, left: 24, right: 24, alignItems: 'center', gap: 14 },
-  bigWord: { color: '#fff', fontSize: 26, fontWeight: '900', textAlign: 'center', letterSpacing: 0.5, textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 10 },
+  bigWord: {
+    color: '#f0f4ee',
+    fontSize: 44,
+    lineHeight: 48,
+    fontWeight: '900',
+    fontFamily: Platform.OS === 'ios' ? 'HelveticaNeue-CondensedBlack' : undefined,
+    textAlign: 'center',
+    letterSpacing: -0.5,
+    textShadowColor: 'rgba(0,0,0,0.55)',
+    textShadowRadius: 12,
+  },
+  bigWordGreen: { color: '#A4C71C' },
   ghostRing: { position: 'absolute', bottom: -6, width: 96, height: 96, borderRadius: 48, borderWidth: 3, borderColor: '#fff' },
   ball: { position: 'absolute', top: 0, left: 0, width: 10, height: 10, borderRadius: 5, backgroundColor: '#fff', shadowColor: '#fff', shadowOpacity: 0.8, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } },
   clicker: { width: 84, height: 84, borderRadius: 42, backgroundColor: '#1B5E20', borderWidth: 4, borderColor: '#4CAF50', alignItems: 'center', justifyContent: 'center', shadowColor: '#4CAF50', shadowOpacity: 0.6, shadowRadius: 16, shadowOffset: { width: 0, height: 0 } },
