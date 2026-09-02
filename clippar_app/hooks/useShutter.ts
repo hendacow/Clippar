@@ -117,7 +117,7 @@ const SHUTTER_KEYS = new Set(['AudioVolumeUp', 'VolumeUp', 'Enter', ' ']);
 // taps with THIS window so the timing golfers learn in the theatre is the
 // timing the real clicker demands. If this constant moves, the tutorial
 // moves with it — that coupling is the point.
-export const CLICK_WINDOW_MS = 1000;
+export const CLICK_WINDOW_MS = 5000;
 
 // Many cheap shutters fire BOTH a key-event (HID) AND a volume change for
 // the SAME physical press, with the two events landing within a few tens of
