@@ -23,6 +23,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { View, Text, Image, Pressable, StyleSheet, Platform, Animated as RNAnimated } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
+import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeIn, FadeOut, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
 import { CLICK_WINDOW_MS } from '@/hooks/useShutter';
 import { logFunnel } from '@/lib/onboardingFunnel';
@@ -33,7 +34,13 @@ const ExpoVideo = isNative ? (require('expo-video') as typeof import('expo-video
 
 // Bundled real footage — see assets/onboarding/. montage is 12s cut from a
 // real exported reel; shots 1-3 are detector-trimmed swings (~5s each).
-const WORDMARK = require('@/assets/images/clippar-logo-wordmark-black.png');
+// The real stacked lockup in its black variant — C-with-flag mark, CLIPPAR,
+// and GOLF letterspaced beneath — NOT a typeface set to resemble it. The
+// previous asset here was clippar-logo-wordmark-black.png, which is a heavy
+// slab wordmark in a different face from the brand lockup entirely.
+// Artwork as supplied: black elements, the mark's flag and GOLF in the
+// artwork's own green (#A4C71C). Not recoloured to the site's CSS green.
+const WORDMARK = require('@/assets/images/clippar-logo-stacked-black.png');
 
 const VIDEOS = {
   // The cold-open hero (plan §13.1/§13.7a): frame 1 is Henry mid-downswing on
@@ -366,6 +373,24 @@ function MontageScene({ onNext }: { onNext: () => void }) {
   return (
     <View style={styles.fill}>
       <SceneVideo source={VIDEOS.hero} playerRef={(p) => (pRef.current = p)} />
+      {/* Title scrim. MEASURED, not judged by eye: the lockup's green GOLF is
+          #A1C41A and the sky behind it is #6B9BD9 — 1.43:1, where large text
+          needs 3.0:1. The black mark and CLIPPAR are fine at 7.27:1; it is
+          only the green that fails. A top-down gradient fixes it without
+          recolouring Henry's artwork and without a hard panel over the frame
+          he wanted to end on: it is dark where the lockup sits and gone by
+          the time it reaches the golfer. Measured on device: 1.43:1 before, 4.4:1 after.
+          (Do NOT "fix" this with the dim green #6FA828 — against this sky it
+          measures 1.00:1, i.e. it disappears completely. The comfortable
+          answer is the WHITE lockup on this scrim, 7.61:1 / 3.78:1, which is
+          also what the website reference actually shows — but Henry asked
+          for black, so that is his call and not this file's.) */}
+      <LinearGradient
+        pointerEvents="none"
+        colors={['rgba(0,0,0,0.55)', 'rgba(0,0,0,0.38)', 'rgba(0,0,0,0)']}
+        locations={[0, 0.6, 1]}
+        style={styles.titleScrim}
+      />
       {/* Logo + words TOGETHER at the top (Henry's end-frame screenshot): the
           black wordmark resolves in above the line, and "Every shot
           remembered" builds one word at a time beneath it — both held on the
@@ -839,7 +864,8 @@ const styles = StyleSheet.create({
   beatWrap: { position: 'absolute', bottom: 130, left: 24, right: 24, alignItems: 'center' },
   beatText: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   brandWrap: { position: 'absolute', top: 70, left: 0, right: 0, alignItems: 'center' },
-  wordmark: { width: 200, height: 58 },
+  wordmark: { width: 176, height: 111 },  // 967x609 artwork aspect
+  titleScrim: { position: 'absolute', top: 0, left: 0, right: 0, height: 320 },
   topStack: { position: 'absolute', top: 70, left: 24, right: 24, alignItems: 'center', gap: 14 },
   bigWord: { color: '#fff', fontSize: 26, fontWeight: '900', textAlign: 'center', letterSpacing: 0.5, textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 10 },
   ghostRing: { position: 'absolute', bottom: -6, width: 96, height: 96, borderRadius: 48, borderWidth: 3, borderColor: '#fff' },
