@@ -49,8 +49,11 @@ const VIDEOS = {
   reel: require('@/assets/onboarding/sample_reel.mp4'),
 } as const;
 
-// Landscape frame for the trimmer card: portrait golf posters cover-crop to
-// sky in a wide card, so the trim beat needs a frame that stays a golf clip.
+// Landscape frame for the trimmer card. NOTE: the card's Image must be sized
+// with width/height '100%', NOT absoluteFillObject — under absoluteFill it
+// lays out at its intrinsic 1080x760 anchored top-left and the card clips to
+// the photo's top-left corner (sky and trees), whatever photo you put in it.
+// That, not the choice of still, was the "trees instead of a golfer" bug.
 const TRIM_FRAME = require('@/assets/onboarding/trim_frame.jpg');
 
 const SCENES = [
@@ -646,18 +649,18 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
   const tiles = [t0, t1, t2, t3];
 
   // The fused card grows from the lead tile; the trimmer lives on it.
+  const CARD_W = 330;
+  const CARD_H = 232;
   const cardStyle = useAnimatedStyle(() => ({
     opacity: fuse.value,
-    width: TILE_W + (250 - TILE_W) * fuse.value,
-    height: TILE_H + (150 - 0) * 0 + (TILE_H) * 0, // height fixed via style; width grows
-    transform: [{ translateY: (1 - rise.value) * 300 }],
+    transform: [{ scale: 0.9 + 0.1 * fuse.value }],
   }));
   const flashStyle = useAnimatedStyle(() => ({ opacity: flash.value }));
   // Trim handles + dimmed margins (fractions of the fused card width).
-  const leftDimStyle = useAnimatedStyle(() => ({ width: `${trimL.value * 34}%` as unknown as number }));
-  const rightDimStyle = useAnimatedStyle(() => ({ width: `${trimR.value * 34}%` as unknown as number }));
-  const leftHandleStyle = useAnimatedStyle(() => ({ left: `${trimL.value * 34}%` as unknown as number }));
-  const rightHandleStyle = useAnimatedStyle(() => ({ right: `${trimR.value * 34}%` as unknown as number }));
+  const leftDimStyle = useAnimatedStyle(() => ({ width: `${trimL.value * 19}%` as unknown as number }));
+  const rightDimStyle = useAnimatedStyle(() => ({ width: `${trimR.value * 19}%` as unknown as number }));
+  const leftHandleStyle = useAnimatedStyle(() => ({ left: `${trimL.value * 19}%` as unknown as number }));
+  const rightHandleStyle = useAnimatedStyle(() => ({ right: `${trimR.value * 19}%` as unknown as number }));
   const reelStyle = useAnimatedStyle(() => ({ opacity: reelOpacity.value, transform: [{ scale: reelScale.value }] }));
 
   useEffect(() => {
@@ -735,20 +738,26 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
         </View>
       )}
 
-      {/* The fused card + trimmer. Grows from the lead tile at fuse. */}
+      {/* The fused card + trimmer. A big centred clip; handles + dimmed
+          margins appear only while trimming ('trim'); on 'stitch' the trim is
+          done so the card is a clean kept clip, matching the caption. */}
       {showCard && (
         <View style={[styles.fill, styles.center]} pointerEvents="none">
-          <Animated.View style={[styles.fusedCard, { height: TILE_H }, cardStyle]}>
-            <Image source={TRIM_FRAME} style={StyleSheet.absoluteFillObject} resizeMode="cover" />
-            {/* dimmed trimmed-off margins */}
-            <Animated.View style={[styles.trimDim, { left: 0 }, leftDimStyle]} />
-            <Animated.View style={[styles.trimDim, { right: 0 }, rightDimStyle]} />
-            {/* the two handles closing in */}
-            <Animated.View style={[styles.trimHandle, leftHandleStyle]} />
-            <Animated.View style={[styles.trimHandle, rightHandleStyle]} />
+          <Animated.View style={[styles.fusedCard, { width: CARD_W, height: CARD_H }, cardStyle]}>
+            <Image source={TRIM_FRAME} style={{ width: '100%', height: '100%' }} resizeMode="cover" />
+            {beat === 'trim' && (
+              <>
+                <Animated.View style={[styles.trimDim, { left: 0 }, leftDimStyle]} />
+                <Animated.View style={[styles.trimDim, { right: 0 }, rightDimStyle]} />
+                <Animated.View style={[styles.trimHandle, leftHandleStyle]} />
+                <Animated.View style={[styles.trimHandle, rightHandleStyle]} />
+              </>
+            )}
           </Animated.View>
-          {(beat === 'trim' || beat === 'stitch') && (
-            <Animated.Text entering={FadeIn.duration(200)} style={styles.trimSeconds}>3s</Animated.Text>
+          {beat === 'trim' && (
+            <Animated.View entering={FadeIn.duration(200)} style={[styles.secondsPill, { top: '50%', marginTop: CARD_H / 2 + 18 }]}>
+              <Text style={styles.secondsPillText}>the 3s that matter</Text>
+            </Animated.View>
           )}
         </View>
       )}
@@ -756,11 +765,19 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
       {/* White fuse flash */}
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: '#fff' }, flashStyle]} />
 
-      <View style={styles.narrationWrap} pointerEvents="none">
-        <Animated.Text key={NARRATION[beat]} entering={FadeIn.duration(300)} style={styles.narration}>
-          {NARRATION[beat]}
-        </Animated.Text>
-      </View>
+      {beat !== 'reel' ? (
+        <View style={styles.narrationWrap} pointerEvents="none">
+          <Animated.Text key={NARRATION[beat]} entering={FadeIn.duration(300)} style={styles.narration}>
+            {NARRATION[beat]}
+          </Animated.Text>
+        </View>
+      ) : (
+        // On the reel the text sits on bright footage, so it gets its own dark
+        // band high on the screen, clear of the "Now make YOURS" button.
+        <View style={styles.reelNarrationBand} pointerEvents="none">
+          <Text style={styles.reelNarrationText}>Reel ready to share</Text>
+        </View>
+      )}
 
       {beat === 'reel' && (
         <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
@@ -800,10 +817,13 @@ const styles = StyleSheet.create({
   hudChip: { backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
   hudChipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   storyBigTile: { position: 'absolute', borderRadius: 12, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } },
-  fusedCard: { position: 'absolute', borderRadius: 12, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: '#fff' },
+  fusedCard: { position: 'absolute', borderRadius: 14, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: '#fff' },
   trimDim: { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.62)' },
   trimHandle: { position: 'absolute', top: 0, bottom: 0, width: 8, backgroundColor: '#FFD54F', borderRadius: 3 },
-  trimSeconds: { position: 'absolute', color: '#FFD54F', fontSize: 22, fontWeight: '900' },
+  secondsPill: { position: 'absolute', alignSelf: 'center', backgroundColor: '#FFD54F', borderRadius: 20, paddingHorizontal: 16, paddingVertical: 8 },
+  secondsPillText: { color: '#0A0A0F', fontSize: 15, fontWeight: '900' },
+  reelNarrationBand: { position: 'absolute', top: 90, alignSelf: 'center', backgroundColor: 'rgba(0,0,0,0.6)', borderRadius: 14, paddingHorizontal: 18, paddingVertical: 10 },
+  reelNarrationText: { color: '#fff', fontSize: 18, fontWeight: '800', textAlign: 'center' },
   narrationWrap: { position: 'absolute', bottom: 150, left: 24, right: 24, alignItems: 'center' },
   narration: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   storyCta: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
