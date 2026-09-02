@@ -8,6 +8,9 @@ const cin = readFileSync(join(root, 'components/onboarding/cinematic/CinematicOn
 const host = readFileSync(join(root, 'app/(onboarding)/index.tsx'), 'utf8');
 const funnel = readFileSync(join(root, 'lib/onboardingFunnel.ts'), 'utf8');
 const shutter = readFileSync(join(root, 'hooks/useShutter.ts'), 'utf8');
+const sales = readFileSync(join(root, 'lib/salesFlow.ts'), 'utf8');
+const rootLayout = readFileSync(join(root, 'app/_layout.tsx'), 'utf8');
+const diagnostics = readFileSync(join(root, 'app/profile/diagnostics.tsx'), 'utf8');
 
 // The plan's central claim: the tutorial teaches the PRODUCTION interface.
 test('the fake clicker resolves taps with the real shutter window', () => {
@@ -130,4 +133,29 @@ test('the hero resolves the white lockup + stamped two-tone headline on the end 
   assert.match(cin, /if \(!resolved\) return;/, 'the words stamp on the END frame, not during the clip');
   assert.match(cin, /setTimeout\(onNext, 3000\)/, 'auto-advances once the last word has held');
   assert.doesNotMatch(cin, /CONTACT_MS/, 'the old mid-downswing stamp is gone');
+});
+
+
+// The cinematic intro is gated on being signed OUT with sales_done unset, so
+// on a real handset it can never be seen again once finished — which meant
+// there was no way to review it without deleting the app. The profile's
+// "Replay onboarding" clears the in-app TOUR flags and is a different feature.
+test('the cinematic intro can be replayed on a device that has finished it', () => {
+  assert.match(sales, /export async function beginIntroReplay/);
+  assert.match(sales, /setSetting\(DONE_KEY, null\)/, 'clears sales_done, not just the tour flags');
+  assert.match(sales, /onboarding\.v2\.completed_at/);
+  assert.match(diagnostics, /Replay cinematic intro/);
+  assert.match(diagnostics, /beginIntroReplay/);
+
+  // The root gate bounces a signed-in user out of (onboarding); the replay
+  // needs one narrow exception or the button lands nowhere.
+  assert.match(rootLayout, /inOnboardingGroup && isReplayingIntro\(\)/);
+
+  // In-memory, never persisted: a relaunch must not be able to strand a
+  // signed-in golfer inside the funnel.
+  assert.doesNotMatch(sales, /setSetting\('onboarding\.replaying/);
+  assert.match(sales, /let replayingIntro = false;/);
+
+  // And it has to be switched off when the funnel exits, or the gate stays open.
+  assert.match(host, /endIntroReplay\(\)/);
 });

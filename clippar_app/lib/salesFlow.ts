@@ -51,6 +51,38 @@ export async function consumeTrialIntent(): Promise<boolean> {
   }
 }
 
+// ---- Replaying the cinematic intro on a device that has finished it -------
+//
+// The funnel is reachable only when signed OUT and sales_done is unset, which
+// on a real handset means it can never be seen again once completed — the
+// profile's "Replay onboarding" clears the in-app TOUR flags, which is a
+// different feature entirely. That left no way to review this work on a phone
+// short of deleting the app, so: this flag, one narrow exception in the root
+// auth gate, and a button in diagnostics.
+//
+// Deliberately module-level rather than persisted: it lives exactly as long as
+// the replay does and cannot survive a relaunch into a state where a signed-in
+// golfer is stuck in the funnel.
+let replayingIntro = false;
+
+export function isReplayingIntro(): boolean {
+  return replayingIntro;
+}
+
+export function endIntroReplay(): void {
+  replayingIntro = false;
+}
+
+/** Clear the funnel's completion so it plays again, and open the gate for it. */
+export async function beginIntroReplay(): Promise<void> {
+  replayingIntro = true;
+  try {
+    await setSetting(DONE_KEY, null);
+    await setSetting('onboarding.v2.completed_at', null);
+    await setSetting('onboarding.v2.scene', null);
+  } catch {}
+}
+
 /** Auth-gate helper: has the cold-start funnel already been seen/finished? */
 export function useSalesFlowDone(): { loaded: boolean; done: boolean } {
   const [state, setState] = useState({ loaded: false, done: false });

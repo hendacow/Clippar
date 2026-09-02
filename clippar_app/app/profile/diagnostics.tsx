@@ -31,6 +31,7 @@ import { theme } from '@/constants/theme';
 import { GradientBackground } from '@/components/ui/GradientBackground';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
+import { beginIntroReplay } from '@/lib/salesFlow';
 import { supabase } from '@/lib/supabase';
 import { processUploadQueue } from '@/lib/uploadQueue';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
@@ -336,6 +337,20 @@ export default function DiagnosticsScreen() {
                 }}
                 variant="secondary"
               />
+              {/* The cinematic intro is normally reachable only by a signed-out
+                  visitor who has never finished it, i.e. never again on this
+                  handset. This is the only way to review it without deleting
+                  the app. "Replay tour" above is the in-app spotlight tour —
+                  a different feature. */}
+              <View style={{ marginTop: 10 }}>
+                <Button
+                  title="Replay cinematic intro"
+                  onPress={() => {
+                    void beginIntroReplay().then(() => router.replace('/(onboarding)'));
+                  }}
+                  variant="secondary"
+                />
+              </View>
             </View>
           </Section>
 

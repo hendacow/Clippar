@@ -34,7 +34,7 @@ import {
 import { AhaScreen } from '@/components/onboarding/flow/AhaScreen';
 import { FlowProgressBar } from '@/components/onboarding/flow/FlowKit';
 import { PROGRESS_START } from '@/constants/onboardingV2';
-import { markSalesDone, setTrialIntent } from '@/lib/salesFlow';
+import { markSalesDone, setTrialIntent, endIntroReplay } from '@/lib/salesFlow';
 import {
   saveOnboardingAnswers,
   markOnboardingComplete,
@@ -111,6 +111,7 @@ export default function OnboardingFunnel() {
       await saveOnboardingAnswers(answers);
       await markOnboardingComplete();
       await setTrialIntent(wantsTrial);
+      endIntroReplay();
       await markSalesDone();
     },
     [answers, variant, step]
@@ -163,6 +164,7 @@ export default function OnboardingFunnel() {
     // The hook earns the signup; the REAL app does the teaching after it
     // (the post-auth tutorial redirect in _layout picks up the pending flag).
     const toSignup = async () => {
+      endIntroReplay();
       await markSalesDone();
       await setTutorialPending(true);
       router.replace('/(auth)/signup');

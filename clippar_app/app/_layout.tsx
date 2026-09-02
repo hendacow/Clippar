@@ -10,6 +10,7 @@ import * as Sentry from '@sentry/react-native';
 import Constants from 'expo-constants';
 import { theme } from '@/constants/theme';
 import { useAuth } from '@/hooks/useAuth';
+import { isReplayingIntro } from '@/lib/salesFlow';
 import { useSalesFlowDone } from '@/lib/salesFlow';
 import { isTutorialPending, sweepTutorialRounds, getActiveTutorialRoundId } from '@/lib/tutorialRound';
 import { resolvePostAuthRoute } from '@/lib/mountOffer';
@@ -147,6 +148,11 @@ function RootLayout() {
       // navigating away here would unmount the form before the new password
       // is saved. Let the screen finish and navigate itself.
       if ((segments as string[])[1] === 'reset-password') return;
+      // Reviewing the cinematic intro on a handset that has already finished
+      // it. In-memory flag, set only by the diagnostics button and cleared
+      // when the funnel exits, so a relaunch can never strand a signed-in
+      // golfer inside the funnel.
+      if (inOnboardingGroup && isReplayingIntro()) return;
       // New-account handoff (feat/mount-upsell): a freshly created account
       // gets the one-time Clippar Mount offer before landing on the tabs;
       // returning logins go straight home. Async because the seen/pending
