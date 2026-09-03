@@ -54,9 +54,9 @@ const ExpoVideo = isNative ? (require('expo-video') as typeof import('expo-video
 const WORDMARK = require('@/assets/images/clippar-logo-stacked-white.png');
 
 const VIDEOS = {
-  // The cold-open hero (plan §13.1/§13.7a): frame 1 is Henry mid-downswing on
-  // the last hole's approach; contact lands ~800ms in. Frame-verified cut.
-  // 3 Sep: first 0.2s dropped — it carried a sliver of the previous shot.
+  // The hero: the last hole, four shots from the tee. 3 Sep: first 0.2s
+  // dropped — it carried a sliver of the previous shot — so frame 1 is Henry
+  // at address at sunset (frame-verified on the simulator). 14.85s, loops.
   hero: require('@/assets/onboarding/hero.mp4'),
   shot1: require('@/assets/onboarding/shot1.mp4'),
   // Henry's exported reel at 5x (75s → 15s) under the hero's own music track,
@@ -312,7 +312,12 @@ function MontageScene({ onNext }: { onNext: () => void }) {
   // so the sequence starts that much earlier than the 3s mark.
   const WORDS_DONE_BEFORE_END_S = 3;
   const WORD_FADE_MS = 400;
-  const WORDS_LEAD_S = WORDS_DONE_BEFORE_END_S + (260 + 2 * 620 + WORD_FADE_MS) / 1000;
+  // Measured on the simulator (3 Sep, frame-timed burst): the sequence lands
+  // ~0.7s after the clock says it should — currentTime is polled at 120ms and
+  // the player reports late — which left the line finished 2.2s before the
+  // end, not 3. This is that allowance; re-measure if the poll changes.
+  const WORD_TRIGGER_LATENCY_S = 0.8;
+  const WORDS_LEAD_S = WORDS_DONE_BEFORE_END_S + (260 + 2 * 620 + WORD_FADE_MS) / 1000 + WORD_TRIGGER_LATENCY_S;
   const [wordCount, setWordCount] = useState(0);
   const [resolved, setResolved] = useState(false);
   const [ctaReady, setCtaReady] = useState(false);
