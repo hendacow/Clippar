@@ -12,7 +12,6 @@
  * override lets either build force either variant for comparison.
  */
 import * as Sentry from '@sentry/react-native';
-import Constants from 'expo-constants';
 import { getSetting, setSetting } from '@/lib/storage';
 
 // v1 = shipped 5-screen stepper (production default until beaten).
@@ -30,11 +29,12 @@ export async function getOnboardingVariant(): Promise<OnboardingVariant> {
     const override = await getSetting(VARIANT_KEY);
     if (override === 'v1' || override === 'v2' || override === 'v3') return override;
   } catch {}
-  // app.config.js stamps extra.variant from APP_VARIANT at build time.
-  const appVariant = (Constants.expoConfig?.extra as { variant?: string } | undefined)?.variant;
-  // v3 becomes the dev default when its record-screen coach lands; until
-  // then defaulting to it would strand a fresh signup on a coach-less round.
-  return appVariant === 'development' ? 'v2' : 'v1';
+  // 3 Sep: the cinematic flow IS the onboarding, on every build. Henry cut
+  // the v1 stepper's two remaining screens (camera-roll import, the par-5
+  // sample round) and the cinematic now ends on signup itself, so nothing
+  // hands into v1 any more. The override above still lets diagnostics force
+  // a variant for comparison.
+  return 'v2';
 }
 
 export async function setOnboardingVariant(v: OnboardingVariant): Promise<void> {

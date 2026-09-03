@@ -2,11 +2,12 @@
  * Cinematic onboarding (v2) — "watch Henry, then it's your turn".
  *
  * The plan: company-brain org/cto/CINEMATIC_ONBOARDING_PLAN.md. The short of
- * it: a scene machine over REAL footage (bundled, 9 MB — first cold start
- * cannot depend on the update channel) where the fake clicker resolves taps
- * with the REAL shutter window (CLICK_WINDOW_MS from hooks/useShutter), so
- * the muscle memory built here is the production interface: 1 tap =
- * start/stop, 2 = next hole, 3 = penalty.
+ * it: a scene machine over REAL footage (bundled — first cold start cannot
+ * depend on the update channel). 3 Sep shape, Henry's: the hero with the
+ * line fading in and looping under a CTA → the recording lesson on the REAL
+ * record-screen chrome (press to start, press to stop, End Round) → the
+ * trim/stitch storyline → share → his exported reel at 5x → signup. The
+ * double/triple-tap lessons were cut; the real screen still teaches them.
  *
  * Scenes never own their advancement — the machine does, and every scene has
  * a way forward that doesn't depend on a video finishing (a stalled decode
@@ -20,12 +21,15 @@
  * arrives (it replaces any need for a recreated Instagram UI).
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { View, Text, Image, Pressable, StyleSheet, Platform, Animated as RNAnimated } from 'react-native';
+import { View, Text, Image, Pressable, StyleSheet, Platform, Dimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
-import Animated, { FadeIn, FadeOut, ZoomIn, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
-import { CLICK_WINDOW_MS } from '@/hooks/useShutter';
+import Animated, { FadeIn, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
+import { Flag, AlertTriangle, ChevronLeft, ChevronRight, Bluetooth, Settings2, SwitchCamera } from 'lucide-react-native';
+import { theme } from '@/constants/theme';
+import { ScoreOverlay } from '@/components/record/ScoreOverlay';
+import { RecordingIndicator } from '@/components/record/RecordingIndicator';
 import { logFunnel } from '@/lib/onboardingFunnel';
 import { getSetting, setSetting } from '@/lib/storage';
 
@@ -52,10 +56,12 @@ const WORDMARK = require('@/assets/images/clippar-logo-stacked-white.png');
 const VIDEOS = {
   // The cold-open hero (plan §13.1/§13.7a): frame 1 is Henry mid-downswing on
   // the last hole's approach; contact lands ~800ms in. Frame-verified cut.
+  // 3 Sep: first 0.2s dropped — it carried a sliver of the previous shot.
   hero: require('@/assets/onboarding/hero.mp4'),
   shot1: require('@/assets/onboarding/shot1.mp4'),
-  shot2: require('@/assets/onboarding/shot2.mp4'),
-  shot3: require('@/assets/onboarding/shot3.mp4'),
+  // Henry's exported reel at 5x (75s → 15s) under the hero's own music track,
+  // which is 15.0s — they fit to the frame. The last thing seen before signup.
+  demo: require('@/assets/onboarding/demo_reel.mp4'),
   // The stitched sample reel doubles as "the exported reel" in the lift-off
   // beat. (The IG story recording is retired from this position per plan
   // §13.4 — the sample is not the viewer's footage, so showing it posted to
@@ -69,14 +75,18 @@ const VIDEOS = {
 // the photo's top-left corner (sky and trees), whatever photo you put in it.
 // That, not the choice of still, was the "trees instead of a golfer" bug.
 const TRIM_FRAME = require('@/assets/onboarding/trim_frame.jpg');
+// Henry's share mock (Reel · Post · Story · Message), its grey ground
+// replaced with the app black so it sits flush on the SHARE scene.
+const SHARE_MOCK = require('@/assets/onboarding/share_socials.png');
 
+// 3 Sep (Henry): montage → the REAL recording screen → the trim/stitch
+// storyline → share → the demo reel → signup. Double/triple-tap lessons cut.
 const SCENES = [
   'MONTAGE',
-  'CLICKER_INTRO',
-  'RECORD_SHOT',
-  'NEXT_HOLE',
-  'PENALTY',
+  'RECORD',
   'STORYLINE',
+  'SHARE',
+  'DEMO_REEL',
 ] as const;
 export type Scene = (typeof SCENES)[number];
 
@@ -85,12 +95,11 @@ const SCENE_KEY = 'onboarding.v2.scene';
 // Max ms a scene may hold the user with no input before offering itself a
 // way forward. Generous — this is a wedge guard, not pacing.
 const SCENE_TIMEOUT_MS: Record<Scene, number> = {
-  MONTAGE: 20_000,
-  CLICKER_INTRO: 30_000,
-  RECORD_SHOT: 40_000,
-  NEXT_HOLE: 30_000,
-  PENALTY: 30_000,
+  MONTAGE: 120_000, // loops under the CTA by design; this is only the wedge guard
+  RECORD: 60_000,
   STORYLINE: 45_000,
+  SHARE: 15_000,
+  DEMO_REEL: 40_000,
 };
 
 export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
@@ -135,7 +144,7 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
       if (sceneRef.current === 'MONTAGE') {
         logFunnel('v3', 'MONTAGE', 'complete', Date.now() - sceneStartedAt.current);
         sceneStartedAt.current = Date.now();
-        setScene('CLICKER_INTRO'); // reused slot; renders the hook CTA below
+        setScene('RECORD'); // reused slot; renders the hook CTA below
         logFunnel('v3', 'HOOK_CTA', 'enter', 0);
       } else {
         logFunnel('v3', 'HOOK_CTA', 'complete', Date.now() - sceneStartedAt.current);
@@ -193,13 +202,10 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
   return (
     <View style={[styles.fill, { backgroundColor: '#000' }]}>
       {scene === 'MONTAGE' && <MontageScene onNext={advance} />}
-      {scene === 'CLICKER_INTRO' && (hook ? <HookCtaScene onNext={advance} /> : <ClickerIntroScene onNext={advance} />)}
-      {scene === 'RECORD_SHOT' && <RecordShotScene onNext={advance} />}
-      {scene === 'NEXT_HOLE' && <MultiTapScene key="nh" taps={2} video={VIDEOS.shot2}
-        title="Double-tap = next hole" sub="Two quick taps on the clicker moves your round along." confirm="Hole 2 →" onNext={advance} />}
-      {scene === 'PENALTY' && <MultiTapScene key="pen" taps={3} video={VIDEOS.shot3}
-        title="Found trouble? Triple-tap" sub="Three taps adds a penalty stroke — honesty, automated." confirm="+1 penalty" onNext={advance} />}
+      {scene === 'RECORD' && (hook ? <HookCtaScene onNext={advance} /> : <RecordScene onNext={advance} topInset={insets.top} bottomInset={insets.bottom} />)}
       {scene === 'STORYLINE' && <StorylineScene onNext={advance} />}
+      {scene === 'SHARE' && <ShareScene onNext={advance} />}
+      {scene === 'DEMO_REEL' && <DemoReelScene onNext={advance} />}
 
       {/* The travelling ball (plan §13.7): one white dot that persists across
           every beat — the putt at rest, the pulse over the clicker, the
@@ -208,8 +214,13 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
 
       <Animated.View pointerEvents="none" style={[StyleSheet.absoluteFillObject, { backgroundColor: '#fff' }, spliceStyle]} />
 
+      {/* On the RECORD scene the real ScoreOverlay owns top-right (Shot chip at
+          +8, End Round at +52), so Skip drops to +92 — the slot Options uses on
+          the left — rather than sit on the Shot chip, which it did. On the
+          demo reel Henry's export carries its own scorecard header in the top
+          ~210pt, so Skip drops beneath it there. */}
       {showSkip && (
-        <Pressable onPress={skip} hitSlop={12} style={[styles.skip, { top: insets.top + 10 }]}>
+        <Pressable onPress={skip} hitSlop={12} style={[styles.skip, { top: insets.top + (scene === 'RECORD' ? 92 : scene === 'DEMO_REEL' ? 180 : 10) }]}>
           <Text style={styles.skipText}>Skip</Text>
         </Pressable>
       )}
@@ -221,12 +232,11 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
 
 /** Per-scene anchor for the travelling ball, in screen fractions. */
 const BALL_ANCHORS: Record<Scene, { x: number; y: number; s: number }> = {
-  MONTAGE: { x: 0.5, y: 0.86, s: 1 },        // the ball at rest after the putt
-  CLICKER_INTRO: { x: 0.5, y: 0.52, s: 1.4 }, // hovers to the clicker
-  RECORD_SHOT: { x: 0.5, y: 0.9, s: 1.2 },    // the record dot's orbit
-  NEXT_HOLE: { x: 0.5, y: 0.56, s: 1.2 },
-  PENALTY: { x: 0.5, y: 0.56, s: 1.2 },
-  STORYLINE: { x: 0.5, y: 0.5, s: 1 },        // rides the stitch
+  MONTAGE: { x: 0.5, y: 0.86, s: 1 },     // the ball at rest after the putt
+  RECORD: { x: 0.5, y: 0.9, s: 0 },       // hidden: nothing may sit on the real chrome
+  STORYLINE: { x: 0.5, y: 0.5, s: 1 },    // rides the stitch
+  SHARE: { x: 0.5, y: 0.5, s: 0 },
+  DEMO_REEL: { x: 0.5, y: 0.9, s: 0 },
 };
 
 function TravellingBall({ scene }: { scene: Scene }) {
@@ -265,31 +275,6 @@ function SceneVideo({ source, playerRef, loop = false, muted = false }: {
   return <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />;
 }
 
-/** The fake clicker — a big physical-feeling button. Fires the SAME haptic
- *  the real shutter press does. */
-function FakeClicker({ onPress, label }: { onPress: () => void; label?: string }) {
-  const scale = useRef(new RNAnimated.Value(1)).current;
-  return (
-    <View style={{ alignItems: 'center', gap: 10 }}>
-      {label ? <Text style={styles.clickerLabel}>{label}</Text> : null}
-      <Pressable
-        onPress={() => {
-          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
-          RNAnimated.sequence([
-            RNAnimated.timing(scale, { toValue: 0.85, duration: 70, useNativeDriver: true }),
-            RNAnimated.spring(scale, { toValue: 1, useNativeDriver: true }),
-          ]).start();
-          onPress();
-        }}
-      >
-        <RNAnimated.View style={[styles.clicker, { transform: [{ scale }] }]}>
-          <View style={styles.clickerInner} />
-        </RNAnimated.View>
-      </Pressable>
-    </View>
-  );
-}
-
 // ---- scenes -------------------------------------------------------------
 
 function HookCtaScene({ onNext }: { onNext: () => void }) {
@@ -310,25 +295,6 @@ function HookCtaScene({ onNext }: { onNext: () => void }) {
   );
 }
 
-/** One silent demonstration of the press — scale in, dip, fade. No haptic:
- *  the user didn't do it (plan §13.7c). Then it waits forever patiently. */
-function GhostRing() {
-  const sc = useSharedValue(1.3);
-  const op = useSharedValue(0);
-  useEffect(() => {
-    op.value = withDelay(600, withTiming(0.3, { duration: 200 }));
-    sc.value = withDelay(600, withTiming(1.0, { duration: 400 }, () => {
-      sc.value = withTiming(0.92, { duration: 100 }, () => {
-        sc.value = withTiming(1.05, { duration: 150 });
-        op.value = withDelay(150, withTiming(0, { duration: 300 }));
-      });
-    }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const st = useAnimatedStyle(() => ({ opacity: op.value, transform: [{ scale: sc.value }] }));
-  return <Animated.View pointerEvents="none" style={[styles.ghostRing, st]} />;
-}
-
 function MontageScene({ onNext }: { onNext: () => void }) {
   // Henry's spec (plan §13.7 rev 2 Sep): the hero is the last hole, four
   // shots from the tee (drive → approach → chip → putt). Over it, the line
@@ -339,8 +305,17 @@ function MontageScene({ onNext }: { onNext: () => void }) {
   // "REMEMBERED." in the brand green. Three stamps, the last one landing on
   // its own line.
   const WORDS = ['EVERY', 'SHOT.', 'REMEMBERED.'];
+  // 3 Sep (Henry): the words FADE in, and the whole line + logo must be
+  // finished on screen 3s before the clip ends. The clip then LOOPS under
+  // them, and "Let's create your reel" at the bottom is the only way on —
+  // no auto-advance. Last word lands at 260 + 2×620ms and fades WORD_FADE_MS,
+  // so the sequence starts that much earlier than the 3s mark.
+  const WORDS_DONE_BEFORE_END_S = 3;
+  const WORD_FADE_MS = 400;
+  const WORDS_LEAD_S = WORDS_DONE_BEFORE_END_S + (260 + 2 * 620 + WORD_FADE_MS) / 1000;
   const [wordCount, setWordCount] = useState(0);
   const [resolved, setResolved] = useState(false);
+  const [ctaReady, setCtaReady] = useState(false);
   const pRef = useRef<import('expo-video').VideoPlayer | null>(null);
   const logoOpacity = useSharedValue(0);
   const logoScale = useSharedValue(1.4);
@@ -360,6 +335,8 @@ function MontageScene({ onNext }: { onNext: () => void }) {
         setWordCount(i + 1);
       }, 260 + i * 620)
     );
+    // The CTA arrives once the line is complete — never over a half-built line.
+    timers.push(setTimeout(() => setCtaReady(true), 260 + 2 * 620 + WORD_FADE_MS));
     return () => timers.forEach(clearTimeout);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolved]);
@@ -371,24 +348,21 @@ function MontageScene({ onNext }: { onNext: () => void }) {
     const iv = setInterval(() => {
       const p = pRef.current;
       if (!p || p.duration <= 0) return;
-      if (!resolved && p.currentTime >= p.duration - 0.25) {
+      if (!resolved && p.currentTime >= p.duration - WORDS_LEAD_S) {
         setResolved(true);
-        p.pause();
+        // The clip keeps running to its end and loops (SceneVideo loop) —
+        // the line and logo stay up over it until the CTA is pressed.
         Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
         logoOpacity.value = withTiming(1, { duration: 300 });
         logoScale.value = withTiming(1, { duration: 400, easing: Easing.out(Easing.back(1.6)) });
-        // Advance on its own once the last word has stamped and held —
-        // "then it automatically goes to the next screen once finished".
-        // Last stamp lands at 260 + 2*620 = 1500ms; hold it for 1.5s.
-        setTimeout(onNext, 3000);
       }
     }, 120);
     return () => clearInterval(iv);
-  }, [resolved, onNext, logoOpacity, logoScale]);
+  }, [resolved, logoOpacity, logoScale]);
 
   return (
     <View style={styles.fill}>
-      <SceneVideo source={VIDEOS.hero} playerRef={(p) => (pRef.current = p)} />
+      <SceneVideo source={VIDEOS.hero} loop playerRef={(p) => (pRef.current = p)} />
       {/* Title scrim. MEASURED, not judged by eye.
 
           With the WHITE lockup the old black-vs-green tension is gone: white
@@ -422,7 +396,7 @@ function MontageScene({ onNext }: { onNext: () => void }) {
             {WORDS.slice(0, Math.min(wordCount, 2)).map((w, i) => (
               <Animated.Text
                 key={w}
-                entering={ZoomIn.duration(260).springify().damping(13)}
+                entering={FadeIn.duration(WORD_FADE_MS)}
                 style={[styles.bigWord, i === 1 && { marginLeft: 12 }]}
               >
                 {w}
@@ -431,7 +405,7 @@ function MontageScene({ onNext }: { onNext: () => void }) {
           </View>
           {wordCount >= 3 && (
             <Animated.Text
-              entering={ZoomIn.duration(260).springify().damping(13)}
+              entering={FadeIn.duration(WORD_FADE_MS)}
               style={[styles.bigWord, styles.bigWordGreen]}
             >
               {WORDS[2]}
@@ -439,31 +413,30 @@ function MontageScene({ onNext }: { onNext: () => void }) {
           )}
         </View>
       </View>
+      {ctaReady && (
+        <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
+          <Pressable onPress={onNext} style={styles.cta}>
+            <Text style={styles.ctaText}>Let's create your reel</Text>
+          </Pressable>
+        </Animated.View>
+      )}
     </View>
   );
 }
 
-function ClickerIntroScene({ onNext }: { onNext: () => void }) {
-  return (
-    <View style={[styles.fill, styles.center, { backgroundColor: '#0A0A0F', padding: 32 }]}>
-      <Animated.View entering={FadeIn.duration(400)} style={{ alignItems: 'center', gap: 18 }}>
-        <Text style={styles.h1}>Let's make your first reel</Text>
-        <Text style={styles.sub}>
-          On the course, a clicker on your glove records everything.{'\n'}This is it. Give it a press.
-        </Text>
-        <View style={{ marginTop: 30 }}>
-          <FakeClicker onPress={onNext} />
-        </View>
-      </Animated.View>
-    </View>
-  );
-}
-
-function RecordShotScene({ onNext }: { onNext: () => void }) {
-  // Freeze-frame IS the held-at-address shot (Henry's insight): the player
-  // starts paused on frame one, resumes on the clicker tap, drops to 0.5x
-  // after the strike. No purpose-filmed footage required.
-  const [phase, setPhase] = useState<'address' | 'rolling' | 'slowmo'>('address');
+/** The recording lesson on the REAL interface (3 Sep, Henry: "look
+ *  identical to the real recording screen"). Same chrome as
+ *  app/(tabs)/record.tsx — the real ScoreOverlay and RecordingIndicator,
+ *  the shutter badge, Options and End Round pills, the camera-controls row
+ *  and the Penalty · record · Prev/Next Hole row — with Henry's footage
+ *  where the camera preview would be. Everything is inert except the record
+ *  button and, once a clip is saved, End Round.
+ *
+ *  Freeze-frame IS the held-at-address shot: the player starts paused on
+ *  frame one, rolls on the press, drops to 0.5x after the strike. */
+function RecordScene({ onNext, topInset, bottomInset }: { onNext: () => void; topInset: number; bottomInset: number }) {
+  type Phase = 'address' | 'rolling' | 'slowmo' | 'stopped';
+  const [phase, setPhase] = useState<Phase>('address');
   const pRef = useRef<import('expo-video').VideoPlayer | null>(null);
   const { useVideoPlayer, VideoView } = ExpoVideo!;
   const player = useVideoPlayer(VIDEOS.shot1, (p) => {
@@ -487,161 +460,138 @@ function RecordShotScene({ onNext }: { onNext: () => void }) {
     return () => clearInterval(iv);
   }, [phase]);
 
-  const onClicker = useCallback(() => {
+  const isRecording = phase === 'rolling' || phase === 'slowmo';
+
+  const onRecordPress = useCallback(() => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (phase === 'address') {
       player.play();
       setPhase('rolling');
-    } else {
-      // Stop — same as the real screen: press ends the clip.
+    } else if (phase === 'rolling' || phase === 'slowmo') {
+      // Stop — same as the real screen: the press ends the clip.
       player.pause();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      onNext();
+      setPhase('stopped');
     }
-  }, [phase, player, onNext]);
+  }, [phase, player]);
+
+  const onEndRound = useCallback(() => {
+    if (phase !== 'stopped') return;
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    onNext();
+  }, [phase, onNext]);
+
+  const coach =
+    phase === 'address' ? 'This is your clicker. Press it to start recording.'
+    : phase === 'rolling' ? 'Recording. Press again when the shot is done.'
+    : phase === 'slowmo' ? 'Slow-mo on the strike — automatic. Press to stop.'
+    : 'Shot saved. Now end the round.';
+  const armed = phase === 'stopped';
+  const pillColor = armed ? '#fff' : theme.colors.textSecondary;
 
   return (
-    <View style={styles.fill}>
+    <View style={[styles.fill, { backgroundColor: '#000' }]}>
       <VideoView player={player} style={StyleSheet.absoluteFillObject} contentFit="cover" nativeControls={false} />
-      {/* Live-recording chrome, same visual grammar as the real screen */}
-      {/* REC sits BESIDE the hole chip — top-right belongs to the parent's
-          Skip button, and the two overlapped in the first sim pass. */}
-      <View style={styles.hudTop}>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <View style={styles.hudChip}><Text style={styles.hudChipText}>Hole 1 · Par 4</Text></View>
-          {phase !== 'address' && (
-            <View style={[styles.hudChip, { backgroundColor: 'rgba(229,57,53,0.9)' }]}>
-              <Text style={styles.hudChipText}>● REC</Text>
+
+      {/* Top chrome — the real components, real offsets. */}
+      <ScoreOverlay holeNumber={1} par={4} currentShot={armed ? 2 : 1} scoreToPar={0} isRecording={isRecording} topInset={topInset} />
+      <View style={[styles.recPill, { top: topInset + 52, left: 12 }]}>
+        <Bluetooth size={12} color={theme.colors.connected} />
+        <Text style={[styles.recPillText, { color: theme.colors.connected }]}>Clicker</Text>
+      </View>
+      <View style={[styles.recPill, { top: topInset + 92, left: 12 }]}>
+        <Settings2 size={12} color={theme.colors.textSecondary} />
+        <Text style={[styles.recPillText, { color: theme.colors.textSecondary }]}>Options</Text>
+      </View>
+      <Pressable onPress={onEndRound} hitSlop={8} style={[styles.recPill, { top: topInset + 52, right: 12 }, armed && styles.recPillArmed]}>
+        <Flag size={12} color={pillColor} />
+        <Text style={[styles.recPillText, { color: pillColor }]}>End Round</Text>
+      </Pressable>
+
+      {/* The coach line sits just above the controls, scrimmed. */}
+      <Animated.View key={coach} entering={FadeIn.duration(250)} pointerEvents="none" style={[styles.coachBand, { bottom: bottomInset + 190 }]}>
+        <Text style={styles.coachText}>{coach}</Text>
+      </Animated.View>
+
+      {/* Bottom controls — same two rows as the real screen. */}
+      <View style={[styles.recBottom, { paddingBottom: bottomInset + 16 }]}>
+        <View style={styles.recCameraRow}>
+          <View style={styles.recZoomToggle}>
+            {(['0.5x', '1x'] as const).map((m) => (
+              <View key={m} style={[styles.recZoomPill, m === '1x' && styles.recZoomPillActive]}>
+                <Text style={[styles.recZoomText, m === '1x' && { color: '#fff' }]}>{m}</Text>
+              </View>
+            ))}
+          </View>
+          <View style={styles.recFlip}>
+            <SwitchCamera size={20} color="#fff" />
+          </View>
+        </View>
+        <View style={styles.recActionRow}>
+          <View style={styles.recActionBtn}>
+            <AlertTriangle size={16} color="#FF6B6B" />
+            <Text style={styles.recActionText}>Penalty</Text>
+          </View>
+          <Pressable onPress={onRecordPress} style={styles.center}>
+            <RecordingIndicator isRecording={isRecording} />
+          </Pressable>
+          <View style={styles.recHoleNav}>
+            <View style={[styles.recHoleBtn, { opacity: 0.35 }]}>
+              <ChevronLeft size={16} color={theme.colors.textSecondary} />
+              <Text style={[styles.recActionText, { color: theme.colors.textSecondary }]}>Prev</Text>
             </View>
-          )}
+            <View style={styles.recHoleBtn}>
+              <ChevronRight size={16} color={theme.colors.primary} />
+              <Text style={[styles.recActionText, { color: theme.colors.primary }]}>Next Hole</Text>
+            </View>
+          </View>
         </View>
       </View>
-      {phase === 'slowmo' && (
-        <Animated.View entering={FadeIn.duration(250)} style={styles.slowmoWrap}>
-          <Text style={styles.beatText}>Slow-mo on the strike. Automatic.</Text>
+    </View>
+  );
+}
+
+/** Share beat (3 Sep): Henry's Reel · Post · Story · Message mock on the app
+ *  black. Holds a few seconds, or a tap moves on. */
+function ShareScene({ onNext }: { onNext: () => void }) {
+  const w = Dimensions.get('window').width - 32;
+  const h = Math.round(w * (638 / 1179)); // the mock's own aspect
+  useEffect(() => {
+    const t = setTimeout(onNext, 3800);
+    return () => clearTimeout(t);
+  }, [onNext]);
+  return (
+    <Pressable onPress={onNext} style={[styles.fill, styles.center, { backgroundColor: '#0A0A0F', padding: 16 }]}>
+      <Animated.View entering={FadeIn.duration(350)} style={{ alignItems: 'center', gap: 22 }}>
+        <Text style={styles.h1}>Share it anywhere</Text>
+        <Text style={styles.sub}>Reel, post, story or message — straight from the app.</Text>
+        <Image source={SHARE_MOCK} style={{ width: w, height: h, marginTop: 6 }} resizeMode="contain" />
+      </Animated.View>
+    </Pressable>
+  );
+}
+
+/** The last thing before signup: Henry's real exported reel at 5x under the
+ *  opening video's music. The CTA arrives after a beat so nobody is held. */
+function DemoReelScene({ onNext }: { onNext: () => void }) {
+  const [ctaReady, setCtaReady] = useState(false);
+  useEffect(() => {
+    const t = setTimeout(() => setCtaReady(true), 2500);
+    return () => clearTimeout(t);
+  }, []);
+  return (
+    <View style={[styles.fill, { backgroundColor: '#000' }]}>
+      {/* No caption: Henry's export carries the app's own scorecard header in
+          its top quarter, and a band there sat on top of the hole columns. */}
+      <SceneVideo source={VIDEOS.demo} />
+      {ctaReady && (
+        <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
+          <Pressable onPress={onNext} style={styles.cta}>
+            <Text style={styles.ctaText}>Make yours — it's free</Text>
+          </Pressable>
         </Animated.View>
       )}
-      <View style={styles.clickerDock}>
-        {phase === 'address' && <GhostRing />}
-        <FakeClicker
-          onPress={onClicker}
-          label={phase === 'address' ? 'Press the clicker to start recording' : phase === 'slowmo' ? 'Press again to stop' : undefined}
-        />
-      </View>
     </View>
-  );
-}
-
-/** Teaches double/triple tap using the REAL click window: taps are counted
- *  and resolved after CLICK_WINDOW_MS of quiet, exactly like useShutter. */
-function MultiTapScene({ taps, video, title, sub, confirm, onNext }: {
-  taps: 2 | 3; video: number; title: string; sub: string; confirm: string; onNext: () => void;
-}) {
-  const [state, setState] = useState<'prompt' | 'confirmed'>('prompt');
-  const [hint, setHint] = useState<string | null>(null);
-  const count = useRef(0);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const resolve = useCallback(() => {
-    const n = count.current;
-    count.current = 0;
-    if (n === taps) {
-      if (taps === 3) {
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-        setTimeout(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy), 120);
-      } else {
-        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
-      }
-      setState('confirmed');
-      setTimeout(onNext, 1800);
-    } else {
-      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
-      setHint(n < taps ? `That was ${n} — try ${taps} quick taps` : `That was ${n} — just ${taps} taps`);
-    }
-  }, [taps, onNext]);
-
-  const onClicker = useCallback(() => {
-    setHint(null);
-    count.current += 1;
-    if (timer.current) clearTimeout(timer.current);
-    // The production window, verbatim. What they learn here is what works.
-    timer.current = setTimeout(resolve, CLICK_WINDOW_MS);
-  }, [resolve]);
-
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-
-  return (
-    <View style={styles.fill}>
-      <SceneVideo source={video} loop muted />
-      <View style={styles.dim} />
-      <View style={[styles.fill, styles.center, { padding: 32 }]}>
-        {state === 'prompt' ? (
-          <Animated.View entering={FadeIn.duration(350)} style={{ alignItems: 'center', gap: 14 }}>
-            <Text style={styles.h1}>{title}</Text>
-            <Text style={styles.sub}>{sub}</Text>
-            {hint && <Text style={styles.hint}>{hint}</Text>}
-            <View style={{ marginTop: 26 }}>
-              <FakeClicker onPress={onClicker} />
-            </View>
-          </Animated.View>
-        ) : taps === 2 ? (
-          <HoleFlip />
-        ) : (
-          <PenaltyChip />
-        )}
-      </View>
-    </View>
-  );
-}
-
-/** Scoreboard flip: the old hole digit exits up, the new one springs in
- *  from below — state change as the confirmation, not a caption. */
-function HoleFlip() {
-  const oldY = useSharedValue(0);
-  const oldOp = useSharedValue(1);
-  const newY = useSharedValue(24);
-  const newOp = useSharedValue(0);
-  useEffect(() => {
-    oldY.value = withTiming(-24, { duration: 220 });
-    oldOp.value = withTiming(0, { duration: 220 });
-    newY.value = withDelay(120, withSpring(0, { damping: 14 }));
-    newOp.value = withDelay(120, withTiming(1, { duration: 180 }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const oldSt = useAnimatedStyle(() => ({ opacity: oldOp.value, transform: [{ translateY: oldY.value }] }));
-  const newSt = useAnimatedStyle(() => ({ opacity: newOp.value, transform: [{ translateY: newY.value }] }));
-  return (
-    <View style={styles.confirmCard}>
-      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
-        <Text style={styles.confirmText}>Hole</Text>
-        <View style={{ width: 26, height: 30 }}>
-          <Animated.Text style={[styles.confirmText, { position: 'absolute' }, oldSt]}>1</Animated.Text>
-          <Animated.Text style={[styles.confirmText, { position: 'absolute' }, newSt]}>2</Animated.Text>
-        </View>
-      </View>
-    </View>
-  );
-}
-
-/** The +1 chip drops onto the card with spring overshoot and a slight
- *  un-rotate — consequence, not caption (plan §13.7c). */
-function PenaltyChip() {
-  const y = useSharedValue(-40);
-  const rot = useSharedValue(-8);
-  const op = useSharedValue(0);
-  useEffect(() => {
-    op.value = withTiming(1, { duration: 120 });
-    y.value = withSpring(0, { damping: 11, stiffness: 160 });
-    rot.value = withSpring(0, { damping: 12 });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-  const st = useAnimatedStyle(() => ({
-    opacity: op.value,
-    transform: [{ translateY: y.value }, { rotate: `${rot.value}deg` }],
-  }));
-  return (
-    <Animated.View style={[styles.penaltyChip, st]}>
-      <Text style={styles.confirmText}>+1 penalty</Text>
-    </Animated.View>
   );
 }
 
@@ -880,7 +830,7 @@ function StorylineScene({ onNext }: { onNext: () => void }) {
       {beat === 'reel' && (
         <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
           <Pressable onPress={onNext} style={styles.cta}>
-            <Text style={styles.ctaText}>Now make YOURS</Text>
+            <Text style={styles.ctaText}>Share it</Text>
           </Pressable>
         </Animated.View>
       )}
@@ -897,8 +847,6 @@ const styles = StyleSheet.create({
   skipText: { color: 'rgba(255,255,255,0.85)', fontSize: 13, fontWeight: '600' },
   h1: { color: '#fff', fontSize: 26, fontWeight: '800', textAlign: 'center' },
   sub: { color: 'rgba(255,255,255,0.75)', fontSize: 15, textAlign: 'center', lineHeight: 22 },
-  hint: { color: '#FFD54F', fontSize: 14, fontWeight: '600' },
-  slowmoWrap: { position: 'absolute', top: 130, left: 24, right: 24, alignItems: 'center' },
   beatWrap: { position: 'absolute', bottom: 130, left: 24, right: 24, alignItems: 'center' },
   beatText: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   brandWrap: { position: 'absolute', top: 70, left: 0, right: 0, alignItems: 'center' },
@@ -917,15 +865,7 @@ const styles = StyleSheet.create({
     textShadowRadius: 12,
   },
   bigWordGreen: { color: '#A4C71C' },
-  ghostRing: { position: 'absolute', bottom: -6, width: 96, height: 96, borderRadius: 48, borderWidth: 3, borderColor: '#fff' },
   ball: { position: 'absolute', top: 0, left: 0, width: 10, height: 10, borderRadius: 5, backgroundColor: '#fff', shadowColor: '#fff', shadowOpacity: 0.8, shadowRadius: 6, shadowOffset: { width: 0, height: 0 } },
-  clicker: { width: 84, height: 84, borderRadius: 42, backgroundColor: '#1B5E20', borderWidth: 4, borderColor: '#4CAF50', alignItems: 'center', justifyContent: 'center', shadowColor: '#4CAF50', shadowOpacity: 0.6, shadowRadius: 16, shadowOffset: { width: 0, height: 0 } },
-  clickerInner: { width: 54, height: 54, borderRadius: 27, backgroundColor: '#4CAF50' },
-  clickerLabel: { color: '#fff', fontSize: 15, fontWeight: '700', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 6 },
-  clickerDock: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
-  hudTop: { position: 'absolute', top: 60, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between' },
-  hudChip: { backgroundColor: 'rgba(0,0,0,0.55)', borderRadius: 10, paddingHorizontal: 10, paddingVertical: 6 },
-  hudChipText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   storyBigTile: { position: 'absolute', borderRadius: 12, overflow: 'hidden', backgroundColor: 'rgba(255,255,255,0.06)', borderWidth: 2, borderColor: 'rgba(255,255,255,0.35)', shadowColor: '#000', shadowOpacity: 0.4, shadowRadius: 10, shadowOffset: { width: 0, height: 4 } },
   fusedCard: { position: 'absolute', borderRadius: 14, overflow: 'hidden', backgroundColor: '#000', borderWidth: 2, borderColor: '#fff' },
   trimDim: { position: 'absolute', top: 0, bottom: 0, backgroundColor: 'rgba(0,0,0,0.62)' },
@@ -945,9 +885,6 @@ const styles = StyleSheet.create({
   narrationWrap: { position: 'absolute', bottom: 140, left: 24, right: 24, alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.62)', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14 },
   narration: { color: '#fff', fontSize: 20, fontWeight: '800', textAlign: 'center', textShadowColor: 'rgba(0,0,0,0.7)', textShadowRadius: 8 },
   storyCta: { position: 'absolute', bottom: 60, left: 0, right: 0, alignItems: 'center' },
-  penaltyChip: { backgroundColor: 'rgba(211,47,47,0.95)', borderRadius: 18, paddingHorizontal: 28, paddingVertical: 18 },
-  confirmCard: { backgroundColor: 'rgba(76,175,80,0.95)', borderRadius: 18, paddingHorizontal: 28, paddingVertical: 18 },
-  confirmText: { color: '#fff', fontSize: 22, fontWeight: '800' },
   progressTrack: { width: '100%', height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.15)', overflow: 'hidden' },
   progressFill: { height: 8, borderRadius: 4, backgroundColor: '#4CAF50' },
   slotRow: { position: 'absolute', bottom: 90, flexDirection: 'row', gap: 14 },
@@ -956,6 +893,26 @@ const styles = StyleSheet.create({
   exampleBadge: { borderWidth: 1.5, borderColor: '#FFD54F', borderRadius: 8, paddingHorizontal: 10, paddingVertical: 4 },
   exampleFloat: { position: 'absolute', top: 64, alignSelf: 'center', backgroundColor: 'rgba(10,10,15,0.75)' },
   exampleBadgeText: { color: '#FFD54F', fontSize: 12, fontWeight: '800', letterSpacing: 2 },
+  // Record-screen chrome, lifted from app/(tabs)/record.tsx so the lesson is
+  // the production screen to the pixel. Keep these in step with that file.
+  recPill: { position: 'absolute', flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: 'rgba(0,0,0,0.5)', paddingHorizontal: 10, paddingVertical: 6, borderRadius: 16 },
+  recPillArmed: { backgroundColor: '#4CAF50' },
+  recPillText: { fontSize: 11, fontWeight: '600' },
+  coachBand: { position: 'absolute', left: 24, right: 24, alignItems: 'center', backgroundColor: 'rgba(0,0,0,0.62)', borderRadius: 14, paddingVertical: 10, paddingHorizontal: 14 },
+  coachText: { color: '#fff', fontSize: 17, fontWeight: '800', textAlign: 'center' },
+  recBottom: { position: 'absolute', bottom: 0, left: 0, right: 0, paddingTop: 16 },
+  recCameraRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24, marginBottom: 18 },
+  recZoomToggle: { flexDirection: 'row', backgroundColor: 'rgba(0,0,0,0.5)', borderRadius: 18, padding: 3, gap: 2 },
+  recZoomPill: { paddingHorizontal: 14, paddingVertical: 7, borderRadius: 15 },
+  recZoomPillActive: { backgroundColor: 'rgba(255,255,255,0.18)' },
+  recZoomText: { color: theme.colors.textTertiary, fontSize: 13, fontWeight: '700' },
+  recFlip: { width: 44, height: 44, borderRadius: 22, backgroundColor: 'rgba(0,0,0,0.5)', alignItems: 'center', justifyContent: 'center' },
+  recActionRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 24 },
+  recActionBtn: { alignItems: 'center', justifyContent: 'center', gap: 4, width: 70 },
+  recActionText: { color: '#FF6B6B', fontSize: 11, fontWeight: '600' },
+  recHoleNav: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  recHoleBtn: { alignItems: 'center', justifyContent: 'center', gap: 4, width: 56 },
   cta: { backgroundColor: '#4CAF50', borderRadius: 16, paddingHorizontal: 30, paddingVertical: 16, marginTop: 12 },
   ctaText: { color: '#fff', fontSize: 17, fontWeight: '800' },
 });
+

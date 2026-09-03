@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFileSync, statSync, readdirSync } from 'node:fs';
+import { readFileSync, statSync, readdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
@@ -12,11 +12,19 @@ const sales = readFileSync(join(root, 'lib/salesFlow.ts'), 'utf8');
 const rootLayout = readFileSync(join(root, 'app/_layout.tsx'), 'utf8');
 const diagnostics = readFileSync(join(root, 'app/profile/diagnostics.tsx'), 'utf8');
 
-// The plan's central claim: the tutorial teaches the PRODUCTION interface.
-test('the fake clicker resolves taps with the real shutter window', () => {
-  assert.match(shutter, /export const CLICK_WINDOW_MS = 1000;/);
-  assert.match(cin, /import \{ CLICK_WINDOW_MS \} from '@\/hooks\/useShutter';/);
-  assert.match(cin, /setTimeout\(resolve, CLICK_WINDOW_MS\)/);
+// 3 Sep: the recording lesson IS the production interface — the real
+// ScoreOverlay and RecordingIndicator, the real End Round pill — over
+// Henry's footage. Not a green stand-in clicker. The double/triple-tap
+// lessons were cut at Henry's instruction, so the shutter window is no
+// longer exercised here (the real screen still owns it).
+test('the recording lesson renders the real record-screen chrome', () => {
+  assert.match(shutter, /export const CLICK_WINDOW_MS = 1000;/, 'the production window is untouched');
+  assert.match(cin, /import \{ ScoreOverlay \} from '@\/components\/record\/ScoreOverlay';/);
+  assert.match(cin, /import \{ RecordingIndicator \} from '@\/components\/record\/RecordingIndicator';/);
+  assert.match(cin, /<ScoreOverlay/);
+  assert.match(cin, /<RecordingIndicator isRecording=/);
+  assert.match(cin, /End Round/);
+  assert.doesNotMatch(cin, /function MultiTapScene|function ClickerIntroScene/, 'cut scenes are gone');
 });
 
 // Henry's footage insight: the held-at-address shot is a paused player, not
@@ -33,8 +41,8 @@ test('tutorial videos ride the binary, within budget', () => {
   assert.match(cin, /require\('@\/assets\/onboarding\/hero\.mp4'\)/);
   const dir = join(root, 'assets/onboarding');
   const total = readdirSync(dir).reduce((sum, f) => sum + statSync(join(dir, f)).size, 0);
-  // Budget raised to 35MB for the par-5 sample round (plan §13.5) — five
-  // raw-capture clips, five strike posters and the stitched reel.
+  // 35MB: the hero, one address clip, the stitched sample reel, the 5x demo
+  // reel, four posters, the trimmer still and the share mock.
   assert.ok(total < 35 * 1024 * 1024, `onboarding assets ${Math.round(total / 1e6)}MB exceed the 35MB budget`);
 });
 
@@ -45,12 +53,15 @@ test('every scene has a wedge-guard timeout and skip is always reachable', () =>
   assert.match(cin, /setShowSkip\(true\), 3000/);
 });
 
-// Skip and completion both land on the real Aha step — never a dead end.
-test('v2 hands off into the v1 stepper at the Aha step', () => {
-  assert.match(host, /AHA_STEP_INDEX = 2/);
-  assert.match(host, /setStep\(AHA_STEP_INDEX\)/);
-  const v2block = host.match(/variant === 'v2'[\s\S]*?<\/CinematicOnboarding>|variant === 'v2'[\s\S]*?\/>\s*\);/)?.[0] ?? '';
-  assert.match(v2block, /onSkip/);
+// 3 Sep: the cinematic flow ends on signup. It must never hand into the v1
+// stepper — its camera-roll import and par-5 sample round were cut.
+test('the cinematic flow ends on signup, never the v1 stepper', () => {
+  const block = host.match(/variant === 'v3' \|\| variant === 'v2'[\s\S]*?\/>\s*\);\s*\}/)?.[0] ?? '';
+  assert.ok(block, 'v2 and v3 share one exit');
+  assert.match(block, /router\.replace\('\/\(auth\)\/signup'\)/);
+  assert.match(block, /onSkip=\{\(\) => void toSignup\(\)\}/, 'skip lands on signup too');
+  assert.doesNotMatch(block, /setStep\(AHA_STEP_INDEX\)/, 'no hand-off into the stepper');
+  assert.doesNotMatch(block, /setVariant\('v1'\)/);
 });
 
 // Rework 2 Sep: EXPORT lift-off replaced by the create-your-own STORYLINE
@@ -72,10 +83,11 @@ test('both variants log the funnel', () => {
   assert.match(cin, /logFunnel\('v2'/);
 });
 
-// Production stays v1 until v2 wins; dev defaults v2.
-test('variant defaults: production v1, dev v2, override honoured', () => {
-  assert.match(funnel, /appVariant === 'development' \? 'v2' : 'v1'/);
-  assert.match(funnel, /onboarding\.variant/);
+// 3 Sep: the cinematic flow is the onboarding on every build.
+test('variant default: v2 everywhere, override honoured', () => {
+  assert.match(funnel, /return 'v2';/);
+  assert.doesNotMatch(funnel, /appVariant === 'development' \? 'v2' : 'v1'/);
+  assert.match(funnel, /onboarding\.variant/, 'diagnostics can still force a variant');
 });
 
 // Resume restarts the current scene from its top, never mid-video.
@@ -84,18 +96,27 @@ test('a killed run resumes at the top of its scene', () => {
   assert.match(cin, /saved !== 'MONTAGE'/);
 });
 
-// Plan §13.5 — the sample round. Frame-verified inputs (one hole, strikes
-// pinned at 9.9/6.9/10.0/5.9/4.2s), raw-feel clips in, offline reel out.
-test('the sample round is five presses that become a reel', () => {
-  const sr = readFileSync(join(root, 'components/onboarding/flow/SampleRound.tsx'), 'utf8');
-  assert.match(sr, /sample1\.mp4/);
-  assert.match(sr, /sample_reel\.mp4/);
-  assert.match(sr, /playToEnd/, 'clips land when they end');
-  assert.match(sr, /setTimeout\(\(\) => land\(idx\), 9000\)/, 'wedge guard on every raw clip');
-  assert.match(sr, /never claims the reel is yours|Yours will look like this/, 'honest sample copy');
+// 3 Sep: Henry cut the par-5 sample round outright and took the camera-roll
+// import out of the funnel. The five raw clips left the bundle with it.
+test('the par-5 sample round is gone and its clips are out of the bundle', () => {
+  assert.ok(!existsSync(join(root, 'components/onboarding/flow/SampleRound.tsx')), 'SampleRound.tsx deleted');
   const aha = readFileSync(join(root, 'components/onboarding/flow/AhaScreen.tsx'), 'utf8');
-  assert.match(aha, /<SampleRound/, 'wired into the aha sample path');
-  assert.match(aha, /setAhaOutcome\('sample'\)/, 'preserves the outcome contract');
+  assert.doesNotMatch(aha, /SampleRound/);
+  const bundled = readdirSync(join(root, 'assets/onboarding'));
+  for (const f of ['sample1.mp4', 'sample5.mp4', 'shot2.mp4', 'shot3.mp4']) {
+    assert.ok(!bundled.includes(f), `${f} must not ride the binary any more`);
+  }
+});
+
+// 3 Sep: after the storyline, the share screen (Henry's Reel/Post/Story/
+// Message mock, ground matched to the app black) and then the demo reel at
+// 5x with the opening video's music. Then signup.
+test('share screen and 5x demo reel close the flow', () => {
+  assert.match(cin, /const SCENES = \[\s*'MONTAGE',\s*'RECORD',\s*'STORYLINE',\s*'SHARE',\s*'DEMO_REEL',\s*\] as const;/);
+  assert.match(cin, /require\('@\/assets\/onboarding\/share_socials\.png'\)/);
+  assert.match(cin, /require\('@\/assets\/onboarding\/demo_reel\.mp4'\)/);
+  assert.match(cin, /function ShareScene/);
+  assert.match(cin, /function DemoReelScene/);
 });
 
 // §13.6 as ratified: NO kit content in onboarding; earned observations only.
@@ -129,9 +150,14 @@ test('the hero resolves the white lockup + stamped two-tone headline on the end 
   assert.match(cin, /bigWordGreen/, 'REMEMBERED. is the brand green, not white');
 
   assert.match(cin, /ImpactFeedbackStyle\.Heavy/, 'a haptic per word');
-  assert.match(cin, /currentTime >= p\.duration - 0\.25/, 'resolves on the final frame, not a timer');
-  assert.match(cin, /if \(!resolved\) return;/, 'the words stamp on the END frame, not during the clip');
-  assert.match(cin, /setTimeout\(onNext, 3000\)/, 'auto-advances once the last word has held');
+  // 3 Sep: the words FADE in and are all up 3s before the clip ends; the
+  // clip then loops under them until "Let's create your reel" is pressed.
+  assert.match(cin, /const WORDS_DONE_BEFORE_END_S = 3;/);
+  assert.match(cin, /currentTime >= p\.duration - WORDS_LEAD_S/, 'resolves off the clip clock, not a timer');
+  assert.match(cin, /entering=\{FadeIn\.duration\(WORD_FADE_MS\)/, 'fade, not a zoom stamp');
+  assert.match(cin, /<SceneVideo source=\{VIDEOS\.hero\} loop/, 'the hero loops once the words are up');
+  assert.match(cin, /Let's create your reel/);
+  assert.doesNotMatch(cin, /setTimeout\(onNext, 3000\)/, 'no auto-advance — the CTA is the exit');
   assert.doesNotMatch(cin, /CONTACT_MS/, 'the old mid-downswing stamp is gone');
 });
 

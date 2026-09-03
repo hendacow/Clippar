@@ -53,10 +53,6 @@ const STEPS = [
 
 // Step names for funnel telemetry — index-aligned with STEPS.
 const STEP_NAMES = ['HERO', 'INTENT', 'AHA', 'REEL_READY', 'PRO_GATE'] as const;
-// The v2 cinematic flow hands off INTO this stepper at the Aha step —
-// "watch Henry, then make yours" — so the camera-roll moment is shared by
-// both variants rather than rebuilt.
-const AHA_STEP_INDEX = 2;
 
 export default function OnboardingFunnel() {
   const insets = useSafeAreaInsets();
@@ -160,31 +156,23 @@ export default function OnboardingFunnel() {
   if (variant === null) {
     return <View style={{ flex: 1, backgroundColor: '#0A0A0F' }} />;
   }
-  if (variant === 'v3') {
-    // The hook earns the signup; the REAL app does the teaching after it
-    // (the post-auth tutorial redirect in _layout picks up the pending flag).
+  if (variant === 'v3' || variant === 'v2') {
+    // Both cinematic variants end on signup. v3 is the short hook; v2 is the
+    // full flow (3 Sep spec): montage → the real recording screen → the
+    // trim/stitch storyline → share → the demo reel. Neither hands into the
+    // v1 stepper any more — its camera-roll import and par-5 sample round
+    // were cut, so a hand-off there would land on screens Henry removed.
     const toSignup = async () => {
       endIntroReplay();
       await markSalesDone();
       await setTutorialPending(true);
       router.replace('/(auth)/signup');
     };
-    return <CinematicOnboarding hook onDone={() => void toSignup()} onSkip={() => void toSignup()} />;
-  }
-  if (variant === 'v2') {
     return (
       <CinematicOnboarding
-        onDone={() => {
-          // Hand off into the real funnel at the Aha step — the tutorial
-          // sold it; now they make their own from the camera roll.
-          setStep(AHA_STEP_INDEX);
-          setVariant('v1');
-          logFunnel('v2', 'HANDOFF', 'complete', 0);
-        }}
-        onSkip={() => {
-          setStep(AHA_STEP_INDEX);
-          setVariant('v1');
-        }}
+        hook={variant === 'v3'}
+        onDone={() => void toSignup()}
+        onSkip={() => void toSignup()}
       />
     );
   }
