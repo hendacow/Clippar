@@ -58,12 +58,11 @@ const VIDEOS = {
   // dropped — it carried a sliver of the previous shot — so frame 1 is Henry
   // at address at sunset (frame-verified on the simulator). 14.85s, loops.
   hero: require('@/assets/onboarding/hero.mp4'),
-  // The recording lesson's clip: Henry's punch-out under the tree, the first
-  // 4.4s only — address, strike at ~2.0s, follow-through — with its natural
-  // sound KEPT (Henry wants the noise of the shot). 4 Sep: the full clip had
-  // a friend talking over its tail; the loudness profile rises again at
-  // 5.0s, so the cut lands at 4.4s. A putt was tried and rejected — he wants
-  // a real swing here.
+  // The recording lesson's clip: Henry's own pick (4 Sep, IMG_0600) — 4.5s,
+  // address for ~1.8s, strike ~2.6s, full finish, natural sound kept.
+  // Remuxed losslessly (HEVC/HLG + AAC, rotation metadata intact). Three
+  // earlier clips were wrong: another golfer, a friend talking over the
+  // tail, a putt where a swing was wanted.
   lesson: require('@/assets/onboarding/lesson_shot.mp4'),
   // Henry's exported reel at 5x (75s → 15s) under the hero's own music track,
   // which is 15.0s — they fit to the frame. The last thing seen before signup.
