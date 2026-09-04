@@ -233,7 +233,16 @@ export default function TrainingRecordScreen() {
   return (
     <View style={{ flex: 1, backgroundColor: '#000' }}>
       {isNative && CameraView ? (
-        <CameraView ref={camera.cameraRef} style={StyleSheet.absoluteFillObject} facing="back" mode="video" />
+        <CameraView
+          ref={camera.cameraRef}
+          style={StyleSheet.absoluteFillObject}
+          facing="back"
+          mode="video"
+          // The torch as the "recording in progress" light, exactly as on the
+          // round screen — the range never turned it on (Henry, 4 Sep). Follows
+          // isRecording so it is on the instant a clip starts and off when it ends.
+          enableTorch={camera.isRecording}
+        />
       ) : (
         <View style={[StyleSheet.absoluteFillObject, { backgroundColor: '#111' }]} />
       )}

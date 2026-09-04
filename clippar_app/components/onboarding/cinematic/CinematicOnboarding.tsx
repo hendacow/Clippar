@@ -58,7 +58,10 @@ const VIDEOS = {
   // dropped — it carried a sliver of the previous shot — so frame 1 is Henry
   // at address at sunset (frame-verified on the simulator). 14.85s, loops.
   hero: require('@/assets/onboarding/hero.mp4'),
-  shot1: require('@/assets/onboarding/shot1.mp4'),
+  // The recording lesson's clip: Henry's punch-out under the tree — frame 1 is
+  // address, the strike lands ~2.0s in. (4 Sep: the previous clip was another
+  // golfer entirely; Henry: "get rid of this guy".)
+  lesson: require('@/assets/onboarding/lesson_shot.mp4'),
   // Henry's exported reel at 5x (75s → 15s) under the hero's own music track,
   // which is 15.0s — they fit to the frame. The last thing seen before signup.
   demo: require('@/assets/onboarding/demo_reel.mp4'),
@@ -436,41 +439,27 @@ function MontageScene({ onNext }: { onNext: () => void }) {
  *  button and, once a clip is saved, End Round.
  *
  *  Freeze-frame IS the held-at-address shot: the player starts paused on
- *  frame one, rolls on the press, drops to 0.5x after the strike. */
+ *  frame one and rolls on the press. No slow-mo on the strike — the real
+ *  app does not do that, so the lesson must not either (Henry, 4 Sep). */
 function RecordScene({ onNext, topInset, bottomInset }: { onNext: () => void; topInset: number; bottomInset: number }) {
-  type Phase = 'address' | 'rolling' | 'slowmo' | 'stopped';
+  type Phase = 'address' | 'rolling' | 'stopped';
   const [phase, setPhase] = useState<Phase>('address');
   const pRef = useRef<import('expo-video').VideoPlayer | null>(null);
   const { useVideoPlayer, VideoView } = ExpoVideo!;
-  const player = useVideoPlayer(VIDEOS.shot1, (p) => {
+  const player = useVideoPlayer(VIDEOS.lesson, (p) => {
     p.loop = false;
     p.pause(); // frame one = Henry at address, held until the tap
   });
   pRef.current = player;
 
-  useEffect(() => {
-    if (phase !== 'rolling') return;
-    const iv = setInterval(() => {
-      const p = pRef.current;
-      if (!p || p.duration <= 0) return;
-      if (p.currentTime >= p.duration * 0.55) {
-        p.playbackRate = 0.5;
-        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy);
-        setTimeout(() => Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light), 90);
-        setPhase('slowmo');
-      }
-    }, 100);
-    return () => clearInterval(iv);
-  }, [phase]);
-
-  const isRecording = phase === 'rolling' || phase === 'slowmo';
+  const isRecording = phase === 'rolling';
 
   const onRecordPress = useCallback(() => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     if (phase === 'address') {
       player.play();
       setPhase('rolling');
-    } else if (phase === 'rolling' || phase === 'slowmo') {
+    } else if (phase === 'rolling') {
       // Stop — same as the real screen: the press ends the clip.
       player.pause();
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
@@ -487,7 +476,6 @@ function RecordScene({ onNext, topInset, bottomInset }: { onNext: () => void; to
   const coach =
     phase === 'address' ? 'This is your clicker. Press it to start recording.'
     : phase === 'rolling' ? 'Recording. Press again when the shot is done.'
-    : phase === 'slowmo' ? 'Slow-mo on the strike — automatic. Press to stop.'
     : 'Shot saved. Now end the round.';
   const armed = phase === 'stopped';
   const pillColor = armed ? '#fff' : theme.colors.textSecondary;
@@ -586,7 +574,7 @@ function DemoReelScene({ onNext }: { onNext: () => void }) {
   const { width, height } = Dimensions.get('window');
   const { useVideoPlayer, VideoView } = ExpoVideo!;
   const player = useVideoPlayer(VIDEOS.demo, (p) => {
-    p.loop = false;
+    p.loop = true; // Henry, 4 Sep: "make that looping as well once it finishes"
     p.muted = false;
     p.play();
   });
@@ -594,7 +582,8 @@ function DemoReelScene({ onNext }: { onNext: () => void }) {
   const progress = useSharedValue(0);
   useEffect(() => {
     const t = setTimeout(() => setCtaReady(true), 2500);
-    progress.value = withTiming(1, { duration: 15000, easing: Easing.linear });
+    // 15.0s clip, looping — the bar refills each pass.
+    progress.value = withRepeat(withTiming(1, { duration: 15000, easing: Easing.linear }), -1, false);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

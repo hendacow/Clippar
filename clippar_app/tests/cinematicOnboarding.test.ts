@@ -28,10 +28,27 @@ test('the recording lesson renders the real record-screen chrome', () => {
 });
 
 // Henry's footage insight: the held-at-address shot is a paused player, not
-// purpose-filmed footage; slow-mo is a playbackRate change.
-test('freeze-frame and playbackRate replace purpose-filmed footage', () => {
+// purpose-filmed footage. 4 Sep: NO slow-mo on the strike — the real app
+// does not do that, so the lesson must not pretend it does.
+test('freeze-frame replaces purpose-filmed footage; no fake slow-mo', () => {
   assert.match(cin, /p\.pause\(\); \/\/ frame one = Henry at address/);
-  assert.match(cin, /playbackRate = 0\.5/);
+  assert.doesNotMatch(cin, /playbackRate = 0\.5/, 'slow-mo on the strike is gone');
+  assert.match(cin, /lesson: require\('@\/assets\/onboarding\/lesson_shot\.mp4'\)/, 'the lesson clip is Henry');
+  assert.doesNotMatch(cin, /shot1\.mp4/, 'the other golfer\'s clip is out');
+});
+
+// 4 Sep: the range light. The practice screen's CameraView never enabled the
+// torch, so the "recording" light only ever worked on a round.
+test('the range turns the recording light on while a clip records', () => {
+  const range = readFileSync(join(root, 'app/training/record.tsx'), 'utf8');
+  assert.match(range, /enableTorch=\{camera\.isRecording\}/);
+});
+
+// 4 Sep: the story-framed demo reel loops.
+test('the demo reel loops inside its story frame', () => {
+  const demo = cin.slice(cin.indexOf('function DemoReelScene'), cin.indexOf('function StorylineScene'));
+  assert.match(demo, /p\.loop = true;/);
+  assert.match(demo, /withRepeat\(withTiming\(1, \{ duration: 15000/);
 });
 
 // First cold start cannot depend on the update channel (5s fallback window).
@@ -103,7 +120,7 @@ test('the par-5 sample round is gone and its clips are out of the bundle', () =>
   const aha = readFileSync(join(root, 'components/onboarding/flow/AhaScreen.tsx'), 'utf8');
   assert.doesNotMatch(aha, /SampleRound/);
   const bundled = readdirSync(join(root, 'assets/onboarding'));
-  for (const f of ['sample1.mp4', 'sample5.mp4', 'shot2.mp4', 'shot3.mp4']) {
+  for (const f of ['sample1.mp4', 'sample5.mp4', 'shot1.mp4', 'shot2.mp4', 'shot3.mp4']) {
     assert.ok(!bundled.includes(f), `${f} must not ride the binary any more`);
   }
 });
