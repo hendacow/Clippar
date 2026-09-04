@@ -26,7 +26,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Haptics from 'expo-haptics';
 import { LinearGradient } from 'expo-linear-gradient';
 import Animated, { FadeIn, useSharedValue, useAnimatedStyle, withTiming, withSpring, withRepeat, withSequence, withDelay, Easing, runOnJS } from 'react-native-reanimated';
-import { Flag, AlertTriangle, ChevronLeft, ChevronRight, Bluetooth, Settings2, SwitchCamera } from 'lucide-react-native';
+import { Flag, AlertTriangle, ChevronLeft, ChevronRight, Bluetooth, Settings2, SwitchCamera, X, Heart, Send } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 import { ScoreOverlay } from '@/components/record/ScoreOverlay';
 import { RecordingIndicator } from '@/components/record/RecordingIndicator';
@@ -216,11 +216,9 @@ export function CinematicOnboarding({ onDone, onSkip, hook = false }: {
 
       {/* On the RECORD scene the real ScoreOverlay owns top-right (Shot chip at
           +8, End Round at +52), so Skip drops to +92 — the slot Options uses on
-          the left — rather than sit on the Shot chip, which it did. On the
-          demo reel Henry's export carries its own scorecard header in the top
-          ~210pt, so Skip drops beneath it there. */}
+          the left — rather than sit on the Shot chip, which it did. */}
       {showSkip && (
-        <Pressable onPress={skip} hitSlop={12} style={[styles.skip, { top: insets.top + (scene === 'RECORD' ? 92 : scene === 'DEMO_REEL' ? 180 : 10) }]}>
+        <Pressable onPress={skip} hitSlop={12} style={[styles.skip, { top: insets.top + (scene === 'RECORD' ? 92 : 10) }]}>
           <Text style={styles.skipText}>Skip</Text>
         </Pressable>
       )}
@@ -577,18 +575,63 @@ function ShareScene({ onNext }: { onNext: () => void }) {
 }
 
 /** The last thing before signup: Henry's real exported reel at 5x under the
- *  opening video's music. The CTA arrives after a beat so nobody is held. */
+ *  opening video's music, presented INSIDE an Instagram-story frame (3 Sep,
+ *  Henry). The story chrome sits ABOVE and BELOW the video, never over it,
+ *  and the video is contain-fit — so the reel's own scorecard header, which
+ *  a full-bleed cover crop was cutting off, is always whole. This is his own
+ *  reel in a story frame, not a sample posted to his story (the thing plan
+ *  §13.4 retired). The CTA arrives after a beat so nobody is held. */
 function DemoReelScene({ onNext }: { onNext: () => void }) {
+  const insets = useSafeAreaInsets();
+  const { width, height } = Dimensions.get('window');
+  const { useVideoPlayer, VideoView } = ExpoVideo!;
+  const player = useVideoPlayer(VIDEOS.demo, (p) => {
+    p.loop = false;
+    p.muted = false;
+    p.play();
+  });
   const [ctaReady, setCtaReady] = useState(false);
+  const progress = useSharedValue(0);
   useEffect(() => {
     const t = setTimeout(() => setCtaReady(true), 2500);
+    progress.value = withTiming(1, { duration: 15000, easing: Easing.linear });
     return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const progressStyle = useAnimatedStyle(() => ({ width: `${progress.value * 100}%` as unknown as number }));
+
+  // Story chrome heights + the CTA's reserve decide how big the 9:16 video can be.
+  const HEAD_H = 44;
+  const FOOT_H = 52;
+  const top = insets.top + 46;                 // Skip sits above the card at +10
+  const reserve = 60 + 64 + 16;                // storyCta bottom + button + gap
+  const videoH = Math.floor(Math.min(height - top - reserve - HEAD_H - FOOT_H, ((width - 44) * 16) / 9));
+  const videoW = Math.floor((videoH * 9) / 16);
+
   return (
-    <View style={[styles.fill, { backgroundColor: '#000' }]}>
-      {/* No caption: Henry's export carries the app's own scorecard header in
-          its top quarter, and a band there sat on top of the hole columns. */}
-      <SceneVideo source={VIDEOS.demo} />
+    <View style={[styles.fill, { backgroundColor: '#0A0A0F', alignItems: 'center' }]}>
+      <View style={[styles.storyCard, { width: videoW, marginTop: top }]}>
+        <View style={[styles.storyHead, { height: HEAD_H }]}>
+          <View style={styles.storyProgress}>
+            <Animated.View style={[styles.storyProgressFill, progressStyle]} />
+          </View>
+          <View style={styles.storyHeadRow}>
+            <View style={styles.storyAvatar} />
+            <Text style={styles.storyName}>clippar.golf</Text>
+            <Text style={styles.storyTime}>1h</Text>
+            <View style={{ flex: 1 }} />
+            <X size={18} color="#fff" />
+          </View>
+        </View>
+        <VideoView player={player} style={{ width: videoW, height: videoH, backgroundColor: '#000' }} contentFit="contain" nativeControls={false} />
+        <View style={[styles.storyFoot, { height: FOOT_H }]}>
+          <View style={styles.storyReply}>
+            <Text style={styles.storyReplyText}>Send message</Text>
+          </View>
+          <Heart size={22} color="#fff" />
+          <Send size={22} color="#fff" />
+        </View>
+      </View>
       {ctaReady && (
         <Animated.View entering={FadeIn.duration(400)} style={styles.storyCta}>
           <Pressable onPress={onNext} style={styles.cta}>
@@ -917,6 +960,18 @@ const styles = StyleSheet.create({
   recActionText: { color: '#FF6B6B', fontSize: 11, fontWeight: '600' },
   recHoleNav: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   recHoleBtn: { alignItems: 'center', justifyContent: 'center', gap: 4, width: 56 },
+  // Instagram-story frame for the demo reel: chrome above/below, never over the video.
+  storyCard: { borderRadius: 18, overflow: 'hidden', backgroundColor: '#000', borderWidth: 1, borderColor: 'rgba(255,255,255,0.14)' },
+  storyHead: { paddingHorizontal: 10, paddingTop: 8, backgroundColor: '#000' },
+  storyProgress: { height: 2, borderRadius: 1, backgroundColor: 'rgba(255,255,255,0.35)', overflow: 'hidden' },
+  storyProgressFill: { height: 2, backgroundColor: '#fff' },
+  storyHeadRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 8 },
+  storyAvatar: { width: 24, height: 24, borderRadius: 12, backgroundColor: '#A4C71C' },
+  storyName: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  storyTime: { color: 'rgba(255,255,255,0.6)', fontSize: 12 },
+  storyFoot: { flexDirection: 'row', alignItems: 'center', gap: 14, paddingHorizontal: 12, backgroundColor: '#000' },
+  storyReply: { flex: 1, height: 34, borderRadius: 17, borderWidth: 1, borderColor: 'rgba(255,255,255,0.5)', justifyContent: 'center', paddingHorizontal: 14 },
+  storyReplyText: { color: 'rgba(255,255,255,0.7)', fontSize: 13 },
   cta: { backgroundColor: '#4CAF50', borderRadius: 16, paddingHorizontal: 30, paddingVertical: 16, marginTop: 12 },
   ctaText: { color: '#fff', fontSize: 17, fontWeight: '800' },
 });
