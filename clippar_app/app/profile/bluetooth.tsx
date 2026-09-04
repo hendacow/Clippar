@@ -1,4 +1,5 @@
-import { View, Text, FlatList, Pressable, ActivityIndicator } from 'react-native';
+import { useState } from 'react';
+import { View, Text, FlatList, Pressable, ActivityIndicator, ScrollView, Linking } from 'react-native';
 import { Stack } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Bluetooth, BluetoothOff, Wifi, WifiOff } from 'lucide-react-native';
@@ -7,14 +8,35 @@ import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
 import { Badge } from '@/components/ui/Badge';
 import { useBLE } from '@/hooks/useBLE';
+import { CONNECT_STEPS, HELP_SECTIONS } from '@/lib/clickerHelp';
 
 export default function BluetoothScreen() {
   const ble = useBLE();
+  // The scan is for clickers that talk BLE directly; most cheap shutters
+  // pair in iPhone Settings as a keyboard, which the three steps cover.
+  // Henry, 4 Sep: "get rid of Scan for devices — three steps to connect".
+  const [showScan, setShowScan] = useState(false);
 
   return (
     <>
-      <Stack.Screen options={{ title: 'Bluetooth Clicker' }} />
-      <View style={{ flex: 1, padding: 16 }}>
+      <Stack.Screen options={{ title: 'Connect your clicker' }} />
+      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingBottom: 40 }}>
+        {/* The three steps */}
+        <View style={{ marginBottom: 20 }}>
+          {CONNECT_STEPS.map((step, i) => (
+            <View key={step.title} style={{ flexDirection: 'row', gap: 14, marginBottom: 16 }}>
+              <View style={{ width: 34, height: 34, borderRadius: 17, backgroundColor: theme.colors.primary, justifyContent: 'center', alignItems: 'center' }}>
+                <Text style={{ color: '#000', fontSize: 16, fontWeight: '800' }}>{i + 1}</Text>
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: theme.colors.textPrimary, fontSize: 16, fontWeight: '700', marginBottom: 3 }}>{step.title}</Text>
+                <Text style={{ color: theme.colors.textSecondary, fontSize: 14, lineHeight: 20 }}>{step.body}</Text>
+              </View>
+            </View>
+          ))}
+          <Button title="Open iPhone Settings" onPress={() => { void Linking.openSettings(); }} variant="ghost" />
+        </View>
+
         {/* Connection Status */}
         <Card style={{ marginBottom: 24, alignItems: 'center', paddingVertical: 32 }}>
           <View
@@ -47,8 +69,24 @@ export default function BluetoothScreen() {
           />
         </Card>
 
-        {/* Actions */}
-        {ble.connectionState === 'connected' ? (
+        {/* Having trouble? — the same answers as the record screen's Troubleshoot */}
+        <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '600', marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Having trouble?</Text>
+        {HELP_SECTIONS.filter((h) => h.key === 'not-working' || h.key === 'record' || h.key === 'next-hole' || h.key === 'penalty').map((h) => (
+          <View key={h.key} style={{ backgroundColor: theme.colors.surface, borderRadius: 14, padding: 14, borderWidth: 1, borderColor: theme.colors.surfaceBorder, marginBottom: 10 }}>
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700', marginBottom: 6 }}>{h.title}</Text>
+            {h.steps.map((line, i) => (
+              <Text key={i} style={{ color: theme.colors.textSecondary, fontSize: 14, lineHeight: 20, marginBottom: 4 }}>• {line}</Text>
+            ))}
+          </View>
+        ))}
+
+        {/* Advanced: a direct Bluetooth scan for clickers that do not pair as a keyboard */}
+        <Pressable onPress={() => setShowScan((v) => !v)} hitSlop={8} style={{ paddingVertical: 12 }}>
+          <Text style={{ color: theme.colors.textTertiary, fontSize: 13, textDecorationLine: 'underline' }}>
+            {showScan ? 'Hide advanced' : 'Advanced: my clicker does not show up in iPhone Settings'}
+          </Text>
+        </Pressable>
+        {showScan && (ble.connectionState === 'connected' ? (
           <Button
             title="Disconnect"
             onPress={ble.disconnect}
@@ -56,14 +94,14 @@ export default function BluetoothScreen() {
           />
         ) : (
           <Button
-            title={ble.connectionState === 'scanning' ? 'Scanning...' : 'Scan for Devices'}
+            title={ble.connectionState === 'scanning' ? 'Scanning...' : 'Scan for Bluetooth devices'}
             onPress={ble.startScan}
             disabled={ble.connectionState === 'scanning'}
           />
-        )}
+        ))}
 
         {/* Discovered Devices */}
-        {ble.devices.length > 0 && (
+        {showScan && ble.devices.length > 0 && (
           <View style={{ marginTop: 24 }}>
             <Text style={{ color: theme.colors.textSecondary, fontSize: 13, fontWeight: '500', marginBottom: 8 }}>
               DISCOVERED DEVICES
@@ -113,7 +151,7 @@ export default function BluetoothScreen() {
           </View>
         )}
 
-        {ble.connectionState === 'scanning' && ble.devices.length === 0 && (
+        {showScan && ble.connectionState === 'scanning' && ble.devices.length === 0 && (
           <View style={{ marginTop: 32, alignItems: 'center' }}>
             <ActivityIndicator color={theme.colors.primary} />
             <Text style={{ color: theme.colors.textSecondary, marginTop: 8, fontSize: 14 }}>
@@ -122,14 +160,7 @@ export default function BluetoothScreen() {
           </View>
         )}
 
-        {/* Info note */}
-        <View style={{ marginTop: 'auto', paddingVertical: 16 }}>
-          <Text style={{ color: theme.colors.textTertiary, fontSize: 12, textAlign: 'center' }}>
-            BLE clicker requires a development build.{'\n'}
-            Not available in Expo Go.
-          </Text>
-        </View>
-      </View>
+      </ScrollView>
     </>
   );
 }

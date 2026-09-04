@@ -40,6 +40,7 @@ import { CourseSearch } from '@/components/record/CourseSearch';
 import { RecentScorecards } from '@/components/record/RecentScorecards';
 import { ScorecardSetupScreen } from '@/components/record/ScorecardSetupScreen';
 import { ClickerTutorial } from '@/components/record/ClickerTutorial';
+import { TroubleshootSheet } from '@/components/record/TroubleshootSheet';
 import { RecordingSettingsSheet } from '@/components/record/RecordingSettingsSheet';
 import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
@@ -161,6 +162,9 @@ export default function RecordScreen() {
   const [lightEnabled, setLightEnabled] = useState(true);
   const [showRecordingSettings, setShowRecordingSettings] = useState(false);
   const [tutorialActive, setTutorialActive] = useState(false);
+  // Troubleshoot & how-to (Henry, 4 Sep): reachable from Options and from
+  // the clicker badge, without leaving the round.
+  const [showTroubleshoot, setShowTroubleshoot] = useState(false);
   // Two-phase tutorial. 'intro' is a BLOCKING choice card — nothing underneath
   // it is pressable, so the user can't unknowingly play a real hole while the
   // camera is in practice mode. Only after they choose "Practise" do we enter
@@ -1824,8 +1828,14 @@ export default function RecordScreen() {
         topInset={insets.top}
       />
 
-      {/* Shutter status badge — top left */}
-      <View
+      {/* Shutter status badge — top left. Tapping it opens the how-to, so a
+          grey "No Clicker" is one tap from the three connect steps. */}
+      <Pressable
+        onPress={() => {
+          Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+          setShowTroubleshoot(true);
+        }}
+        hitSlop={8}
         style={{
           position: 'absolute',
           top: insets.top + 52,
@@ -1851,7 +1861,7 @@ export default function RecordScreen() {
         }}>
           {shutter.connected ? 'Clicker' : 'No Clicker'}
         </Text>
-      </View>
+      </Pressable>
 
       {/* Recording settings gear — top left, under the shutter badge.
           Hidden during the tutorial to keep the practice run focused. */}
@@ -2062,7 +2072,13 @@ export default function RecordScreen() {
         undoableDeleteCount={round.undoableDeleteCount}
         lastDeletedHole={round.lastDeletedHole}
         onReplayTutorial={handleReplayTutorial}
+        onTroubleshoot={() => {
+          setShowRecordingSettings(false);
+          setTimeout(() => setShowTroubleshoot(true), 350);
+        }}
       />
+
+      <TroubleshootSheet visible={showTroubleshoot} onDismiss={() => setShowTroubleshoot(false)} />
 
       {/* Clicker tutorial. Opens on a BLOCKING intro card (nothing underneath
           is pressable) so practice mode can only ever be entered deliberately;

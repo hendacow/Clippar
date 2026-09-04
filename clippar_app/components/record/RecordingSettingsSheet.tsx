@@ -11,7 +11,7 @@ import { useRef, useEffect } from 'react';
 import { View, Text, Pressable } from 'react-native';
 import BottomSheet, { BottomSheetView } from '@gorhom/bottom-sheet';
 import * as Haptics from 'expo-haptics';
-import { Flashlight, FlashlightOff, ListVideo, Trash2, GraduationCap, Undo2 } from 'lucide-react-native';
+import { Flashlight, FlashlightOff, ListVideo, Trash2, GraduationCap, Undo2, LifeBuoy } from 'lucide-react-native';
 import { theme } from '@/constants/theme';
 
 interface RecordingSettingsSheetProps {
@@ -30,6 +30,8 @@ interface RecordingSettingsSheetProps {
   /** Hole the most recently deleted shot came from. */
   lastDeletedHole: number | null;
   onReplayTutorial: () => void;
+  /** Opens the Troubleshoot & how-to sheet (Henry, 4 Sep). */
+  onTroubleshoot: () => void;
 }
 
 export function RecordingSettingsSheet({
@@ -45,6 +47,7 @@ export function RecordingSettingsSheet({
   undoableDeleteCount,
   lastDeletedHole,
   onReplayTutorial,
+  onTroubleshoot,
 }: RecordingSettingsSheetProps) {
   const sheetRef = useRef<BottomSheet>(null);
 
@@ -148,6 +151,20 @@ export function RecordingSettingsSheet({
           <View style={{ flex: 1 }}>
             <Text style={rowTitle}>Replay clicker tutorial</Text>
             <Text style={rowSub}>Run through the click controls again.</Text>
+          </View>
+        </Pressable>
+
+        <Pressable
+          onPress={() => {
+            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+            onTroubleshoot();
+          }}
+          style={rowStyle}
+        >
+          <LifeBuoy size={20} color={theme.colors.textSecondary} />
+          <View style={{ flex: 1 }}>
+            <Text style={rowTitle}>Troubleshoot & how-to</Text>
+            <Text style={rowSub}>Connecting the clicker, next hole, penalties, deleting a shot — step by step.</Text>
           </View>
         </Pressable>
 

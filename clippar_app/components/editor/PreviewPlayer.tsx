@@ -1,3 +1,4 @@
+import { useFocusEffect } from 'expo-router';
 import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import {
   View,
@@ -492,6 +493,18 @@ function NativeClipPlayer({
     }
     p.play();
   });
+
+  // The round page stays mounted under the editor it pushes, so its reel kept
+  // playing — audible — after "Open full editor" (Henry, 4 Sep). Pause when
+  // this screen leaves focus; resume when it comes back.
+  useFocusEffect(
+    useCallback(() => {
+      try { player.play(); } catch {}
+      return () => {
+        try { player.pause(); } catch {}
+      };
+    }, [player])
+  );
 
   // Monitor for endMs or natural end, with trim-mode looping
   useEffect(() => {
