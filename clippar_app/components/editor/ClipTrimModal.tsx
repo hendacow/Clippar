@@ -10,7 +10,8 @@ import {
   Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Check, RotateCcw } from 'lucide-react-native';
+import { X, Check, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react-native';
+import { GestureDetector, Gesture, Directions, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { theme } from '@/constants/theme';
 import { type EditorClip, getInitialTrimBounds } from '@/types/editor';
 import { trimVideo } from 'shot-detector';
@@ -57,6 +58,12 @@ interface ClipTrimModalProps {
     sourceOverride?: { sourceUri: string; durationMs: number },
   ) => void;
   onDismiss: () => void;
+  /** Swipe / chevron navigation between shots on the same hole (4 Sep). The
+   *  modal hands back the current trim so the caller can apply it first. */
+  onNavigate?: (dir: 'prev' | 'next', trimStartMs: number, trimEndMs: number) => void;
+  positionLabel?: string;
+  hasPrev?: boolean;
+  hasNext?: boolean;
 }
 
 export function ClipTrimModal({
@@ -64,6 +71,10 @@ export function ClipTrimModal({
   clip,
   onSave,
   onDismiss,
+  onNavigate,
+  positionLabel,
+  hasPrev = false,
+  hasNext = false,
 }: ClipTrimModalProps) {
   const insets = useSafeAreaInsets();
   const [startMs, setStartMs] = useState(0);
@@ -255,6 +266,28 @@ export function ClipTrimModal({
     }
   }, [startMs, endMs, durationMs, onSave, activeUri, clip?.autoTrimmed, clip?.originalUri]);
 
+  // Move to the previous/next shot on the hole with the current trim applied
+  // (offsets only — the explicit Save still does the full re-trim).
+  const navigate = useCallback(
+    (dir: 'prev' | 'next') => {
+      if (!onNavigate) return;
+      if (dir === 'prev' && !hasPrev) return;
+      if (dir === 'next' && !hasNext) return;
+      const finalEnd = endMs >= durationMs ? -1 : endMs;
+      const finalStart = startMs <= 0 ? 0 : startMs;
+      onNavigate(dir, finalStart, finalEnd);
+    },
+    [onNavigate, hasPrev, hasNext, startMs, endMs, durationMs]
+  );
+  const swipe = useMemo(
+    () =>
+      Gesture.Race(
+        Gesture.Fling().direction(Directions.LEFT).runOnJS(true).onEnd(() => navigate('next')),
+        Gesture.Fling().direction(Directions.RIGHT).runOnJS(true).onEnd(() => navigate('prev'))
+      ),
+    [navigate]
+  );
+
   // Generate filmstrip thumbnails
   const THUMB_COUNT = 15;
   const THUMB_WIDTH = Math.floor(TIMELINE_WIDTH / THUMB_COUNT);
@@ -312,6 +345,8 @@ export function ClipTrimModal({
       presentationStyle="fullScreen"
       onRequestClose={onDismiss}
     >
+      {/* A Modal is its own native window: gestures inside it need their own root. */}
+      <GestureHandlerRootView style={{ flex: 1 }}>
       <View
         style={{
           flex: 1,
@@ -361,9 +396,26 @@ export function ClipTrimModal({
           >
             <X size={20} color="#fff" />
           </Pressable>
-          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>
-            Trim Clip
-          </Text>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+            {onNavigate && (
+              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} hitSlop={10} style={{ opacity: hasPrev ? 1 : 0.25 }}>
+                <ChevronLeft size={22} color="#fff" />
+              </Pressable>
+            )}
+            <View style={{ alignItems: 'center' }}>
+              <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>Trim Clip</Text>
+              {positionLabel ? (
+                <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, marginTop: 1 }}>
+                  {positionLabel}{onNavigate ? ' · swipe for next' : ''}
+                </Text>
+              ) : null}
+            </View>
+            {onNavigate && (
+              <Pressable onPress={() => navigate('next')} disabled={!hasNext} hitSlop={10} style={{ opacity: hasNext ? 1 : 0.25 }}>
+                <ChevronRight size={22} color="#fff" />
+              </Pressable>
+            )}
+          </View>
           <Pressable
             onPress={handleSave}
             disabled={savingTrim}
@@ -382,7 +434,8 @@ export function ClipTrimModal({
           </Pressable>
         </View>
 
-        {/* Video preview area */}
+        {/* Video preview area — swipe left/right here to change shot */}
+        <GestureDetector gesture={swipe}>
         <View
           style={{ flex: 1, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' }}
         >
@@ -412,6 +465,7 @@ export function ClipTrimModal({
             </View>
           )}
         </View>
+        </GestureDetector>
 
         {/* Duration info */}
         <View style={{ alignItems: 'center', paddingBottom: 12 }}>
@@ -650,6 +704,7 @@ export function ClipTrimModal({
           )}
         </View>
       </View>
+      </GestureHandlerRootView>
     </Modal>
   );
 }

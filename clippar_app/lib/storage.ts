@@ -1405,6 +1405,62 @@ export async function resetRoundData(
  * the end of the destination hole so ordering stays sane. Marks the
  * round's reel stale since the composed sequence changed.
  */
+/**
+ * Write a hole's shot order: shot_number = 1-based position, sort_order = index.
+ * The editor's "change shot number" and every renumber go through here so the
+ * two columns can never disagree.
+ */
+export async function writeHoleShotOrder(
+  roundId: string,
+  holeNumber: number,
+  orderedClipIds: number[]
+): Promise<void> {
+  const database = await getDatabase();
+  for (let i = 0; i < orderedClipIds.length; i++) {
+    await database.runAsync(
+      'UPDATE local_clips SET shot_number = ?, sort_order = ? WHERE id = ? AND round_id = ? AND hole_number = ?',
+      i + 1,
+      i,
+      orderedClipIds[i],
+      roundId,
+      holeNumber
+    );
+  }
+  await markReelStale(roundId).catch(() => {});
+}
+
+/**
+ * Renumber a hole's surviving shots 1..n in their current order. Called after
+ * a delete or a restore: six shots minus shot two must read 1..5, not
+ * 1,3,4,5,6 (Henry, 4 Sep — the gap was also being counted on the scorecard).
+ */
+export async function renumberHoleShots(roundId: string, holeNumber: number): Promise<void> {
+  const database = await getDatabase();
+  const rows = await database.getAllAsync<{ id: number }>(
+    'SELECT id FROM local_clips WHERE round_id = ? AND hole_number = ? ORDER BY sort_order ASC, shot_number ASC, id ASC',
+    roundId,
+    holeNumber
+  );
+  await writeHoleShotOrder(roundId, holeNumber, rows.map((r) => r.id));
+}
+
+/**
+ * Nudge a hole's recorded score by delta (-1 on delete, +1 on restore). The
+ * score row is written at End Hole from the live counter and never followed
+ * clip deletions, so a deleted shot stayed on the scorecard. No row → no-op
+ * (a hole still being played has no score row yet, and the live counter owns
+ * it). Floors at zero.
+ */
+export async function adjustHoleStrokes(roundId: string, holeNumber: number, delta: number): Promise<void> {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_scores SET strokes = MAX(0, strokes + ?) WHERE round_id = ? AND hole_number = ?',
+    delta,
+    roundId,
+    holeNumber
+  );
+}
+
 export async function updateClipHole(
   clipId: number,
   newHoleNumber: number,

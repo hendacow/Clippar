@@ -340,15 +340,49 @@ export function useEditorState(roundId: string | undefined) {
 
   const reorderClips = useCallback(
     (holeNumber: number, reorderedClips: EditorClip[]) => {
+      const renumbered = reorderedClips.map((c, i) => ({ ...c, shotNumber: i + 1 }));
       setState((prev) => ({
         ...prev,
         holes: prev.holes.map((h) =>
-          h.holeNumber === holeNumber ? { ...h, clips: reorderedClips } : h
+          h.holeNumber === holeNumber ? { ...h, clips: renumbered } : h
         ),
       }));
-      // Reordering changes the composed reel's clip sequence — mark stale.
+      // Persist the order (shot_number + sort_order) — this used to mark the
+      // reel stale and write nothing, so the next reload undid the reorder.
       if (storage && state.roundId) {
-        storage.markReelStale(state.roundId).catch(() => {});
+        const ids = renumbered.map((c) => Number(c.id)).filter((n) => Number.isInteger(n));
+        storage.writeHoleShotOrder(state.roundId, holeNumber, ids).catch(() => {});
+      }
+    },
+    [state.roundId]
+  );
+
+  /**
+   * Change a shot's number within its hole (Henry, 4 Sep: "if I am at shot
+   * four and it was meant to be shot two, switch it to shot two"). The clip
+   * moves to that position and every shot on the hole is renumbered 1..n.
+   */
+  const setClipShotNumber = useCallback(
+    (clipId: string, newShotNumber: number) => {
+      let holeNumber: number | null = null;
+      let ordered: EditorClip[] = [];
+      setState((prev) => {
+        const hole = prev.holes.find((h) => h.clips.some((c) => c.id === clipId));
+        if (!hole) return prev;
+        const rest = hole.clips.filter((c) => c.id !== clipId);
+        const moving = hole.clips.find((c) => c.id === clipId)!;
+        const idx = Math.min(Math.max(newShotNumber - 1, 0), rest.length);
+        rest.splice(idx, 0, moving);
+        ordered = rest.map((c, i) => ({ ...c, shotNumber: i + 1 }));
+        holeNumber = hole.holeNumber;
+        return {
+          ...prev,
+          holes: prev.holes.map((h) => (h.holeNumber === hole.holeNumber ? { ...h, clips: ordered } : h)),
+        };
+      });
+      if (storage && state.roundId && holeNumber !== null) {
+        const ids = ordered.map((c) => Number(c.id)).filter((n) => Number.isInteger(n));
+        storage.writeHoleShotOrder(state.roundId, holeNumber, ids).catch(() => {});
       }
     },
     [state.roundId]
@@ -370,10 +404,14 @@ export function useEditorState(roundId: string | undefined) {
     (clipId: string) => {
       setState((prev) => ({
         ...prev,
-        holes: prev.holes.map((h) => ({
-          ...h,
-          clips: h.clips.filter((c) => c.id !== clipId),
-        })),
+        holes: prev.holes.map((h) => {
+          if (!h.clips.some((c) => c.id === clipId)) return h;
+          // The survivors close the gap and the hole's score drops by one —
+          // mirrors what deleteClipToBin writes to SQLite.
+          const clips = h.clips.filter((c) => c.id !== clipId).map((c, i) => ({ ...c, shotNumber: i + 1 }));
+          const strokes = Math.max(0, h.strokes - 1);
+          return { ...h, clips, strokes, scoreToPar: strokes - h.par };
+        }),
       }));
       const numId = parseInt(clipId, 10);
       if (isNaN(numId) || !storage) return;
@@ -1440,6 +1478,7 @@ export function useEditorState(roundId: string | undefined) {
     state,
     reload: loadRound,
     reorderClips,
+    setClipShotNumber,
     removeClip,
     undoRemoveClip,
     moveClipToHole,

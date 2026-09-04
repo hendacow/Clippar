@@ -13,7 +13,7 @@ import {
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { getProStatus } from '@/lib/subscription';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, ArrowLeft, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle , CheckCircle2 } from 'lucide-react-native';
+import { X, ArrowLeft, XCircle, Film, Upload, Music, Monitor, Check, Download, Share2, ListChecks, CircleCheck, Circle , CheckCircle2, MoreHorizontal } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
 import { config } from '@/constants/config';
@@ -130,6 +130,32 @@ function ClipCard({
   }, [clip.sourceUri, thumbnail]);
 
   const duration = formatDuration(clip.durationMs);
+
+  // 4 Sep, Henry: a visible Options button on every shot instead of a hold.
+  const optionsButton = !disabled && !selectable ? (
+    <Pressable
+      onPress={() => {
+        Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+        onLongPress();
+      }}
+      hitSlop={6}
+      style={{
+        marginTop: 6,
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 4,
+        paddingVertical: 5,
+        borderRadius: 8,
+        backgroundColor: theme.colors.surfaceElevated,
+        borderWidth: 1,
+        borderColor: theme.colors.surfaceBorder,
+      }}
+    >
+      <MoreHorizontal size={14} color={theme.colors.textPrimary} />
+      <Text style={{ color: theme.colors.textPrimary, fontSize: 11, fontWeight: '600' }}>Options</Text>
+    </Pressable>
+  ) : null;
 
   return (
     <View
@@ -374,6 +400,7 @@ function ClipCard({
           </View>
         </View>
       </Pressable>
+      {optionsButton}
     </View>
   );
 }
@@ -1970,6 +1997,30 @@ export default function EditorScreen() {
           setTrimClip(null);
         }}
         onDismiss={() => setTrimClip(null)}
+        // 4 Sep, Henry: swipe left/right inside the trimmer to move to the
+        // next/previous shot on the same hole. The current trim is applied
+        // (offsets) before moving so nothing is lost on the way.
+        positionLabel={(() => {
+          if (!trimClip) return undefined;
+          const clips = state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips ?? [];
+          const i = clips.findIndex((c) => c.id === trimClip.id);
+          return i >= 0 ? `${isTraining ? trainingHoleLabel(trimClip.holeNumber) : `Hole ${trimClip.holeNumber}`} · Shot ${i + 1} of ${clips.length}` : undefined;
+        })()}
+        hasPrev={!!trimClip && (state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips.findIndex((c) => c.id === trimClip.id) ?? 0) > 0}
+        hasNext={!!trimClip && (() => {
+          const clips = state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips ?? [];
+          return clips.findIndex((c) => c.id === trimClip.id) < clips.length - 1;
+        })()}
+        onNavigate={(dir, startMs, endMs) => {
+          if (!trimClip) return;
+          const clips = state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips ?? [];
+          const i = clips.findIndex((c) => c.id === trimClip.id);
+          const next = clips[i + (dir === 'next' ? 1 : -1)];
+          if (!next) return;
+          editor.updateTrim(trimClip.id, startMs, endMs);
+          Haptics.selectionAsync();
+          setTrimClip(next);
+        }}
       />
 
       {/* Clip actions menu (long-press a clip): move to a different hole,
@@ -2069,6 +2120,62 @@ export default function EditorScreen() {
                     </Text>
                   )}
                 </ScrollView>
+
+                {/* Change the shot's number within its hole (4 Sep, Henry). */}
+                {(() => {
+                  const n = state.holes.find((h) => h.holeNumber === movingClip.holeNumber)?.clips.length ?? 1;
+                  if (n < 2) return null;
+                  return (
+                    <>
+                      <Text
+                        style={{
+                          ...theme.typography.caption,
+                          color: theme.colors.textTertiary,
+                          textTransform: 'uppercase',
+                          letterSpacing: 0.5,
+                          marginBottom: 8,
+                        }}
+                      >
+                        {isTraining ? 'Shot order' : 'Shot number on this hole'}
+                      </Text>
+                      <ScrollView
+                        horizontal
+                        showsHorizontalScrollIndicator={false}
+                        style={{ marginBottom: 18 }}
+                        contentContainerStyle={{ gap: 8, paddingRight: 8 }}
+                      >
+                        {Array.from({ length: n }, (_, i) => i + 1).map((num) => {
+                          const current = num === movingClip.shotNumber;
+                          return (
+                            <Pressable
+                              key={num}
+                              disabled={current}
+                              onPress={() => {
+                                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                                editor.setClipShotNumber(movingClip.id, num);
+                                setMovingClip(null);
+                              }}
+                              style={{
+                                width: 52,
+                                height: 52,
+                                borderRadius: 12,
+                                backgroundColor: current ? theme.colors.primary : theme.colors.surfaceElevated,
+                                borderWidth: 1,
+                                borderColor: current ? theme.colors.primary : theme.colors.surfaceBorder,
+                                justifyContent: 'center',
+                                alignItems: 'center',
+                              }}
+                            >
+                              <Text style={{ color: current ? '#fff' : theme.colors.textPrimary, fontSize: 16, fontWeight: '700' }}>
+                                {num}
+                              </Text>
+                            </Pressable>
+                          );
+                        })}
+                      </ScrollView>
+                    </>
+                  );
+                })()}
 
                 {/* Exclude / include + delete */}
                 <Pressable

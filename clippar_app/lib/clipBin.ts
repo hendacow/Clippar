@@ -16,7 +16,7 @@
  * `restoreLocalClip` wants, primary key included, so a restore lines back up
  * with anything still holding that id.
  */
-import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, type LocalClipRow } from '@/lib/storage';
+import { getSetting, setSetting, deleteLocalClip, restoreLocalClip, commitClipDeletion, type LocalClipRow, renumberHoleShots, adjustHoleStrokes } from '@/lib/storage';
 import { deleteFile } from 'shot-detector';
 
 const BIN_KEY = 'clips.bin.v1';
@@ -72,6 +72,10 @@ async function writeBin(entries: BinnedClip[]): Promise<void> {
 export async function deleteClipToBin(clipId: number, roundId: string): Promise<BinnedClip | null> {
   const { fileUris, row } = await deleteLocalClip(clipId, false);
   if (!row) return null;
+  // The surviving shots close the gap (1..n) and the hole's score drops by
+  // one — otherwise "Stroke 1, 3, 4, 5, 6" and a scorecard still saying six.
+  await renumberHoleShots(roundId, row.hole_number).catch(() => {});
+  await adjustHoleStrokes(roundId, row.hole_number, -1).catch(() => {});
   const entry: BinnedClip = { row, fileUris, deletedAt: new Date().toISOString(), roundId };
   const entries = [entry, ...(await readBin())];
   const kept = entries.slice(0, MAX_ENTRIES);
@@ -87,6 +91,11 @@ export async function restoreClipFromBin(clipId: number): Promise<boolean> {
   const entry = entries.find((e) => Number(e.row?.id) === clipId);
   if (!entry) return false;
   const restored = await restoreLocalClip(entry.row);
+  if (restored) {
+    // Back in its place: renumber the hole around it and give the score back.
+    await renumberHoleShots(entry.roundId, entry.row.hole_number).catch(() => {});
+    await adjustHoleStrokes(entry.roundId, entry.row.hole_number, +1).catch(() => {});
+  }
   await writeBin(entries.filter((e) => Number(e.row?.id) !== clipId));
   return restored;
 }
