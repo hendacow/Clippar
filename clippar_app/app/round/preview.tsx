@@ -12,7 +12,8 @@ import {
 } from 'react-native';
 import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { X, Check, RotateCcw, Music, VolumeX, PersonStanding, Pause } from 'lucide-react-native';
+import { X, Check, RotateCcw, Music, VolumeX, PersonStanding, Pause, Scissors } from 'lucide-react-native';
+import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
 import { PoseOverlay } from '@/components/editor/PoseOverlay';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -46,7 +47,7 @@ const ExpoAV = isNative
 // ---- Constants for inline trim ----
 const TIMELINE_PADDING = 24;
 const TIMELINE_WIDTH = SCREEN_WIDTH - TIMELINE_PADDING * 2;
-const HANDLE_WIDTH = 24;
+const HANDLE_WIDTH = 40; // touch target; the bar inside is 14 wide (thumb-proof, 4 Sep)
 const MIN_TRIM_MS = 500;
 const THUMB_COUNT = 12;
 // How long a clip must stay on screen before its filmstrip starts decoding.
@@ -885,12 +886,12 @@ function InlineTrimPanel({
                 {...startPanResponder.panHandlers}
                 style={{
                   position: 'absolute', left: msToX(startMs) - HANDLE_WIDTH / 2,
-                  top: -4, width: HANDLE_WIDTH, height: 52,
+                  top: -10, width: HANDLE_WIDTH, height: 64,
                   justifyContent: 'center', alignItems: 'center', zIndex: 10,
                 }}
               >
                 <View
-                  style={{ width: 6, height: 28, borderRadius: 3, backgroundColor: theme.colors.primary }}
+                  style={{ width: 14, height: 40, borderRadius: 5, backgroundColor: theme.colors.primary, borderWidth: 2, borderColor: '#000' }}
                 />
               </View>
 
@@ -899,12 +900,12 @@ function InlineTrimPanel({
                 {...endPanResponder.panHandlers}
                 style={{
                   position: 'absolute', left: msToX(effectiveEndMs) - HANDLE_WIDTH / 2,
-                  top: -4, width: HANDLE_WIDTH, height: 52,
+                  top: -10, width: HANDLE_WIDTH, height: 64,
                   justifyContent: 'center', alignItems: 'center', zIndex: 10,
                 }}
               >
                 <View
-                  style={{ width: 6, height: 28, borderRadius: 3, backgroundColor: theme.colors.primary }}
+                  style={{ width: 14, height: 40, borderRadius: 5, backgroundColor: theme.colors.primary, borderWidth: 2, borderColor: '#000' }}
                 />
               </View>
             </>
@@ -990,6 +991,9 @@ export default function PreviewScreen() {
   const [draggingHandle, setDraggingHandle] = useState<'none' | 'start' | 'end'>('none');
   // URI shown while editing (original for auto-trimmed clips)
   const [trimModeUri, setTrimModeUri] = useState<string | null>(null);
+  // The full trimmer (thick handles, hold-to-zoom, swipe between shots) —
+  // one tap from the preview (Henry, 4 Sep: "give preview the better UI").
+  const [fullTrimOpen, setFullTrimOpen] = useState(false);
   // Ref-guard for bounds reports — declared up here because the per-clip
   // init effect below must reset it when the clip changes.
   const lastBoundsAppliedRef = useRef<{ startMs: number; endMs: number } | null>(null);
@@ -1348,6 +1352,22 @@ export default function PreviewScreen() {
               </Pressable>
             )}
 
+            {/* Full trimmer */}
+            <Pressable
+              onPress={() => {
+                Haptics.selectionAsync();
+                setFullTrimOpen(true);
+              }}
+              hitSlop={10}
+              style={{
+                width: 36, height: 36, borderRadius: 18,
+                backgroundColor: 'rgba(0,0,0,0.5)',
+                justifyContent: 'center', alignItems: 'center',
+              }}
+            >
+              <Scissors size={16} color="rgba(255,255,255,0.85)" />
+            </Pressable>
+
             {/* Music toggle */}
             <Pressable
               onPress={toggleMusic}
@@ -1399,6 +1419,23 @@ export default function PreviewScreen() {
           handles reset to the new clip's bounds instead of carrying the
           previous clip's over. */}
       {currentClip && (
+        <>
+        <ClipTrimModal
+          visible={fullTrimOpen && !!currentClip}
+          clip={currentClip ?? null}
+          onSave={(startMs, endMs, sourceOverride) => {
+            handleTrimSave(startMs, endMs, sourceOverride);
+            setFullTrimOpen(false);
+          }}
+          onDismiss={() => setFullTrimOpen(false)}
+          positionLabel={currentClip ? `Hole ${currentClip.holeNumber} · Shot ${currentClip.shotNumber}` : undefined}
+          hasPrev={currentIndex > 0}
+          hasNext={currentIndex < allClips.length - 1}
+          onNavigate={(dir, startMs, endMs) => {
+            handleTrimSave(startMs, endMs);
+            setCurrentIndex((i) => Math.max(0, Math.min(allClips.length - 1, i + (dir === 'next' ? 1 : -1))));
+          }}
+        />
         <InlineTrimPanel
           key={currentClip.id}
           clip={currentClip}
@@ -1409,6 +1446,7 @@ export default function PreviewScreen() {
           onDraggingHandle={handleDraggingHandle}
           onHeight={setTrimPanelHeight}
         />
+        </>
       )}
     </View>
   );

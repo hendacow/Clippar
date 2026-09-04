@@ -131,6 +131,14 @@ function ClipCard({
 
   const duration = formatDuration(clip.durationMs);
 
+  // Was anything actually cut? Manual bounds narrower than the file, or an
+  // auto-trim that produced a different (shorter) file than the original.
+  const wasTrimmed =
+    !clip.needsTrim &&
+    ((clip.trimStartMs ?? 0) > 0 ||
+      (clip.trimEndMs !== -1 && clip.trimEndMs > 0 && clip.trimEndMs < clip.durationMs) ||
+      (!!clip.autoTrimmed && !!clip.originalUri && clip.originalUri !== clip.sourceUri));
+
   // 4 Sep, Henry: a visible Options button on every shot instead of a hold.
   const optionsButton = !disabled && !selectable ? (
     <Pressable
@@ -340,39 +348,40 @@ function ClipCard({
             <XCircle size={26} color={theme.colors.accentRed} fill="rgba(0,0,0,0.6)" />
           </Pressable>
 
-          {/* Bottom label: "Edit", "Excluded", or "Trimmed" badge */}
-          <View
-            style={{
-              position: 'absolute',
-              bottom: 0,
-              left: 0,
-              right: 0,
-              paddingVertical: 6,
-              backgroundColor: clip.isExcluded
-                ? 'rgba(180,0,0,0.7)'
-                : clip.autoTrimmed && !clip.needsTrim
-                  ? 'rgba(46,125,50,0.85)'
-                  : 'rgba(0,0,0,0.6)',
-              alignItems: 'center',
-              flexDirection: 'row',
-              justifyContent: 'center',
-              gap: 3,
-            }}
-          >
-            {clip.autoTrimmed && !clip.needsTrim && !clip.isExcluded && (
-              <Check size={12} color="#fff" />
-            )}
-            <Text
+          {/* Bottom label: "Excluded", or "Trimmed" ONLY when something was
+              actually cut — a manual trim narrower than the file, or an auto
+              trim that produced a shorter file. An untouched clip (a putt the
+              detector left whole, an import not yet cut) shows NO band, so
+              the ones still at full length stand out when scanning the list
+              (Henry, 4 Sep). */}
+          {(clip.isExcluded || wasTrimmed) && (
+            <View
               style={{
-                color: '#fff',
-                fontSize: 12,
-                fontWeight: '600',
-                textDecorationLine: clip.isExcluded ? 'line-through' : 'none',
+                position: 'absolute',
+                bottom: 0,
+                left: 0,
+                right: 0,
+                paddingVertical: 6,
+                backgroundColor: clip.isExcluded ? 'rgba(180,0,0,0.7)' : 'rgba(46,125,50,0.85)',
+                alignItems: 'center',
+                flexDirection: 'row',
+                justifyContent: 'center',
+                gap: 3,
               }}
             >
-              {clip.isExcluded ? 'Excluded' : clip.autoTrimmed && !clip.needsTrim ? 'Trimmed' : 'Edit'}
-            </Text>
-          </View>
+              {!clip.isExcluded && <Check size={12} color="#fff" />}
+              <Text
+                style={{
+                  color: '#fff',
+                  fontSize: 12,
+                  fontWeight: '600',
+                  textDecorationLine: clip.isExcluded ? 'line-through' : 'none',
+                }}
+              >
+                {clip.isExcluded ? 'Excluded' : 'Trimmed'}
+              </Text>
+            </View>
+          )}
         </View>
       </Pressable>
       {optionsButton}
@@ -509,14 +518,15 @@ function HoleSection({
               disabled={isBusy}
               hitSlop={8}
               style={{
-                width: 28,
-                height: 28,
+                height: 32,
+                paddingHorizontal: 10,
                 borderRadius: 8,
                 borderWidth: 1,
                 borderColor: theme.colors.surfaceBorder,
                 backgroundColor: theme.colors.surfaceElevated,
-                justifyContent: 'center',
+                flexDirection: 'row',
                 alignItems: 'center',
+                gap: 5,
                 opacity: isBusy ? 0.5 : 1,
               }}
             >
@@ -525,6 +535,7 @@ function HoleSection({
               ) : (
                 <Download size={14} color={theme.colors.textPrimary} />
               )}
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Save hole</Text>
             </Pressable>
             <Pressable
               onPress={() => {
@@ -534,18 +545,20 @@ function HoleSection({
               disabled={isBusy}
               hitSlop={8}
               style={{
-                width: 28,
-                height: 28,
+                height: 32,
+                paddingHorizontal: 10,
                 borderRadius: 8,
                 borderWidth: 1,
                 borderColor: theme.colors.surfaceBorder,
                 backgroundColor: theme.colors.surfaceElevated,
-                justifyContent: 'center',
+                flexDirection: 'row',
                 alignItems: 'center',
+                gap: 5,
                 opacity: isBusy ? 0.5 : 1,
               }}
             >
               <Share2 size={14} color={theme.colors.textPrimary} />
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Share hole</Text>
             </Pressable>
           </View>
         )}

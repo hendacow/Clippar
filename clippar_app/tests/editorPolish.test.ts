@@ -13,7 +13,10 @@ const play = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
 test('the trimmer sits below the Dynamic Island with thumb-sized controls', () => {
   assert.match(modal, /paddingTop: insets\.top \+ 8/);
   assert.doesNotMatch(modal, /Drag indicator for iOS pageSheet/, 'no fake drag pill on a fullScreen modal');
-  assert.match(modal, /width: 48,\s*height: 48,\s*borderRadius: 24,\s*backgroundColor: 'rgba\(255,255,255,0\.15\)'/, 'X is 48pt');
+  assert.match(modal, /width: 44,\s*height: 44,\s*borderRadius: 22,\s*backgroundColor: 'rgba\(255,255,255,0\.15\)'/, 'X is 44pt');
+  assert.match(modal, /flex: 1, minWidth: 0, flexDirection: 'row'/, 'the centre block shrinks before the buttons');
+  assert.doesNotMatch(modal, /top: -26, left: 0, right: 0, alignItems: 'center'/, 'the zoom badge no longer sits on the time labels');
+  assert.match(modal, /width: '28%', zIndex: 5/, 'tap the edge of the video to change shot');
   assert.match(modal, /<Check size=\{24\}/);
   assert.match(modal, /<ChevronLeft size=\{30\}/);
 });
@@ -26,7 +29,7 @@ test('trim handles are thick and hold-to-zoom fine scrubbing exists', () => {
   assert.match(modal, /enterFine\(handle\)/);
   assert.match(modal, /\(dur \/ zoomRef\.current\)/, 'a zoomed drag moves a quarter as far');
   assert.match(modal, /viewStartMs \+ i \* interval/, 'the filmstrip follows the zoomed window');
-  assert.match(modal, /Fine scrub · \{FINE_ZOOM\}×/);
+  assert.match(modal, /Fine scrub · \{FINE_ZOOM\}× — let go to zoom out/);
 });
 
 test('trimmer navigation walks the whole round, not one hole', () => {
@@ -55,4 +58,16 @@ test('Select · Preview · Export live in a sticky bottom bar', () => {
 
 test('the training window puts the strike at three-quarters, not the middle', () => {
   assert.match(play, /impactFractionInFile\(current\) - 0\.75 \* L/);
+});
+
+test('hole buttons say what they do; only a real cut is labelled Trimmed; preview opens the full trimmer', () => {
+  assert.match(editor, />Save hole<\/Text>/);
+  assert.match(editor, />Share hole<\/Text>/);
+  assert.match(editor, /const wasTrimmed =/);
+  assert.match(editor, /\(clip\.isExcluded \|\| wasTrimmed\) && \(/, 'untouched clips get no band');
+  assert.doesNotMatch(editor, /: 'Trimmed' : 'Edit'\}/, 'no "Edit" band');
+  const preview = readFileSync(join(root, 'app/round/preview.tsx'), 'utf8');
+  assert.match(preview, /const HANDLE_WIDTH = 40;/);
+  assert.match(preview, /<ClipTrimModal\s*visible=\{fullTrimOpen && !!currentClip\}/);
+  assert.match(preview, /<Scissors size=\{16\}/);
 });

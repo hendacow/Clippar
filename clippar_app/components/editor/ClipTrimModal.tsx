@@ -455,32 +455,38 @@ export function ClipTrimModal({
             onPress={onDismiss}
             hitSlop={10}
             style={{
-              width: 48,
-              height: 48,
-              borderRadius: 24,
+              width: 44,
+              height: 44,
+              borderRadius: 22,
               backgroundColor: 'rgba(255,255,255,0.15)',
               justifyContent: 'center',
               alignItems: 'center',
             }}
           >
-            <X size={24} color="#fff" />
+            <X size={22} color="#fff" />
           </Pressable>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+          {/* Centre block shrinks before the buttons do — the ✓ was pushed off
+              the right edge when the sub-label was long (Henry, 4 Sep). */}
+          <View style={{ flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 2 }}>
             {onNavigate && (
-              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} hitSlop={8} style={{ opacity: hasPrev ? 1 : 0.25, width: 44, height: 44, justifyContent: 'center', alignItems: 'center' }}>
+              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} hitSlop={8} style={{ opacity: hasPrev ? 1 : 0.25, width: 40, height: 44, justifyContent: 'center', alignItems: 'center' }}>
                 <ChevronLeft size={30} color="#fff" />
               </Pressable>
             )}
-            <View style={{ alignItems: 'center' }}>
+            <View style={{ alignItems: 'center', flexShrink: 1, minWidth: 0 }}>
               <Text style={{ color: '#fff', fontWeight: '700', fontSize: 16 }}>Trim Clip</Text>
-              {positionLabel ? (
-                <Text style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, marginTop: 1 }}>
-                  {positionLabel}{onNavigate ? ' · swipe for next' : ''}
+              {zoom !== 1 ? (
+                <Text numberOfLines={1} style={{ color: theme.colors.primary, fontSize: 11, fontWeight: '700', marginTop: 1 }}>
+                  Fine scrub · {FINE_ZOOM}× — let go to zoom out
+                </Text>
+              ) : positionLabel ? (
+                <Text numberOfLines={1} style={{ color: 'rgba(255,255,255,0.6)', fontSize: 11, marginTop: 1 }}>
+                  {positionLabel}
                 </Text>
               ) : null}
             </View>
             {onNavigate && (
-              <Pressable onPress={() => navigate('next')} disabled={!hasNext} hitSlop={8} style={{ opacity: hasNext ? 1 : 0.25, width: 44, height: 44, justifyContent: 'center', alignItems: 'center' }}>
+              <Pressable onPress={() => navigate('next')} disabled={!hasNext} hitSlop={8} style={{ opacity: hasNext ? 1 : 0.25, width: 40, height: 44, justifyContent: 'center', alignItems: 'center' }}>
                 <ChevronRight size={30} color="#fff" />
               </Pressable>
             )}
@@ -490,9 +496,9 @@ export function ClipTrimModal({
             disabled={savingTrim}
             hitSlop={10}
             style={{
-              width: 48,
-              height: 48,
-              borderRadius: 24,
+              width: 44,
+              height: 44,
+              borderRadius: 22,
               backgroundColor: theme.colors.primary,
               justifyContent: 'center',
               alignItems: 'center',
@@ -503,11 +509,18 @@ export function ClipTrimModal({
           </Pressable>
         </View>
 
-        {/* Video preview area — swipe left/right here to change shot */}
+        {/* Video preview area — swipe left/right, or tap the left/right edge,
+            to change shot (Henry, 4 Sep). */}
         <GestureDetector gesture={swipe}>
         <View
           style={{ flex: 1, justifyContent: 'center', alignItems: 'center', overflow: 'hidden' }}
         >
+          {onNavigate && (
+            <>
+              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: '28%', zIndex: 5 }} />
+              <Pressable onPress={() => navigate('next')} disabled={!hasNext} style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: '28%', zIndex: 5 }} />
+            </>
+          )}
           {activeUri && isNative && ExpoVideo ? (
             <NativeTrimPlayer
               uri={activeUri}
@@ -590,11 +603,7 @@ export function ClipTrimModal({
               overflow: 'visible',
             }}
           >
-            {zoom !== 1 && (
-              <View pointerEvents="none" style={{ position: 'absolute', top: -26, left: 0, right: 0, alignItems: 'center' }}>
-                <Text style={{ color: theme.colors.primary, fontSize: 11, fontWeight: '700' }}>Fine scrub · {FINE_ZOOM}×</Text>
-              </View>
-            )}
+
             {/* Filmstrip thumbnails */}
             {filmstripThumbs.length > 0 && (
               <View
