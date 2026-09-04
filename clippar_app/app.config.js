@@ -293,9 +293,12 @@ module.exports = () => ({
       variant: VARIANT,
     },
     owner: 'clippar',
-    runtimeVersion: {
-      policy: 'appVersion',
-    },
+    // Dev builds keep runtime 1.0.0 so an OTA to the development channel
+    // reaches the dev binary Henry already has installed — the appVersion
+    // policy would retag every dev update with the store version and the
+    // installed build would silently ignore it (4 Sep: the 1.1.0 bump did
+    // exactly that). Store builds follow the app version as before.
+    runtimeVersion: VARIANT === 'development' ? '1.0.0' : { policy: 'appVersion' },
     updates: {
       url: 'https://u.expo.dev/2c16b1a5-b169-4d92-b4fc-913067dd4fc6',
       // Wait up to 5 seconds at cold start for a downloaded OTA bundle to
