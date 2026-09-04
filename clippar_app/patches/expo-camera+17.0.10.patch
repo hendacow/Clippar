@@ -1,8 +1,37 @@
+diff --git a/node_modules/expo-camera/ios/Common/CameraExceptions.swift b/node_modules/expo-camera/ios/Common/CameraExceptions.swift
+index 8a2bad6..57c52e1 100644
+--- a/node_modules/expo-camera/ios/Common/CameraExceptions.swift
++++ b/node_modules/expo-camera/ios/Common/CameraExceptions.swift
+@@ -36,9 +36,12 @@ internal final class CameraRecordingException: GenericException<String?> {
+   }
+ }
+ 
+-internal final class CameraRecordingFailedException: Exception {
++// [clippar] Carries the underlying AVFoundation error. The stock exception
++// threw the NSError away, so the app could only ever show a generic sentence
++// and guess at the cause (4 Sep: "Recording failed" on the course, no detail).
++internal final class CameraRecordingFailedException: GenericException<String> {
+   override var reason: String {
+-    "An error occurred while recording a video"
++    "An error occurred while recording a video: \(param)"
+   }
+ }
+ 
 diff --git a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
-index dc2a548..bc39f49 100644
+index dc2a548..91db0c8 100644
 --- a/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
 +++ b/node_modules/expo-camera/ios/Current/CameraSessionManager.swift
-@@ -144,6 +144,52 @@ class CameraSessionManager: NSObject {
+@@ -33,6 +33,9 @@ class CameraSessionManager: NSObject {
+   private var captureDeviceInput: AVCaptureDeviceInput?
+   private var photoOutput: AVCapturePhotoOutput?
+   private var videoFileOutput: AVCaptureMovieFileOutput?
++  // [clippar] kept so an audio-hardware interruption can drop the mic and let
++  // video capture carry on (see addErrorNotification).
++  private var audioDeviceInput: AVCaptureDeviceInput?
+ 
+   init(delegate: CameraSessionManagerDelegate) {
+     self.delegate = delegate
+@@ -144,11 +147,58 @@ class CameraSessionManager: NSObject {
      }
  
      if !delegate.isMuted && delegate.mode == .video {
@@ -55,3 +84,108 @@ index dc2a548..bc39f49 100644
        if let audioCapturedevice = AVCaptureDevice.default(for: .audio) {
          do {
            let audioDeviceInput = try AVCaptureDeviceInput(device: audioCapturedevice)
+           if session.canAddInput(audioDeviceInput) {
+             session.addInput(audioDeviceInput)
++            self.audioDeviceInput = audioDeviceInput
+           }
+         } catch {
+           log.info("\(#function): \(error.localizedDescription)")
+@@ -224,6 +274,11 @@ class CameraSessionManager: NSObject {
+ 
+   func setupMovieFileCapture() {
+     let output = AVCaptureMovieFileOutput()
++    // [clippar] Write a movie fragment every second (default is 10s). If the
++    // recording is cut off — call, interruption, crash — the file is playable
++    // up to the last fragment, so a shot survives instead of being a 0-byte
++    // "Recording failed". Cost: a few KB of headers per second.
++    output.movieFragmentInterval = CMTime(seconds: 1, preferredTimescale: 600)
+     if session.canAddOutput(output) {
+       session.addOutput(output)
+       videoFileOutput = output
+@@ -277,6 +332,45 @@ class CameraSessionManager: NSObject {
+         delegate.onMountError(["message": "Camera session was reset"])
+       }
+     }
++
++    // [clippar] Interruptions. Stock expo-camera observes none of these, so a
++    // phone call, Siri, or another app grabbing the microphone silently killed
++    // the session and every later recordAsync failed until the screen was
++    // remounted. Apple's documented recovery for the audio case is to remove
++    // the audio input so capture continues video-only; for the rest, restart
++    // the session when the interruption ends.
++    Task {
++      let interruptions = NotificationCenter.default.notifications(named: .AVCaptureSessionWasInterrupted, object: self.session)
++      for await note in interruptions {
++        let raw = note.userInfo?[AVCaptureSessionInterruptionReasonKey] as? Int ?? -1
++        let reason = AVCaptureSession.InterruptionReason(rawValue: raw)
++        log.info("[clippar] capture session interrupted, reason \(raw)")
++        if reason == .audioDeviceInUseByAnotherClient, let audioInput = self.audioDeviceInput {
++          delegate.sessionQueue.async {
++            self.session.beginConfiguration()
++            self.session.removeInput(audioInput)
++            self.session.commitConfiguration()
++            self.audioDeviceInput = nil
++            log.info("[clippar] audio input dropped so video capture continues")
++          }
++        }
++      }
++    }
++    Task {
++      let ended = NotificationCenter.default.notifications(named: .AVCaptureSessionInterruptionEnded, object: self.session)
++      for await _ in ended {
++        log.info("[clippar] capture session interruption ended")
++        delegate.sessionQueue.async {
++          if !self.session.isRunning {
++            self.session.startRunning()
++          }
++          // Re-attach the microphone for the next clip if it was dropped.
++          if self.audioDeviceInput == nil {
++            self.updateSessionAudioIsMuted()
++          }
++        }
++      }
++    }
+   }
+ 
+   var currentPhotoOutput: AVCapturePhotoOutput? {
+diff --git a/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift b/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
+index 0cf1b56..0790730 100644
+--- a/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
++++ b/node_modules/expo-camera/ios/Current/CameraVideoRecording.swift
+@@ -43,7 +43,7 @@ class CameraVideoRecording: NSObject, AVCaptureFileOutputRecordingDelegate {
+     }
+ 
+     guard let appContext = delegate?.appContext else {
+-      promise.reject(CameraRecordingFailedException())
++      promise.reject(CameraRecordingFailedException("no app context"))
+       return
+     }
+ 
+@@ -116,7 +116,26 @@ class CameraVideoRecording: NSObject, AVCaptureFileOutputRecordingDelegate {
+     if success && videoRecordedPromise != nil {
+       videoRecordedPromise?.resolve(["uri": outputFileURL.absoluteString])
+     } else if videoRecordedPromise != nil {
+-      videoRecordedPromise?.reject(CameraRecordingFailedException())
++      // [clippar] A golfer's shot must not vanish because the recording was cut
++      // short. With movieFragmentInterval at 1s (CameraSessionManager) the file
++      // on disk is playable up to the last whole second even when AVFoundation
++      // reports the recording as NOT successfully finished (phone call, another
++      // app taking the mic, session interruption). If there is a real file,
++      // hand it back marked partial and let the app decide; only a file with
++      // nothing in it is a failure. Either way the actual error travels up.
++      let ns = error as NSError?
++      let detail = "\(ns?.domain ?? "AVError") \(ns?.code ?? 0): \(ns?.localizedDescription ?? "unknown")"
++      let bytes = (try? FileManager.default.attributesOfItem(atPath: outputFileURL.path)[.size] as? Int64) ?? 0
++      if bytes > 250_000 {
++        videoRecordedPromise?.resolve([
++          "uri": outputFileURL.absoluteString,
++          "partial": true,
++          "reason": detail,
++          "bytes": bytes
++        ])
++      } else {
++        videoRecordedPromise?.reject(CameraRecordingFailedException("\(detail) (file \(bytes) bytes)"))
++      }
+     }
+ 
+     videoRecordedPromise = nil

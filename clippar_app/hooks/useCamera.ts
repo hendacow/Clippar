@@ -388,9 +388,29 @@ export function useCamera({
 
       // Note: videoQuality must be set as a PROP on <CameraView> (in record.tsx),
       // not passed to recordAsync. It's not a valid recordAsync option.
-      const video = await cameraRef.current.recordAsync({
+      const video = (await cameraRef.current.recordAsync({
         maxDuration: 120,
-      });
+      })) as { uri: string; partial?: boolean; reason?: string; bytes?: number } | undefined;
+
+      // The patched native layer (patches/expo-camera) resolves an
+      // INTERRUPTED recording — phone call, another app taking the mic, a
+      // session interruption — with whatever it managed to write, marked
+      // partial, instead of rejecting and losing the shot. With 1s movie
+      // fragments that file is playable up to the last whole second. Save it
+      // through the normal path below; just say so, once, without blocking.
+      const partialReason = video?.partial ? String(video.reason ?? 'the recording was interrupted') : null;
+      if (partialReason && video?.uri) {
+        console.warn('[useCamera] partial clip kept:', partialReason, video.bytes);
+      }
+      if (partialReason && video?.uri && !isPractice) {
+        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning).catch(() => {});
+        setTimeout(() => {
+          Alert.alert(
+            'Recording was cut short',
+            `The shot was saved up to the point it was interrupted.\n\n${partialReason}`
+          );
+        }, 0);
+      }
 
       // Force-stopped under the 2s minimum (on-screen button / tutorial
       // end): the recording genuinely ended, but a <2s file can't contain a
@@ -856,7 +876,7 @@ export function useCamera({
             savedClipId ? 'Saved, but something went wrong' : 'Recording failed',
             savedClipId
               ? `This shot IS saved — it will be in your round. Something after the save failed: ${reason}`
-              : `This shot was not saved: ${reason}\n\nLeaving the app or switching tabs while a clip is still saving will do this.`
+              : `This shot was not saved.\n\n${reason}`
           );
         }
       }
