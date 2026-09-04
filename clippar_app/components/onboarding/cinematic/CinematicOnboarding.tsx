@@ -58,9 +58,10 @@ const VIDEOS = {
   // dropped — it carried a sliver of the previous shot — so frame 1 is Henry
   // at address at sunset (frame-verified on the simulator). 14.85s, loops.
   hero: require('@/assets/onboarding/hero.mp4'),
-  // The recording lesson's clip: Henry's punch-out under the tree — frame 1 is
-  // address, the strike lands ~2.0s in. (4 Sep: the previous clip was another
-  // golfer entirely; Henry: "get rid of this guy".)
+  // The recording lesson's clip: Henry's approach from the hero (2.75–5.5s),
+  // frame 1 at address, strike ~1.25s in, silent. 4 Sep: the first clip was
+  // another golfer; the second had a friend talking over its tail. This one
+  // has no audio track at all, and the player is muted besides.
   lesson: require('@/assets/onboarding/lesson_shot.mp4'),
   // Henry's exported reel at 5x (75s → 15s) under the hero's own music track,
   // which is 15.0s — they fit to the frame. The last thing seen before signup.
@@ -448,6 +449,7 @@ function RecordScene({ onNext, topInset, bottomInset }: { onNext: () => void; to
   const { useVideoPlayer, VideoView } = ExpoVideo!;
   const player = useVideoPlayer(VIDEOS.lesson, (p) => {
     p.loop = false;
+    p.muted = true; // the real record screen plays no audio; nothing may talk here
     p.pause(); // frame one = Henry at address, held until the tap
   });
   pRef.current = player;
