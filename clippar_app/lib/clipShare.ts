@@ -94,14 +94,43 @@ export async function saveClipToPhotos(uri: string): Promise<boolean> {
  * Open the iOS share sheet for a single clip — covers AirDrop, Messages,
  * WhatsApp, Mail, Save Video, etc. Sends the actual video file (not a URL).
  */
-export async function shareClip(uri: string, title: string): Promise<void> {
-  if (!isNative || !RNShare) return;
-  await RNShare.open({
-    title,
-    message: title,
-    url: Platform.OS === 'android' ? `file://${uri}` : uri,
-    type: 'video/mp4',
-  }).catch(() => {});
+export async function shareClip(uri: string, title: string): Promise<boolean> {
+  if (!isNative || !RNShare || !FileSystemLegacy) return false;
+  try {
+    // Same guard as saveClipToPhotos: a trim in Library/Caches can be gone
+    // by the time the share sheet asks for it, and the old version swallowed
+    // that ("Share this shot" did nothing — Henry, 4 Sep). Check, and copy
+    // out of the purgeable directory first.
+    let shareUri = uri.startsWith('file://') || uri.startsWith('/') ? uri : uri;
+    if (shareUri.startsWith('/')) shareUri = `file://${shareUri}`;
+    const info = await FileSystemLegacy.getInfoAsync(shareUri);
+    if (!info.exists) {
+      console.warn(`[clipShare] shareClip: file missing at ${shareUri.slice(-60)}`);
+      return false;
+    }
+    if (shareUri.includes('/Library/Caches/') || shareUri.includes('/tmp/')) {
+      const filename = shareUri.split('/').pop() ?? `clip_${Date.now()}.mp4`;
+      const destDir = `${FileSystemLegacy.documentDirectory}exports/`;
+      const destInfo = await FileSystemLegacy.getInfoAsync(destDir);
+      if (!destInfo.exists) await FileSystemLegacy.makeDirectoryAsync(destDir, { intermediates: true });
+      const dest = `${destDir}${filename}`;
+      try {
+        await FileSystemLegacy.copyAsync({ from: shareUri, to: dest });
+        shareUri = dest;
+      } catch {}
+    }
+    await RNShare.open({
+      title,
+      message: title,
+      url: shareUri,
+      type: 'video/mp4',
+      failOnCancel: false,
+    });
+    return true;
+  } catch (err) {
+    console.warn('[clipShare] shareClip failed:', err);
+    return false;
+  }
 }
 
 /**

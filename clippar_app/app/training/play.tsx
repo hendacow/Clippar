@@ -180,11 +180,14 @@ export default function TrainingPlayScreen() {
             armWindowTimer(lenMs);
           }
         } else {
-          // Auto window: centred on the STRIKE, not the clip middle — the
-          // trim puts impact at ~62.5% of the file (impactFractionInFile),
-          // so a middle-centred 0.5s window showed the strike at its edge.
+          // Auto window: the STRIKE sits at 75% of the window — three quarters
+          // downswing, one quarter after impact. Centring it (4 Sep) put the
+          // top of the backswing in a 0.5s window; Henry wants the downswing
+          // and the hit. impactFractionInFile gives the strike's place in the
+          // file; if the detector's estimate is off, this shape cannot fix
+          // that — only the estimate can.
           const L = playLengthRef.current / 1000;
-          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - L / 2), dur - L) : 0;
+          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - 0.75 * L), dur - L) : 0;
           // dur can be 0 briefly if metadata isn't ready — play the whole
           // clip on a generous timer rather than skipping (playToEnd still
           // advances at the true end).

@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from 'react';
+import { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -328,42 +328,17 @@ function ClipCard({
                 { text: 'Delete', style: 'destructive', onPress: () => onRemove() },
               ]);
             }}
-            hitSlop={6}
+            hitSlop={8}
             style={{
               position: 'absolute',
               top: 3,
               right: 3,
             }}
           >
-            <XCircle size={18} color="rgba(255,255,255,0.8)" fill="rgba(0,0,0,0.5)" />
+            {/* One control on the tile: a red X. Download lives in Options
+                now (Henry, 4 Sep). */}
+            <XCircle size={26} color={theme.colors.accentRed} fill="rgba(0,0,0,0.6)" />
           </Pressable>
-
-          {/* Download button (top-right, below the X) — saves this single
-              clip to the user's Photos library. Hidden while clip is
-              waiting for auto-trim or has no playable file. */}
-          {!clip.needsTrim && clip.sourceUri && (
-            <Pressable
-              onPress={(e) => {
-                e.stopPropagation?.();
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                onDownload();
-              }}
-              hitSlop={6}
-              style={{
-                position: 'absolute',
-                top: 26,
-                right: 3,
-                width: 22,
-                height: 22,
-                borderRadius: 11,
-                backgroundColor: 'rgba(0,0,0,0.55)',
-                justifyContent: 'center',
-                alignItems: 'center',
-              }}
-            >
-              <Download size={12} color="rgba(255,255,255,0.95)" />
-            </Pressable>
-          )}
 
           {/* Bottom label: "Edit", "Excluded", or "Trimmed" badge */}
           <View
@@ -666,6 +641,9 @@ export default function EditorScreen() {
 
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
+  // Every clip in play order (holes ascending, shots ascending) — the
+  // trimmer's swipe/chevron navigation walks this, across holes.
+  const flatClips = useMemo(() => state.holes.flatMap((h) => h.clips), [state.holes]);
   // Long-press a clip → opens the clip-actions menu (move to hole / exclude
   // / delete). Holds the clip whose menu is open; null = closed.
   const [movingClip, setMovingClip] = useState<EditorClip | null>(null);
@@ -1617,8 +1595,9 @@ export default function EditorScreen() {
           </Text>
         </View>
 
-        {/* Right cluster: in select mode just a Done/Cancel; otherwise
-            Select + Preview + Export. */}
+        {/* Right cluster: Cancel in select mode. Select / Preview / Export
+            moved to the sticky bottom bar (Henry, 4 Sep) — bigger, in the
+            thumb arc, not in a cluster of small buttons up here. */}
         {selectMode ? (
           <Pressable
             onPress={exitSelectMode}
@@ -1637,79 +1616,7 @@ export default function EditorScreen() {
             </Text>
           </Pressable>
         ) : (
-          <View style={{ flexDirection: 'row', gap: 6 }}>
-            {/* Select holes → custom highlight */}
-            <Pressable
-              onPress={() => {
-                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                setSelectMode(true);
-              }}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: 4,
-                paddingHorizontal: 10,
-                paddingVertical: 8,
-                borderRadius: 8,
-                backgroundColor: theme.colors.surfaceElevated,
-                borderWidth: 1,
-                borderColor: theme.colors.surfaceBorder,
-                opacity: hasUntrimmedClips || isTracing || totalClips === 0 ? 0.4 : 1,
-              }}
-              disabled={hasUntrimmedClips || isTracing || totalClips === 0}
-            >
-              <ListChecks size={13} color={theme.colors.textPrimary} />
-              <Text style={{ color: theme.colors.textPrimary, fontSize: 13, fontWeight: '600' }}>
-                Select
-              </Text>
-            </Pressable>
-
-            <Pressable
-              onPress={handlePreviewAll}
-              style={{
-                paddingHorizontal: 12,
-                paddingVertical: 8,
-                borderRadius: 8,
-                backgroundColor: theme.colors.surfaceElevated,
-                borderWidth: 1,
-                borderColor: theme.colors.surfaceBorder,
-                opacity: hasUntrimmedClips ? 0.4 : 1,
-              }}
-            >
-              <Text
-                style={{
-                  color: theme.colors.textPrimary,
-                  fontSize: 13,
-                  fontWeight: '600',
-                }}
-              >
-                Preview
-              </Text>
-            </Pressable>
-
-            {/* Export hidden in review mode (round still in progress) — the
-                user is just checking/fixing clips, not finalizing the reel. */}
-            {!isReview && (
-              <Pressable
-                onPress={handleExportPress}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: 4,
-                  paddingHorizontal: 12,
-                  paddingVertical: 8,
-                  borderRadius: 8,
-                  backgroundColor: '#000',
-                  opacity: hasUntrimmedClips || isTracing ? 0.4 : 1,
-                }}
-              >
-                <Upload size={13} color="#fff" />
-                <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>
-                  Export
-                </Text>
-              </Pressable>
-            )}
-          </View>
+          <View style={{ width: 34 }} />
         )}
       </View>
 
@@ -1761,11 +1668,12 @@ export default function EditorScreen() {
       <ScrollView
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
+
           paddingTop: 16,
           // Extra bottom room in select mode so the action bar doesn't
           // cover the last hole; likewise for the review-mode "Back to
           // round" bar, which is pinned over the same space.
-          paddingBottom: insets.bottom + (selectMode ? 120 : isReview ? 100 : 80),
+          paddingBottom: insets.bottom + 112, // clears the sticky action bar
         }}
       >
         {/* Music selection row */}
@@ -1940,14 +1848,107 @@ export default function EditorScreen() {
         </View>
       )}
 
-      {/* ---- BACK TO ROUND (review mode) ---- */}
+      {/* ---- STICKY ACTION BAR: Select · Preview · Export / Back to round ---- */}
+      {!selectMode && (
+        <View
+          style={{
+            position: 'absolute',
+            left: 0,
+            right: 0,
+            bottom: 0,
+            paddingHorizontal: 16,
+            paddingTop: 12,
+            paddingBottom: insets.bottom + 12,
+            backgroundColor: theme.colors.surface,
+            borderTopWidth: 1,
+            borderTopColor: theme.colors.surfaceBorder,
+            flexDirection: 'row',
+            alignItems: 'center',
+            gap: 10,
+          }}
+        >
+          <Pressable
+            onPress={() => {
+              Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+              setSelectMode(true);
+            }}
+            disabled={hasUntrimmedClips || isTracing || totalClips === 0}
+            style={{
+              flex: 1,
+              height: 56,
+              borderRadius: 14,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 6,
+              backgroundColor: theme.colors.surfaceElevated,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              opacity: hasUntrimmedClips || isTracing || totalClips === 0 ? 0.4 : 1,
+            }}
+          >
+            <ListChecks size={18} color={theme.colors.textPrimary} />
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700' }}>Select</Text>
+          </Pressable>
+          <Pressable
+            onPress={handlePreviewAll}
+            disabled={hasUntrimmedClips}
+            style={{
+              flex: 1,
+              height: 56,
+              borderRadius: 14,
+              alignItems: 'center',
+              justifyContent: 'center',
+              backgroundColor: theme.colors.surfaceElevated,
+              borderWidth: 1,
+              borderColor: theme.colors.surfaceBorder,
+              opacity: hasUntrimmedClips ? 0.4 : 1,
+            }}
+          >
+            <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '700' }}>Preview</Text>
+          </Pressable>
+          {isReview ? (
+            <Pressable
+              onPress={() => {
+                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+                backToRound();
+              }}
+              style={{ flex: 1.3, height: 56, borderRadius: 14, flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6, backgroundColor: theme.colors.primary }}
+            >
+              <ArrowLeft size={18} color="#000" />
+              <Text style={{ color: '#000', fontSize: 15, fontWeight: '800' }}>Back to round</Text>
+            </Pressable>
+          ) : (
+            <Pressable
+              onPress={handleExportPress}
+              disabled={hasUntrimmedClips || isTracing}
+              style={{
+                flex: 1.3,
+                height: 56,
+                borderRadius: 14,
+                flexDirection: 'row',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: 6,
+                backgroundColor: theme.colors.primary,
+                opacity: hasUntrimmedClips || isTracing ? 0.4 : 1,
+              }}
+            >
+              <Upload size={18} color="#000" />
+              <Text style={{ color: '#000', fontSize: 15, fontWeight: '800' }}>Export</Text>
+            </Pressable>
+          )}
+        </View>
+      )}
+
+      {/* ---- BACK TO ROUND (review mode) — folded into the sticky bar above ---- */}
       {/* The golfer is standing on a tee, one-handed, in sunlight: the way
           back to the live round has to be pinned in the thumb arc, not a
           14px X in the top-left corner. Hidden in select mode so it can't
           sit under that bar. Deliberately no "Leave Editor?" confirm —
           going back to your own round in progress isn't leaving anything,
           and edits are already saved as a draft. */}
-      {isReview && !selectMode && (
+      {false && isReview && !selectMode && (
         <View
           style={{
             position: 'absolute',
@@ -2006,16 +2007,15 @@ export default function EditorScreen() {
           const i = clips.findIndex((c) => c.id === trimClip.id);
           return i >= 0 ? `${isTraining ? trainingHoleLabel(trimClip.holeNumber) : `Hole ${trimClip.holeNumber}`} · Shot ${i + 1} of ${clips.length}` : undefined;
         })()}
-        hasPrev={!!trimClip && (state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips.findIndex((c) => c.id === trimClip.id) ?? 0) > 0}
-        hasNext={!!trimClip && (() => {
-          const clips = state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips ?? [];
-          return clips.findIndex((c) => c.id === trimClip.id) < clips.length - 1;
-        })()}
+        // Swipes and chevrons walk the WHOLE round in play order — the last
+        // shot of hole 10 leads to the first of hole 11 (Henry, 4 Sep: "they
+        // shouldn't be confined to that hole's shots").
+        hasPrev={!!trimClip && flatClips.findIndex((c) => c.id === trimClip.id) > 0}
+        hasNext={!!trimClip && flatClips.findIndex((c) => c.id === trimClip.id) < flatClips.length - 1}
         onNavigate={(dir, startMs, endMs) => {
           if (!trimClip) return;
-          const clips = state.holes.find((h) => h.holeNumber === trimClip.holeNumber)?.clips ?? [];
-          const i = clips.findIndex((c) => c.id === trimClip.id);
-          const next = clips[i + (dir === 'next' ? 1 : -1)];
+          const i = flatClips.findIndex((c) => c.id === trimClip.id);
+          const next = flatClips[i + (dir === 'next' ? 1 : -1)];
           if (!next) return;
           editor.updateTrim(trimClip.id, startMs, endMs);
           Haptics.selectionAsync();
@@ -2195,9 +2195,30 @@ export default function EditorScreen() {
                   onPress={() => {
                     const c = movingClip;
                     setMovingClip(null);
-                    if (c.sourceUri) {
-                      void shareClip(c.sourceUri, `${isTraining ? trainingHoleLabel(c.holeNumber) : `Hole ${c.holeNumber}`} · Shot ${c.shotNumber}`);
-                    }
+                    // Let this sheet finish dismissing before Photos asks for
+                    // permission / presents anything of its own.
+                    setTimeout(() => void handleClipDownload(c), 400);
+                  }}
+                  style={menuRowStyle}
+                >
+                  <Download size={18} color={theme.colors.textPrimary} />
+                  <Text style={{ color: theme.colors.textPrimary, fontSize: 15, fontWeight: '600' }}>
+                    Save to Photos
+                  </Text>
+                </Pressable>
+                <Pressable
+                  onPress={() => {
+                    const c = movingClip;
+                    setMovingClip(null);
+                    if (!c.sourceUri) return;
+                    // iOS refuses to present the share sheet while this modal
+                    // is still animating away — which is why "Share this shot"
+                    // silently did nothing. Wait for the dismiss, then present,
+                    // and say so if the file is gone.
+                    setTimeout(async () => {
+                      const ok = await shareClip(c.sourceUri!, `${isTraining ? trainingHoleLabel(c.holeNumber) : `Hole ${c.holeNumber}`} · Shot ${c.shotNumber}`);
+                      if (!ok) Alert.alert('Could not share', 'This clip\u2019s file is missing or the share sheet could not open.');
+                    }, 450);
                   }}
                   style={menuRowStyle}
                 >

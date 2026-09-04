@@ -10,6 +10,7 @@ import {
   Image,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Haptics from 'expo-haptics';
 import { X, Check, RotateCcw, ChevronLeft, ChevronRight } from 'lucide-react-native';
 import { GestureDetector, Gesture, Directions, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { theme } from '@/constants/theme';
@@ -23,7 +24,14 @@ const VideoThumbnails = Platform.OS !== 'web'
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const TIMELINE_PADDING = 24;
 const TIMELINE_WIDTH = SCREEN_WIDTH - TIMELINE_PADDING * 2;
-const HANDLE_WIDTH = 28;
+// Touch target for a handle (Henry, 4 Sep: "thick thumb proof"). The visible
+// bar is narrower; this is the width that catches the finger.
+const HANDLE_WIDTH = 44;
+// Hold a handle still for this long and the timeline zooms in around it —
+// the Photos trimmer's fine-scrub behaviour. Release restores the whole clip.
+const FINE_HOLD_MS = 450;
+const FINE_ZOOM = 4;
+const FINE_MOVE_TOLERANCE_PX = 8;
 const MIN_TRIM_MS = 500;
 const LOOP_POLL_MS = 50;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -159,6 +167,56 @@ export function ClipTrimModal({
   const startHandleOriginRef = useRef(0);
   const endHandleOriginRef = useRef(0);
 
+  // Fine-scrub zoom (Photos-style): while zoomed, the timeline shows the
+  // window [viewStartMs, viewStartMs + durationMs / FINE_ZOOM] and a finger
+  // moves the handle a quarter as far per pixel.
+  const [zoom, setZoom] = useState(1);
+  const [viewStartMs, setViewStartMs] = useState(0);
+  const zoomRef = useRef(1);
+  const viewStartRef = useRef(0);
+  zoomRef.current = zoom;
+  viewStartRef.current = viewStartMs;
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastDxRef = useRef(0);
+  const fineOriginDxRef = useRef(0);
+  const fineOriginMsRef = useRef(0);
+
+  const clearHold = () => {
+    if (holdTimerRef.current) {
+      clearTimeout(holdTimerRef.current);
+      holdTimerRef.current = null;
+    }
+  };
+  const enterFine = (handle: 'start' | 'end') => {
+    const dur = durationMsRef.current;
+    const anchor = handle === 'start' ? startMsRef.current : endMsRef.current;
+    const windowMs = dur / FINE_ZOOM;
+    const vs = Math.max(0, Math.min(anchor - windowMs / 2, dur - windowMs));
+    fineOriginDxRef.current = lastDxRef.current;
+    fineOriginMsRef.current = anchor;
+    zoomRef.current = FINE_ZOOM;
+    viewStartRef.current = vs;
+    setZoom(FINE_ZOOM);
+    setViewStartMs(vs);
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium).catch(() => {});
+  };
+  const exitFine = () => {
+    clearHold();
+    if (zoomRef.current !== 1) {
+      zoomRef.current = 1;
+      viewStartRef.current = 0;
+      setZoom(1);
+      setViewStartMs(0);
+    }
+  };
+  const armHold = (handle: 'start' | 'end') => {
+    clearHold();
+    lastDxRef.current = 0;
+    holdTimerRef.current = setTimeout(() => {
+      if (Math.abs(lastDxRef.current) <= FINE_MOVE_TOLERANCE_PX) enterFine(handle);
+    }, FINE_HOLD_MS);
+  };
+
   const triggerSeek = useCallback(() => {
     setSeekGeneration((g) => g + 1);
   }, []);
@@ -171,11 +229,16 @@ export function ClipTrimModal({
         onPanResponderGrant: () => {
           startHandleOriginRef.current = startMsRef.current;
           setDraggingHandle('start');
+          armHold('start');
         },
         onPanResponderMove: (_, gestureState) => {
+          lastDxRef.current = gestureState.dx;
+          if (zoomRef.current === 1 && Math.abs(gestureState.dx) > FINE_MOVE_TOLERANCE_PX) clearHold();
           const dur = durationMsRef.current;
-          const originMs = startHandleOriginRef.current;
-          const deltaMs = (gestureState.dx / TIMELINE_WIDTH) * dur;
+          const zoomed = zoomRef.current !== 1;
+          const originMs = zoomed ? fineOriginMsRef.current : startHandleOriginRef.current;
+          const dx = zoomed ? gestureState.dx - fineOriginDxRef.current : gestureState.dx;
+          const deltaMs = (dx / TIMELINE_WIDTH) * (dur / zoomRef.current);
           const newMs = Math.round(originMs + deltaMs);
           const clamped = Math.max(
             0,
@@ -184,11 +247,13 @@ export function ClipTrimModal({
           setStartMs(clamped);
         },
         onPanResponderRelease: () => {
+          exitFine();
           setDraggingHandle('none');
           setSeekTarget('start');
           triggerSeek();
         },
         onPanResponderTerminate: () => {
+          exitFine();
           setDraggingHandle('none');
           setSeekTarget('start');
           triggerSeek();
@@ -205,11 +270,16 @@ export function ClipTrimModal({
         onPanResponderGrant: () => {
           endHandleOriginRef.current = endMsRef.current;
           setDraggingHandle('end');
+          armHold('end');
         },
         onPanResponderMove: (_, gestureState) => {
+          lastDxRef.current = gestureState.dx;
+          if (zoomRef.current === 1 && Math.abs(gestureState.dx) > FINE_MOVE_TOLERANCE_PX) clearHold();
           const dur = durationMsRef.current;
-          const originMs = endHandleOriginRef.current;
-          const deltaMs = (gestureState.dx / TIMELINE_WIDTH) * dur;
+          const zoomed = zoomRef.current !== 1;
+          const originMs = zoomed ? fineOriginMsRef.current : endHandleOriginRef.current;
+          const dx = zoomed ? gestureState.dx - fineOriginDxRef.current : gestureState.dx;
+          const deltaMs = (dx / TIMELINE_WIDTH) * (dur / zoomRef.current);
           const newMs = Math.round(originMs + deltaMs);
           const clamped = Math.min(
             dur,
@@ -218,11 +288,13 @@ export function ClipTrimModal({
           setEndMs(clamped);
         },
         onPanResponderRelease: () => {
+          exitFine();
           setDraggingHandle('none');
           setSeekTarget('end');
           triggerSeek();
         },
         onPanResponderTerminate: () => {
+          exitFine();
           setDraggingHandle('none');
           setSeekTarget('end');
           triggerSeek();
@@ -231,8 +303,13 @@ export function ClipTrimModal({
     [triggerSeek, setDraggingHandle],
   );
 
-  // Convert ms to timeline position
-  const msToX = (ms: number) => (ms / durationMs) * TIMELINE_WIDTH;
+  // Convert ms to timeline position — within the zoomed window when fine
+  // scrubbing, clamped to the track so the far handle parks at the edge.
+  const windowMs = durationMs / zoom;
+  const msToX = (ms: number) => {
+    const x = ((ms - viewStartMs) / windowMs) * TIMELINE_WIDTH;
+    return Math.max(0, Math.min(TIMELINE_WIDTH, x));
+  };
 
   const handleReset = useCallback(() => {
     setStartMs(0);
@@ -302,13 +379,16 @@ export function ClipTrimModal({
     let cancelled = false;
     const generateThumbs = async () => {
       const thumbs: (string | null)[] = new Array(THUMB_COUNT).fill(null);
-      const interval = durationMs / THUMB_COUNT;
+      // Zoomed: thumbnails span the visible window only, so the strip shows
+      // more frames of less time — the whole point of the fine scrub.
+      const spanMs = durationMs / zoom;
+      const interval = spanMs / THUMB_COUNT;
 
       // Generate all thumbs concurrently for speed
       const promises = Array.from({ length: THUMB_COUNT }, async (_, i) => {
         if (cancelled) return;
         try {
-          const time = Math.round(i * interval + interval / 2);
+          const time = Math.round(viewStartMs + i * interval + interval / 2);
           const result = await VideoThumbnails!.getThumbnailAsync(activeUri!, {
             time,
             quality: 0.3,
@@ -327,7 +407,7 @@ export function ClipTrimModal({
 
     generateThumbs();
     return () => { cancelled = true; };
-  }, [visible, activeUri, durationMs]);
+  }, [visible, activeUri, durationMs, zoom, viewStartMs]);
 
   if (!clip) return null;
 
@@ -351,23 +431,12 @@ export function ClipTrimModal({
         style={{
           flex: 1,
           backgroundColor: '#000',
-          paddingTop: Platform.OS === 'ios' ? 10 : 16,
+          // Below the Dynamic Island / notch, not under it (Henry, 4 Sep:
+          // "the little black thing cuts off everything up there").
+          paddingTop: insets.top + 8,
           paddingBottom: insets.bottom + 16,
         }}
       >
-        {/* Drag indicator for iOS pageSheet */}
-        {Platform.OS === 'ios' && (
-          <View style={{ alignItems: 'center', paddingTop: 8, paddingBottom: 4 }}>
-            <View
-              style={{
-                width: 36,
-                height: 5,
-                borderRadius: 2.5,
-                backgroundColor: 'rgba(255,255,255,0.3)',
-              }}
-            />
-          </View>
-        )}
 
         {/* Header */}
         <View
@@ -384,22 +453,22 @@ export function ClipTrimModal({
         >
           <Pressable
             onPress={onDismiss}
-            hitSlop={12}
+            hitSlop={10}
             style={{
-              width: 36,
-              height: 36,
-              borderRadius: 18,
+              width: 48,
+              height: 48,
+              borderRadius: 24,
               backgroundColor: 'rgba(255,255,255,0.15)',
               justifyContent: 'center',
               alignItems: 'center',
             }}
           >
-            <X size={20} color="#fff" />
+            <X size={24} color="#fff" />
           </Pressable>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
             {onNavigate && (
-              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} hitSlop={10} style={{ opacity: hasPrev ? 1 : 0.25 }}>
-                <ChevronLeft size={22} color="#fff" />
+              <Pressable onPress={() => navigate('prev')} disabled={!hasPrev} hitSlop={8} style={{ opacity: hasPrev ? 1 : 0.25, width: 44, height: 44, justifyContent: 'center', alignItems: 'center' }}>
+                <ChevronLeft size={30} color="#fff" />
               </Pressable>
             )}
             <View style={{ alignItems: 'center' }}>
@@ -411,26 +480,26 @@ export function ClipTrimModal({
               ) : null}
             </View>
             {onNavigate && (
-              <Pressable onPress={() => navigate('next')} disabled={!hasNext} hitSlop={10} style={{ opacity: hasNext ? 1 : 0.25 }}>
-                <ChevronRight size={22} color="#fff" />
+              <Pressable onPress={() => navigate('next')} disabled={!hasNext} hitSlop={8} style={{ opacity: hasNext ? 1 : 0.25, width: 44, height: 44, justifyContent: 'center', alignItems: 'center' }}>
+                <ChevronRight size={30} color="#fff" />
               </Pressable>
             )}
           </View>
           <Pressable
             onPress={handleSave}
             disabled={savingTrim}
-            hitSlop={12}
+            hitSlop={10}
             style={{
-              width: 36,
-              height: 36,
-              borderRadius: 18,
+              width: 48,
+              height: 48,
+              borderRadius: 24,
               backgroundColor: theme.colors.primary,
               justifyContent: 'center',
               alignItems: 'center',
               opacity: savingTrim ? 0.5 : 1,
             }}
           >
-            <Check size={20} color="#fff" />
+            <Check size={24} color="#fff" />
           </Pressable>
         </View>
 
@@ -515,12 +584,17 @@ export function ClipTrimModal({
           {/* Track background with filmstrip thumbnails */}
           <View
             style={{
-              height: 48,
+              height: 56,
               backgroundColor: 'rgba(255,255,255,0.1)',
               borderRadius: 8,
               overflow: 'visible',
             }}
           >
+            {zoom !== 1 && (
+              <View pointerEvents="none" style={{ position: 'absolute', top: -26, left: 0, right: 0, alignItems: 'center' }}>
+                <Text style={{ color: theme.colors.primary, fontSize: 11, fontWeight: '700' }}>Fine scrub · {FINE_ZOOM}×</Text>
+              </View>
+            )}
             {/* Filmstrip thumbnails */}
             {filmstripThumbs.length > 0 && (
               <View
@@ -536,15 +610,15 @@ export function ClipTrimModal({
                 }}
               >
                 {filmstripThumbs.map((thumbUri, i) => (
-                  <View key={i} style={{ width: THUMB_WIDTH, height: 48 }}>
+                  <View key={i} style={{ width: THUMB_WIDTH, height: 56 }}>
                     {thumbUri ? (
                       <Image
                         source={{ uri: thumbUri }}
-                        style={{ width: THUMB_WIDTH, height: 48 }}
+                        style={{ width: THUMB_WIDTH, height: 56 }}
                         resizeMode="cover"
                       />
                     ) : (
-                      <View style={{ width: THUMB_WIDTH, height: 48, backgroundColor: 'rgba(255,255,255,0.05)' }} />
+                      <View style={{ width: THUMB_WIDTH, height: 56, backgroundColor: 'rgba(255,255,255,0.05)' }} />
                     )}
                   </View>
                 ))}
@@ -601,9 +675,9 @@ export function ClipTrimModal({
               style={{
                 position: 'absolute',
                 left: msToX(startMs) - HANDLE_WIDTH / 2,
-                top: -6,
+                top: -10,
                 width: HANDLE_WIDTH,
-                height: 60,
+                height: 76,
                 justifyContent: 'center',
                 alignItems: 'center',
                 zIndex: 10,
@@ -611,10 +685,12 @@ export function ClipTrimModal({
             >
               <View
                 style={{
-                  width: 8,
-                  height: 32,
-                  borderRadius: 4,
+                  width: 16,
+                  height: 48,
+                  borderRadius: 6,
                   backgroundColor: theme.colors.primary,
+                  borderWidth: 2,
+                  borderColor: '#000',
                 }}
               />
             </View>
@@ -625,9 +701,9 @@ export function ClipTrimModal({
               style={{
                 position: 'absolute',
                 left: msToX(effectiveEndMs) - HANDLE_WIDTH / 2,
-                top: -6,
+                top: -10,
                 width: HANDLE_WIDTH,
-                height: 60,
+                height: 76,
                 justifyContent: 'center',
                 alignItems: 'center',
                 zIndex: 10,
@@ -635,10 +711,12 @@ export function ClipTrimModal({
             >
               <View
                 style={{
-                  width: 8,
-                  height: 32,
-                  borderRadius: 4,
+                  width: 16,
+                  height: 48,
+                  borderRadius: 6,
                   backgroundColor: theme.colors.primary,
+                  borderWidth: 2,
+                  borderColor: '#000',
                 }}
               />
             </View>
