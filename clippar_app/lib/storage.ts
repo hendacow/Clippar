@@ -177,13 +177,46 @@ async function migrateEditorColumns() {
 /**
  * Last user id we successfully resolved this process. Used ONLY to answer a
  * transient getSession() failure (a Keychain-busy window, say) without hiding
- * a golfer's own round from them mid-round. It is overwritten with `null` on a
- * clean signed-out read, so it can never serve a departed user's id to the
- * next account: signing in as B necessarily produced a successful getSession
- * that set this to B.
+ * a golfer's own round from them mid-round.
+ *
+ * This docstring used to claim the cache "is overwritten with null on a clean
+ * signed-out read, so it can never serve a departed user's id to the next
+ * account: signing in as B necessarily produced a successful getSession that
+ * set this to B." **That guarantee had no implementation.** This global is
+ * written in exactly one place (the success branch of sessionUserId below);
+ * sign-in goes through signInWithPassword / OAuth and never routes through it,
+ * and nothing invalidated it on sign-out. So on a shared handset — A signs out,
+ * B signs in, B's first identity check hits the error branch — B was handed A's
+ * id, and every scoped read (the Resume card and its playable video) answered
+ * for A. forgetCachedSessionUser() below is what actually implements it now,
+ * called from the SIGNED_OUT auth event and from account deletion.
  */
 let lastKnownUserId: string | null = null;
 let legacyRoundsClaimed = false;
+
+/**
+ * Forget who was last signed in on this handset. Called on EVERY sign-out
+ * (hooks/useAuth.ts's SIGNED_OUT branch, which also covers a remote revoke and
+ * a refresh-token failure) and at the end of account deletion.
+ *
+ * Deliberately clears `lastKnownUserId` and NOTHING ELSE. In particular it must
+ * NOT also reset `legacyRoundsClaimed`: shouldClaimLegacyRows() is
+ * `!!sessionUserId && !alreadyClaimed`, and that latched flag is the only thing
+ * stopping `UPDATE local_rounds SET user_id = ? WHERE user_id IS NULL` running
+ * a second time in a process. Clearing it here would make the NULL-owner claim
+ * fire on the very next sign-in — i.e. exactly the A-signs-out / B-signs-in
+ * handover this function exists to protect, handing B any unowned round. One of
+ * the two patches proposed for this on PR #152 carried that line; this is the
+ * merged version with it removed.
+ *
+ * The lenient fallback in sessionUserId() is untouched on purpose. Within a
+ * signed-in session the cache is still populated by the first successful read,
+ * so a golfer with no signal keeps seeing their own round mid-round and can
+ * still start one (saveLocalRound tolerates a null owner and re-arms the claim).
+ */
+export function forgetCachedSessionUser(): void {
+  lastKnownUserId = null;
+}
 
 async function sessionUserId(): Promise<string | null> {
   try {
@@ -1680,7 +1713,7 @@ export async function listLocalRoundIdsForCurrentUser(): Promise<string[]> {
  * NOTHING points at — so a departing user's directory cleanup can never take
  * another signed-in user's still-referenced video with it.
  */
-export async function allReferencedClipFileUris(): Promise<Set<string>> {
+export async function allReferencedClipFileUris(): Promise<Set<string> | null> {
   const database = await getDatabase();
   const set = new Set<string>();
   try {
@@ -1696,8 +1729,15 @@ export async function allReferencedClipFileUris(): Promise<Set<string>> {
       }
     }
   } catch {
-    // Older schema / missing table — an empty set means the sweep deletes
-    // nothing rather than risking a live file, which is the safe direction.
+    // Older schema, missing table, or a BUSY database. This used to swallow the
+    // error and return an empty set, and the comment here claimed that meant
+    // "the sweep deletes nothing". It meant the opposite: the sweep's test is
+    // `referenced.has(fileUri)`, so an empty set makes every file on the
+    // handset look like an orphan and re-arms the whole-directory delete this
+    // function exists to prevent — the shared-phone footage loss, back again,
+    // on any transient read failure. Return null instead: the caller must skip
+    // the sweep when the reference set cannot be established.
+    return null;
   }
   return set;
 }

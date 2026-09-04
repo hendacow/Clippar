@@ -111,6 +111,19 @@ export function useAuth() {
       setUser(session?.user ?? null);
       setLoading(false);
       if (event === 'SIGNED_OUT') {
+        // Forget who was signed in, BEFORE anything else can read it. storage's
+        // sessionUserId() answers a transient getSession() failure from a
+        // module-global cache, and nothing used to clear that cache on sign-out
+        // — so on a shared handset B's first identity check, if it hit the
+        // error branch (a token refresh with no signal returns a retryable
+        // fetch error; a Keychain-busy read throws), was answered with A's id
+        // and B was offered A's unfinished round and its video. Synchronous and
+        // inline rather than inside resetLocalAccountState(), which is
+        // fire-and-forget async: this must be true the instant the session ends.
+        // Lazy require, so the auth hook does not drag SQLite in at module load.
+        const { forgetCachedSessionUser } =
+          require('@/lib/storage') as typeof import('@/lib/storage');
+        forgetCachedSessionUser();
         // RevenueCat does NOT fall back to an anonymous id on its own — it
         // keeps the previously identified user's appUserID and their cached
         // CustomerInfo. Without logOut(), the next account to sign in on this

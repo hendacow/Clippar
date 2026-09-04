@@ -1,5 +1,11 @@
 import { Platform } from 'react-native';
-import { clearLocalDatabase, listLocalRoundIdsForCurrentUser, deleteLocalRound, setSetting } from './storage';
+import {
+  clearLocalDatabase,
+  listLocalRoundIdsForCurrentUser,
+  deleteLocalRound,
+  setSetting,
+  forgetCachedSessionUser,
+} from './storage';
 import { clearRoundPrefetch } from './roundPrefetch';
 
 /**
@@ -64,6 +70,11 @@ async function removeOwnedMediaDirectories(): Promise<void> {
     // row across ANY account references it.
     const { allReferencedClipFileUris } = require('@/lib/storage') as typeof import('@/lib/storage');
     const referenced = await allReferencedClipFileUris();
+    // null = the reference set could not be established (busy/locked db, older
+    // schema). Sweeping anyway would treat EVERY file as an orphan and delete
+    // the whole tree — the exact bug above. Skip: an orphan left behind on a
+    // device is a far smaller harm than a second golfer's unrecoverable round.
+    if (!referenced) return;
     for (const dir of OWNED_MEDIA_DIRS) {
       const dirUri = `${root}${dir}`;
       let names: string[] = [];
@@ -135,6 +146,14 @@ export async function wipeLocalUserData(): Promise<void> {
   // Entries are also owner-stamped (a take by another account misses), but
   // drop the memory itself here rather than rely on that gate alone.
   clearRoundPrefetch();
+
+  // AFTER the sweeps, never before: every one of them resolves the departing
+  // user through the storage layer, and clearLocalDatabase fails CLOSED with no
+  // resolvable owner — forgetting the id any earlier would make an account
+  // deletion delete nothing. Before the web early-return so it runs everywhere.
+  // The SIGNED_OUT event that follows a deletion clears this too; doing it here
+  // as well means the departing account is forgotten even if that never fires.
+  forgetCachedSessionUser();
 
   if (Platform.OS === 'web') return;
 
