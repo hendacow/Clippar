@@ -33,15 +33,19 @@ const readCode = (rel: string) =>
 
 const SRC = 'app/round/preview.tsx';
 
-test('the scissors toggle is gone, not merely hidden', () => {
+// 4 Sep: the scissors is BACK — not as the old trim-mode toggle, but as the
+// way into the full shared trimmer (ClipTrimModal: thick handles, hold-to-
+// zoom, swipe/tap across shots). The docked panel stays for quick nudges.
+test('the scissors opens the full trimmer; the old mode toggle stays gone', () => {
   const code = readCode(SRC);
-  assert.doesNotMatch(code, /\bScissors\b/);
   assert.doesNotMatch(code, /toggleTrimMode/);
+  assert.match(code, /setFullTrimOpen\(true\)/);
+  assert.match(code, /<ClipTrimModal/);
 });
 
 test('the trim panel renders for every clip, with no mode gate', () => {
   const src = read(SRC);
-  assert.match(src, /\{currentClip && \(\s*<InlineTrimPanel/);
+  assert.match(src, /\{currentClip && \(\s*<>\s*<ClipTrimModal[\s\S]*?<InlineTrimPanel/);
   assert.doesNotMatch(src, /\{trimMode && currentClip && \(\s*<InlineTrimPanel/);
 });
 
