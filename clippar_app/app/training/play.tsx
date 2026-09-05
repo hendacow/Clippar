@@ -180,14 +180,13 @@ export default function TrainingPlayScreen() {
             armWindowTimer(lenMs);
           }
         } else {
-          // Auto window: the STRIKE sits at 75% of the window — three quarters
-          // downswing, one quarter after impact. Centring it (4 Sep) put the
-          // top of the backswing in a 0.5s window; Henry wants the downswing
-          // and the hit. impactFractionInFile gives the strike's place in the
-          // file; if the detector's estimate is off, this shape cannot fix
-          // that — only the estimate can.
+          // Auto window: the STRIKE sits 35% of the way in — a little
+          // downswing before, the hit and the ball leaving after (Henry,
+          // 5 Sep: "0.5s should be forward in time from the strike"). The
+          // anchor itself comes from impactFractionInFile, which now reads
+          // the stored impact for whole-file clips instead of guessing.
           const L = playLengthRef.current / 1000;
-          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - 0.75 * L), dur - L) : 0;
+          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - 0.35 * L), dur - L) : 0;
           // dur can be 0 briefly if metadata isn't ready — play the whole
           // clip on a generous timer rather than skipping (playToEnd still
           // advances at the true end).

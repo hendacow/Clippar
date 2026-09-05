@@ -153,10 +153,16 @@ export type MemoryStats = {
   cachesDirMB: number;
 };
 
+/** Which card the reel burns in. Native draws all of these; the app's preview
+ *  mirrors them. 'training' is the practice look: the club name over the shot. */
+export type ScorecardTemplate = 'classic' | 'minimal' | 'euro' | 'pga' | 'masters' | 'training';
+
 export type ScorecardHole = {
   holeNumber: number;
   par: number;
   strokes: number;
+  /** Practice reels: the club name shown over this segment. */
+  label?: string;
   /**
    * True only when the hole was actually ended (a score row exists for it —
    * EditorHoleSection.hasScore). When false, `strokes` is just the clip-count
@@ -170,6 +176,10 @@ export type ScorecardHole = {
 
 export type ScorecardData = {
   courseName: string;
+  /** Card design; absent = 'classic' (older binaries ignore it). */
+  template?: ScorecardTemplate;
+  /** Shown on the tour-style cards. */
+  playerName?: string;
   /** Par over COMPLETED holes only (0 when no hole is finished). */
   totalPar: number;
   /** Strokes over COMPLETED holes only (0 when no hole is finished). */

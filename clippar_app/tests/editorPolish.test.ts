@@ -57,7 +57,9 @@ test('Select · Preview · Export live in a sticky bottom bar', () => {
 });
 
 test('the training window puts the strike at three-quarters, not the middle', () => {
-  assert.match(play, /impactFractionInFile\(current\) - 0\.75 \* L/);
+  assert.match(play, /impactFractionInFile\(current\) - 0\.35 \* L/, 'strike at 35% of the window');
+  const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
+  assert.match(training, /const base = isCutFile \? \(clip\.autoTrimStartMs as number\) : 0;/, 'whole-file clips use their stored impact directly');
 });
 
 test('hole buttons say what they do; only a real cut is labelled Trimmed; preview opens the full trimmer', () => {

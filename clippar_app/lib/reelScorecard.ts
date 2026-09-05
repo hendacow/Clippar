@@ -22,7 +22,7 @@
  * (tests/reelScorecard.test.ts).
  */
 import { completedTotals, type DisplayHole } from '@/lib/scoreDisplay';
-import type { ScorecardData, ScorecardHole } from '@/modules/shot-detector';
+import type { ScorecardData, ScorecardHole, ScorecardTemplate } from '@/modules/shot-detector';
 
 export interface ReelScorecardHole extends DisplayHole {
   holeNumber: number;
@@ -146,15 +146,19 @@ export function holeReelDurationMs<T extends ReelClipTiming>(
 export function buildReelScorecard(
   courseName: string,
   holes: readonly ReelScorecardHole[],
+  extra?: { template?: ScorecardTemplate; playerName?: string },
 ): ScorecardData {
   let cumulativeMs = 0;
   const payloadHoles: ScorecardHole[] = holes.map((hole) => {
     const startMs = cumulativeMs;
     cumulativeMs += Math.max(0, hole.durationMs);
     return {
+    ...(extra?.template ? { template: extra.template } : {}),
+    ...(extra?.playerName ? { playerName: extra.playerName } : {}),
       holeNumber: hole.holeNumber,
       par: hole.par,
       strokes: hole.strokes,
+      ...((hole as { label?: string }).label ? { label: (hole as { label?: string }).label } : {}),
       hasScore: hole.hasScore,
       startMs,
       endMs: cumulativeMs,

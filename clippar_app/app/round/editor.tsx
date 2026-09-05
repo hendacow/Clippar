@@ -22,6 +22,9 @@ import { emitPipelineEvent, subscribePipeline } from '@/lib/pipelineEvents';
 import { buildReelScorecard, holeReelDurationMs } from '@/lib/reelScorecard';
 import { composeFailureCause, FAILURE_CAUSE } from '@/lib/roundStatusLogic';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
+import { SCORECARD_TEMPLATES, TemplateSwatch } from '@/components/editor/ScorecardTemplates';
+import type { ScorecardTemplate } from '@/modules/shot-detector';
+import { supabase } from '@/lib/supabase';
 import { MusicPicker, type MusicTrack } from '@/components/editor/MusicPicker';
 import type { EditorClip, EditorHoleSection } from '@/types/editor';
 import { trainingHoleLabel, CLUBS } from '@/lib/training';
@@ -654,6 +657,38 @@ export default function EditorScreen() {
 
   const totalClips = state.holes.reduce((sum, h) => sum + h.clips.length, 0);
   const [trimClip, setTrimClip] = useState<EditorClip | null>(null);
+  // Which scorecard the reel gets (5 Sep). Persisted on the round; the
+  // preview mirrors it; native burns it in. Training rounds always use the
+  // club-name look and never show this picker.
+  const [scorecardTemplate, setScorecardTemplate] = useState<ScorecardTemplate>('classic');
+  const [playerName, setPlayerName] = useState('');
+  useEffect(() => {
+    if (!roundId) return;
+    (async () => {
+      try {
+        const storage = require('@/lib/storage') as typeof import('@/lib/storage');
+        const r = await storage.getLocalRound(roundId);
+        const t = r?.scorecard_template as ScorecardTemplate | null | undefined;
+        if (t && t !== 'training') setScorecardTemplate(t);
+      } catch {}
+      try {
+        const { data } = await supabase.auth.getSession();
+        const u = data.session?.user;
+        const name = (u?.user_metadata?.full_name as string | undefined) || u?.email?.split('@')[0] || '';
+        setPlayerName(name);
+      } catch {}
+    })();
+  }, [roundId]);
+  const chooseTemplate = useCallback((t: ScorecardTemplate) => {
+    setScorecardTemplate(t);
+    Haptics.selectionAsync();
+    if (!roundId) return;
+    try {
+      const storage = require('@/lib/storage') as typeof import('@/lib/storage');
+      void storage.updateLocalRound(roundId, { scorecard_template: t }).catch(() => {});
+      void storage.markReelStale(roundId).catch(() => {});
+    } catch {}
+  }, [roundId]);
   // Every clip in play order (holes ascending, shots ascending) — the
   // trimmer's swipe/chevron navigation walks this, across holes.
   const flatClips = useMemo(() => state.holes.flatMap((h) => h.clips), [state.holes]);
@@ -1306,7 +1341,10 @@ export default function EditorScreen() {
             strokes: hole.strokes,
             hasScore: hole.hasScore,
             durationMs: holeReelDurationMs(hole.clips, (c) => inReelClipIds.has(c.id)),
+            // Practice: the club name is what the reel shows over each segment.
+            ...(isTraining ? { label: trainingHoleLabel(hole.holeNumber) } : {}),
           })),
+          { template: isTraining ? 'training' : scorecardTemplate, playerName },
         );
 
         // Resolve music to a local file path the native engine can read
@@ -1733,6 +1771,24 @@ export default function EditorScreen() {
             </Pressable>
           )}
         </Pressable>
+
+        {/* Scorecard style (5 Sep) — hidden for practice, which has its own look. */}
+        {!isTraining && (
+          <View style={{ marginBottom: 16 }}>
+            <Text style={{ color: theme.colors.textTertiary, fontSize: 11, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 0.5, marginLeft: 16, marginBottom: 8 }}>
+              Scorecard style
+            </Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16, gap: 10 }}>
+              {SCORECARD_TEMPLATES.map((t) => (
+                <Pressable key={t.key} onPress={() => chooseTemplate(t.key)} style={{ alignItems: 'center', width: 108 }}>
+                  <TemplateSwatch template={t.key} selected={scorecardTemplate === t.key} />
+                  <Text style={{ color: scorecardTemplate === t.key ? theme.colors.textPrimary : theme.colors.textTertiary, fontSize: 12, fontWeight: '700', marginTop: 6 }}>{t.name}</Text>
+                  <Text style={{ color: theme.colors.textTertiary, fontSize: 10 }} numberOfLines={1}>{t.blurb}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+          </View>
+        )}
 
         {/* Hole sections */}
         {state.holes.map((hole) => (

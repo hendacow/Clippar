@@ -14,6 +14,8 @@ import { useLocalSearchParams, router, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { X, Check, RotateCcw, Music, VolumeX, PersonStanding, Pause, Scissors } from 'lucide-react-native';
 import { ClipTrimModal } from '@/components/editor/ClipTrimModal';
+import { TEMPLATE_PALETTE } from '@/components/editor/ScorecardTemplates';
+import type { ScorecardTemplate } from '@/modules/shot-detector';
 import { PoseOverlay } from '@/components/editor/PoseOverlay';
 import * as Haptics from 'expo-haptics';
 import { theme } from '@/constants/theme';
@@ -76,15 +78,24 @@ function HoleCell({
   hole,
   isCurrent,
   width,
+  skin,
 }: {
   hole: EditorHoleSection;
   isCurrent: boolean;
   width?: number;
+  skin?: { text: string; dim: string; accent: string; under: string; over: string; line: string; markers: boolean; serif: boolean } | null;
 }) {
   const complete = isHoleComplete(hole);
-  const cellColor = complete
-    ? getScoreColor(hole.strokes - hole.par)
-    : 'rgba(255,255,255,0.25)';
+  const diff = hole.strokes - hole.par;
+  const cellColor = skin
+    ? (complete ? (diff < 0 ? skin.under : diff > 0 ? skin.over : skin.text) : skin.dim)
+    : complete
+      ? getScoreColor(diff)
+      : 'rgba(255,255,255,0.25)';
+  // Tour-style markers: a circle for under par, a square for over par.
+  const marker = skin?.markers && complete && diff !== 0
+    ? { borderWidth: 1.5, borderColor: cellColor, borderRadius: diff < 0 ? 10 : 3, width: 20, height: 20, justifyContent: 'center' as const, alignItems: 'center' as const }
+    : null;
 
   return (
     <View
@@ -93,31 +104,35 @@ function HoleCell({
         alignItems: 'center',
         paddingVertical: 4,
         borderRadius: 6,
-        backgroundColor: isCurrent ? 'rgba(255,255,255,0.1)' : 'transparent',
+        backgroundColor: isCurrent ? (skin ? skin.line : 'rgba(255,255,255,0.1)') : 'transparent',
+        borderBottomWidth: isCurrent && skin ? 2 : 0,
+        borderBottomColor: skin?.accent,
       }}
     >
       <Text
         style={{
-          color: isCurrent ? '#fff' : 'rgba(255,255,255,0.4)',
+          color: skin ? (isCurrent ? skin.text : skin.dim) : isCurrent ? '#fff' : 'rgba(255,255,255,0.4)',
           fontSize: 10,
           fontWeight: '600',
         }}
       >
         {hole.holeNumber}
       </Text>
+      <View style={[{ marginTop: 1, height: 20, justifyContent: 'center', alignItems: 'center' }, marker]}>
+        <Text
+          style={{
+            color: cellColor,
+            fontSize: 13,
+            fontWeight: '800',
+            fontFamily: skin?.serif ? 'Georgia-Bold' : undefined,
+          }}
+        >
+          {complete ? hole.strokes : '-'}
+        </Text>
+      </View>
       <Text
         style={{
-          color: cellColor,
-          fontSize: 13,
-          fontWeight: '800',
-          marginTop: 1,
-        }}
-      >
-        {complete ? hole.strokes : '-'}
-      </Text>
-      <Text
-        style={{
-          color: 'rgba(255,255,255,0.25)',
+          color: skin ? skin.dim : 'rgba(255,255,255,0.25)',
           fontSize: 9,
         }}
       >
@@ -131,13 +146,44 @@ function ScorecardOverlay({
   clip,
   holes,
   courseName,
+  template = 'classic',
+  playerName = '',
 }: {
   clip: EditorClip;
   holes: EditorHoleSection[];
   courseName: string;
+  template?: ScorecardTemplate;
+  playerName?: string;
 }) {
   const currentHole = holes.find((h) => h.holeNumber === clip.holeNumber);
   if (!currentHole) return null;
+
+  // 5 Sep: the chosen design. 'minimal' is words only; the three tour
+  // looks re-skin the same card; classic is unchanged below.
+  if (template === 'minimal') {
+    const done = isHoleComplete(currentHole);
+    const diff = currentHole.strokes - currentHole.par;
+    return (
+      <View style={{ marginTop: 14, alignItems: 'center' }} pointerEvents="none">
+        <Text style={{ color: 'rgba(255,255,255,0.75)', fontSize: 11, letterSpacing: 2, fontWeight: '600', textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 6 }}>
+          {(courseName || 'ROUND').toUpperCase()}
+        </Text>
+        <Text style={{ color: '#fff', fontSize: 22, fontFamily: 'Georgia-Bold', letterSpacing: 1.5, marginTop: 4, textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 8 }}>
+          HOLE {currentHole.holeNumber} · PAR {currentHole.par}
+        </Text>
+        {done && (
+          <Text style={{ color: getScoreColor(diff), fontSize: 28, fontFamily: 'Georgia-Bold', marginTop: 2, textShadowColor: 'rgba(0,0,0,0.6)', textShadowRadius: 8 }}>
+            {holeResultLabel(diff)}
+          </Text>
+        )}
+      </View>
+    );
+  }
+  const skin =
+    template === 'euro' ? { ...TEMPLATE_PALETTE.euro, header: undefined as string | undefined, cream: undefined as string | undefined, under: TEMPLATE_PALETTE.euro.accent, over: TEMPLATE_PALETTE.euro.accent, markers: true, serif: false }
+    : template === 'pga' ? { ...TEMPLATE_PALETTE.pga, header: undefined as string | undefined, cream: undefined as string | undefined, markers: true, serif: false }
+    : template === 'masters' ? { ...TEMPLATE_PALETTE.masters, markers: false, serif: true }
+    : null;
 
   const holeClips = currentHole.clips.filter((c) => !c.isExcluded);
   const shotIndex = holeClips.findIndex((c) => c.id === clip.id);
@@ -165,13 +211,24 @@ function ScorecardOverlay({
       {/* Main scorecard container */}
       <View
         style={{
-          backgroundColor: 'rgba(0,0,0,0.75)',
+          backgroundColor: skin ? skin.card : 'rgba(0,0,0,0.75)',
           borderRadius: 16,
           overflow: 'hidden',
           borderWidth: 1,
-          borderColor: 'rgba(255,255,255,0.1)',
+          borderColor: skin ? skin.line : 'rgba(255,255,255,0.1)',
         }}
       >
+        {skin?.header && (
+          <View style={{ backgroundColor: skin.header, paddingHorizontal: 16, paddingVertical: 8, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Text style={{ color: skin.cream, fontSize: 14, fontFamily: 'Georgia-Bold' }} numberOfLines={1}>{playerName || 'Player'}</Text>
+            <Text style={{ color: skin.cream, fontSize: 11, fontFamily: 'Georgia' }} numberOfLines={1}>{courseName || 'Round'}</Text>
+          </View>
+        )}
+        {skin && !skin.header && !!playerName && (
+          <View style={{ paddingHorizontal: 16, paddingTop: 10 }}>
+            <Text style={{ color: skin.accent, fontSize: 13, fontWeight: '800', letterSpacing: 0.5 }} numberOfLines={1}>{playerName.toUpperCase()}</Text>
+          </View>
+        )}
         {/* Top row: course name + total over completed holes */}
         <View
           style={{
@@ -184,16 +241,16 @@ function ScorecardOverlay({
           }}
         >
           <Text
-            style={{ color: 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: '600' }}
+            style={{ color: skin ? skin.dim : 'rgba(255,255,255,0.6)', fontSize: 12, fontWeight: '600' }}
             numberOfLines={1}
           >
-            {courseName || 'Round'}
+            {skin?.header ? 'SCORECARD' : courseName || 'Round'}
           </Text>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-            <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 11 }}>
+            <Text style={{ color: skin ? skin.dim : 'rgba(255,255,255,0.5)', fontSize: 11 }}>
               TOTAL
             </Text>
-            <Text style={{ color: totalColor, fontWeight: '800', fontSize: 14 }}>
+            <Text style={{ color: skin ? skin.text : totalColor, fontWeight: '800', fontSize: 14 }}>
               {totals ? totals.strokes : '-'}
             </Text>
             {totals && (
@@ -233,6 +290,7 @@ function ScorecardOverlay({
                 hole={h}
                 isCurrent={h.holeNumber === clip.holeNumber}
                 width={GRID_CELL_WIDTH}
+                skin={skin}
               />
             ))}
           </ScrollView>
@@ -250,6 +308,7 @@ function ScorecardOverlay({
                 key={h.holeNumber}
                 hole={h}
                 isCurrent={h.holeNumber === clip.holeNumber}
+                skin={skin}
               />
             ))}
           </View>
@@ -267,10 +326,10 @@ function ScorecardOverlay({
           }}
         >
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
-            <Text style={{ color: '#fff', fontWeight: '800', fontSize: 16 }}>
+            <Text style={{ color: skin ? skin.text : '#fff', fontWeight: '800', fontSize: 16, fontFamily: skin?.serif ? 'Georgia-Bold' : undefined }}>
               Hole {currentHole.holeNumber}
             </Text>
-            <Text style={{ color: 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '500' }}>
+            <Text style={{ color: skin ? skin.dim : 'rgba(255,255,255,0.5)', fontSize: 13, fontWeight: '500' }}>
               Par {currentHole.par}
             </Text>
           </View>
@@ -994,6 +1053,25 @@ export default function PreviewScreen() {
   // The full trimmer (thick handles, hold-to-zoom, swipe between shots) —
   // one tap from the preview (Henry, 4 Sep: "give preview the better UI").
   const [fullTrimOpen, setFullTrimOpen] = useState(false);
+  const [scorecardTemplate, setScorecardTemplate] = useState<ScorecardTemplate>('classic');
+  const [playerName, setPlayerName] = useState('');
+  useEffect(() => {
+    if (!roundId) return;
+    (async () => {
+      try {
+        const storage = require('@/lib/storage') as typeof import('@/lib/storage');
+        const r = await storage.getLocalRound(roundId);
+        const t = r?.scorecard_template as ScorecardTemplate | null | undefined;
+        if (t) setScorecardTemplate(t);
+      } catch {}
+      try {
+        const { supabase } = require('@/lib/supabase') as typeof import('@/lib/supabase');
+        const { data } = await supabase.auth.getSession();
+        const u = data.session?.user;
+        setPlayerName((u?.user_metadata?.full_name as string | undefined) || u?.email?.split('@')[0] || '');
+      } catch {}
+    })();
+  }, [roundId]);
   // Ref-guard for bounds reports — declared up here because the per-clip
   // init effect below must reset it when the clip changes.
   const lastBoundsAppliedRef = useRef<{ startMs: number; endMs: number } | null>(null);
@@ -1410,7 +1488,7 @@ export default function PreviewScreen() {
           <ScorecardOverlay
             clip={currentClip}
             holes={editor.state.holes}
-            courseName={editor.state.courseName}
+            courseName={editor.state.courseName} template={scorecardTemplate} playerName={playerName}
           />
         )}
       </View>

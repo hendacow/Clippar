@@ -1854,6 +1854,8 @@ public class ShotDetectorModule: Module {
         /// `strokes` would only be the clip-count fallback. Same rule as
         /// isHoleComplete() in lib/scoreDisplay.ts.
         let hasScore: Bool?
+        /// Practice reels: the club name drawn over this segment.
+        let label: String?
         var isComplete: Bool { hasScore ?? false }
     }
 
@@ -1865,9 +1867,69 @@ public class ShotDetectorModule: Module {
         /// 0 → nothing is finished yet, so TOTAL shows "-" and no +/- chip.
         let holesCompleted: Int?
         let holes: [ScorecardHole]
+        /// Card design (5 Sep): classic | minimal | euro | pga | masters |
+        /// training. Absent → classic.
+        let template: String?
+        let playerName: String?
 
         var hasTotals: Bool { (holesCompleted ?? 0) > 0 }
         var totalDiff: Int { totalStrokes - totalPar }
+        var style: ScorecardStyle { ScorecardStyle.resolve(template) }
+    }
+
+    // MARK: - Scorecard designs (5 Sep)
+    //
+    // Palettes are a hand port of components/editor/ScorecardTemplates.tsx
+    // (TEMPLATE_PALETTE) — change them there first, then here.
+    private struct ScorecardStyle {
+        enum Kind { case classic, minimal, euro, pga, masters, training }
+        let kind: Kind
+        let cardFill: UIColor
+        let cardBorder: UIColor
+        let text: UIColor
+        let dim: UIColor
+        let accent: UIColor
+        let under: UIColor      // score colour under par
+        let over: UIColor       // score colour over par
+        let line: UIColor
+        let headerBar: UIColor? // masters: green bar with the player's name
+        let cream: UIColor?
+        let markers: Bool       // circle under par / square over par
+        let serif: Bool
+        var showsPlayer: Bool { kind == .euro || kind == .pga || kind == .masters }
+
+        static func resolve(_ template: String?) -> ScorecardStyle {
+            switch template ?? "classic" {
+            case "minimal":
+                return ScorecardStyle(kind: .minimal, cardFill: .clear, cardBorder: .clear, text: .white, dim: UIColor(white: 1, alpha: 0.75), accent: .white, under: ScorecardPalette.birdie, over: ScorecardPalette.bogey, line: .clear, headerBar: nil, cream: nil, markers: false, serif: true)
+            case "training":
+                return ScorecardStyle(kind: .training, cardFill: .clear, cardBorder: .clear, text: .white, dim: UIColor(white: 1, alpha: 0.75), accent: .white, under: .white, over: .white, line: .clear, headerBar: nil, cream: nil, markers: false, serif: true)
+            case "euro":
+                let navy = UIColor(red: 0.043, green: 0.165, blue: 0.290, alpha: 1)  // #0B2A4A
+                return ScorecardStyle(kind: .euro, cardFill: UIColor(white: 1, alpha: 0.94), cardBorder: navy.withAlphaComponent(0.15), text: navy, dim: navy.withAlphaComponent(0.55), accent: navy, under: navy, over: navy, line: navy.withAlphaComponent(0.15), headerBar: nil, cream: nil, markers: true, serif: false)
+            case "pga":
+                let gold = UIColor(red: 0.878, green: 0.722, blue: 0.298, alpha: 1)   // #E0B84C
+                return ScorecardStyle(kind: .pga, cardFill: UIColor(red: 0.043, green: 0.122, blue: 0.227, alpha: 0.94), cardBorder: UIColor(white: 1, alpha: 0.12), text: .white, dim: UIColor(white: 1, alpha: 0.6), accent: gold, under: UIColor(red: 0.910, green: 0.341, blue: 0.247, alpha: 1), over: UIColor(red: 0.298, green: 0.553, blue: 0.878, alpha: 1), line: UIColor(white: 1, alpha: 0.12), headerBar: nil, cream: nil, markers: true, serif: false)
+            case "masters":
+                let green = UIColor(red: 0.059, green: 0.361, blue: 0.180, alpha: 1)  // #0F5C2E
+                let dark = UIColor(red: 0.071, green: 0.231, blue: 0.133, alpha: 1)   // #123B22
+                return ScorecardStyle(kind: .masters, cardFill: UIColor(white: 1, alpha: 0.96), cardBorder: dark.withAlphaComponent(0.12), text: dark, dim: dark.withAlphaComponent(0.55), accent: UIColor(red: 0.949, green: 0.788, blue: 0.298, alpha: 1), under: UIColor(red: 0.784, green: 0.063, blue: 0.180, alpha: 1), over: green, line: dark.withAlphaComponent(0.12), headerBar: green, cream: UIColor(red: 0.965, green: 0.937, blue: 0.851, alpha: 1), markers: false, serif: true)
+            default:
+                return ScorecardStyle(kind: .classic, cardFill: ScorecardPalette.cardFill, cardBorder: ScorecardPalette.cardBorder, text: .white, dim: ScorecardPalette.courseName, accent: .white, under: ScorecardPalette.birdie, over: ScorecardPalette.bogey, line: ScorecardPalette.divider, headerBar: nil, cream: nil, markers: false, serif: false)
+            }
+        }
+
+        /// Score colour for a finished hole under this design.
+        func scoreColor(diff: Int) -> UIColor {
+            switch kind {
+            case .classic, .minimal, .training: return ScorecardPalette.color(forDiff: diff)
+            default: return diff < 0 ? under : diff > 0 ? over : text
+            }
+        }
+        func font(_ weight: UIFont.Weight) -> UIFont {
+            if serif, let f = UIFont(name: weight == .regular ? "Georgia" : "Georgia-Bold", size: 1) { return f }
+            return UIFont.systemFont(ofSize: 1, weight: weight)
+        }
     }
 
     // MARK: - Scorecard card design
@@ -2028,11 +2090,19 @@ public class ShotDetectorModule: Module {
         layout: ScorecardLayout,
         top: CGFloat,
         left: CGFloat,
-        width: CGFloat
+        width: CGFloat,
+        font: UIFont? = nil,
+        shadow: Bool = false
     ) -> CATextLayer {
         let text = CATextLayer()
         text.string = string
-        text.font = UIFont.systemFont(ofSize: 1, weight: weight) as CTFont
+        text.font = (font ?? UIFont.systemFont(ofSize: 1, weight: weight)) as CTFont
+        if shadow {
+            text.shadowColor = UIColor.black.cgColor
+            text.shadowOpacity = 0.7
+            text.shadowRadius = 4 * layout.pt
+            text.shadowOffset = CGSize(width: 0, height: -1 * layout.pt)
+        }
         text.fontSize = size * layout.pt
         text.foregroundColor = color.cgColor
         text.alignmentMode = align
@@ -2049,6 +2119,7 @@ public class ShotDetectorModule: Module {
     /// An unfinished hole shows a dim "-" where the score goes — the par is
     /// still printed, exactly as the preview does.
     private func scorecardCellLayers(
+        sc: ScorecardData,
         hole: ScorecardHole,
         index: Int,
         layout: ScorecardLayout,
@@ -2057,14 +2128,27 @@ public class ShotDetectorModule: Module {
         let left = ScorecardLayout.gridPadding + layout.cellW * CGFloat(index)
         let s = layout.cellFontScale
         let complete = hole.isComplete
+        let style = sc.style
+        let diff = hole.strokes - hole.par
+        let classic = style.kind == .classic
         let scoreColor = complete
-            ? ScorecardPalette.color(forDiff: hole.strokes - hole.par)
-            : ScorecardPalette.unfinished
-
-        return [
+            ? style.scoreColor(diff: diff)
+            : (classic ? ScorecardPalette.unfinished : style.dim)
+        var layers: [CALayer] = []
+        // Tour-style marker: circle under par, square over par (5 Sep).
+        if style.markers && complete && diff != 0 {
+            let d = 18 * s
+            let m = CALayer()
+            m.frame = layout.rect(top: ScorecardLayout.cellScoreTop - 1, left: left + (layout.cellW - d) / 2, width: d, height: d)
+            m.borderWidth = max(1, 1.5 * layout.pt)
+            m.borderColor = scoreColor.cgColor
+            m.cornerRadius = (diff < 0 ? d / 2 : 3) * layout.pt
+            layers.append(m)
+        }
+        layers.append(contentsOf: [
             scorecardTextLayer(
                 "\(hole.holeNumber)", size: 10 * s, weight: .semibold,
-                color: isCurrent ? .white : ScorecardPalette.holeNumber,
+                color: classic ? (isCurrent ? .white : ScorecardPalette.holeNumber) : (isCurrent ? style.text : style.dim),
                 align: .center, layout: layout,
                 top: ScorecardLayout.cellNumberTop, left: left, width: layout.cellW
             ),
@@ -2072,14 +2156,16 @@ public class ShotDetectorModule: Module {
                 complete ? "\(hole.strokes)" : "-",
                 size: ScorecardLayout.cellScoreSize * s, weight: .heavy,
                 color: scoreColor, align: .center, layout: layout,
-                top: ScorecardLayout.cellScoreTop, left: left, width: layout.cellW
+                top: ScorecardLayout.cellScoreTop, left: left, width: layout.cellW,
+                font: style.serif ? style.font(.heavy) : nil
             ),
             scorecardTextLayer(
                 "\(hole.par)", size: 9 * s, weight: .regular,
-                color: ScorecardPalette.gridPar, align: .center, layout: layout,
+                color: classic ? ScorecardPalette.gridPar : style.dim, align: .center, layout: layout,
                 top: ScorecardLayout.cellParTop, left: left, width: layout.cellW
             ),
-        ]
+        ])
+        return layers
     }
 
     /// Everything on the card that is the SAME for every hole: the card body,
@@ -2087,20 +2173,55 @@ public class ShotDetectorModule: Module {
     /// come from `hasScore`, not from playback position, so — like the preview
     /// — a finished hole's score is on the card for the whole reel.
     private func scorecardStaticLayers(sc: ScorecardData, layout: ScorecardLayout) -> [CALayer] {
+        let style = sc.style
+        // Words-only designs have no static card at all.
+        if style.kind == .minimal || style.kind == .training { return [] }
+        let classic = style.kind == .classic
         var layers: [CALayer] = []
 
         let bg = CALayer()
         bg.frame = CGRect(x: layout.cardX, y: layout.cardY, width: layout.cardW, height: layout.cardH)
-        bg.backgroundColor = ScorecardPalette.cardFill.cgColor
+        bg.backgroundColor = style.cardFill.cgColor
         bg.cornerRadius = 16 * layout.pt
         bg.borderWidth = max(1, layout.pt)
-        bg.borderColor = ScorecardPalette.cardBorder.cgColor
+        bg.borderColor = style.cardBorder.cgColor
+        bg.masksToBounds = true
         layers.append(bg)
+
+        // Augusta look: a green header bar carrying the player's name and the
+        // course, in serif cream. It sits IN the top row's space, so the
+        // course name below is replaced by "SCORECARD".
+        if let bar = style.headerBar {
+            let barH = ScorecardLayout.row1Top + ScorecardLayout.row1Height + 4
+            let barLayer = CALayer()
+            barLayer.frame = layout.rect(top: 0, left: 0, width: ScorecardLayout.designWidth, height: barH)
+            barLayer.backgroundColor = bar.cgColor
+            layers.append(barLayer)
+            let name = (sc.playerName ?? "").isEmpty ? "Player" : sc.playerName!
+            layers.append(scorecardTextLayer(
+                name, size: 14, weight: .heavy, color: style.cream ?? .white, align: .left,
+                layout: layout, top: 8, left: ScorecardLayout.cardInset, width: ScorecardLayout.designWidth * 0.6,
+                font: style.font(.heavy)
+            ))
+            layers.append(scorecardTextLayer(
+                sc.courseName.isEmpty ? "Round" : sc.courseName, size: 11, weight: .regular,
+                color: (style.cream ?? .white).withAlphaComponent(0.85), align: .right,
+                layout: layout, top: 10, left: ScorecardLayout.designWidth * 0.5 - ScorecardLayout.cardInset,
+                width: ScorecardLayout.designWidth * 0.5, font: style.font(.regular)
+            ))
+        } else if style.showsPlayer, let name = sc.playerName, !name.isEmpty {
+            // Tour / broadcast: the player's name in the accent colour, top-left.
+            layers.append(scorecardTextLayer(
+                name.uppercased(), size: 11, weight: .heavy, color: style.accent, align: .left,
+                layout: layout, top: ScorecardLayout.row1Top - 8, left: ScorecardLayout.cardInset,
+                width: ScorecardLayout.designWidth * 0.55
+            ))
+        }
 
         // ---- Row 1 right → left: [diff chip] [strokes] TOTAL ----
         let totalColor = sc.hasTotals
-            ? ScorecardPalette.color(forDiff: sc.totalDiff)
-            : UIColor.white
+            ? (classic ? ScorecardPalette.color(forDiff: sc.totalDiff) : style.scoreColor(diff: sc.totalDiff))
+            : (classic ? UIColor.white : style.text)
         var cursor = ScorecardLayout.designWidth - ScorecardLayout.cardInset
 
         if sc.hasTotals {
@@ -2125,42 +2246,45 @@ public class ShotDetectorModule: Module {
         let totalString = sc.hasTotals ? "\(sc.totalStrokes)" : "-"
         let totalW = ScorecardLayout.approxWidth(totalString, size: 14) + 4
         layers.append(scorecardTextLayer(
-            totalString, size: 14, weight: .heavy, color: totalColor,
+            totalString, size: 14, weight: .heavy, color: classic ? totalColor : style.text,
             align: .right, layout: layout,
-            top: ScorecardLayout.row1Top, left: cursor - totalW, width: totalW
+            top: ScorecardLayout.row1Top + (style.headerBar != nil ? ScorecardLayout.row1Height + 4 : 0), left: cursor - totalW, width: totalW,
+            font: style.serif ? style.font(.heavy) : nil
         ))
         cursor -= totalW + 6
 
         let labelW = ScorecardLayout.approxWidth("TOTAL", size: 11)
         layers.append(scorecardTextLayer(
-            "TOTAL", size: 11, weight: .regular, color: ScorecardPalette.totalLabel,
+            "TOTAL", size: 11, weight: .regular, color: classic ? ScorecardPalette.totalLabel : style.dim,
             align: .right, layout: layout,
-            top: ScorecardLayout.row1Top + (ScorecardLayout.row1Height - 11 * ScorecardLayout.lineHeight) / 2,
+            top: ScorecardLayout.row1Top + (ScorecardLayout.row1Height - 11 * ScorecardLayout.lineHeight) / 2 + (style.headerBar != nil ? ScorecardLayout.row1Height + 4 : 0),
             left: cursor - labelW, width: labelW
         ))
         cursor -= labelW
 
-        let courseW = max(48, cursor - 6 - ScorecardLayout.cardInset)
-        layers.append(scorecardTextLayer(
-            sc.courseName.isEmpty ? "Round" : sc.courseName,
-            size: 12, weight: .semibold, color: ScorecardPalette.courseName,
-            align: .left, layout: layout,
-            top: ScorecardLayout.row1Top + (ScorecardLayout.row1Height - 12 * ScorecardLayout.lineHeight) / 2,
-            left: ScorecardLayout.cardInset, width: courseW
-        ))
+        if style.headerBar == nil {
+            let courseW = max(48, cursor - 6 - ScorecardLayout.cardInset)
+            layers.append(scorecardTextLayer(
+                sc.courseName.isEmpty ? "Round" : sc.courseName,
+                size: 12, weight: .semibold, color: classic ? ScorecardPalette.courseName : style.dim,
+                align: .left, layout: layout,
+                top: ScorecardLayout.row1Top + (ScorecardLayout.row1Height - 12 * ScorecardLayout.lineHeight) / 2 + (style.showsPlayer && !(sc.playerName ?? "").isEmpty ? 8 : 0),
+                left: ScorecardLayout.cardInset, width: courseW
+            ))
+        }
 
         let divider = CALayer()
         divider.frame = layout.rect(
             top: ScorecardLayout.dividerTop, left: 12,
             width: ScorecardLayout.designWidth - 24, height: 1
         )
-        divider.backgroundColor = ScorecardPalette.divider.cgColor
+        divider.backgroundColor = (classic ? ScorecardPalette.divider : style.line).cgColor
         layers.append(divider)
 
         // ---- Hole grid ----
         for (index, hole) in sc.holes.enumerated() {
             layers.append(contentsOf: scorecardCellLayers(
-                hole: hole, index: index, layout: layout, isCurrent: false
+                sc: sc, hole: hole, index: index, layout: layout, isCurrent: false
             ))
         }
 
@@ -2170,9 +2294,59 @@ public class ShotDetectorModule: Module {
     /// The parts of the card that belong to ONE hole: its cell highlighted and
     /// redrawn crisply over the tint, and the "Hole N · Par X" row with the
     /// result chip (only once that hole is finished).
+    /// Words only (5 Sep, "Instagram style"): course in small caps, "HOLE N ·
+    /// PAR X" in serif, and the result — Birdie / Par — once the hole is done.
+    /// No card. Sits where the card's top would be.
+    private func minimalHoleLayers(sc: ScorecardData, hole: ScorecardHole, layout: ScorecardLayout) -> [CALayer] {
+        let style = sc.style
+        var layers: [CALayer] = []
+        let w = ScorecardLayout.designWidth
+        layers.append(scorecardTextLayer(
+            (sc.courseName.isEmpty ? "ROUND" : sc.courseName.uppercased()), size: 11, weight: .semibold,
+            color: style.dim, align: .center, layout: layout, top: 6, left: 0, width: w, shadow: true
+        ))
+        layers.append(scorecardTextLayer(
+            "HOLE \(hole.holeNumber) · PAR \(hole.par)", size: 22, weight: .heavy, color: .white,
+            align: .center, layout: layout, top: 24, left: 0, width: w, font: style.font(.heavy), shadow: true
+        ))
+        if hole.isComplete {
+            let diff = hole.strokes - hole.par
+            layers.append(scorecardTextLayer(
+                scorecardResultLabel(diff), size: 28, weight: .heavy, color: ScorecardPalette.color(forDiff: diff),
+                align: .center, layout: layout, top: 56, left: 0, width: w, font: style.font(.heavy), shadow: true
+            ))
+        }
+        return layers
+    }
+
+    /// Practice reels: the club name, elegant, top-left over the shot.
+    private func trainingHoleLayers(sc: ScorecardData, hole: ScorecardHole, layout: ScorecardLayout) -> [CALayer] {
+        let style = sc.style
+        let label = (hole.label ?? "").isEmpty ? "Shot" : hole.label!
+        return [
+            scorecardTextLayer(
+                label, size: 26, weight: .heavy, color: .white, align: .left,
+                layout: layout, top: 10, left: ScorecardLayout.cardInset, width: ScorecardLayout.designWidth - 32,
+                font: style.font(.heavy), shadow: true
+            ),
+            scorecardTextLayer(
+                (sc.courseName.isEmpty ? "PRACTICE" : sc.courseName.uppercased()), size: 11, weight: .semibold,
+                color: style.dim, align: .left, layout: layout, top: 46, left: ScorecardLayout.cardInset,
+                width: ScorecardLayout.designWidth - 32, shadow: true
+            ),
+        ]
+    }
+
     private func scorecardHoleLayers(sc: ScorecardData, index: Int, layout: ScorecardLayout) -> [CALayer] {
         guard index >= 0, index < sc.holes.count else { return [] }
         let hole = sc.holes[index]
+        let style = sc.style
+        switch style.kind {
+        case .minimal: return minimalHoleLayers(sc: sc, hole: hole, layout: layout)
+        case .training: return trainingHoleLayers(sc: sc, hole: hole, layout: layout)
+        default: break
+        }
+        let classic = style.kind == .classic
         var layers: [CALayer] = []
 
         let cellLeft = ScorecardLayout.gridPadding + layout.cellW * CGFloat(index)
@@ -2181,30 +2355,40 @@ public class ShotDetectorModule: Module {
             top: ScorecardLayout.gridTop, left: cellLeft,
             width: layout.cellW, height: ScorecardLayout.gridCellHeight
         )
-        highlight.backgroundColor = ScorecardPalette.currentCell.cgColor
+        highlight.backgroundColor = (classic ? ScorecardPalette.currentCell : style.line).cgColor
         highlight.cornerRadius = 6 * layout.pt
         layers.append(highlight)
+        if !classic {
+            // Tour looks underline the current hole in the accent colour.
+            let underline = CALayer()
+            underline.frame = layout.rect(
+                top: ScorecardLayout.gridTop + ScorecardLayout.gridCellHeight - 2, left: cellLeft + 4,
+                width: layout.cellW - 8, height: 2
+            )
+            underline.backgroundColor = style.accent.cgColor
+            layers.append(underline)
+        }
         // Redraw this cell on top of its own tint so the digits stay crisp.
         layers.append(contentsOf: scorecardCellLayers(
-            hole: hole, index: index, layout: layout, isCurrent: true
+            sc: sc, hole: hole, index: index, layout: layout, isCurrent: true
         ))
 
         let holeName = "Hole \(hole.holeNumber)"
         let holeNameW = ScorecardLayout.approxWidth(holeName, size: 16) + 4
         layers.append(scorecardTextLayer(
-            holeName, size: 16, weight: .heavy, color: .white, align: .left,
+            holeName, size: 16, weight: .heavy, color: classic ? .white : style.text, align: .left,
             layout: layout, top: ScorecardLayout.holeNameTop,
-            left: ScorecardLayout.cardInset, width: holeNameW
+            left: ScorecardLayout.cardInset, width: holeNameW, font: style.serif ? style.font(.heavy) : nil
         ))
         layers.append(scorecardTextLayer(
-            "Par \(hole.par)", size: 13, weight: .medium, color: ScorecardPalette.parLabel,
+            "Par \(hole.par)", size: 13, weight: .medium, color: classic ? ScorecardPalette.parLabel : style.dim,
             align: .left, layout: layout, top: ScorecardLayout.holeParTop,
             left: ScorecardLayout.cardInset + holeNameW + 8, width: 64
         ))
 
         if hole.isComplete {
             let diff = hole.strokes - hole.par
-            let color = ScorecardPalette.color(forDiff: diff)
+            let color = classic ? ScorecardPalette.color(forDiff: diff) : style.scoreColor(diff: diff)
             let label = scorecardResultLabel(diff)
             let chipW = ScorecardLayout.approxWidth(label, size: 12) + 16
             let chipLeft = ScorecardLayout.designWidth - ScorecardLayout.cardInset - chipW

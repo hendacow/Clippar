@@ -144,18 +144,24 @@ export interface TrainingClip {
  * at impact" report, 31 Aug. Centre on THIS instead.
  */
 export function impactFractionInFile(clip: TrainingClip): number {
-  if (
-    clip.impactTimeMs != null &&
-    clip.autoTrimStartMs != null &&
-    clip.durationSeconds != null &&
-    clip.durationSeconds > 0
-  ) {
-    const inFileMs = clip.impactTimeMs - clip.autoTrimStartMs;
-    const frac = inFileMs / (clip.durationSeconds * 1000);
+  if (clip.impactTimeMs != null && clip.durationSeconds != null && clip.durationSeconds > 0) {
+    // impactTimeMs is in the ORIGINAL recording's timeline. Only subtract the
+    // auto-trim offset when the file being played IS the cut file. A clip the
+    // detector kept whole (putts, low-confidence swings — the common range
+    // case) stores impact but no trim start; the old code then ignored the
+    // impact it had and guessed 62.5% of the file, which on an 8s range clip
+    // landed on the takeaway (Henry, 4/5 Sep). The file is the original, so
+    // the impact is exactly where it says.
+    const isCutFile =
+      clip.autoTrimmed &&
+      clip.autoTrimStartMs != null &&
+      !!clip.originalFileUri &&
+      clip.originalFileUri !== clip.fileUri;
+    const base = isCutFile ? (clip.autoTrimStartMs as number) : 0;
+    const frac = (clip.impactTimeMs - base) / (clip.durationSeconds * 1000);
     if (frac > 0 && frac < 1) return frac;
   }
-  // No stored anchor (old rows, imports mid-process): assume the fullSwing
-  // window shape rather than the middle — closer for every trimmed clip.
+  // No impact at all (nothing detected, old rows): the fullSwing window shape.
   return 0.625;
 }
 

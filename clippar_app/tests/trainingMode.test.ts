@@ -198,14 +198,14 @@ test('import asks for library permission so the fast path can run at all', () =>
 // trim puts impact at ~62.5% of the file (preRoll 2500 / postRoll 1500), so
 // centring on the clip middle showed the strike at the window's edge — his
 // "+0.2s" ask was a workaround for that; the fix is centring on impact.
-test('the auto window centres on the strike, not the clip middle', () => {
+test('the auto window puts the strike 35% in, off the stored impact', () => {
   const tr = readFileSync(join(root, 'lib/training.ts'), 'utf8');
   const pl = readFileSync(join(root, 'app/training/play.tsx'), 'utf8');
   assert.match(tr, /export function impactFractionInFile/);
-  assert.match(tr, /impactTimeMs - clip\.autoTrimStartMs/, 'anchored to the stored impact');
-  assert.match(tr, /return 0\.625;/, 'fallback assumes the trim shape, not the middle');
-  assert.match(pl, /dur \* impactFractionInFile\(current\)/);
-  assert.doesNotMatch(pl, /dur \/ 2 - L \/ 2/, 'the middle-centred window is gone');
+  // 5 Sep: a whole-file clip (putt, low-confidence swing — the range case)
+  // stores impact but no trim start; the fraction must read it directly.
+  assert.match(tr, /const base = isCutFile \? \(clip\.autoTrimStartMs as number\) : 0;/);
+  assert.match(pl, /dur \* impactFractionInFile\(current\) - 0\.35 \* L/, 'a little downswing, then the hit and the ball leaving');
 });
 
 // "Once you edit a video that video will stay exactly the same and won't

@@ -86,6 +86,9 @@ async function migrateEditorColumns() {
     'ALTER TABLE local_clips ADD COLUMN auto_trim_end_ms INTEGER',
     // Shot type classification: 'swing' | 'putt' | null (unknown)
     "ALTER TABLE local_clips ADD COLUMN shot_type TEXT",
+    // Reel scorecard design chosen for this round (5 Sep): classic | minimal |
+    // euro | pga | masters. NULL = classic.
+    'ALTER TABLE local_rounds ADD COLUMN scorecard_template TEXT',
     // Last upload error (string) when background upload fails — surfaces a
     // "Retry upload" affordance in the library. NULL when no error.
     'ALTER TABLE local_clips ADD COLUMN upload_error TEXT',
@@ -1061,6 +1064,7 @@ export async function getLocalRound(roundId: string) {
     holes_played: number | null;
     start_hole: number | null;
     user_id: string | null;
+    scorecard_template: string | null;
   }>(
     `SELECT * FROM local_rounds WHERE id = ? AND ${scope.sql}`,
     roundId,
@@ -1076,11 +1080,17 @@ export async function updateLocalRound(
     current_shot?: number;
     status?: string;
     finished_at?: string;
+    scorecard_template?: string;
   }
 ) {
   const database = await getDatabase();
   const fields: string[] = [];
   const values: (string | number)[] = [];
+
+  if (updates.scorecard_template !== undefined) {
+    fields.push('scorecard_template = ?');
+    values.push(updates.scorecard_template);
+  }
 
   if (updates.current_hole !== undefined) {
     fields.push('current_hole = ?');
