@@ -205,7 +205,7 @@ test('the auto window puts the strike 35% in, off the stored impact', () => {
   // 5 Sep: a whole-file clip (putt, low-confidence swing — the range case)
   // stores impact but no trim start; the fraction must read it directly.
   assert.match(tr, /const base = isCutFile \? \(clip\.autoTrimStartMs as number\) : 0;/);
-  assert.match(pl, /dur \* impactFractionInFile\(current\) - 0\.35 \* L/, 'a little downswing, then the hit and the ball leaving');
+  assert.match(pl, /dur \* impactFractionInFile\(current\) - 0\.35 \* L \+ FORWARD_BIAS_S/, 'a little downswing, then the hit and the ball leaving, nudged forward');
 });
 
 // "Once you edit a video that video will stay exactly the same and won't

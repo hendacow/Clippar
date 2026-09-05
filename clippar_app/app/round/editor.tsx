@@ -538,7 +538,7 @@ function HoleSection({
               ) : (
                 <Download size={14} color={theme.colors.textPrimary} />
               )}
-              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Save hole</Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Save</Text>
             </Pressable>
             <Pressable
               onPress={() => {
@@ -561,7 +561,7 @@ function HoleSection({
               }}
             >
               <Share2 size={14} color={theme.colors.textPrimary} />
-              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Share hole</Text>
+              <Text style={{ color: theme.colors.textPrimary, fontSize: 12, fontWeight: '700' }}>Share</Text>
             </Pressable>
           </View>
         )}

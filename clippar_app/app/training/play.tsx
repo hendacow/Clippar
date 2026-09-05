@@ -186,7 +186,10 @@ export default function TrainingPlayScreen() {
           // anchor itself comes from impactFractionInFile, which now reads
           // the stored impact for whole-file clips instead of guessing.
           const L = playLengthRef.current / 1000;
-          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - 0.35 * L), dur - L) : 0;
+          // Henry, 5 Sep, after trying it: push the whole window a further
+          // 0.2s forward in time — at 0.5s that starts on the strike itself.
+          const FORWARD_BIAS_S = 0.2;
+          const start = dur > L ? Math.min(Math.max(0, dur * impactFractionInFile(current) - 0.35 * L + FORWARD_BIAS_S), dur - L) : 0;
           // dur can be 0 briefly if metadata isn't ready — play the whole
           // clip on a generous timer rather than skipping (playToEnd still
           // advances at the true end).

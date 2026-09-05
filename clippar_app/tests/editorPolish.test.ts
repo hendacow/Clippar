@@ -57,14 +57,17 @@ test('Select · Preview · Export live in a sticky bottom bar', () => {
 });
 
 test('the training window puts the strike at three-quarters, not the middle', () => {
-  assert.match(play, /impactFractionInFile\(current\) - 0\.35 \* L/, 'strike at 35% of the window');
+  assert.match(play, /impactFractionInFile\(current\) - 0\.35 \* L \+ FORWARD_BIAS_S/, 'strike at 35% of the window, then 0.2s forward');
+  assert.match(play, /const FORWARD_BIAS_S = 0\.2;/);
+  assert.match(editor, />Save<\/Text>/); assert.match(editor, />Share<\/Text>/);
+  assert.doesNotMatch(editor, />Save hole<\/Text>/, 'the long labels overflowed the row');
   const training = readFileSync(join(root, 'lib/training.ts'), 'utf8');
   assert.match(training, /const base = isCutFile \? \(clip\.autoTrimStartMs as number\) : 0;/, 'whole-file clips use their stored impact directly');
 });
 
 test('hole buttons say what they do; only a real cut is labelled Trimmed; preview opens the full trimmer', () => {
-  assert.match(editor, />Save hole<\/Text>/);
-  assert.match(editor, />Share hole<\/Text>/);
+  assert.match(editor, />Save<\/Text>/);
+  assert.match(editor, />Share<\/Text>/);
   assert.match(editor, /const wasTrimmed =/);
   assert.match(editor, /\(clip\.isExcluded \|\| wasTrimmed\) && \(/, 'untouched clips get no band');
   assert.doesNotMatch(editor, /: 'Trimmed' : 'Edit'\}/, 'no "Edit" band');
