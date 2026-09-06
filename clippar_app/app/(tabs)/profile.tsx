@@ -39,6 +39,9 @@ import { useOnboarding } from '@/contexts/OnboardingContext';
 import { getProfile, getRoundStatusCounts, deleteAccount } from '@/lib/api';
 import { iap } from '@/lib/iap';
 import { verifyAllRoundsReachable } from '@/lib/verifyRound';
+import { isDevVariant } from '@/lib/devPro';
+// config.tracer.enabled gates the tracer dev-settings row (see the comment at its JSX).
+import { config } from '@/constants/config';
 import { processUploadQueue } from '@/lib/uploadQueue';
 import { isConnected } from '@/lib/network';
 import {
@@ -818,6 +821,30 @@ export default function ProfileScreen() {
                   title="Swing Vision (debug)"
                   subtitle="Pick a clip → the instant it thinks you swung"
                   onPress={() => router.push('/(dev)/swing-vision')}
+                />
+              </>
+            )}
+            {/* Tracer dev settings. Gated on the dev VARIANT, not __DEV__,
+                deliberately: __DEV__ is false in a Release dev build
+                (eas.json's `dev-standalone`), which is the binary an actual
+                field test runs on. isDevVariant() is the same double gate
+                lib/devPro.ts uses — extra.variant AND a `.dev` bundle id — so
+                no App Store binary can reach this screen even via a stray OTA.
+
+                ALSO gated on config.tracer.enabled, added by the verify agent:
+                the one-line revert (ENABLE_TRACER_ON_DEV_VARIANT = false) must
+                leave NO UI behind, and without this the row survived the revert
+                on a dev binary with every toggle behind it inert. It costs
+                nothing — with the tracer off this screen has no diagnostics to
+                show and no knob it could usefully turn. */}
+            {isDevVariant() && config.tracer.enabled && (
+              <>
+                <Divider />
+                <SettingsRow
+                  icon={<Activity size={18} color={theme.colors.textSecondary} />}
+                  title="Tracer Dev Settings"
+                  subtitle="Engine, render knobs, GPS health, and what the last batch decided"
+                  onPress={() => router.push('/profile/tracer-dev-settings')}
                 />
               </>
             )}

@@ -1,3 +1,10 @@
+// The ONLY import this module is allowed: a pure, dependency-free predicate.
+// constants/config.ts is imported by ~15 app files AND by five node test files,
+// so anything it pulls in has to work under `node --import tsx --test` with no
+// React Native runtime. Relative, not `@/`, so resolution never depends on the
+// test runner honouring tsconfig paths.
+import { variantIsDev } from '../lib/proStatusLogic';
+
 export const config = {
   supabase: {
     url: process.env.EXPO_PUBLIC_SUPABASE_URL!,
@@ -290,14 +297,34 @@ export const config = {
     } as Record<string, unknown>,
   },
   tracer: {
-    // Master kill switch. Every tracer code path (capture, detect, geometry,
-    // render, playback switching) is gated on this so the app is byte-identical
-    // with it off. OFF for the v1 production build — the tracer has not yet
-    // passed a real-round field test, so prod ships stock behavior. Flip to
-    // true (clippar-dev only) to resume field testing; originals are never
-    // modified, so this is a pure on/off with no data risk.
+    // Master kill switch. Every tracer code path (capture, GPS session, detect,
+    // geometry, render, playback switching) is gated on this so the app is
+    // byte-identical with it off. OFF for the v1 production build — the tracer
+    // has not yet passed a real-round field test, so prod ships stock behavior.
+    // Originals are never modified, so this is a pure on/off with no data risk.
+    //
+    // THE LITERAL HERE IS THE PRODUCTION VALUE. It is flipped to true, at module
+    // load, for the DEVELOPMENT VARIANT ONLY — see the block below the config
+    // object (`ENABLE_TRACER_ON_DEV_VARIANT`). That flip is why this stays a
+    // plain literal rather than becoming a function call: tests/tracerClaims.ts
+    // pins `enabled: <literal> as boolean` so the paywall/onboarding guards can
+    // never silently become dead code, and constants/config.ts must stay
+    // node-safe (five test files import it under `node --test`).
     enabled: false as boolean,
+    // Which tracer pipeline runs. 'v1' is the shipped Vision-trajectory +
+    // Bézier path (lib/tracerMath.ts + ShotTracer.swift); 'v3' is the physics
+    // pipeline ported from ~/projects/clippar/tracer-lab (detector -> camera ->
+    // RK4 flight -> bounded LM fit -> decision ladder -> polyline render).
+    //
+    // A SECOND knob rather than a replacement, deliberately: v3 can be turned
+    // off in the field without losing v1, and with `enabled` on the two are a
+    // genuine A/B on the same clips. Everything v3 adds is additive — v1 reads
+    // no column and calls no native function that v3 introduces.
+    engine: 'v3' as 'v1' | 'v3',
     // Sub-gate within `enabled` for compass-heading capture at record start.
+    // V3 does NOT use heading for geometry (the fit gets its direction from the
+    // pixels), but it is kept because it is free, already captured, and is the
+    // only diagnostic that says which way the phone was pointing.
     captureHeading: true as boolean,
     // DEBUG OFF-SWITCH for the evidence gates, so street tests (no club, no
     // ball) still render an arc and the GPS distance + direction + visual
@@ -352,6 +379,110 @@ export const config = {
     // Added to the fullSwing postRollMs (capture + re-trim) when enabled, so
     // future clips keep more ball flight. 0 = no-op; set 2000 for cinematic.
     extraPostRollMs: 0,
+
+    // ── GPS session (V3). Consumed structurally by lib/gpsSession.ts ────────
+    //
+    // WHY A SESSION AND NOT A FIX. v1 took ONE getCurrentPositionAsync at
+    // recording stop, and in the field that call returned a stale WiFi-anchored
+    // position: two shots 80 m apart came back 4 cm apart, both claiming ±18 m,
+    // because both resolved to the same router across a WiFi→4G handoff. The
+    // carry collapsed to ~0 and every arc was silently skipped. These numbers
+    // are the defence, and they are v2's (origin/tracer-v2, reviewed there) —
+    // lib/gpsSession.ts carries the same values in DEFAULT_GPS_CONFIG as a
+    // test-stable mirror, so if you retune here, retune there too or the tests
+    // pin numbers the app no longer uses.
+    gps: {
+      // The first fixes after a cold start / AppState resume are junk. Excluded.
+      warmupSec: 15,
+      // STOP-anchor window. Wider look-back than the impact anchor because the
+      // stop press is 1-3 s after the ball has gone and the setup dwell is
+      // further back. (The IMPACT anchor's 15 s pre-window is a module constant
+      // in lib/gpsSession.ts — it is not tunable and must not be.)
+      windowPreSec: 25,
+      windowPostSec: 10,
+      // Widen the pre-window to here when the base window holds too few fixes.
+      widenPreSec: 45,
+      // m/s. Above this the golfer is walking, so the fix is not "at the ball".
+      stationarySpeedMax: 0.7,
+      // m. Drop fixes whose own reported horizontalAccuracy is worse than this.
+      fixAccMax: 20,
+      // Widen below this many accepted fixes; at the impact anchor, degrade to
+      // no-fix rather than widen across a walk onto the bag.
+      minFixes: 5,
+      // m. Honest precision ceiling — no median of consumer GPS is better.
+      effAccFloor: 2.5,
+      // iOS horizontalAccuracy is optimistic; inflate before believing it.
+      safetyFactor: 1.2,
+      // No fix within this many seconds of the anchor -> 'gps-stale', never a
+      // cached position. This rule is v1's bug's tombstone.
+      staleSec: 10,
+      // Health-chip thresholds (dev settings + record screen), metres of effAcc.
+      tier1EffAccM: 5,
+      tier2EffAccM: 10,
+      // 1-sigma of where the phone actually sat relative to the ball at the
+      // NEXT shot. This is the lab's CarryModel.bag_offset_m = 3.0
+      // (tracer-lab/lib/fit.py), which is the authority for the name and value.
+      bagOffsetM: 3,
+    },
+
+    // ── V3 pipeline knobs (lib/tracerV3.ts, the native detector, the render) ──
+    //
+    // Every number below is traceable to tracer-lab. Where the lab has a
+    // constant, its name is quoted next to it so a value can be checked against
+    // the source rather than taken on trust.
+    v3: {
+      // Detector: mean track confidence below this emits NOTHING (lab
+      // detect.py P['conf_floor'] = 0.4 — every wrong output the vision skeptic
+      // found had conf <= 0.33), and a track shorter than this many detections
+      // is not emitted either (P['min_track_emit'] = 3).
+      detectConfFloor: 0.4,
+      detectMinTrackEmit: 3,
+      // Analysis window around impact, in 30 fps-equivalent frames, scaled by
+      // the clip's real fps in Swift (lab P['pre_frames'] / P['post_frames']).
+      detectPreFrames: 3,
+      detectPostFrames: 45,
+      // 0 = no ceiling on frames analysed. A ceiling exists only as an escape
+      // hatch if a 4K60 clip proves too slow on an older phone; the lab
+      // measured 8-33 ms/frame on a Mac and 1-3 ms/frame estimated in vImage.
+      detectMaxFrames: 0,
+      // Fit: LM iteration cap per solver stage (lib/tracerFit.ts default).
+      // The lab runs 40 evaluations per multistart seed and up to 1000 on the
+      // two survivors; the port's 200 is its own default and is what ships.
+      fitMaxIterations: 200,
+      // Fit the camera-pitch nuisance when the track is long AND passes the
+      // image apex. OFF on short climbs, where the fit report (§3) measured it
+      // moving the WRONG way. The ladder applies the same rule the lab does;
+      // this only allows it at all.
+      fitPitchAllowed: true as boolean,
+      // 1-sigma of the CoreMotion camera pitch, degrees. Propagates 1:1 into
+      // launch angle (skeptic-physics §3), so it is the floor on sigma(theta).
+      pitchSigmaDeg: 0.5,
+      // Cap a short or prior-driven fit whose apex/hang exceeds the club
+      // bucket's physical maximum (lab render3 / tracer.py IMPLAUSIBLE_*).
+      // IMG_3626's 3 detections fitted 71.8 m/s, a 53.7 m apex and 8.2 s of
+      // hang before this rung existed.
+      implausibleCap: true as boolean,
+      // Hold the last source frame so a flight that outlasts the clip still
+      // lands, instead of the trace being cut mid-air (lab render3 §4).
+      freezeComplete: true as boolean,
+      freezeTailSec: 0.6,
+      freezeMaxSec: 6.0,
+      // Person segmentation hides the trace behind the golfer
+      // (VNGeneratePersonSegmentationRequest; lab render2/e2e2 §2 measured a
+      // 76-89 % drop in trace pixels on the body).
+      occlusion: true as boolean,
+      // Round the pill's carry to the fit's own honest step (1 / 5 / 10 m from
+      // sigma_total['carry_m'], which includes the f_px systematic). OFF shows
+      // the unrounded metre, which over-claims precision — dev diagnosis only.
+      labelRounding: true as boolean,
+      // DEV OFF-SWITCH for the ladder's refusals, so a street test with no club
+      // and no ball still produces an arc. Bypasses: putt / not-a-flight,
+      // track-not-ballistic, poor-fit and the never-climbs check. Does NOT
+      // bypass "there are no detections" or "there is no address ball" — those
+      // are absences of input, not judgements, and there is nothing to draw.
+      // MUST be false for a real round: it will draw arcs over putts.
+      forceTrace: false as boolean,
+    },
   },
   export: {
     defaultResolution: '1080p' as const,
@@ -360,6 +491,137 @@ export const config = {
     frameRateOptions: [30, 60] as const,
   },
 } as const;
+
+// ── Tracer: dev-variant enablement ──────────────────────────────────────────
+//
+// Henry's brief, 6 Sep 2026: "integrate this into the app FOR THE DEV BUILD but
+// make it a config so it's super easy to revert". So the tracer must be on in
+// "Clippar Dev" and off in every binary that can reach a customer, and the
+// revert must be one line.
+//
+// WHY THIS IS A POST-DEFINITION FLIP AND NOT A COMPUTED PROPERTY. Three
+// constraints meet here and only this shape satisfies all three:
+//
+//  1. `constants/config.ts` must stay NODE-SAFE. Five test files import it
+//     under `node --import tsx --test`, where `expo-constants` cannot be
+//     resolved at all. So the variant read has to be a guarded require that
+//     degrades to "not dev", not a static import.
+//  2. `tests/tracerClaims.test.ts` pins `enabled: <literal> as boolean` in the
+//     SOURCE TEXT. That test exists so that renaming the key can never turn the
+//     paywall/onboarding guards into dead code while the copy keeps selling a
+//     tracer the binary does not ship (App Review 3.1.2). Turning `enabled`
+//     into a call expression would break it, and weakening it to accommodate
+//     this file would remove exactly the protection it was written for.
+//  3. Ordering must be unambiguous. It is: an ES module's body runs to
+//     completion before any importing module's body starts, so every consumer
+//     of `config.tracer.enabled` — including modules that read it at their own
+//     top level, like `lib/gpsSession.ts`'s singleton — sees the flipped value.
+//     There is no "who imported first" hazard.
+//
+// FAIL-CLOSED, and double-gated exactly as lib/devPro.ts is, for the same
+// reason. `extra.variant` is stamped at PUBLISH time, so a stray
+// `APP_VARIANT=development eas update --branch production` would push a
+// dev-variant manifest into every App Store install; the manifest check alone
+// would then switch the tracer on for real users, and the one thing they would
+// SEE is a location permission dialog. The native bundle identifier is baked
+// into the binary and no OTA can change it, so a production binary that
+// receives a dev-variant manifest still reads NOT dev.
+//
+// THE ONE-LINE REVERT: set this to false. Nothing flips, `config.tracer.enabled`
+// stays the `false` literal above in every binary — no GPS session, no
+// detection, no render, and no UI reachable by tapping.
+//
+// Said precisely, because "byte-identical" was overstated and the review caught
+// it (docs/tracer-v3/review.md, F9 and F10). FOUR things survive the revert:
+//
+//  1. `app/profile/tracer-dev-settings.tsx` is an expo-router route file, so
+//     `/profile/tracer-dev-settings` is REGISTERED in every binary including
+//     production, even though the row that pushes it is gated away.
+//  2. The schema migration is one flag-independent list, so the tracer's columns
+//     are added to every database and reverting does not remove them.
+//  3. `capture_lens` and `capture_zoom` are WRITTEN, non-null, on every clip
+//     save, with the tracer off. This corrects what this comment said until
+//     6 Sep, which was that `saveLocalClip` binds them to NULL — the same change
+//     set that added them deliberately left them UNGATED (`hooks/useCamera.ts`,
+//     review F3a), and the two files disagreed for a round (gate NEW-3).
+//     Deliberate, and the reason is worth keeping: a clip saved without those
+//     two values is one the V3 ladder must refuse FOREVER, because "unknown
+//     lens" and "1x" are the same input to every calculation downstream and only
+//     one of them is safe. Gating them behind the flag would silently poison
+//     every clip recorded before the flag was flipped. They are two nullable
+//     columns, nothing reads them with the tracer off, and they contain no
+//     location, no identifier and nothing about the golfer.
+//  4. One navigation focus subscription and one state object per mount of the
+//     record screen (review F11).
+//
+// None of it executes work, prompts the user or touches a hot path, and only
+// item 3 writes anything — but it is not nothing, and rounding it to
+// "byte-identical" is how a claim in a comment stops being true.
+const ENABLE_TRACER_ON_DEV_VARIANT = true;
+
+/**
+ * `expo-constants` / `expo-application`, or undefined where they cannot load.
+ *
+ * A guarded `require` rather than an import: Metro resolves a literal-string
+ * require statically so the device build is unaffected, while node throws
+ * (`expo-modules-core` ships TypeScript sources) and we catch it. Both failure
+ * modes land on the same answer — "cannot prove this is the dev variant" — and
+ * that answer is the safe one.
+ */
+function readOptionalNativeModule(name: 'expo-constants' | 'expo-application'): unknown {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    return name === 'expo-constants' ? require('expo-constants') : require('expo-application');
+  } catch {
+    return undefined;
+  }
+}
+
+/** app.config.js `extra.variant` for this binary; undefined off-device. */
+function readAppVariant(): string | undefined {
+  const mod = readOptionalNativeModule('expo-constants') as
+    | { default?: { expoConfig?: { extra?: { variant?: unknown } } }; expoConfig?: { extra?: { variant?: unknown } } }
+    | undefined;
+  const constants = mod?.default ?? mod;
+  const variant = constants?.expoConfig?.extra?.variant;
+  return typeof variant === 'string' ? variant : undefined;
+}
+
+/** Native bundle identifier; undefined off-device or on a binary too old to
+ *  carry expo-application. Null from the module means "no native module". */
+function readBundleId(): string | undefined {
+  const mod = readOptionalNativeModule('expo-application') as
+    | { default?: { applicationId?: unknown }; applicationId?: unknown }
+    | undefined;
+  const application = mod?.default ?? mod;
+  const id = application?.applicationId;
+  return typeof id === 'string' ? id : undefined;
+}
+
+/**
+ * Whether this binary is allowed to run the tracer. Pure, so the fail-closed
+ * rules are unit-testable without a device (tests/tracerV3Wiring.test.ts).
+ *
+ * `bundleId === undefined` is NOT treated as a failure: it is what a build
+ * predating expo-application, or a web bundle, reports, and in those contexts
+ * the manifest check is the pre-hardening behaviour and is all there is. It is
+ * unreachable from a store binary, which always has an applicationId.
+ */
+export function tracerAllowedOnBinary(
+  variant: string | null | undefined,
+  bundleId: string | null | undefined
+): boolean {
+  if (!variantIsDev(variant)) return false;
+  if (typeof bundleId === 'string' && !bundleId.endsWith('.dev')) return false;
+  return true;
+}
+
+if (ENABLE_TRACER_ON_DEV_VARIANT && tracerAllowedOnBinary(readAppVariant(), readBundleId())) {
+  // `config` is `as const`, so this needs a cast. The dev-settings screen
+  // (app/profile/tracer-dev-settings.tsx) mutates config.tracer the same way,
+  // which is how its toggles take effect without a rebuild.
+  (config.tracer as { enabled: boolean }).enabled = true;
+}
 
 // ── Trim window resolution ───────────────────────────────────────────────────
 //

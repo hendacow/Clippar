@@ -232,6 +232,64 @@ public class ShotDetectorModule: Module {
         AsyncFunction("getDevicePitchDeg") { (promise: Promise) in
             self.getDevicePitchDegImpl(promise: promise)
         }
+
+        // ---- V3 physics tracer (config.tracer.enabled && config.tracer.engine === 'v3') ----
+        // Implementations live in TracerDetect.swift / TracerDetectCore.swift (the ball
+        // detector, ported from tracer-lab/lib/detect.py) and TracerRenderV3.swift (the
+        // polyline renderer). Neither file imports ExpoModulesCore, so these two blocks are
+        // the ONLY place they meet Expo — which is also why they can be unit-checked with
+        // swiftc without a pod install.
+        //
+        // Registered always, invoked only while the JS engine switch says 'v3'. An older
+        // binary simply has no such function, and modules/shot-detector/index.ts checks for
+        // it by name before calling — see the `typeof … !== "function"` guards there.
+        // ARITY: as above, Expo matches AsyncFunction arity exactly.
+
+        // Detect the ball at address and through the launch, returning pixels in the
+        // display-oriented frame (SHARED CONVENTION 2). Never rejects: a missing file, a
+        // golfer it cannot find or a shot that never flew all come back
+        // `found: false` with a `notes.reason`, because a failure must be a SKIP and a
+        // rejected promise upstream is a skip that looks like a bug.
+        AsyncFunction("detectShotV3") { (videoUri: String, impactTimeMs: Double, optionsJson: String, promise: Promise) in
+            // Synchronous and seconds-long on a 1080p clip — never on the main thread.
+            DispatchQueue.global(qos: .userInitiated).async {
+                autoreleasepool {
+                    let fileURL = self.resolveFileURL(videoUri)
+                    promise.resolve(TracerDetect.detect(assetURL: fileURL,
+                                                        impactTimeMs: impactTimeMs,
+                                                        optionsJson: optionsJson))
+                }
+            }
+        }
+
+        // Burn a V3 polyline trace onto a clip -> NEW tracer_<UUID>.mp4 (original untouched).
+        // The `tracer_` prefix is deliberate: reclaimTemporaryExports sweeps that prefix out
+        // of Library/Caches, so V3's output is reclaimed by the machinery that already exists
+        // rather than accumulating invisibly.
+        AsyncFunction("renderTracerV3") { (videoUri: String, specJson: String, promise: Promise) in
+            DispatchQueue.global(qos: .userInitiated).async {
+                autoreleasepool {
+                    let videoURL = self.resolveFileURL(videoUri)
+                    let outputURL = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+                        .appendingPathComponent("tracer_\(UUID().uuidString).mp4")
+                    do {
+                        let result = try TracerRenderV3.render(videoURL: videoURL,
+                                                               specJson: specJson,
+                                                               outputURL: outputURL)
+                        promise.resolve(result)
+                    } catch let e as TracerRenderV3Error {
+                        // The codes are the same strings the shipped v1 renderer emits, so JS
+                        // error handling does not have to fork.
+                        try? FileManager.default.removeItem(at: outputURL)
+                        promise.reject(Exception(name: e.code, description: e.message))
+                    } catch {
+                        try? FileManager.default.removeItem(at: outputURL)
+                        promise.reject(Exception(name: "ERR_TRACER_RENDER_FAILED",
+                                                 description: error.localizedDescription))
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Passthrough Trim (zero re-encode)

@@ -27,6 +27,7 @@ import {
   logTrimResult,
 } from '@/lib/trimDiagnostics';
 import { canStartRecording, resolveStopRequest } from '@/lib/liveRecordingLogic';
+import { fixSourceLabel, gpsSession, type RawFix, type ShotFix } from '@/lib/gpsSession';
 import { markTrimInFlight, clearTrimInFlight } from '@/lib/trimInFlight';
 
 // Resolve the active trim window (pre/post roll) for live capture.
@@ -106,6 +107,23 @@ interface UseCameraParams {
     isTrue: boolean;
     calibration: number;
   } | null>;
+  /**
+   * Tracer V3 capture optics: which lens the clip was shot on and how much
+   * pinch zoom was applied. Read at SAVE time, once, so a screen that does not
+   * model lenses simply does not pass it.
+   *
+   * WHY IT IS RECORDED AT ALL (docs/tracer-v3/review.md, F3a). The V3 fit's
+   * world scale is the focal length in pixels, and native `getCameraFovDeg()`
+   * only knows the 1x wide lens's FORMAT field of view. The record screen's
+   * 0.5x toggle and its pinch zoom change the real focal length by up to a
+   * factor of two and reach nothing downstream, so a 202 m drive shot at 1.5x
+   * was drawn, cleanly and unflagged, as "140 m". The ladder now refuses any
+   * clip it cannot prove was shot at 1x with no pinch; this is what tells it.
+   *
+   * `zoom` must be the PEAK over the recording, not the value at the stop
+   * press — pinch is deliberately not blocked mid-clip.
+   */
+  getCaptureOptics?: () => { lens: string; zoom: number } | null;
   onClipSaved?: (clip: ClipMetadata) => void;
   onShotClassified?: (shotType: ShotTypeClassification) => void;
   /**
@@ -126,6 +144,7 @@ export function useCamera({
   shotNumber,
   getLocation,
   getHeading,
+  getCaptureOptics,
   onClipSaved,
   onShotClassified,
   practice = false,
@@ -135,6 +154,25 @@ export function useCamera({
   // the moment recording begins (the recordAsync promise resolves later).
   const practiceRef = useRef(practice);
   practiceRef.current = practice;
+  /**
+   * The optics (lens + PEAK pinch zoom) of the clip being recorded, taken at the
+   * STOP PRESS and read by the save that lands 5-10 s later.
+   *
+   * GATE NEW-2. The save used to call `getCaptureOptics()` live, inside that
+   * finalize window, while the 0.5x/1x pill and the flip button were still
+   * tappable — and both call `resetPinchZoom()`, which zeroes the peak-zoom REF
+   * the save closure reads. So "put the framing back" in the seconds after the
+   * stop press recorded `zoom: 0` for a clip that was shot zoomed, the F3a lens
+   * gate passed it, and the clip drew -28 % with nothing downstream able to
+   * tell. A saved clip's provenance must not be mutable after the clip exists,
+   * so it is frozen at the press rather than merely made hard to reach.
+   */
+  const capturedOpticsRef = useRef<{ lens: string; zoom: number } | null>(null);
+  // `stopRecording` is deliberately dependency-free (it must never be recreated
+  // mid-clip), so the current reader is mirrored into a ref for it, the same way
+  // `practice` is above.
+  const getCaptureOpticsRef = useRef(getCaptureOptics);
+  getCaptureOpticsRef.current = getCaptureOptics;
   const [isRecording, setIsRecording] = useState(false);
   // CAMERA permission only. The mic is tracked separately below: the shot
   // detector runs pose-only when there is no audio track
@@ -284,6 +322,10 @@ export function useCamera({
     // the time recordAsync resolves.
     const isPractice = practiceRef.current;
     const gen = ++recordingGenRef.current;
+    // A snapshot belongs to exactly one clip (GATE NEW-2). The save consumes it,
+    // but clear it here too so a stop that never reached a save cannot hand its
+    // framing to the next clip.
+    capturedOpticsRef.current = null;
 
     // Did the clip row actually reach SQLite before anything threw? The catch
     // below spans ~500 lines, most of them AFTER saveLocalClip — detection,
@@ -539,6 +581,57 @@ export function useCamera({
         // no second place that can still be holding the pre-move path.
         const finalUri = await durableUriPromise;
 
+        // ── Tracer V3 GPS (config.tracer.engine === 'v3') ──
+        //
+        // The continuous ring that `useGpsSession` has been filling all round
+        // is asked for this shot's position here, at the STOP anchor. The stop
+        // anchor is the FALLBACK, not the answer: the real anchor is impact,
+        // and impact_time_ms does not exist yet (detectAndTrim runs later). So
+        // the raw fix series goes into the row too, and the tracer batch
+        // re-derives the impact-anchored fix from it once detection lands.
+        //
+        // Gated on the V3 engine specifically, not just `tracer.enabled`, so
+        // that turning the engine back to 'v1' restores v1's inputs exactly —
+        // v1's pairing gates read gps_accuracy_m, and effAccM is a different
+        // number from the one-shot fix's accuracy radius. With the tracer off
+        // this whole block is skipped and the columns stay NULL.
+        const tracerV3Gps = config.tracer.enabled && config.tracer.engine === 'v3';
+        // Taken at the STOP PRESS, not read here: this line runs inside the
+        // 5-10 s finalize window, where a tap could still change it (NEW-2).
+        let captureOptics: { lens: string; zoom: number } | null = capturedOpticsRef.current;
+        capturedOpticsRef.current = null;
+        try {
+          // Only null if this recording ended without passing through
+          // `stopRecording`; reading live there is exactly today's behaviour.
+          if (captureOptics === null) captureOptics = getCaptureOpticsRef.current?.() ?? null;
+        } catch {
+          // A framing read must never cost a clip. A null lens is a refusal
+          // downstream, which is the safe answer.
+        }
+        const stopTs = recordingStartTime.current + durationSeconds * 1000;
+        let sessionFix: ShotFix | null = null;
+        let fixSeries: RawFix[] = [];
+        if (tracerV3Gps) {
+          try {
+            sessionFix = gpsSession.estimateAtStop(stopTs).fix;
+            fixSeries = gpsSession.seriesAround(stopTs);
+          } catch {
+            // A GPS estimate must never cost a clip. Falling through leaves the
+            // one-shot fix below, which is exactly today's behaviour.
+          }
+          if (__DEV__) {
+            console.log(
+              '[TRACER-GPS]',
+              JSON.stringify({
+                hasSessionFix: !!sessionFix,
+                effAccM: sessionFix ? Math.round(sessionFix.effAccM * 10) / 10 : null,
+                fixCount: sessionFix?.fixCount ?? 0,
+                seriesN: fixSeries.length,
+              })
+            );
+          }
+        }
+
         // Save to SQLite — same initial shape as imports (needs_trim=1, auto_trimmed=0,
         // original_file_uri=finalUri). detectAndTrim will promote it to auto_trimmed=1
         // and swap file_uri to the trimmed file. If detection fails, the editor's
@@ -549,13 +642,37 @@ export function useCamera({
           shot_number: shot,
           file_uri: finalUri,
           original_file_uri: finalUri,
-          gps_latitude: gps?.latitude,
-          gps_longitude: gps?.longitude,
-          gps_accuracy_m: gps?.accuracy ?? undefined,
+          // The session estimate WINS when there is one: it is a weighted
+          // median over a stationary window rather than one sample, and the
+          // one-shot call is the very thing that returned a stale WiFi-anchored
+          // fix in the field. It falls back to the one-shot rather than to
+          // nothing, because a coarse fix still pairs better than no fix.
+          gps_latitude: sessionFix?.lat ?? gps?.latitude,
+          gps_longitude: sessionFix?.lon ?? gps?.longitude,
+          gps_accuracy_m: sessionFix?.effAccM ?? gps?.accuracy ?? undefined,
           camera_heading_deg: heading?.headingDeg,
           camera_heading_is_true: heading ? (heading.isTrue ? 1 : 0) : undefined,
           camera_heading_calibration: heading?.calibration,
           camera_pitch_deg: pitchDeg ?? undefined,
+          // Capture optics (review F3a). Written whenever the caller supplies
+          // them, NOT gated on the tracer: they cost two nullable columns and
+          // they are the only record of how big the world was in this clip. A
+          // clip saved without them is one the V3 ladder must refuse forever,
+          // so withholding them behind a flag would silently poison every clip
+          // recorded before the flag was flipped.
+          capture_lens: captureOptics?.lens ?? undefined,
+          capture_zoom: captureOptics?.zoom ?? undefined,
+          recording_start_ts: tracerV3Gps ? Math.round(recordingStartTime.current) : undefined,
+          gps_fix_series: fixSeries.length ? JSON.stringify(fixSeries) : undefined,
+          gps_fix_meta: sessionFix
+            ? JSON.stringify({
+                source: fixSourceLabel(sessionFix),
+                fixCount: sessionFix.fixCount,
+                windowSec: sessionFix.windowSec,
+                medianAccM: sessionFix.medianAccM,
+                estimatorVersion: sessionFix.estimatorVersion,
+              })
+            : undefined,
           duration_seconds: durationSeconds,
           auto_trimmed: 0,
           needs_trim: 1,
@@ -913,7 +1030,7 @@ export function useCamera({
       // reel previews audible; that reclaim works because we leave
       // expo-camera's automaticallyConfiguresApplicationAudioSession = true.
     }
-  }, [getLocation, getHeading, onClipSaved, onShotClassified]);
+  }, [getLocation, getHeading, getCaptureOptics, onClipSaved, onShotClassified]);
 
   const stopRecording = useCallback(async () => {
     if (!isNative || !cameraRef.current || !isRecordingRef.current) return;
@@ -924,6 +1041,15 @@ export function useCamera({
     // user unambiguously asked), but the too-short file can't contain a
     // shot and often fails MP4 finalize, so mark the generation cancelled:
     // the pipeline discards the file and swallows the expected error.
+    // GATE NEW-2, and FIRST — before any state flips, before the haptic, before
+    // anything that could yield. From this line on, no tap can change what this
+    // clip records itself as having been shot at.
+    try {
+      capturedOpticsRef.current = getCaptureOpticsRef.current?.() ?? null;
+    } catch {
+      capturedOpticsRef.current = null;
+    }
+
     const elapsed = Date.now() - recordingStartTime.current;
     if (elapsed < 2000) {
       cancelledGenRef.current = recordingGenRef.current;

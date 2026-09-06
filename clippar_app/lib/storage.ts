@@ -121,6 +121,53 @@ async function migrateEditorColumns() {
     'ALTER TABLE local_clips ADD COLUMN tracer_status TEXT',
     'ALTER TABLE local_clips ADD COLUMN tracer_meta TEXT',
     'ALTER TABLE local_clips ADD COLUMN tracer_rendered_at TEXT',
+    // ── Tracer V3 GPS columns (config.tracer.engine === 'v3') ──
+    //
+    // WHY THESE THREE EXIST AT ALL. The V3 fix is anchored at IMPACT
+    // (recording start + impact_time_ms), because the golfer presses start at
+    // the bag and walks 5-20 s to the ball — a stop-press anchor medians onto
+    // the previous filming spot, which looks perfectly healthy and is 50-150 m
+    // wrong. But impact_time_ms is not known at save time (detectAndTrim runs
+    // later), so the save stores the RAW FIX SERIES and the recording start,
+    // and the tracer batch re-derives the impact-anchored fix once detection
+    // has landed. No re-recording, no second GPS session.
+    //
+    // recording_start_ts: Date.now() at recordAsync, epoch ms. The anchor is
+    // recording_start_ts + impact_time_ms.
+    'ALTER TABLE local_clips ADD COLUMN recording_start_ts INTEGER',
+    // gps_fix_series: JSON RawFix[] (ts/lat/lon/acc/speed/course), capped at 60
+    // by the estimator, spanning at most ~55 s around the stop press.
+    // UNFILTERED on purpose — a future estimator re-applies its own gates.
+    'ALTER TABLE local_clips ADD COLUMN gps_fix_series TEXT',
+    // gps_fix_meta: JSON provenance of whatever is in gps_latitude/longitude/
+    // gps_accuracy_m — { source, widened, fixCount, windowSec, medianAccM,
+    // estimatorVersion }. Without it a fix cannot be told apart from the v1
+    // one-shot, and the estimator version is what says whether it needs
+    // re-deriving.
+    'ALTER TABLE local_clips ADD COLUMN gps_fix_meta TEXT',
+    // ── Tracer V3 capture optics (config.tracer.engine === 'v3') ──
+    //
+    // WHY THESE EXIST. The V3 fit's whole world scale is the focal length in
+    // pixels, and the app gets that from native `getCameraFovDeg()`, which
+    // reports `videoFieldOfView` for the 1x wide lens's FORMAT. The record
+    // screen gives the golfer a 0.5x ultra-wide toggle and continuous pinch
+    // zoom, and neither reaches that number: a clip shot at 1.5x pinch fits
+    // cleanly and draws a 202 m drive as "140 m" (docs/tracer-v3/review.md,
+    // F3a). Nothing recorded which lens or zoom a clip was shot at, so nothing
+    // downstream could tell.
+    //
+    // capture_lens: '1x' | '0.5x' — the lens the clip was recorded on.
+    // capture_zoom: expo-camera's normalized pinch zoom, 0 = the lens's native
+    // framing. The PEAK over the recording, not the value at the stop press:
+    // pinch is deliberately not blocked mid-clip, so a zoom applied and
+    // released still rescaled the frames the detector reads.
+    //
+    // NULL on every row written before this, and on every tracer-disabled
+    // build. The ladder treats NULL as "unknown lens" and SKIPS, which is the
+    // point — a skip costs a trace, a wrong distance stated confidently is the
+    // worst thing this feature can do.
+    'ALTER TABLE local_clips ADD COLUMN capture_lens TEXT',
+    'ALTER TABLE local_clips ADD COLUMN capture_zoom REAL',
     // Reel staleness flag — set to 1 whenever a clip in a round is edited
     // after the last successful compose. The round detail page shows a
     // "Re-compose reel" button when this is 1, so the user knows their
@@ -487,11 +534,19 @@ export async function saveLocalClip(clip: {
   camera_heading_calibration?: number | null;
   camera_pitch_deg?: number | null;
   gps_accuracy_m?: number | null;
+  // Tracer V3 GPS (config.tracer.engine === 'v3'). All nullable so v1 and a
+  // tracer-disabled build write exactly what they wrote before.
+  recording_start_ts?: number | null;
+  gps_fix_series?: string | null;
+  gps_fix_meta?: string | null;
+  // Tracer V3 capture optics. See migrateEditorColumns and review F3a.
+  capture_lens?: string | null;
+  capture_zoom?: number | null;
 }): Promise<number> {
   const database = await getDatabase();
   const result = await database.runAsync(
-    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id, camera_heading_deg, camera_heading_is_true, camera_heading_calibration, camera_pitch_deg, gps_accuracy_m)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO local_clips (round_id, hole_number, shot_number, file_uri, gps_latitude, gps_longitude, duration_seconds, timestamp, trimmed_file_uri, original_file_uri, auto_trimmed, trim_confidence, impact_time_ms, trim_start_ms, trim_end_ms, needs_trim, photos_asset_id, camera_heading_deg, camera_heading_is_true, camera_heading_calibration, camera_pitch_deg, gps_accuracy_m, recording_start_ts, gps_fix_series, gps_fix_meta, capture_lens, capture_zoom)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     clip.round_id,
     clip.hole_number,
     clip.shot_number,
@@ -514,8 +569,78 @@ export async function saveLocalClip(clip: {
     clip.camera_heading_calibration ?? null,
     clip.camera_pitch_deg ?? null,
     clip.gps_accuracy_m ?? null,
+    clip.recording_start_ts ?? null,
+    clip.gps_fix_series ?? null,
+    clip.gps_fix_meta ?? null,
+    clip.capture_lens ?? null,
+    clip.capture_zoom ?? null,
   );
   return result.lastInsertRowId;
+}
+
+/**
+ * The most recent clips that the tracer has an opinion about, newest first.
+ *
+ * Exists for one reason: the dev-settings screen has to be able to answer "what
+ * did the last batch decide, and why" on the course, on a phone, with no Metro
+ * attached. Reading `tracer_meta` is the only way to do that — the console log
+ * is gone the moment the app is backgrounded.
+ *
+ * Read-only and unscoped by round on purpose: a field test walks holes, and
+ * scoping to "the current round" would hide the clip that just failed if the
+ * round has already been ended.
+ */
+export async function getRecentTracerDiagnostics(limit = 25): Promise<
+  Array<{
+    id: number;
+    hole_number: number;
+    shot_number: number;
+    tracer_status: string | null;
+    tracer_meta: string | null;
+    tracer_rendered_at: string | null;
+  }>
+> {
+  const database = await getDatabase();
+  return database.getAllAsync(
+    `SELECT id, hole_number, shot_number, tracer_status, tracer_meta, tracer_rendered_at
+       FROM local_clips
+      WHERE tracer_status IS NOT NULL
+      ORDER BY id DESC
+      LIMIT ?`,
+    limit
+  );
+}
+
+/**
+ * Overwrite a clip's GPS fix with one re-derived at IMPACT time.
+ *
+ * Separate from `updateClipTracer` because it writes CAPTURE data, not tracer
+ * output: the tracer batch is merely the first caller that knows
+ * `impact_time_ms` and can therefore ask `gpsSession` the question the save
+ * path could not. `gps_fix_meta` is written in the same statement as the
+ * coordinates so provenance and position can never disagree.
+ *
+ * Only ever called on the V3 path. v1 and a tracer-disabled build leave the
+ * one-shot fix exactly as recorded.
+ */
+export async function updateClipGpsFix(
+  clipId: number,
+  fix: {
+    gps_latitude: number;
+    gps_longitude: number;
+    gps_accuracy_m: number;
+    gps_fix_meta: string;
+  }
+) {
+  const database = await getDatabase();
+  await database.runAsync(
+    'UPDATE local_clips SET gps_latitude = ?, gps_longitude = ?, gps_accuracy_m = ?, gps_fix_meta = ? WHERE id = ?',
+    fix.gps_latitude,
+    fix.gps_longitude,
+    fix.gps_accuracy_m,
+    fix.gps_fix_meta,
+    clipId
+  );
 }
 
 /**
@@ -944,6 +1069,16 @@ export async function getClipsForRound(roundId: string) {
     tracer_status: string | null;
     tracer_meta: string | null;
     photos_asset_id: string | null;
+    // Tracer V3 GPS. NULL on every row written by v1 or a tracer-disabled
+    // build, which is exactly how the batch tells "no session fix" from "a
+    // session fix that came back empty".
+    recording_start_ts: number | null;
+    gps_fix_series: string | null;
+    gps_fix_meta: string | null;
+    // Capture optics (review F3a). NULL means "unknown lens", which the V3
+    // ladder refuses rather than assumes.
+    capture_lens: string | null;
+    capture_zoom: number | null;
   }>(
     'SELECT * FROM local_clips WHERE round_id = ? ORDER BY hole_number, sort_order, shot_number',
     roundId

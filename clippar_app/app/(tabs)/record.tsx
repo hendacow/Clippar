@@ -46,6 +46,7 @@ import { useShutter } from '@/hooks/useShutter';
 import { useRound } from '@/hooks/useRound';
 import { useCamera } from '@/hooks/useCamera';
 import { useLocation } from '@/hooks/useLocation';
+import { useGpsSession } from '@/hooks/useGpsSession';
 import { getOrphanedRounds, getCloudBackupEnabled, getSetting, setSetting } from '@/lib/storage';
 import { getMountCardDismissed, dismissMountCard } from '@/lib/mountOffer';
 import { getOnboardingProfile } from '@/lib/onboardingProfile';
@@ -217,6 +218,16 @@ export default function RecordScreen() {
   const pinchBaseZoom = useSharedValue(0);
   const lastAppliedZoom = useSharedValue(0);
   const zoomIndicatorTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Peak pinch zoom applied at any point during the CURRENT recording.
+  //
+  // The tracer (config.tracer, V3) needs to know the optics a clip was shot
+  // with, because its whole world scale is the focal length in pixels and the
+  // 1x/0.5x toggle and this pinch both change it — a 1.5x pinch drew a 202 m
+  // drive as "140 m" (docs/tracer-v3/review.md, F3a). The PEAK and not the
+  // final value, because unlike the lens toggle the pinch is deliberately not
+  // blocked mid-recording: a zoom applied and released still rescaled the
+  // frames the detector reads.
+  const captureZoomPeak = useRef(0);
 
   // Pinch feel. (scale - 1) is the fractional finger spread; multiplying by
   // SENSITIVITY spreads a full pinch across roughly the whole 0..1 range while
@@ -285,6 +296,26 @@ export default function RecordScreen() {
   // kept the old behaviour: a gate that exists and is never applied.
   const shutter = useShutter({ armed: captureArmed });
 
+  // ── Tracer V3 GPS session ──
+  //
+  // The continuous location watch that replaces v1's one-shot fix at recording
+  // stop. It runs for the whole time the record tab is focused, not per clip,
+  // because a per-shot fix is exactly the failure it was written to fix: a
+  // single getCurrentPositionAsync came back WiFi-anchored and two shots 80 m
+  // apart read 4 cm apart.
+  //
+  // TRIPLE-GATED, and the innermost gate is inside the hook. The one thing a
+  // user SEES from this is a location permission dialog, so `useGpsSession`
+  // itself ANDs `config.tracer.enabled` and refuses on web; the engine check
+  // here means turning the engine back to 'v1' also stops the watch. With the
+  // tracer off nothing is started and no permission is ever requested — that is
+  // the byte-identical requirement, and this is the line that carries it.
+  //
+  // The returned health is not rendered on this screen: the record UI is for
+  // playing golf, not for debugging a tracer. It is read on
+  // app/profile/tracer-dev-settings.tsx, which subscribes to the same singleton.
+  useGpsSession(config.tracer.engine === 'v3');
+
   // Camera hook — only active when round is in progress
   const camera = useCamera({
     roundId: roundState?.roundId ?? '',
@@ -317,7 +348,22 @@ export default function RecordScreen() {
       },
       [round.onShotClassified]
     ),
+    // The optics this clip was shot with, read once at save (F3a). `zoomMode`
+    // cannot change mid-clip (selectZoom and flipCamera are both inert while
+    // recording), so it is read live; the pinch CAN, so the peak is used.
+    getCaptureOptics: useCallback(
+      () => ({ lens: zoomMode, zoom: captureZoomPeak.current }),
+      [zoomMode]
+    ),
   });
+
+  // Start every recording's zoom history at whatever pinch is standing, so a
+  // pinch applied and released BETWEEN clips cannot make the next clip look
+  // zoomed (F3a). Rising edge only — the dep is the recording flag alone.
+  useEffect(() => {
+    if (camera.isRecording) captureZoomPeak.current = zoomShared.value;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [camera.isRecording]);
 
   // Recording OR finalizing (the 5-10s MP4 write + save after a stop).
   // Round-mutating actions (End Round / Next Hole / pickup / delete last
@@ -328,8 +374,9 @@ export default function RecordScreen() {
   const recordingBusy = camera.isRecording || camera.isFinalizing;
 
   // Camera framing handlers — defined after `camera` so they can read
-  // isRecording. Both are inert mid-clip so the AVCaptureSession is never
-  // reconfigured under a running recording.
+  // isRecording. Both are inert mid-clip AND through the finalize window, so
+  // the AVCaptureSession is never reconfigured under a running recording and
+  // the clip's recorded optics cannot change after the stop press (NEW-2).
   // Reset digital pinch zoom back to the lens's native framing. Called when
   // the base lens changes (flip / 0.5×–1× toggle) so pinch zoom never silently
   // compounds on top of a lens the user just switched to — they always start
@@ -337,25 +384,41 @@ export default function RecordScreen() {
   const resetPinchZoom = useCallback(() => {
     zoomShared.value = 0;
     lastAppliedZoom.value = 0;
+    captureZoomPeak.current = 0;
     setZoom(0);
   }, [zoomShared, lastAppliedZoom]);
 
+  /** Apply a pinch zoom AND remember the highest this clip has seen (F3a). */
+  const applyZoom = useCallback((v: number) => {
+    if (v > captureZoomPeak.current) captureZoomPeak.current = v;
+    setZoom(v);
+  }, []);
+
+  // GATE NEW-2: `recordingBusy`, not `isRecording`. Both of these call
+  // `resetPinchZoom()`, which zeroes `captureZoomPeak` — the value the clip's
+  // save reads 5-10 s AFTER the stop press, inside the finalize window. Gated on
+  // `isRecording` alone they stayed live through that window, so one "put the
+  // framing back" tap made a zoomed clip record itself as 1x / zoom 0, which the
+  // F3a lens gate then waved through and drew at -28 %. The optics are also
+  // snapshotted at the stop press (hooks/useCamera.ts), so this is the second of
+  // two locks rather than the only one — and it is the house pattern every other
+  // round-mutating control on this screen already uses.
   const flipCamera = useCallback(() => {
-    if (camera.isRecording) return;
+    if (recordingBusy) return;
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setFacing((f) => (f === 'back' ? 'front' : 'back'));
     setZoomMode('1x'); // front has no ultra-wide — always land on 1×
     resetPinchZoom();
-  }, [camera.isRecording, resetPinchZoom]);
+  }, [recordingBusy, resetPinchZoom]);
 
   const selectZoom = useCallback(
     (mode: '0.5x' | '1x') => {
-      if (camera.isRecording) return;
+      if (recordingBusy) return;
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
       setZoomMode(mode);
       resetPinchZoom();
     },
-    [camera.isRecording, resetPinchZoom]
+    [recordingBusy, resetPinchZoom]
   );
 
   // Zoom indicator show/hide. The pill is visible while pinching and lingers
@@ -403,17 +466,18 @@ export default function RecordScreen() {
           zoomShared.value = next;
           if (Math.abs(next - lastAppliedZoom.value) >= 0.004 || next === 0 || next === 1) {
             lastAppliedZoom.value = next;
-            runOnJS(setZoom)(next);
+            runOnJS(applyZoom)(next);
           }
         })
         .onFinalize(() => {
-          runOnJS(setZoom)(zoomShared.value);
+          runOnJS(applyZoom)(zoomShared.value);
           runOnJS(scheduleHideZoomIndicator)();
         }),
     [
       pinchBaseZoom,
       zoomShared,
       lastAppliedZoom,
+      applyZoom,
       showZoomIndicator,
       scheduleHideZoomIndicator,
     ]
@@ -1942,8 +2006,10 @@ export default function RecordScreen() {
       <View style={[styles.bottomControls, { paddingBottom: insets.bottom + 16 }]}>
         {/* Camera framing row: zoom toggle (left) + flip (right). Hidden during
             the tutorial to keep the practice run focused. Both are disabled
-            mid-recording so the capture session isn't reconfigured under a
-            running clip. */}
+            while recording AND while finalizing (`recordingBusy`): the capture
+            session must not be reconfigured under a running clip, and a tap in
+            the finalize window used to rewrite the optics of the clip that was
+            already recorded (NEW-2). */}
         {!tutorialActive && (
           <View style={styles.cameraControlsRow}>
             {hasUltraWide ? (
@@ -1952,7 +2018,7 @@ export default function RecordScreen() {
                   <Pressable
                     key={m}
                     onPress={() => selectZoom(m)}
-                    disabled={camera.isRecording}
+                    disabled={recordingBusy}
                     hitSlop={6}
                     style={[styles.zoomPill, zoomMode === m && styles.zoomPillActive]}
                   >
@@ -1973,13 +2039,13 @@ export default function RecordScreen() {
 
             <Pressable
               onPress={flipCamera}
-              disabled={camera.isRecording}
+              disabled={recordingBusy}
               hitSlop={8}
               style={styles.flipButton}
             >
               <SwitchCamera
                 size={20}
-                color={camera.isRecording ? theme.colors.textTertiary : '#fff'}
+                color={recordingBusy ? theme.colors.textTertiary : '#fff'}
               />
             </Pressable>
           </View>

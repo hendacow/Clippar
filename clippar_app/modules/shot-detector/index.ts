@@ -1,4 +1,9 @@
 import { config } from "../../constants/config";
+// Type-only, so nothing is imported at runtime and there is no cycle: the wire
+// shapes for the V3 pair are DEFINED in lib/tracerV3.ts (SHARED CONVENTIONS 2
+// and 3) and must not be restated here — two declarations of one wire format is
+// exactly how a native bridge drifts from its caller.
+import type { TracerDetectResultV3, TracerRenderSpecV3 } from "../../lib/tracerV3";
 
 export type ShotTypeClassification = 'swing' | 'putt';
 
@@ -281,6 +286,14 @@ type NativeModuleType = {
   getMemoryStats(): Promise<MemoryStats>;
   detectBallLaunch(videoUri: string, impactTimeMs: number, optionsJson: string): Promise<BallLaunchResult>;
   renderTracerOnClip(videoUri: string, specJson: string): Promise<{ tracerUri: string; durationMs: number }>;
+  /**
+   * V3 pair. Optional for the same reason `excludeFromBackup` is: they are
+   * absent from every native build predating the tracer-v3 branch, and an old
+   * dev client must SKIP cleanly rather than crash. Both wrappers below check
+   * `typeof … === "function"` before calling.
+   */
+  detectShotV3?(videoUri: string, impactTimeMs: number, optionsJson: string): Promise<TracerDetectResultV3>;
+  renderTracerV3?(videoUri: string, specJson: string): Promise<{ tracerUri: string; durationMs: number; stats?: Record<string, unknown> }>;
   getCameraFovDeg(): Promise<{ hFovLandscapeDeg: number | null }>;
   getDevicePitchDeg(): Promise<{ pitchDownDeg: number | null }>;
   addListener<K extends keyof ShotDetectorEvents>(eventName: K, listener: ShotDetectorEvents[K]): { remove(): void };
@@ -857,4 +870,113 @@ export async function getDevicePitchDeg(): Promise<number | null> {
 
   const result = await nativeModule.getDevicePitchDeg();
   return result?.pitchDownDeg ?? null;
+}
+
+// ─── V3 physics tracer (config.tracer.engine === 'v3'; iOS-only) ───
+
+/**
+ * Knobs forwarded to native `detectShotV3` as optionsJson. Anything omitted
+ * keeps the lab's own value (tracer-lab/lib/detect.py's `P` dict) — the Swift
+ * side defaults every field, so this object only ever OVERRIDES.
+ */
+export type TracerDetectV3Options = {
+  /** Analysis window around impact, 30 fps-equivalent frames. */
+  preFrames?: number;
+  postFrames?: number;
+  /** 0 = no ceiling on frames analysed. */
+  maxFrames?: number;
+  /** Track-level emission: mean confidence floor and minimum detections. */
+  confFloor?: number;
+  minTrackEmit?: number;
+  /** Diagnostics: adds a per-frame `trackLog` to `notes`. Large. */
+  verbose?: boolean;
+};
+
+/**
+ * Detect the ball at address and through the launch (the V3 detector: median
+ * background, DoG blobs, a pose-seeded address finder, Core ML ball model,
+ * departure cue, decaying-velocity Kalman).
+ *
+ * Runs on the ORIGINAL (untrimmed) file when there is one — it holds more
+ * post-impact footage — and `impactTimeMs` is on that same file's timeline.
+ *
+ * NEVER REJECTS. Every failure, including a missing file, comes back
+ * `found: false` with a reason in `notes`, because the product rule is that a
+ * failure is a SKIP and a rejected promise reads as a bug. The one thing it
+ * cannot answer for is a binary that predates it: that is the guard below, and
+ * it produces the same shaped "no" so `lib/tracerV3.ts` needs no special case.
+ *
+ * NOTE: native detectShotV3 is a 3-arg AsyncFunction; Expo Modules matches
+ * arity exactly, so this wrapper ALWAYS forwards all three args.
+ */
+export async function detectShotV3(
+  videoUri: string,
+  impactTimeMs: number,
+  optionsJson: string = JSON.stringify({
+    preFrames: config.tracer.v3.detectPreFrames,
+    postFrames: config.tracer.v3.detectPostFrames,
+    maxFrames: config.tracer.v3.detectMaxFrames,
+    confFloor: config.tracer.v3.detectConfFloor,
+    minTrackEmit: config.tracer.v3.detectMinTrackEmit,
+  } satisfies TracerDetectV3Options)
+): Promise<TracerDetectResultV3> {
+  if (!nativeModule || typeof nativeModule.detectShotV3 !== "function") {
+    console.warn(
+      "[ShotDetector] detectShotV3 not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return {
+      found: false,
+      method: 'none',
+      fps: 0,
+      width: 0,
+      height: 0,
+      impactFrameGiven: 0,
+      impactFrameUsed: null,
+      launchFrame: null,
+      address: null,
+      detections: [],
+      notes: { reason: 'native-unavailable' },
+      msPerFrame: 0,
+    };
+  }
+  return nativeModule.detectShotV3(videoUri, impactTimeMs, optionsJson);
+}
+
+/**
+ * Burn a V3 polyline trace onto a clip, producing a NEW tracer_<UUID>.mp4 in
+ * caches (the source file is never touched). `spec` is the TracerRenderSpecV3
+ * built by lib/tracerV3.ts — normalized 0..1, bottom-left, display-oriented.
+ *
+ * Rejects on spec/file/track/export errors, with the SAME error names the v1
+ * renderer uses (ERR_TRACER_SPEC / ERR_FILE_NOT_FOUND / ERR_NO_VIDEO_TRACK /
+ * ERR_COMPOSITION / ERR_INSERT_VIDEO / ERR_TRACER_ANIM_WINDOW /
+ * ERR_EXPORT_GATE_TIMEOUT / ERR_EXPORT_SESSION / ERR_TRACER_RENDER_FAILED), so
+ * the caller marks the clip 'failed' and continues exactly as before. Resolves
+ * `{ tracerUri: null }` when the native function is absent.
+ */
+export async function renderTracerV3(
+  videoUri: string,
+  spec: TracerRenderSpecV3
+): Promise<TracerRenderResult> {
+  if (!nativeModule || typeof nativeModule.renderTracerV3 !== "function") {
+    console.warn(
+      "[ShotDetector] renderTracerV3 not available — rebuild native app with: npx expo run:ios --device"
+    );
+    return { tracerUri: null, durationMs: 0 };
+  }
+  const result = await nativeModule.renderTracerV3(videoUri, JSON.stringify(spec));
+  return {
+    tracerUri: result.tracerUri ?? null,
+    durationMs: result.durationMs ?? 0,
+  };
+}
+
+/** Whether this binary carries the V3 native pair at all. Lets the batch skip
+ *  the whole engine rather than fail every clip one at a time. */
+export function isTracerV3Available(): boolean {
+  return (
+    nativeModule !== null &&
+    typeof nativeModule.detectShotV3 === "function" &&
+    typeof nativeModule.renderTracerV3 === "function"
+  );
 }

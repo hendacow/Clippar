@@ -2,7 +2,19 @@ import { useState, useCallback, useEffect, useRef } from 'react';
 import { Platform } from 'react-native';
 import { supabase } from '@/lib/supabase';
 import { getSignedClipUrls } from '@/lib/api';
-import { detectAndTrim, deleteFile, getMemoryStats, detectBallLaunch, renderTracer, getCameraFovDeg, type ShotTypeClassification, type DetectionStrategy } from 'shot-detector';
+import {
+  detectAndTrim,
+  deleteFile,
+  getMemoryStats,
+  detectBallLaunch,
+  renderTracer,
+  getCameraFovDeg,
+  detectShotV3,
+  renderTracerV3,
+  isTracerV3Available,
+  type ShotTypeClassification,
+  type DetectionStrategy,
+} from 'shot-detector';
 import { shouldKeepFullRecording } from '@/lib/shotPolicy';
 import { precheckArcGeometry, buildArcSpec, isTracerSkip, type TracerGeometryInput, type TracerSkipReason, type TracerMeta } from '@/lib/tracerMath';
 import { logDetection } from '@/lib/detectionLog';
@@ -17,6 +29,15 @@ import { config, resolveEffectiveTrimWindow, type TrimWindow } from '@/constants
 import type { EditorClip, EditorHoleSection, EditorState } from '@/types/editor';
 import { deleteClipToBin, restoreClipFromBin } from '@/lib/clipBin';
 import { markClipManuallyTrimmed } from '@/lib/training';
+import { fPxFromLandscapeFov, traceClip, type TracerV3Meta } from '@/lib/tracerV3';
+import {
+  GpsSession,
+  carryBetween,
+  fixSourceLabel,
+  gpsSession,
+  type RawFix,
+  type ShotFix,
+} from '@/lib/gpsSession';
 
 const DEFAULT_PAR = 4;
 const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
@@ -25,6 +46,88 @@ const isNative = Platform.OS === 'ios' || Platform.OS === 'android';
 let storage: typeof import('@/lib/storage') | null = null;
 if (isNative) {
   storage = require('@/lib/storage') as typeof import('@/lib/storage');
+}
+
+/**
+ * One clip row's GPS fix, re-derived at IMPACT time from the raw series the
+ * capture path persisted.
+ *
+ * THIS IS THE POINT OF THE WHOLE GPS DESIGN. The definitive anchor is
+ * `recording_start_ts + impact_time_ms`, and impact_time_ms does not exist when
+ * the clip is saved — detectAndTrim produces it minutes later. So the save
+ * stored the raw fixes and the stop-anchored estimate; here, with impact known,
+ * the same estimator is asked again with the tight impact window and the
+ * movement barrier, which is what stops the median sliding back onto the bag
+ * the golfer walked from.
+ *
+ * Returns null when the row predates V3 (no series), when impact never landed,
+ * or when the estimator refuses — a refusal is a real answer and must not be
+ * replaced with the stop-anchored fallback, which is what the stored columns
+ * already hold.
+ */
+function deriveImpactFix(row: {
+  recording_start_ts: number | null;
+  impact_time_ms: number | null;
+  gps_fix_series: string | null;
+}): ShotFix | null {
+  if (row.recording_start_ts === null || row.impact_time_ms === null || !row.gps_fix_series) {
+    return null;
+  }
+  let series: RawFix[];
+  try {
+    const parsed: unknown = JSON.parse(row.gps_fix_series);
+    if (!Array.isArray(parsed)) return null;
+    series = parsed as RawFix[];
+  } catch {
+    return null;
+  }
+  if (series.length === 0) return null;
+  // A FRESH session, seeded from the stored fixes: it has no warm-up marker, so
+  // every stored fix counts (the warm-up exclusion was already applied when the
+  // series was captured). Its config is the LIVE one — `gpsSession.cfg` — so a
+  // retune in constants/config.ts reaches re-derivation too.
+  const session = new GpsSession(gpsSession.cfg);
+  for (const f of [...series].sort((a, b) => a.ts - b.ts)) session.addFix(f);
+  return session.estimateAtImpact(row.recording_start_ts + row.impact_time_ms).fix;
+}
+
+/**
+ * The fix to PAIR with: the impact-anchored one when it can be derived,
+ * otherwise whatever the row already holds.
+ *
+ * The fallback matters for the SUCCESSOR clip, which may not have been through
+ * detection yet — its stop-anchored fix is a worse anchor but it is a real
+ * position, and refusing to pair with it would deny a carry to every shot whose
+ * successor happens to be untrimmed. `effAccM` is the stored accuracy either
+ * way, so the uncertainty travels with the number.
+ */
+function fixForPairing(row: {
+  recording_start_ts: number | null;
+  impact_time_ms: number | null;
+  gps_fix_series: string | null;
+  gps_latitude: number | null;
+  gps_longitude: number | null;
+  gps_accuracy_m: number | null;
+}): { fix: ShotFix | null; derived: boolean } {
+  const derived = deriveImpactFix(row);
+  if (derived) return { fix: derived, derived: true };
+  if (row.gps_latitude === null || row.gps_longitude === null) return { fix: null, derived: false };
+  return {
+    fix: {
+      lat: row.gps_latitude,
+      lon: row.gps_longitude,
+      // No accuracy stored at all is not "perfect": fall back to the fix-accuracy
+      // ceiling so a legacy row is paired pessimistically rather than optimistically.
+      effAccM: row.gps_accuracy_m ?? gpsSession.cfg.fixAccMax,
+      fixCount: 1,
+      windowSec: 1,
+      medianAccM: row.gps_accuracy_m ?? gpsSession.cfg.fixAccMax,
+      source: 'stop-fallback',
+      widened: false,
+      estimatorVersion: 0,
+    },
+    derived: false,
+  };
 }
 
 function buildHoleSections(
@@ -1288,6 +1391,12 @@ export function useEditorState(roundId: string | undefined) {
       hFovLandscapeDeg = (await getCameraFovDeg()) ?? hFovLandscapeDeg;
     } catch {}
 
+    // One availability check per batch. A dev client built before the V3 native
+    // pair landed has neither function, and finding that out 18 times in a row
+    // (once per clip, after paying for the detector each time) is not a useful
+    // way to learn it.
+    const v3Available = config.tracer.engine === 'v3' ? isTracerV3Available() : false;
+
     for (let i = 0; i < candidates.length; i++) {
       const row = candidates[i];
       const clipId = String(row.id);
@@ -1319,6 +1428,193 @@ export function useEditorState(roundId: string | undefined) {
         const idx = rows.findIndex((r) => r.id === row.id);
         const next = rows[idx + 1];
         const successor = next && next.hole_number === row.hole_number ? next : null;
+
+        // ─────────────────────────────────────────────────────────────────
+        // V3: the physics pipeline (config.tracer.engine === 'v3').
+        //
+        // Same batch discipline as v1 — the surrounding loop owns idempotence,
+        // the cancellation ref, the 'pending' lifecycle, the one retry and the
+        // mark-failed-and-continue. What differs is only what happens per clip:
+        // detect -> re-derive the GPS fix at impact -> pair -> ladder -> render.
+        //
+        // Ordering is deliberate: every gate that can be answered from the ROW
+        // runs before `detectShotV3`, which is seconds of full-resolution work.
+        // A clip with no impact time or no camera pitch can never produce a
+        // trace, so it must not pay for the detector to find that out.
+        // ─────────────────────────────────────────────────────────────────
+        if (config.tracer.engine === 'v3') {
+          if (!v3Available) {
+            // An older dev client. Leave every row untouched (status stays
+            // NULL) so a rebuilt binary picks the whole round up next time,
+            // rather than writing 'skipped' rows a rebuild would then ignore.
+            console.warn('[TRACER-V3] native detectShotV3/renderTracerV3 missing — batch skipped');
+            return;
+          }
+          const forceTrace = config.tracer.v3.forceTrace;
+
+          const persistSkipV3 = async (meta: TracerV3Meta) => {
+            await db
+              .updateClipTracer(row.id, {
+                tracer_status: 'skipped',
+                tracer_meta: JSON.stringify(meta),
+              })
+              .catch(() => {});
+            updateClipInState(clipId, (c) => ({ ...c, tracerStatus: 'skipped' }));
+            console.log(
+              `[TRACER-V3] hole=${row.hole_number} shot=${row.shot_number} SKIP reason=${meta.reason}`
+            );
+          };
+          /** A row-level refusal, shaped like the ladder's so `tracer_meta` has
+           *  one schema whatever refused. */
+          const rowSkip = (reason: string): TracerV3Meta => ({
+            engine: 'v3',
+            decision: 'none',
+            reason,
+            flags: [],
+            nDetections: 0,
+            selection: {
+              mode: 'none', k: 0, throughApex: false, climbPx: null, frameRange: null,
+              kImpFit: null, impactSlackFrames: 0,
+            },
+            ladder: [],
+            detectorNotes: {},
+            msPerFrame: 0,
+            elapsedMs: 0,
+          });
+
+          if (row.shot_type === 'putt' && !forceTrace) {
+            await persistSkipV3(rowSkip('putt'));
+            continue;
+          }
+          // forceTrace: a street test has no swing to detect, so anchor on the
+          // clip midpoint. Timing is approximate and the arc is a shape test,
+          // not a measurement — which is why this is a dev-only switch.
+          let v3ImpactMs = row.impact_time_ms;
+          if (v3ImpactMs === null && forceTrace) {
+            v3ImpactMs = Math.max(0, Math.round(((row.duration_seconds ?? 0) * 1000) / 2));
+          }
+          if (v3ImpactMs === null) {
+            await persistSkipV3(rowSkip('no-impact'));
+            continue;
+          }
+          if (row.camera_pitch_deg === null) {
+            // Without CoreMotion's pitch the camera cannot be calibrated, and a
+            // guessed pitch maps 1:1 into launch angle. Old clips (recorded
+            // before tracer capture existed) land here permanently, correctly.
+            await persistSkipV3(rowSkip('no-camera-pitch'));
+            continue;
+          }
+
+          // ── GPS. The fix is re-derived at IMPACT and written back, so the
+          //    row ends up holding the best position anyone can compute for it.
+          const own = fixForPairing(row);
+          if (own.derived && own.fix) {
+            await db
+              .updateClipGpsFix(row.id, {
+                gps_latitude: own.fix.lat,
+                gps_longitude: own.fix.lon,
+                gps_accuracy_m: own.fix.effAccM,
+                gps_fix_meta: JSON.stringify({
+                  source: fixSourceLabel(own.fix),
+                  fixCount: own.fix.fixCount,
+                  windowSec: own.fix.windowSec,
+                  medianAccM: own.fix.medianAccM,
+                  estimatorVersion: own.fix.estimatorVersion,
+                }),
+              })
+              .catch(() => {});
+          }
+          // THE LAST SHOT OF A HOLE HAS NO SUCCESSOR. That is not an error and
+          // not a skip: the clip renders pixel-only, and its label says "no
+          // GPS" rather than inventing a distance. `carryBetween` returns null
+          // for a missing endpoint, which is exactly the pixel-only input the
+          // fit takes.
+          const succ = successor ? fixForPairing(successor) : { fix: null, derived: false };
+          const carry = carryBetween(own.fix, succ.fix);
+          // A "carry" beyond maxCarryM is a GPS teleport (a dropped fix, a
+          // handoff), not a golf shot. Dropping it costs a label; believing it
+          // would scale the whole flight to a lie.
+          const carryUsable =
+            carry !== null && carry.carryM > 0 && carry.carryM <= config.tracer.maxCarryM;
+
+          await db.updateClipTracer(row.id, { tracer_status: 'pending' }).catch(() => {});
+          updateClipInState(clipId, (c) => ({ ...c, tracerStatus: 'pending' }));
+
+          // Detect on the ORIGINAL file when there is one (more post-impact
+          // footage); impact_time_ms is already on that timeline. The render
+          // happens on the TRIMMED file, so the ladder is told the offset
+          // between the two rather than either side guessing.
+          const v3DetectUri = row.original_file_uri ?? row.file_uri;
+          const v3DetectImpactMs = row.original_file_uri
+            ? v3ImpactMs
+            : v3ImpactMs - (row.auto_trim_start_ms ?? 0);
+          const detection = await detectShotV3(v3DetectUri, v3DetectImpactMs);
+          if (tracerCancelledRef.current) return;
+
+          const result = traceClip({
+            detection,
+            pitchDownDeg: row.camera_pitch_deg,
+            // f_px from the lens's landscape FOV. A METADATA PRIOR, not a
+            // measurement — see fPxFromLandscapeFov — so the fit carries the
+            // lab's +-12 % systematic and the label rounds accordingly.
+            fPx: fPxFromLandscapeFov(
+              hFovLandscapeDeg,
+              detection.width || 1080,
+              detection.height || 1920
+            ),
+            fPxSource: 'fov-metadata',
+            // The optics the clip was actually shot with (review F3a). ALWAYS
+            // passed, even as nulls: omitting the field is a refusal in the
+            // ladder, and a row recorded before capture_lens existed must reach
+            // that refusal rather than be silently treated as 1x. f_px above
+            // describes the 1x wide lens's format and nothing else, so a 0.5x
+            // or pinch-zoomed clip is off by up to a factor of two.
+            capture: { lens: row.capture_lens, zoom: row.capture_zoom },
+            carryM: carryUsable && carry ? carry.carryM : null,
+            carrySigmaGpsM: carryUsable && carry ? carry.sigmaGpsM : null,
+            shotType: row.shot_type === 'putt' ? 'putt' : 'swing',
+            renderDurationSec: row.duration_seconds ?? 0,
+            detectToRenderOffsetSec: row.original_file_uri
+              ? (row.auto_trim_start_ms ?? 0) / 1000
+              : 0,
+          });
+
+          if (result.spec === null) {
+            // Every refusal is a SKIP with the full diagnostic blob attached —
+            // the fit, the sigmas, the flags and the ladder log — because a
+            // field test is read from these rows and "skipped" on its own says
+            // nothing about why.
+            await persistSkipV3(result.meta);
+            continue;
+          }
+
+          const rendered = await renderTracerV3(row.file_uri, result.spec);
+          if (!rendered.tracerUri) {
+            throw new Error('renderTracerV3 unavailable (native rebuild required)');
+          }
+          await db
+            .updateClipTracer(row.id, {
+              tracer_file_uri: rendered.tracerUri,
+              tracer_status: 'done',
+              tracer_meta: JSON.stringify(result.meta),
+              tracer_rendered_at: new Date().toISOString(),
+            })
+            .catch(() => {});
+          updateClipInState(clipId, (c) => ({
+            ...c,
+            tracerUri: rendered.tracerUri ?? undefined,
+            tracerStatus: 'done',
+            sourceUri: rendered.tracerUri ?? c.sourceUri,
+          }));
+          console.log(
+            `[TRACER-V3] hole=${row.hole_number} shot=${row.shot_number} DONE ` +
+              `decision=${result.decision} K=${result.meta.selection.k} ` +
+              `carry=${result.meta.flight ? result.meta.flight.carryM.toFixed(0) : '?'}m ` +
+              `rms=${result.meta.fit ? result.meta.fit.rmsPx.toFixed(2) : '?'}px ` +
+              `flags=[${result.flags.join(' ')}]`
+          );
+          continue;
+        }
 
         // debugForceTrace / gpsOnlyTrace: ignore the classifier so street
         // tests (no club/ball → fallback-classified 'putt') still render.

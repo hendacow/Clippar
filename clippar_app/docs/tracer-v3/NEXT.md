@@ -10,14 +10,15 @@ the DEV BUILD, behind a config so it is trivially revertible, wired to GPS/locat
 ## State machine
 
 - [x] Branch, baseline verify (652), plan committed
-- [ ] **Build wave** (workflow `wf_87ba4412-2ff`, 5 parallel Opus-5 agents):
+- [x] **Build wave** (workflow `wf_87ba4412-2ff`, 5 parallel Opus-5 agents):
       `ts-physics` (lib/tracerPhysics.ts, lib/tracerCamera.ts) · `ts-fit` (lib/tracerFit.ts) ·
       `native-detect` (TracerDetect*.swift + CoreML) · `native-render` (TracerRenderV3.swift) ·
       `ts-gps` (lib/gpsSession.ts, hooks/useGpsSession.ts) → reports in `docs/tracer-v3/*.md`
-- [ ] **Integrate**: config block + engine switch, native bridge, `lib/tracerV3.ts` ladder,
+- [x] **Integrate**: config block + engine switch, native bridge, `lib/tracerV3.ts` ladder,
       editor batch, GPS wiring, dev settings, tests
-- [ ] **Verify**: `npm run verify` green, Swift parse/typecheck, reversibility proof (flag off = no-op)
-- [ ] **Review**: adversarial skeptic → `docs/tracer-v3/review.md`, go/no-go
+- [x] **Verify** — green first run: tsc clean, 799 tests (652 baseline + 147 new): `npm run verify` green, Swift parse/typecheck, reversibility proof (flag off = no-op)
+- [x] **Review** — GO conditional on 3 fixes; `docs/tracer-v3/review.md` (725 lines): adversarial skeptic → `docs/tracer-v3/review.md`, go/no-go
+- [ ] **Fixes** (workflow `wf_c5a4dafb-f17`): F1 carry-inconsistent laundering, F2 impact slack, F3a lens/zoom skip, F4 axis-degenerate, F5 label honesty, F6 persisted bypass, F8 landing flag, refusal test suite → `docs/tracer-v3/fixes.md` + `re-verify.md`
 - [ ] Commit + push the branch; write back to `company-brain/org/cto/STATUS.md` and the daily report;
       hand Henry the build command (do NOT spend EAS credits — nearly exhausted as of 5 Sep)
 

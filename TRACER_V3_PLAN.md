@@ -63,15 +63,42 @@ node tests. Swift is only what must touch pixels.
 
 ## Honest limits carried in from the lab (state these, do not paper over them)
 
-- Ball speed and carry ride on the lens focal length. **On device we read it from `AVCaptureDevice`
-  intrinsics** (`isCameraIntrinsicMatrixDeliveryEnabled`, else `videoFieldOfView` ÷ zoom), which is the
-  fix the lab could not have — its footage had no FOV metadata and carried a ±12 % systematic.
+- Ball speed and carry ride on the lens focal length. **This plan assumed the app would read it from
+  `AVCaptureDevice` intrinsics** (`isCameraIntrinsicMatrixDeliveryEnabled`, else `videoFieldOfView` ÷
+  zoom). **It does not. Nothing built in this wave reads intrinsics** — native `getCameraFovDeg()`
+  still returns `videoFieldOfView`, which describes the FORMAT, and every call site passes
+  `fPxSource: 'fov-metadata'`, so `fPxIsPrior` is always true and the lab's ±12 % systematic is live
+  in every fit. Corrected 6 Sep after the adversarial review (`clippar_app/docs/tracer-v3/review.md`,
+  F3a) found this section reading as though the work were done.
+- The ± 12 % is also not the largest term. `getCameraFovDeg()` hard-codes `.builtInWideAngleCamera`,
+  so it describes the 1× lens at its native framing, while the record screen has a 0.5× toggle and
+  continuous pinch zoom — a factor-of-two error, not a percentage one. Until intrinsics land, the
+  ladder REFUSES any clip not shot at 1× with no pinch (`lens_unsupported`), which is what
+  `capture_lens` / `capture_zoom` on the clip row exist for.
 - Camera pitch maps 1:1 into launch angle: CoreMotion's ±0.5° is the floor.
 - A shot hit exactly down the camera axis has no lateral information and renders as a near-vertical
-  line. Real, not a bug. Mitigation is a capture tip, not code.
+  line. **That understated it, and this too is corrected 6 Sep (review F4): the degeneracy loses the
+  SCALE as well as the direction**, at a pixel residual small enough to pass every gate — 0.64 px rms
+  with a 47 % apex error on the reviewer's fixture. A capture tip is not a mitigation for a wrong
+  number, so the ladder now raises `axis_degenerate` and the pill drops the distance rather than
+  claiming it. The line is still drawn.
 - The detector finds the ball on ~half of unseen footage; yellow balls and far cameras defeat the
   address finder. Every failure must be a **skip**, never a fabricated arc.
 - 6 of 19 lab renders put the landing behind the golfer. Correct occlusion, unlucky framing.
+
+## Build
+
+### Not done — carried forward from the wave, do not read the sections above as finished
+
+1. **`AVCaptureDevice` intrinsics delivery.** Nothing reads them; `fPxSource: 'intrinsics'` exists in
+   the type and is passed by no call site. It needs a device to verify, which is why it was not
+   attempted in the fix pass. Until it lands, `capture_lens === '1x' && capture_zoom === 0` is the
+   only camera the pipeline will draw for.
+2. **The in-source touchdown search** (`find_seen_landing`). `decideArcEnd` is the lab's
+   `search=False` path; on a chip the detector followed to the ground, the arc can run a few frames
+   past where the ball stops (the lab measured 61–70 px on IMG_3652).
+3. **Nothing here has run on a device or rendered a frame.** No Swift has been compiled, linked or
+   executed; the detector has never produced a real detection through this path.
 
 ## Build
 
