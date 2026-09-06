@@ -301,6 +301,24 @@ const LOOSE_CARRY_SIGMA_FRAC = 0.25;
  */
 const LOOSE_APEX_SIGMA_FRAC = 0.25;
 
+/** 1-sigma to allow the fit around an ASSUMED camera pitch (see chooseModel). */
+const ASSUMED_PITCH_SIGMA_DEG = 12;
+
+/**
+ * True when this clip's camera pitch is a GUESS rather than a CoreMotion reading —
+ * an import, or anything recorded before tracer capture existed. Derived from the
+ * input in one place so the fit ladder, the model choice and the label rung cannot
+ * disagree about it.
+ */
+function isPitchAssumed(input: TraceClipInput): boolean {
+  const havePitch = input.pitchDownDeg !== null && Number.isFinite(input.pitchDownDeg);
+  return (
+    !havePitch &&
+    (input.allowUnknownGeometry ?? false) &&
+    Number.isFinite(input.assumedPitchDownDeg)
+  );
+}
+
 // ─── Knobs (structural read of config.tracer.v3) ────────────────────────────
 
 /**
@@ -806,7 +824,13 @@ export function chooseModel(
   carryM: number | null | undefined,
   sel: Pick<Selection, 'throughApex'>,
   fps: number,
-  knobs: TracerV3Knobs
+  knobs: TracerV3Knobs,
+  /**
+   * True when the camera pitch is a GUESS (an imported or pre-tracer clip using
+   * `assumedPitchDownDeg`) rather than a CoreMotion reading. It changes the
+   * pitch decision completely — see below.
+   */
+  pitchAssumed = false
 ): { decision: TraceDecision; fixSpin: boolean; fitPitch: boolean; reason: string | null } {
   const fr = fps / 30.0;
   if (nUsed === 0) {
@@ -832,7 +856,22 @@ export function chooseModel(
   }
   const fixSpin = nUsed < MIN_FULL_MODEL;
   const longTrack = nUsed >= LONG_TRACK_30FPS * fr;
-  const fitPitch = Boolean(knobs.fitPitchAllowed && sel.throughApex && longTrack && !fixSpin);
+  // The lab's rule: only fit the camera pitch on a long track that passed the
+  // image apex, because on a short climb it moves the WRONG way (fit report §3).
+  // That rule assumes the pitch it starts from is a CoreMotion MEASUREMENT.
+  //
+  // When the pitch is a GUESS it is the opposite situation, and the field data
+  // says so plainly. Henry's imported IMG_0601, 44 detections, the ball tracked
+  // cleanly for a second and a half: at the assumed 4 deg the fit lands at
+  // rms 13.8 px and is refused as `track_not_ballistic`; at 2 deg it lands at
+  // rms 3.7 px and DRAWS. The camera angle was never 4 deg — nothing measured
+  // it — and a fit with no freedom to correct it cannot succeed. So on an
+  // assumed pitch the fit is allowed to solve for it as soon as there are
+  // enough points for the full model, apex or no apex: a guess the fit may
+  // correct beats a guess it may not.
+  const fitPitch = Boolean(
+    knobs.fitPitchAllowed && !fixSpin && (pitchAssumed || (sel.throughApex && longTrack))
+  );
   return { decision: 'fit', fixSpin, fitPitch, reason: null };
 }
 
@@ -1212,7 +1251,12 @@ function runFitLadder(
       bucket,
       fixSpin: v.fixSpin,
       fitPitch: v.fitPitch,
-      pitchSigmaDeg: knobs.pitchSigmaDeg,
+      // A guessed pitch must not be held to CoreMotion's accuracy. 0.5 deg is what
+    // the sensor is worth; an assumption is worth a whole camera-setup range, and
+    // pinning it there is what kept IMG_0601 at rms 13.8 px when 2 deg away lay a
+    // 3.7 px fit. ASSUMED_PITCH_SIGMA_DEG is the spread of the lab's eight
+    // calibrated clips (-3.0 to +7.2 deg) rounded outward.
+    pitchSigmaDeg: isPitchAssumed(input) ? ASSUMED_PITCH_SIGMA_DEG : knobs.pitchSigmaDeg,
       carryModel: carryM === null || carryM === undefined ? null : 'nextShot',
       carrySigmaGpsM: input.carrySigmaGpsM ?? undefined,
       maxIterations: knobs.fitMaxIterations,
@@ -1746,7 +1790,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   }
 
   const carryM = input.carryM ?? null;
-  const model = chooseModel(sel.used.length, carryM, sel, fps, knobs);
+  const model = chooseModel(sel.used.length, carryM, sel, fps, knobs, isPitchAssumed(input));
   if (model.decision === 'none') {
     return skip(model.reason ?? 'no_detections', flags, meta, startedAt);
   }
@@ -1877,7 +1921,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
           mode: 'all_holdout',
           frameRange: [Math.round(all[0].frame), Math.round(all[all.length - 1].frame)],
         };
-        const model2 = chooseModel(all.length, carryM, sel2, fps, knobs);
+        const model2 = chooseModel(all.length, carryM, sel2, fps, knobs, isPitchAssumed(input));
         let run2: LadderRun | null = null;
         try {
           run2 = runFitLadder(trackForFit(all), camera, sel2, fps, addressPx, carryM, input.bucket, model2, input, knobs, width);

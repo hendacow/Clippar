@@ -94,10 +94,18 @@ public struct TracerParams {
     /// the first pass and pays nothing.
     ///
     /// Measured 6 Sep on IMG_0601: the true impact gives 44 detections and +-15 frames
-    /// (half a second) gives zero. The app's impact on IMPORTED clips is regularly worse
-    /// than that, so the window reaches +-1.5 s. Beyond that a "shot" found by search is
-    /// more likely to be a different swing in the same clip than a rescue of this one.
-    public var impactSearchOffsets = [0, -8, 8, -16, 16, -24, 24, -32, 32, -45, 45]
+    /// (half a second) gives zero.
+    ///
+    /// The window reaches +-3 s because +-1.5 s was measured to be too narrow on Henry's
+    /// own imports. Sweeping the impact across whole clips found the ball at 4.5 s on
+    /// IMG_0596 (7 detections) and 9.0 s on IMG_0598 (24) where the estimates handed in
+    /// were 2.4 s and 1.5 s away — both outside +-1.5 s, both returning nothing. The
+    /// detector could see those balls the whole time; it was looking in the wrong second.
+    ///
+    /// The cost is bounded and only paid by a clip that was going to draw nothing: 17
+    /// passes over a ~50-frame window, and the ladder returns the moment one succeeds.
+    public var impactSearchOffsets = [0, -8, 8, -16, 16, -24, 24, -32, 32, -45, 45,
+                                      -60, 60, -75, 75, -90, 90]
     public var departScanLo = -4
     public var departScanHi = 6
     public var departPersist = 2

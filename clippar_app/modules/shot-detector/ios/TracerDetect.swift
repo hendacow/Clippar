@@ -580,12 +580,34 @@ public enum TracerDetect {
     public static func detect(assetURL: URL, impactTimeMs: Double,
                               options: TracerDetectOptions) -> [String: Any] {
         let offsets = options.params.impactSearchOffsets
+
+        // BOUND THE SEARCH TO THE CLIP. Every offset must land somewhere the detector
+        // can actually build a background stack and a post-impact window; pushing one
+        // past either end walks the frame maths off the clip and traps at runtime.
+        // Found by this widening: IMG_0594 is 4.47 s, the ladder reaches +-3 s, and the
+        // process died with SIGTRAP. A short clip is the common case for an import, so
+        // this guard is the difference between a rescue and a crash.
+        var durationMs = Double.greatestFiniteMagnitude
+        let probe = AVURLAsset(url: assetURL)
+        let d = CMTimeGetSeconds(probe.duration)
+        if d.isFinite && d > 0 { durationMs = d * 1000.0 }
+        // The detector needs ~1 s of clip before the impact for the background stack and
+        // the address frames (`addrFrames` reaches impact-24 at 30 fps), and ~0.3 s after
+        // it for a departure to be visible at all.
+        let searchLoMs = 1000.0
+        let searchHiMs = max(searchLoMs, durationMs - 300.0)
+
         var firstResult: [String: Any]? = nil
-        for (i, offFrames30Base) in offsets.enumerated() {
+        var attempted = 0
+        for offFrames30Base in offsets {
             var offFrames30 = offFrames30Base
             let offMs = Double(offFrames30) * (1000.0 / 30.0)
             let tryMs = impactTimeMs + offMs
+            // offset 0 always runs: the caller asked about that impact and is owed a
+            // reason about it, even on a clip too short for any search.
+            if offFrames30 != 0 && (tryMs < searchLoMs || tryMs > searchHiMs) { continue }
             if tryMs < 0 { continue }
+            attempted += 1
             var r = detectOnce(assetURL: assetURL, impactTimeMs: tryMs, options: options)
             var dets = (r["detections"] as? [[String: Any]]) ?? []
             if !dets.isEmpty {
@@ -601,7 +623,7 @@ public enum TracerDetect {
                     var bestOff = offFrames30
                     for refine in [offFrames30 - 4, offFrames30 + 4] {
                         let rMs = impactTimeMs + Double(refine) * (1000.0 / 30.0)
-                        if rMs < 0 { continue }
+                        if rMs < searchLoMs || rMs > searchHiMs { continue }
                         let rr = detectOnce(assetURL: assetURL, impactTimeMs: rMs, options: options)
                         let rd = (rr["detections"] as? [[String: Any]]) ?? []
                         if rd.count > dets.count {
@@ -618,7 +640,7 @@ public enum TracerDetect {
                     // rescued a bad impact" from "the impact was right all along" — and
                     // so a systematic bias in the app's impact shows up as a pattern.
                     n["impact_searched"] = "found at \(offFrames30 >= 0 ? "+" : "")\(offFrames30) frames (30fps-equiv) from the given impact"
-                    n["impact_search_attempts"] = i + 1
+                    n["impact_search_attempts"] = attempted
                     r["notes"] = n
                 }
                 return r
@@ -629,7 +651,7 @@ public enum TracerDetect {
         // reason describes what the caller asked about rather than some distant offset.
         var r = firstResult ?? detectOnce(assetURL: assetURL, impactTimeMs: impactTimeMs, options: options)
         var n = (r["notes"] as? [String: Any]) ?? [:]
-        n["impact_search_attempts"] = offsets.count
+        n["impact_search_attempts"] = attempted
         n["impact_searched"] = "no track at any offset in the search window"
         r["notes"] = n
         return r
