@@ -70,3 +70,29 @@ phone, no Swift has been compiled and no frame has been rendered. The single mos
 measurement is `meta.selection.throughApex` — every wrong number in 63,772 simulated calls
 came from a track that stopped before the apex, and nothing whose track reached the apex was
 more than 12 % out.
+
+
+## Round 2 — the window scan (6 Sep 22:00, workflow `wf_48fdac19-613`)
+
+Henry field-tested and 1 of 9 imported clips drew. Diagnosed by compiling the real Swift
+detector into a macOS harness (`docs/tracer-v3/bench/`) and running it against his own footage:
+the detector is faithful, but EVERYTHING it reads is anchored to the impact instant it is given,
+and half a second of error is total failure. The app's impact on imports is regularly 1-3 s out.
+
+Henry's instruction, which is the design being implemented: *"it has a window when it trims of
+like 2 seconds so can't you just scan for the ball in that window and extend it out frame by
+frame"* — derive the impact from the video instead of trusting the hint.
+
+- [ ] `bench` — repeatable measurement over ~180 clips (his ~64 + 84 unseen + 36 lab) under
+      APP conditions (imported: no pitch, no lens, no GPS, app's own impact)
+- [ ] `impact-scan` — scan the window for a static ball that departs; that frame is the impact
+- [ ] `tune` — work down the ranked failure reasons against the bench
+- [ ] `verify` — independent re-measure, refusals still hold, no crashes, the honest number
+- [ ] Rebuild, verify the IPA, send Henry the link
+
+Landed already this round: the fit may now solve for a GUESSED camera angle (IMG_0601 rms 13.8
+-> 2.8 px, refused -> draws); the impact search is bounded so a 4.5 s import cannot crash it
+(IMG_0594 SIGTRAP, fixed).
+
+**Henry asked for a guarantee it will work on every shot. It cannot be given, and the verify
+agent is instructed to report the measured rate rather than a rounded one.**
