@@ -1,3 +1,8 @@
+"""SUPERSEDED by truth.py (2026-09-06), which ranks the top three onsets AND
+renders frames so the pick can be confirmed by eye. Audio alone was wrong by
+more than a second on 4 of the 26 clips this bench now has truth for — see
+bench.md, "Establishing a TRUE impact". Kept as the minimal version.
+"""
 """Strongest audio transient = the strike. Same idea as the app's audio confirmation."""
 import subprocess, sys, numpy as np
 def impact_ms(path):

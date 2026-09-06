@@ -1,4 +1,9 @@
 #!/bin/bash
+#
+# SUPERSEDED by bench.py / bench.sh (2026-09-06). Kept only because it is the
+# smallest possible reproduction of one clip. NOTE: it calls `./harness`, which
+# build.sh no longer produces — the binary is now $BENCH_WORK/tracerdet/tracerdet.
+#
 APP=~/projects/clippar/final_shipment/clippar_app
 while IFS='|' read -r f ms; do
   name=$(basename "$f")

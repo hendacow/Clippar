@@ -43,6 +43,9 @@ public struct TracerDetectOptions {
     public var useCoreML = true
     /// Emit per-stage timings and the address decision into `notes`.
     public var verbose = false
+    /// Frames after the launch frame the sector search gets to find the ball for the FIRST
+    /// time before the track is declared dead. 30 fps-equivalent; scaled by `fr` at the site.
+    public var firstDetFrames = 4
 
     public init() {}
 
@@ -68,6 +71,26 @@ public struct TracerDetectOptions {
         if let v = d("confFloor") { params.confFloor = v }
         if let v = i("minTrackEmit") { params.minTrackEmit = max(1, v) }
         if let v = d("addrWeakC") { params.addrWeakC = v }
+        // Tracker persistence. Exposed (tune, 7 Sep) so a bench can measure what moving them
+        // costs WITHOUT a rebuild; the defaults are unchanged and are still the shipped values.
+        if let v = i("firstDetFrames") { firstDetFrames = max(1, v) }
+        if let v = i("maxMissEarly") { params.maxMissEarly = max(1, v) }
+        if let v = i("maxMissLate") { params.maxMissLate = max(1, v) }
+        if let v = d("minRadius") { params.minRadius = max(0.1, v) }
+        // impact scan
+        if let v = b("scanEnabled") { params.scanEnabled = v }
+        if let v = d("scanRadiusMs") { params.scanRadiusMs = max(0, v) }
+        if let v = i("scanPersist") { params.scanPersist = max(2, v) }
+        if let v = i("scanMaxTries") { params.scanMaxTries = max(1, v) }
+        if let v = i("scanMaxCandidates") { params.scanMaxCandidates = max(1, v) }
+        if let v = d("scanReturnFrac") { params.scanReturnFrac = max(0, min(1, v)) }
+        if let v = d("scanPreNoiseFrac") { params.scanPreNoiseFrac = max(0, min(1, v)) }
+        if let v = d("scanHintSigmaFrames") { params.scanHintSigmaFrames = max(1, v) }
+        if let v = b("scanTryGivenLast") { params.scanTryGivenLast = v }
+        // The pre-scan behaviour, reachable without a native rebuild: `scanEnabled:false` plus
+        // `scanFallbackLadder:true` is exactly what shipped before this change.
+        if let v = b("scanFallbackLadder") { params.scanFallbackLadder = v }
+        if let v = d("scanFallbackBudgetSec") { params.scanFallbackBudgetSec = max(0, v) }
         // switches
         if let v = b("pose") { params.poseEnabled = v }
         if let v = b("localBg") { params.localBg = v }
@@ -114,7 +137,10 @@ final class TracerFramePump {
     private let fps: Double
     private let startFrame: Int
     private let endFrame: Int
-    private let rotation: Int          // 0, 90, 180, 270 — clockwise, to reach display orientation
+    /// 0, 90, 180, 270 — clockwise, to reach display orientation. Read by the impact
+    /// scan, which maps its handful of coordinates backwards through it instead of rotating
+    /// whole frames it does not need.
+    let rotation: Int
     let displayWidth: Int
     let displayHeight: Int
 
@@ -163,9 +189,15 @@ final class TracerFramePump {
 
     deinit { reader.cancelReading() }
 
-    /// Feed every frame in [startFrame, endFrame] to `body`, in order. Return false from `body`
-    /// to stop early.
-    func forEach(_ body: (TracerDecodedFrame) -> Bool) {
+    /// Feed every frame in [startFrame, endFrame] to `body`, in order, as a raw
+    /// display-UNORIENTED pixel buffer plus its frame index. Return false to stop early.
+    ///
+    /// [impact-scan] The rotation gather in `displayOrientedBGRA` copies every pixel of every
+    /// frame — ~8 MB a frame at 1080p — and the impact scan reads a few hundred pixels per
+    /// frame across several hundred frames. Handing the scan the raw buffer and letting it map
+    /// the handful of coordinates it needs backwards through the rotation is what makes
+    /// scanning a seven-second window cost less than one extra detection pass.
+    func forEachRaw(_ body: (Int, CVPixelBuffer) -> Bool) {
         var done = false
         var lastIndex = Int.min
         while !done {
@@ -181,11 +213,72 @@ final class TracerFramePump {
                 if k <= lastIndex { return }
                 lastIndex = k
                 guard let pb = CMSampleBufferGetImageBuffer(sb) else { return }
-                guard let frame = Self.displayOrientedBGRA(pb, rotation: rotation) else { return }
-                if !body(TracerDecodedFrame(index: k, bgra: frame)) { done = true }
+                if !body(k, pb) { done = true }
             }
         }
         reader.cancelReading()
+    }
+
+    /// Feed every frame in [startFrame, endFrame] to `body`, in order. Return false from `body`
+    /// to stop early.
+    ///
+    /// `wants` (when given) is asked BEFORE the rotation gather: a frame it refuses is decoded
+    /// and dropped without being copied. That is how the scan's anchor pass reads three frames
+    /// out of a thirty-frame span for the price of the decode alone.
+    func forEach(wants: ((Int) -> Bool)? = nil, _ body: (TracerDecodedFrame) -> Bool) {
+        forEachRaw { k, pb in
+            if let w = wants, !w(k) { return true }
+            guard let frame = Self.displayOrientedBGRA(pb, rotation: rotation) else { return true }
+            return body(TracerDecodedFrame(index: k, bgra: frame))
+        }
+    }
+
+    /// [impact-scan] Mean luma over each display-space box, read straight out of an unrotated
+    /// source buffer.
+    ///
+    /// Boxes are `(x0, y0, x1, y1)` half-open in DISPLAY pixels. The display->source map is the
+    /// algebraic inverse of the four cases in `displayOrientedBGRA`, and the luma is the same
+    /// fixed-point BT.601 as `tracerLumaPlane`, so a value from here and a value from a rotated
+    /// frame are the same number. A box that lands outside the buffer contributes nothing and
+    /// its entry comes back nil.
+    ///
+    /// The scan reads the MEAN over the box, and the departure test only ever looks at
+    /// DIFFERENCES between frames, so the fact that this omits the background model (which the
+    /// scan has not built yet, because it does not know where the impact is) changes nothing:
+    /// the background is a constant offset over a fixed box and cancels.
+    static func boxLumaMeans(_ pb: CVPixelBuffer, rotation: Int, displayW: Int, displayH: Int,
+                             boxes: [(Int, Int, Int, Int)], into out: inout [Double]) {
+        if out.count != boxes.count { out = [Double](repeating: 0, count: boxes.count) }
+        CVPixelBufferLockBaseAddress(pb, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pb, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(pb) else { return }
+        let sw = CVPixelBufferGetWidth(pb)
+        let sh = CVPixelBufferGetHeight(pb)
+        let stride = CVPixelBufferGetBytesPerRow(pb)
+        let src = base.assumingMemoryBound(to: UInt8.self)
+        for (bi, b) in boxes.enumerated() {
+            var sum = 0, n = 0
+            let x0 = max(0, b.0), y0 = max(0, b.1)
+            let x1 = min(displayW, b.2), y1 = min(displayH, b.3)
+            if x1 <= x0 || y1 <= y0 { out[bi] = 0; continue }
+            for dy in y0..<y1 {
+                for dx in x0..<x1 {
+                    var sx = dx, sy = dy
+                    switch rotation {
+                    case 90:  sx = dy;                 sy = displayW - 1 - dx
+                    case 180: sx = displayW - 1 - dx;  sy = displayH - 1 - dy
+                    case 270: sx = displayH - 1 - dy;  sy = dx
+                    default:  break
+                    }
+                    if sx < 0 || sy < 0 || sx >= sw || sy >= sh { continue }
+                    let si = sy * stride + sx * 4
+                    let bch = Int(src[si]), g = Int(src[si + 1]), r = Int(src[si + 2])
+                    sum += (r * 4899 + g * 9617 + bch * 1868 + (1 << 13)) >> 14
+                    n += 1
+                }
+            }
+            out[bi] = n > 0 ? Double(sum) / Double(n) : 0
+        }
     }
 
     /// Copy a BGRA pixel buffer into a contiguous display-oriented byte array.
@@ -558,103 +651,357 @@ public enum TracerDetect {
                       options: TracerDetectOptions(json: optionsJson))
     }
 
-    /// Detect the ball's first frames of flight, searching for the impact rather than
-    /// trusting the one it was handed.
+    /// [impact-scan] One static ball-like patch, found once, followed frame by frame until it
+    /// leaves and does not come back. Where it leaves IS the impact.
+    struct ScanHit {
+        var impactFrame: Int
+        var launchFrame: Int
+        var x: Double
+        var y: Double
+        var r: Double
+        var source: String
+        var score: Double
+        var strength: Double
+    }
+
+    /// Derive the impact from the video.
     ///
-    /// WHY THIS SEARCHES. Every frame the detector looks at is anchored to the impact:
-    /// the background stack, the three address frames (`addrFrames` = impact-24/-15/-6),
-    /// the departure scan and the launch search. Measured on Henry's own footage
-    /// (IMG_0601, 6 Sep) the sensitivity is brutal — with the true impact it returns 44
-    /// detections, and HALF A SECOND either side it returns ZERO, failing as
-    /// "no address ball", "weak contrast" or "no persistent departure" depending on
-    /// which way it is wrong. The app's `impact_time_ms` comes from the swing detector
-    /// and on IMPORTED footage it is regularly further out than that, which is why four
-    /// of six imported clips traced nothing in the field while the same clips detect
-    /// cleanly here from an audio-derived impact.
+    /// WHY THIS EXISTS. Every frame the detector looks at is anchored to the impact it is
+    /// handed: the background stack, the three address frames (`addrFrames` = impact-24/-15/-6),
+    /// the departure scan and the launch search. Measured on Henry's own footage (IMG_0601,
+    /// 6 Sep) the sensitivity is brutal — with the true impact it returns 44 detections, and
+    /// HALF A SECOND either side it returns ZERO.
     ///
-    /// So a failure is retried at offsets around the given impact, nearest first, and the
-    /// first attempt that actually emits a track wins. A clip whose impact is already
-    /// right pays nothing: offset 0 is tried first and returns immediately. A clip that
-    /// was going to fail outright pays at most `impactSearchOffsets.count` passes over a
-    /// ~50-frame window, which is the cost of the difference between a trace and nothing.
+    /// And the hint it is handed is not close enough. Both of the app's impact estimators were
+    /// compiled and run here over the 36 lab clips against the labelled audio impacts:
+    /// swing-vision, which is what an import actually uses, is out by a median of 0.17 s with a
+    /// worst case of **5.70 s** and **one clip in three beyond half a second**; the
+    /// `detectAndTrim` fallback is out by a median of 0.84 s. Neither is a number to build a
+    /// frame-accurate search window on.
+    ///
+    /// So the impact is not taken on trust and it is not brute-forced either. Henry's design,
+    /// 6 Sep: *"it has a window when it trims of like 2 seconds so can't you just scan for the
+    /// ball in that window and extend it out frame by frame"*. That is this:
+    ///
+    ///  1. A window around the hint, bounded to what the clip can hold.
+    ///  2. The EXISTING address finder, run once at the head of that window — where the ball is
+    ///     still on the ground whatever the hint says — to get static ball-like patches.
+    ///  3. Each patch followed across the whole window, one frame at a time, reading only the
+    ///     few hundred pixels under it.
+    ///  4. The EXISTING departure test, widened, to find the frame each patch leaves and never
+    ///     returns to. That frame is the impact.
+    ///
+    /// It reports what it found and what it was told, so a field row shows how far off the app
+    /// was rather than hiding it.
+    static func scanForImpact(asset: AVURLAsset, track: AVAssetTrack, fps: Double,
+                              W: Int, H: Int, hintFrame: Int, durationSec: Double,
+                              options: TracerDetectOptions,
+                              notes: inout [String: Any]) -> [ScanHit] {
+        let params = options.params
+        let fr = fps / 30.0
+        let u = Double(W) / 1080.0
+        func f30(_ n: Double) -> Int { max(1, Int((n * fr).rounded())) }
+
+        // ---- window, BOUNDED TO THE CLIP -----------------------------------------------
+        // Every impact considered must leave room for what the detector does around it: the
+        // background stack and the address frames reach back 30 frames (30 fps units) and the
+        // departure scan reaches forward 6. A short import is the common case — IMG_0594 is
+        // 4.47 s and the previous widening trapped on it with SIGTRAP — so this clamp is the
+        // difference between a rescue and a crash, not a nicety.
+        let totalFrames = durationSec.isFinite && durationSec > 0
+            ? Int(floor(durationSec * fps)) : hintFrame + f30(60)
+        let kMinImpact = f30(26)
+        let kMaxImpact = totalFrames - f30(8)
+        if kMaxImpact <= kMinImpact {
+            notes["impactScan"] = "clip too short to scan (\(totalFrames) frames)"
+            return []
+        }
+        let radius = max(1, Int((params.scanRadiusMs / 1000.0 * fps).rounded()))
+        let scanLo = max(kMinImpact, hintFrame - radius)
+        let scanHi = min(kMaxImpact, hintFrame + radius)
+        if scanHi < scanLo {
+            notes["impactScan"] = "window empty after clamping to the clip"
+            return []
+        }
+
+        // Anchors: three frames spread over 0.6 s, all BEFORE the earliest impact the window
+        // allows, so the ball is still on the ground on every one of them whatever the hint
+        // said. This is the same 3-frame, 0.6 s spread `addrFrames` was tuned on.
+        let anchorBase = max(0, scanLo - f30(30))
+        let anchorKs = [anchorBase, anchorBase + f30(9), anchorBase + f30(18)]
+        let anchorSet = Set(anchorKs)
+
+        // ---- pass 1: the anchor frames --------------------------------------------------
+        let t0 = CFAbsoluteTimeGetCurrent()
+        var anchors: [(Int, TracerBGRA)] = []
+        guard let pump1 = TracerFramePump(asset: asset, track: track,
+                                          startFrame: anchorKs[0], endFrame: anchorKs[2], fps: fps) else {
+            notes["impactScan"] = "could not open the clip for the anchor pass"
+            return []
+        }
+        pump1.forEach(wants: { anchorSet.contains($0) }) { f in
+            anchors.append((f.index, f.bgra))
+            return true
+        }
+        guard anchors.count >= 2 else {
+            notes["impactScan"] = "only \(anchors.count) anchor frame(s) decoded"
+            return []
+        }
+        anchors.sort { $0.0 < $1.0 }
+        let anchorBGRA = anchors.map { $0.1 }
+
+        // ---- the EXISTING address machinery, unchanged -----------------------------------
+        var geom: GolferGeometry?
+        if params.poseEnabled {
+            geom = tracerGolferGeometry(poses: anchorBGRA.map { TracerVisionPose.pose(in: $0, params: params) },
+                                        params: params)
+        }
+        var yoloPerFrame: [[TracerYoloDetection]] = []
+        if options.useCoreML, TracerBallModel.shared.available {
+            let tiles: [(Int, Int, Int, Int)] = geom.map {
+                tracerAddressROIs(geom: $0, width: W, height: H, params: params)
+            } ?? [(Int(0.1 * Double(W)), Int(0.45 * Double(H)), Int(0.9 * Double(W)), Int(0.95 * Double(H)))]
+            yoloPerFrame = anchorBGRA.map { TracerBallModel.shared.detect(in: $0, tileRegions: tiles) }
+        }
+        let cands = Array(tracerAddressCandidates(frames: anchorBGRA, yoloPerFrame: yoloPerFrame,
+                                                  geom: geom, u: u, params: params)
+                            .prefix(max(1, params.scanMaxCandidates)))
+        notes["scanCandidates"] = cands.count
+        guard !cands.isEmpty else {
+            notes["impactScan"] = "no static ball-like patch anywhere at the head of the window"
+            return []
+        }
+
+        // The reference contrast each departure is measured against. `tracerFinishAddressValidation`
+        // measures this against the background model; the scan has no background model yet — that
+        // is the whole point — so it measures the same disc-against-annulus contrast on the last
+        // anchor frame instead, and applies the SAME validity rule: bright-on-ground always
+        // counts, dark-on-ground only from a ball-SHAPED finder.
+        let anchorLuma = tracerLumaPlane(anchorBGRA[anchorBGRA.count - 1], x0: 0, y0: 0, x1: W, y1: H)
+        var cRefs = [Double](repeating: 30.0, count: cands.count)
+        for (i, c) in cands.enumerated() {
+            let (C, _) = tracerBallContrast(bg: anchorLuma, ax: c.x, ay: c.y, r: c.r, u: u)
+            if let v = C, v > 6 || (v < -6 && (c.source == "yolo" || c.source == "pose_roi")) {
+                cRefs[i] = abs(v)
+            }
+        }
+
+        // ---- pass 2: follow every patch, frame by frame ----------------------------------
+        // The same box the departure scan in `detectOnce` reads: a square of half-width
+        // 0.7 * r around the candidate.
+        var boxes: [(Int, Int, Int, Int)] = []
+        for c in cands {
+            let rr = max(1.0, 0.7 * c.r)
+            boxes.append((Int(c.x - rr), Int(c.y - rr), Int(c.x + rr + 1), Int(c.y + rr + 1)))
+        }
+        var series = [[(k: Int, v: Double)]](repeating: [], count: cands.count)
+        let seriesHi = min(totalFrames - 1, scanHi + f30(Double(params.scanPersist) + 6))
+        var scratch = [Double](repeating: 0, count: cands.count)
+        if let pump2 = TracerFramePump(asset: asset, track: track,
+                                       startFrame: anchorKs[0], endFrame: seriesHi, fps: fps) {
+            pump2.forEachRaw { k, pb in
+                TracerFramePump.boxLumaMeans(pb, rotation: pump2.rotation,
+                                             displayW: W, displayH: H, boxes: boxes, into: &scratch)
+                for i in 0..<cands.count { series[i].append((k, scratch[i])) }
+                return true
+            }
+        }
+        notes["scanFrames"] = series.first?.count ?? 0
+
+        // ---- the departure decides the impact --------------------------------------------
+        let persist = f30(Double(params.scanPersist))
+        let hintSigma = max(1.0, params.scanHintSigmaFrames * fr)
+        var hits: [ScanHit] = []
+        for (i, c) in cands.enumerated() {
+            guard let dep = tracerScanDeparture(series: series[i], cRef: cRefs[i],
+                                                persist: persist, params: params) else { continue }
+            let impactFrame = dep.launch - 1
+            if impactFrame < scanLo || impactFrame > scanHi { continue }
+            // A weak, deliberately broad preference for the departure nearest the hint. It is a
+            // TIE-BREAK and never a gate — it cannot move a decision by more than a factor of
+            // three — and it is what keeps a clip with two shots in it on the shot the app
+            // meant rather than on whichever ball happens to score higher.
+            let z = Double(impactFrame - hintFrame) / hintSigma
+            let prox = 0.35 + 0.65 * exp(-0.5 * z * z)
+            hits.append(ScanHit(impactFrame: impactFrame, launchFrame: dep.launch,
+                                x: c.x, y: c.y, r: c.r, source: c.source,
+                                score: dep.strength * max(0.05, c.prior) * prox,
+                                strength: dep.strength))
+        }
+        hits.sort { $0.score > $1.score }
+        // Two candidates three pixels apart that depart on the same frame are one ball. Trying
+        // both would just spend a second proving it.
+        var dedup: [ScanHit] = []
+        for h in hits {
+            if dedup.contains(where: { abs($0.impactFrame - h.impactFrame) <= f30(3)
+                                    && hypot($0.x - h.x, $0.y - h.y) < 6 * u }) { continue }
+            dedup.append(h)
+        }
+        notes["scanDepartures"] = dedup.count
+        notes["oneOffMsImpactScan"] = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+        if options.verbose {
+            notes["scanCandidateList"] = cands.enumerated().map { (i, c) -> String in
+                let dep = hits.contains { abs($0.x - c.x) < 0.01 && abs($0.y - c.y) < 0.01 }
+                return String(format: "%@%@ (%.0f,%.0f) r%.1f prior %.2f cRef %.0f %@",
+                              c.source, c.inRoi ? "+roi" : "", c.x, c.y, c.r, c.prior, cRefs[i],
+                              dep ? "DEPARTED" : "-")
+            }.joined(separator: " | ")
+            notes["scanHits"] = dedup.prefix(6).map {
+                String(format: "f%d %@ (%.0f,%.0f) score %.3f strength %.2f",
+                       $0.impactFrame, $0.source, $0.x, $0.y, $0.score, $0.strength)
+            }.joined(separator: " | ")
+        }
+        if dedup.isEmpty {
+            notes["impactScan"] = "\(cands.count) static patch(es) found, none of them departed and stayed gone"
+        }
+        return dedup
+    }
+
+    /// THE ENTRY POINT. Runs the impact scan, then the full detector anchored on what the scan
+    /// derived. A clip whose hint was already right pays one extra decode pass over the window;
+    /// a clip whose hint was two seconds out now works at all.
     public static func detect(assetURL: URL, impactTimeMs: Double,
                               options: TracerDetectOptions) -> [String: Any] {
-        let offsets = options.params.impactSearchOffsets
+        let params = options.params
 
-        // BOUND THE SEARCH TO THE CLIP. Every offset must land somewhere the detector
-        // can actually build a background stack and a post-impact window; pushing one
-        // past either end walks the frame maths off the clip and traps at runtime.
-        // Found by this widening: IMG_0594 is 4.47 s, the ladder reaches +-3 s, and the
-        // process died with SIGTRAP. A short clip is the common case for an import, so
-        // this guard is the difference between a rescue and a crash.
-        var durationMs = Double.greatestFiniteMagnitude
-        let probe = AVURLAsset(url: assetURL)
-        let d = CMTimeGetSeconds(probe.duration)
-        if d.isFinite && d > 0 { durationMs = d * 1000.0 }
-        // The detector needs ~1 s of clip before the impact for the background stack and
-        // the address frames (`addrFrames` reaches impact-24 at 30 fps), and ~0.3 s after
-        // it for a departure to be visible at all.
-        let searchLoMs = 1000.0
-        let searchHiMs = max(searchLoMs, durationMs - 300.0)
+        // Probe once. Everything below needs fps and the display size, and the old ladder
+        // re-opened the asset on every one of its seventeen attempts.
+        guard FileManager.default.fileExists(atPath: assetURL.path) else {
+            var n: [String: Any] = [:]
+            return failure(reason: "file not found", notes: &n, fps: 0, width: 0, height: 0, impactFrame: 0)
+        }
+        let asset = AVURLAsset(url: assetURL)
+        let durationSec = CMTimeGetSeconds(asset.duration)
+        guard let track = asset.tracks(withMediaType: .video).first else {
+            var n: [String: Any] = [:]
+            return failure(reason: "no video track", notes: &n, fps: 0, width: 0, height: 0, impactFrame: 0)
+        }
+        let fps = Double(track.nominalFrameRate)
+        guard fps > 1 else {
+            var n: [String: Any] = [:]
+            return failure(reason: "unusable frame rate", notes: &n, fps: 0, width: 0, height: 0, impactFrame: 0)
+        }
+        let displayRect = CGRect(origin: .zero, size: track.naturalSize).applying(track.preferredTransform)
+        let W = Int(abs(displayRect.width).rounded())
+        let H = Int(abs(displayRect.height).rounded())
+        let hintFrame = Int(floor(impactTimeMs / 1000.0 * fps + 1e-6))
 
-        var firstResult: [String: Any]? = nil
-        var attempted = 0
-        for offFrames30Base in offsets {
-            var offFrames30 = offFrames30Base
-            let offMs = Double(offFrames30) * (1000.0 / 30.0)
-            let tryMs = impactTimeMs + offMs
-            // offset 0 always runs: the caller asked about that impact and is owed a
-            // reason about it, even on a clip too short for any search.
-            if offFrames30 != 0 && (tryMs < searchLoMs || tryMs > searchHiMs) { continue }
-            if tryMs < 0 { continue }
-            attempted += 1
-            var r = detectOnce(assetURL: assetURL, impactTimeMs: tryMs, options: options)
-            var dets = (r["detections"] as? [[String: Any]]) ?? []
-            if !dets.isEmpty {
-                // LOCAL REFINEMENT. The coarse ladder steps 8 frames, so the offset that
-                // first succeeds can be a few frames off the real impact and return a
-                // stunted track — measured on IMG_0601 at +500 ms: the coarse hit gave 4
-                // detections where the true anchor gives 44, and the fit needs the frames
-                // far more than it needs the milliseconds. So on a RESCUE (never on the
-                // clean offset-0 path) the two neighbouring half-steps are also tried and
-                // the longest track wins. At most two extra passes, and only for a clip
-                // that had already failed at the impact it was given.
-                if offFrames30 != 0 {
-                    var bestOff = offFrames30
-                    for refine in [offFrames30 - 4, offFrames30 + 4] {
-                        let rMs = impactTimeMs + Double(refine) * (1000.0 / 30.0)
-                        if rMs < searchLoMs || rMs > searchHiMs { continue }
-                        let rr = detectOnce(assetURL: assetURL, impactTimeMs: rMs, options: options)
-                        let rd = (rr["detections"] as? [[String: Any]]) ?? []
-                        if rd.count > dets.count {
-                            r = rr
-                            dets = rd
-                            bestOff = refine
-                        }
-                    }
-                    offFrames30 = bestOff
-                }
-                if offFrames30 != 0 {
-                    var n = (r["notes"] as? [String: Any]) ?? [:]
-                    // The offset is on the row so a field sweep can tell "the detector
-                    // rescued a bad impact" from "the impact was right all along" — and
-                    // so a systematic bias in the app's impact shows up as a pattern.
-                    n["impact_searched"] = "found at \(offFrames30 >= 0 ? "+" : "")\(offFrames30) frames (30fps-equiv) from the given impact"
-                    n["impact_search_attempts"] = attempted
-                    r["notes"] = n
-                }
-                return r
+        var scanNotes: [String: Any] = [:]
+        var hits: [ScanHit] = []
+        if params.scanEnabled && W > 100 && H > 100 {
+            hits = scanForImpact(asset: asset, track: track, fps: fps, W: W, H: H,
+                                 hintFrame: hintFrame, durationSec: durationSec,
+                                 options: options, notes: &scanNotes)
+        } else if !params.scanEnabled {
+            scanNotes["impactScan"] = "disabled by options"
+        }
+
+        /// Stamp both numbers on every row, success or failure, so a field sweep can tell
+        /// "the detector fixed a bad impact" from "the impact was right all along" — and so a
+        /// systematic bias in the app's swing detector shows up as a pattern rather than as a
+        /// scattering of clips that traced nothing.
+        func stamp(_ r: [String: Any], usedFrame: Int?, source: String, tried: Int) -> [String: Any] {
+            var out = r
+            var n = (out["notes"] as? [String: Any]) ?? [:]
+            for (k, v) in scanNotes where n[k] == nil { n[k] = v }
+            n["impactGivenMs"] = Int(impactTimeMs.rounded())
+            n["impactSource"] = source
+            n["impactTriesUsed"] = tried
+            // Omitted rather than null when nothing was derived: `notes` is typed
+            // `Record<string, string | number | boolean>` on the JS side, and the absence of
+            // the key is the same information as a null with none of the type violation.
+            if let f = usedFrame {
+                let ms = Double(f) / fps * 1000.0
+                n["impactDerivedMs"] = Int(ms.rounded())
+                n["impactShiftMs"] = Int((ms - impactTimeMs).rounded())
+            }
+            out["notes"] = n
+            return out
+        }
+
+        var tried = 0
+        var firstResult: [String: Any]?
+        // What the scan DERIVED, whether or not the detector could then use it. Nil when the
+        // scan derived nothing, so the key is absent rather than quietly echoing the hint back
+        // as though it had been confirmed.
+        let derivedFrame: Int? = hits.first?.impactFrame
+        var triedFrames: [Int] = []
+
+        for hit in hits.prefix(max(1, params.scanMaxTries)) {
+            tried += 1
+            triedFrames.append(hit.impactFrame)
+            let r = detectOnce(assetURL: assetURL, impactTimeMs: Double(hit.impactFrame) / fps * 1000.0,
+                               options: options)
+            if !(((r["detections"] as? [[String: Any]]) ?? []).isEmpty) {
+                return stamp(r, usedFrame: hit.impactFrame, source: "scan", tried: tried)
             }
             if firstResult == nil { firstResult = r }
         }
-        // Nothing anywhere in the window. Report the attempt at the GIVEN impact, so the
-        // reason describes what the caller asked about rather than some distant offset.
+
+        // The scan found nothing that departed, or nothing it found survived the full detector.
+        // Ask about the impact the caller actually gave — it is the one the caller is owed a
+        // reason about, and on a clip whose hint was right all along it is free.
+        if params.scanTryGivenLast && !triedFrames.contains(where: { abs($0 - hintFrame) <= 1 }) {
+            tried += 1
+            let r = detectOnce(assetURL: assetURL, impactTimeMs: impactTimeMs, options: options)
+            if !(((r["detections"] as? [[String: Any]]) ?? []).isEmpty) {
+                return stamp(r, usedFrame: hintFrame, source: "given", tried: tried)
+            }
+            if firstResult == nil || hits.isEmpty { firstResult = r }
+        }
+
+        var budgetHit = false
+        // The old brute-force ladder, as a FALLBACK. It is not dead code and it is not off:
+        // measured on the 36 lab clips it emits 19 where the scan alone emits 17, because on
+        // two of those three the scan never saw the ball's departure at all. What the scan buys
+        // is that this is now only reached by a clip that was going to draw nothing — 404
+        // detector passes across the corpus became 61 for the clips the scan can settle. See
+        // docs/tracer-v3/impact-scan.md. Offsets the scan already tried are skipped.
+        if params.scanFallbackLadder {
+            // TIME BUDGET, not a pass count. The gate measured this fallback costing 17-20
+            // passes on a clip that refuses — 496 s, 465 s, 410 s on 4K/60 clips — and 74 % of
+            // the corpus consuming 94 % of all detector time to produce nothing. A pass is
+            // ~3 s at 1080p and ~20 s at 4K, so any fixed number of passes is a different
+            // worst case per format, and it is the WORST case that decides whether a round
+            // finishes processing before Henry loses patience. Budgeting the wall clock
+            // instead bounds it the same way on every clip: the scan still runs in full, the
+            // rescues that fit in the budget are still paid for, and a 4K refusal stops
+            // costing eight minutes. Set `scanFallbackBudgetSec` to 0 for no limit.
+            let fallbackStart = CFAbsoluteTimeGetCurrent()
+            let budget = params.scanFallbackBudgetSec
+            let searchLoMs = 1000.0
+            let durationMs = durationSec.isFinite && durationSec > 0
+                ? durationSec * 1000.0 : Double.greatestFiniteMagnitude
+            let searchHiMs = max(searchLoMs, durationMs - 300.0)
+            for off in params.impactSearchOffsets {
+                let tryMs = impactTimeMs + Double(off) * (1000.0 / 30.0)
+                if tryMs < searchLoMs || tryMs > searchHiMs { continue }
+                let f = Int(floor(tryMs / 1000.0 * fps + 1e-6))
+                // Don't pay twice for an impact the scan already handed to the detector.
+                if triedFrames.contains(where: { abs($0 - f) <= 1 }) { continue }
+                if budget > 0 && CFAbsoluteTimeGetCurrent() - fallbackStart >= budget {
+                    budgetHit = true
+                    break
+                }
+                triedFrames.append(f)
+                tried += 1
+                let r = detectOnce(assetURL: assetURL, impactTimeMs: tryMs, options: options)
+                if !(((r["detections"] as? [[String: Any]]) ?? []).isEmpty) {
+                    return stamp(r, usedFrame: f, source: "offset-ladder", tried: tried)
+                }
+                if firstResult == nil { firstResult = r }
+            }
+        }
+
         var r = firstResult ?? detectOnce(assetURL: assetURL, impactTimeMs: impactTimeMs, options: options)
+        if firstResult == nil { tried += 1 }
         var n = (r["notes"] as? [String: Any]) ?? [:]
-        n["impact_search_attempts"] = attempted
-        n["impact_searched"] = "no track at any offset in the search window"
+        if n["reason"] == nil { n["reason"] = "no departing ball anywhere in the scan window" }
+        // On the row so a field sweep can tell "searched everywhere and found nothing" from
+        // "ran out of time" — they are different problems and only one is fixed by a knob.
+        if budgetHit { n["fallback_budget_hit"] = "stopped after \(params.scanFallbackBudgetSec)s of rescue passes" }
         r["notes"] = n
-        return r
+        return stamp(r, usedFrame: derivedFrame, source: "none", tried: tried)
     }
 
     /// One detection attempt at exactly the impact given. This is the original
@@ -936,9 +1283,9 @@ public enum TracerDetect {
                             det.c2 = hit.cand.c2; det.iso = hit.cand.iso; det.aniso = hit.cand.aniso
                             det.polarity = hit.cand.polarity; det.shift = hit.cand.shift
                             track_.add(det)
-                        } else if Double(k - launch) >= 4 * fr {
+                        } else if Double(k - launch) >= Double(options.firstDetFrames) * fr {
                             track_.alive = false
-                            stopNotes.append("no first detection within 4 frames of launch f\(launch)")
+                            stopNotes.append("no first detection within \(options.firstDetFrames) frames of launch f\(launch)")
                         }
                     }
                 } else {

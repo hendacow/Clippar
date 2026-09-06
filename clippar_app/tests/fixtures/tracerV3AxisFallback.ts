@@ -9,9 +9,9 @@
  * asserts that, so a later "simplification" that merges the fixtures deletes the
  * reproduction rather than quietly weakening it:
  *
- *   1. the PIXEL-ONLY fit is ill-conditioned — sigma(v0)/v0 = 40 % here, against
- *      F4's 10 % bar — and fits to an azimuth of 1.49 deg when the ball actually
- *      flew at 3.0 deg, i.e. it has lost the direction and with it the scale;
+ *   1. the PIXEL-ONLY fit is ill-conditioned — sigma(v0)/v0 = 12 % here, against
+ *      F4's 10 % bar — and fits to an azimuth of 1.25 deg when the ball actually
+ *      flew at 2.0 deg, i.e. it has lost the direction and with it the scale;
  *   2. the JOINT fits are not, because a GPS carry pins the depth (1 %), so
  *      `LadderRun.worstV0RelSigma` — accumulated over the rungs the ladder RAN —
  *      never sees the bad conditioning;
@@ -19,19 +19,31 @@
  *      ill-conditioned fit that no rung measured.
  *
  * The result before FG-3: `gps=null` correctly refuses the distance ("down the
- * line"), and `gps=80` draws the same 33.7 m arc for a 23.8 m shot — **+42 %,
+ * line"), and `gps=80` draws the same 28.7 m arc for a 23.6 m shot — **+21 %,
  * with a number on it**. Supplying a GPS reading the ladder throws away removed
  * F4's protection from the very fit F4 was written for.
- *
- * It also slips both residual gates, which is the gate agent's own point about
- * where these failures live: rms is 7.66 px @1080p, under `MAX_RMS_PX` = 8, and
- * `poor_fit` needs `nPoints >= 10` while this track is 7.
  *
  * THE GEOMETRY is the gate's own camera for its worst FG-3 row (720x1280, 8 deg
  * of pitch, camera 1.30 m up, 70 deg landscape FOV), deliberately sharing no
  * constant with the other three fixtures. The shot is a high, slow one — a
- * 45 deg wedge at 16 m/s — because a steep, short flight over seven 30 fps
+ * 35 deg wedge at 16 m/s — because a steep, short flight over seven 30 fps
  * frames is what makes the pixel-only depth degenerate.
+ *
+ * THE DEFAULT LAUNCH MOVED ON 7 SEP, and the reason is worth reading before
+ * touching it again. It used to be a 45 deg wedge 3.0 deg off the line, and the
+ * header used to say — approvingly — that the fixture "slips both residual
+ * gates: rms is 7.66 px @1080p, under MAX_RMS_PX = 8, and `poor_fit` needs
+ * nPoints >= 10 while this track is 7". `tune` then CLOSED that hole: `poor_fit`
+ * lost its length conjunct, because a real clip walked through it (`IMG_0323`,
+ * a phone on a golf trolley, three blobs at 5.6 px @1080, drawing an arc). The
+ * old default is now refused outright — which is the right answer for a fit that
+ * misses its own detections by 7.66 px and does not converge (`ok: false`) — and
+ * with it refused, FG-3 had no reproduction left. So the launch moved to the
+ * nearest neighbouring geometry that still exhibits all three conditions above
+ * AND converges: 35 deg, 2.0 deg of azimuth, rms 3.37 px @1080p. The mechanism
+ * under test is unchanged; only the launch is. **Do not "restore" the old
+ * numbers — they no longer draw, and the test that reads them would go green by
+ * never reaching its own assertions.**
  *
  * Conventions are `lib/tracerFit.ts`'s, identical to all three siblings: the
  * flight is simulated from z0 = the ball radius, and world z is measured from
@@ -85,7 +97,7 @@ export function addressCue(cam: TracerCamera): { x: number; y: number; r: number
 export interface AxisFallbackOpts {
   v0?: number;
   thetaDeg?: number;
-  /** The TRUE azimuth. The pixel-only fit recovers 1.49 deg from 3.0. */
+  /** The TRUE azimuth. The pixel-only fit recovers 1.25 deg from 2.0. */
   phiDeg?: number;
   rpmBack?: number;
   frames?: number;
@@ -96,8 +108,9 @@ export interface AxisFallbackOpts {
 function flightOf(o: AxisFallbackOpts) {
   return simulate({
     v0: o.v0 ?? 16,
-    thetaDeg: o.thetaDeg ?? 45,
-    phiDeg: o.phiDeg ?? 3,
+    // 35 / 2.0, not 45 / 3.0 — see "THE DEFAULT LAUNCH MOVED" in the header.
+    thetaDeg: o.thetaDeg ?? 35,
+    phiDeg: o.phiDeg ?? 2,
     rpmBack: o.rpmBack ?? 3273,
     rpmSide: 0,
     z0: BALL_RADIUS_M,

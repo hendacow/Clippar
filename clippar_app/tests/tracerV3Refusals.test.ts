@@ -1347,8 +1347,22 @@ test('FG-1: the label-sigma test is reachable on its own, so deleting it is visi
   // third — the weakest predictor and therefore the one most likely to be
   // "simplified" away — by finding a clip where it is the ONLY one that fires.
   // Measured over the sweep it removes 16 of the 63 rows the other two leave.
+  //
+  // The LAUNCH is named here (7 Sep) rather than left to the fixture default. It
+  // used to be the default at `frames: 5`; when the fixture's default launch
+  // moved — see "THE DEFAULT LAUNCH MOVED" in `tracerV3AxisFallback.ts` — that
+  // clip's label sigma came inside the bar and the third test stopped firing at
+  // all, so this test would have passed by never reaching its own assertion.
+  // A 10 m/s, 50 deg lob on the SAME camera puts it back: a 9 m carry with a 2 m
+  // sigma, nothing wrong with the conditioning (sigma_v0 is fine) and nothing
+  // wrong with the residual (0.07 px @1080p). Only the label sigma objects,
+  // which is exactly the state this test exists to keep reachable.
   const r = traceClip(
-    axisFallback.traceInput({ detection: axisFallback.detectionResult(axisFallback.flightDetections({ frames: 5 })) })
+    axisFallback.traceInput({
+      detection: axisFallback.detectionResult(
+        axisFallback.flightDetections({ v0: 10, thetaDeg: 50, frames: 5 })
+      ),
+    })
   );
   assert.ok(r.spec, `the arc must still draw: ${r.reason}`);
   const flag = r.flags.find((f) => f.startsWith('too_uncertain_no_distance('));

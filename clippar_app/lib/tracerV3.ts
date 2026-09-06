@@ -161,10 +161,26 @@ const MIN_FLIGHT_APEX_M = 0.3;
 const MIN_FLIGHT_HANG_S = 0.4;
 /** @1080p: IMG_2329, a topped shot — 3 wrong detections fit 95 m/s at 22 px rms. */
 const MAX_RMS_PX = 8.0;
-/** @1080p over >= POOR_FIT_MIN_K frames: IMG_2331 drew a 2.7 deg bullet under a
- *  climbing ball at 5.3 px over 23 frames. Every good clip is <= 2.8 px. */
+/**
+ * @1080p: IMG_2331 drew a 2.7 deg bullet under a climbing ball at 5.3 px over
+ * 23 frames. Every good clip is <= 2.8 px.
+ *
+ * THE LENGTH CONJUNCT IS GONE (tune, 7 Sep) and that is the whole change. It
+ * used to read `nPoints >= 10 && rms > 4`, and `LOOSE_RMS_PX_1080` below already
+ * names the hole that left — "5-8 frame tracks with an rms between 4 and 8 px,
+ * which draw carrying only a `large_pixel_residual` flag nobody reads" — but it
+ * closed it only for the NUMBER. The bench found the arc walking through the
+ * same hole: `IMG_0323`, a phone strapped to a golf trolley being wheeled down a
+ * fairway, fits three moving blobs at 5.6 px @1080 and DRAWS. Three points and a
+ * 5.6 px residual is not a flight at any track length.
+ *
+ * Measured over the 121-clip bench before it was changed: of the 26 clips that
+ * draw today, the worst rms is `IMG_0323` at 5.59 px @1080 and the next worst is
+ * 3.03 px (a chip); no full swing that draws exceeds 2.58 px. So dropping the
+ * conjunct costs nothing on this corpus and removes the only false draw. It can
+ * only ever turn a draw into a refusal, which is the safe direction.
+ */
 const POOR_FIT_RMS_PX = 4.0;
-const POOR_FIT_MIN_K = 10;
 /** @1080p: a track whose image-y never rises this much above the address is not a flight. */
 const MIN_CLIMB_PX = 25.0;
 /** Detections beyond the fitted window needed for the held-out check ... */
@@ -268,14 +284,16 @@ const LOOSE_V0_REL_SIGMA = 0.05;
 /**
  * (2) The fitted flight misses the detections by more than this, @1080p.
  *
- * `poor_fit` already refuses on rms, but only at `nPoints >= POOR_FIT_MIN_K`
- * (10) and only above `POOR_FIT_RMS_PX` (4) — and the gate showed the failures
- * are concentrated exactly in the hole that leaves: 5-8 frame tracks with an rms
- * between 4 and 8 px, which draw carrying only a `large_pixel_residual` flag
- * nobody reads. So the SAME question is asked with no length conjunct, and at a
- * bar anchored to the fit's own noise model rather than invented: `fitLaunch`
- * defines the label noise as `width / 1080` px per point, so this is two sigma
- * of the error the fit itself assumes.
+ * `poor_fit` refuses on rms above `POOR_FIT_RMS_PX` (4). It used to do so only
+ * at `nPoints >= 10`, and the gate showed the failures were concentrated exactly
+ * in the hole that left: 5-8 frame tracks with an rms between 4 and 8 px, which
+ * drew carrying only a `large_pixel_residual` flag nobody reads. This rule was
+ * the answer for the NUMBER; the conjunct itself is gone as of 7 Sep, so the arc
+ * is covered too. This one stays, at half the bar, because withholding a
+ * distance is cheaper than refusing an arc and can therefore afford to be
+ * stricter: it is anchored to the fit's own noise model rather than invented —
+ * `fitLaunch` defines the label noise as `width / 1080` px per point, so this is
+ * two sigma of the error the fit itself assumes.
  */
 const LOOSE_RMS_PX_1080 = 2.0;
 
@@ -1694,11 +1712,11 @@ function skip(
  *   camera uncalibratable  no pitch, or the address ball is above the horizon
  *   not_a_flight           v0 < 8 m/s, apex < 0.3 m or hang < 0.4 s (a putt)
  *   track_not_ballistic    rms > 8 px @1080p (a topped shot's wrong detections)
- *   poor_fit               rms > 4 px @1080p over >= 10 frames
+ *   poor_fit               rms > 4 px @1080p, at any track length
  *   implausible_flight     a short fit whose apex/hang exceeds the club's maximum
  *   render_spec:*          the flight cannot be expressed as a drawable polyline
  */
-export function traceClip(input: TraceClipInput): TraceClipResult {
+function traceOnce(input: TraceClipInput, assumedPitchOverrideDeg: number | null): TraceClipResult {
   const startedAt = Date.now();
   const knobs = resolveV3Knobs(config.tracer, input.knobs);
   const det = input.detection;
@@ -1822,7 +1840,10 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   if (!havePitch && !pitchAssumed) {
     return skip('no_camera_pitch(CoreMotion sample missing)', flags, meta, startedAt);
   }
-  const pitchForCamera = havePitch ? (input.pitchDownDeg as number) : (assumedPitch as number);
+  const pitchUsedDeg = havePitch
+    ? (input.pitchDownDeg as number)
+    : (assumedPitchOverrideDeg ?? (assumedPitch as number));
+  const pitchForCamera = pitchUsedDeg;
   let camParams: CameraParams;
   try {
     camParams = calibrateFromAddressBall({
@@ -1852,7 +1873,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     );
   }
   if (pitchAssumed) {
-    flags.push(`pitch_assumed(${(assumedPitch as number).toFixed(1)}deg)`);
+    flags.push(`pitch_assumed(${pitchUsedDeg.toFixed(1)}deg)`);
   }
   meta.camera = {
     fPx: camParams.fPx,
@@ -2118,7 +2139,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
       `track_not_ballistic:rms ${usedFit.rmsPx.toFixed(1)} px > ${(MAX_RMS_PX * u).toFixed(0)} px over ` +
         `${usedFit.nPoints} frames (the detections do not lie on a flight; nothing drawn)`,
     ];
-  } else if (usedFit.nPoints >= POOR_FIT_MIN_K && usedFit.rmsPx > POOR_FIT_RMS_PX * u) {
+  } else if (usedFit.rmsPx > POOR_FIT_RMS_PX * u) {
     refusal = [
       'poor_fit',
       `poor_fit:rms ${usedFit.rmsPx.toFixed(1)} px > ${(POOR_FIT_RMS_PX * u).toFixed(0)} px over ` +
@@ -2425,6 +2446,137 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   meta.elapsedMs = Date.now() - startedAt;
   return { decision, reason: meta.reason, flags, spec: built.spec, meta };
 }
+
+// ─── The camera-pitch ladder (tune, 7 Sep) ──────────────────────────────────
+
+/**
+ * Assumed camera pitches to try, degrees down, when the clip carries no
+ * CoreMotion reading. Ordered by distance from the configured prior, so the
+ * FIRST entry is exactly what shipped before this existed and the first rung
+ * that passes is always the one closest to the prior.
+ *
+ * WHY THIS EXISTS. On an import the pitch is a guess, and `chooseModel` already
+ * lets the fit correct it — but `lib/tracerFit.ts` bounds that correction to
+ * `dPitchDeg` +-5 deg and, worse, ranks the multistart basins with `dPitchDeg`
+ * held at 0 (`free1` drops it in stage 1). So the basin is chosen at the guessed
+ * pitch and the nuisance can only polish inside it. When the guess is several
+ * degrees out the optimiser lands in the wrong basin and stays there.
+ *
+ * Measured, not argued. `IMG_3660` (4K60, 43 detections, rms 0.53 px) fits
+ * `apex 0.27 m, hang 1.60 s` at the shipped 4 deg — a driver "rolling along the
+ * ground" — and is refused `not_a_flight`; the SAME detections at 0 deg fit
+ * apex 1.84 m and draw, and at -6 deg apex 8.9 m. The pixel residual is
+ * 0.45-0.54 px at every one of them. The pitch is what changes, and nothing in
+ * the clip measured it.
+ *
+ * THE EXTENT IS FROM THE LAB, THE STEP IS ARBITRARY. `tracer-lab`'s camera
+ * experiment calibrated eight real setups of the same phone clamp and got
+ * -3.0 deg to +6.4 deg (-2.8 to +6.1 restated at this code's f_px, which is 6 %
+ * larger than the lab's). The configured prior of +4 sits near the TOP of that
+ * range, which is why the corpus sweep below is one-sided. The ladder therefore
+ * spans the prior down to -6 in 2 deg steps: 6 rungs covering the measured range
+ * with one step of margin at the bottom.
+ *
+ * FULL-CORPUS SWEEP (121 clips, the app's own impact, one fixed pitch each):
+ * +4 15/51 hits, +2 18/51, 0 19/51, -2 16/51, -4 19/51, -6 19/51. Above +4 it
+ * falls monotonically: +6 13, +8 12, +10 10. It is NOT a clean optimum at any
+ * single value — the wobble is the optimiser changing basins, which is the
+ * thing this ladder exists to stop being a lottery.
+ */
+const ASSUMED_PITCH_LADDER_DELTA_DEG = [0, -2, -4, -6, -8, -10];
+
+/**
+ * How many rungs of the ladder must produce a drawable spec before one is drawn.
+ *
+ * THIS IS A REFUSAL, NOT A RESCUE, and it is what keeps the ladder from being a
+ * way to draw over anything. The camera pitch is unknown across the whole
+ * ladder, so a track that is a flight at ONE isolated camera in that range and
+ * is not a flight at any of its neighbours is a coincidence of the optimiser,
+ * not evidence about the ball. A real flight survives the camera moving inside
+ * its own uncertainty: it reinterprets (a different apex at every rung) but it
+ * keeps fitting.
+ *
+ * Measured on the 121-clip bench, ladder [4, 2, 0, -2, -4, -6], with the
+ * `poor_fit` conjunct above already removed:
+ *   rungs required   full swings drawn   putt/not-a-shot drawn
+ *        1                24 / 51              1  (IMG_0596_2, a putt)
+ *        2                21 / 51              0
+ *        3                18 / 51              0
+ * `IMG_0596_2` is a putt on a green whose 7 detections fit at 3.1 px at exactly
+ * one rung (-4 deg) and at 11.6-22.5 px at the other five. That is the shape
+ * this rule is for. The price is honest and named: `IMG_0578_2` and
+ * `IMG_0598_2` are real full swings that also pass at exactly one rung and are
+ * refused with it.
+ */
+const PITCH_LADDER_MIN_AGREE = 2;
+
+/**
+ * Detections + camera + optional GPS carry -> a render spec, or an honest skip.
+ *
+ * When the clip carries a CoreMotion pitch (or geometry is not allowed to be
+ * unknown) this is exactly `traceOnce` and nothing below runs. When the pitch is
+ * a GUESS, the ladder above runs instead — see its two constants for what it
+ * costs and what it refuses.
+ */
+export function traceClip(input: TraceClipInput): TraceClipResult {
+  if (!isPitchAssumed(input)) return traceOnce(input, null);
+
+  const prior = input.assumedPitchDownDeg as number;
+  const ladder = ASSUMED_PITCH_LADDER_DELTA_DEG.map((d) => prior + d);
+  const results: Array<{ pitch: number; r: TraceClipResult }> = [];
+  let firstDrawn: { pitch: number; r: TraceClipResult } | null = null;
+  let nDrawn = 0;
+  for (let i = 0; i < ladder.length; i++) {
+    const r = traceOnce(input, ladder[i]);
+    results.push({ pitch: ladder[i], r });
+    if (r.spec !== null) {
+      nDrawn++;
+      if (firstDrawn === null) firstDrawn = { pitch: ladder[i], r };
+      if (nDrawn >= PITCH_LADDER_MIN_AGREE) break;
+    }
+    // Nothing left can reach the quorum — stop paying for rungs that cannot
+    // change the answer.
+    if (nDrawn + (ladder.length - 1 - i) < PITCH_LADDER_MIN_AGREE) break;
+  }
+
+  const note = (r: TraceClipResult, used: number, agreed: number) => {
+    r.flags.push(
+      `pitch_ladder(used=${used.toFixed(1)}deg,agreed=${agreed},tried=${results.length}` +
+        `,of=${ladder.length},quorum=${PITCH_LADDER_MIN_AGREE})`
+    );
+    r.meta.flags = r.flags;
+    return r;
+  };
+
+  if (nDrawn >= PITCH_LADDER_MIN_AGREE && firstDrawn !== null) {
+    return note(firstDrawn.r, firstDrawn.pitch, nDrawn);
+  }
+  // Refused. Two different refusals, and a field row has to tell them apart.
+  //
+  // Exactly one rung drew  -> the QUORUM refused it. Show that rung's own
+  //   diagnostics (its fit is the one that was considered and rejected) minus the
+  //   render block, and say which pitch agreed.
+  // Nothing drew anywhere  -> show the PRIOR's rung, so the reason on the row is
+  //   the one the shipped assumption produced rather than whichever rung happened
+  //   to run last.
+  const primary = results[0].r;
+  if (nDrawn === 1 && firstDrawn !== null) {
+    // The one rung that drew is the honest diagnostic here — its fit is what was
+    // considered and rejected — but the ROW must not look like a draw, so the
+    // render block goes with the spec.
+    const shown = firstDrawn.r;
+    shown.meta.decision = 'none';
+    shown.meta.render = undefined;
+    shown.meta.reason =
+      `pitch_unstable:a flight only at an assumed camera pitch of ` +
+      `${firstDrawn.pitch.toFixed(1)} deg and at none of the other ` +
+      `${results.length - 1} tried (${ladder.map((p) => p.toFixed(0)).join(', ')} deg); ` +
+      'the camera angle was never measured, so one agreeing rung is a coincidence, not a flight';
+    return note({ ...shown, decision: 'none', reason: shown.meta.reason, spec: null }, firstDrawn.pitch, nDrawn);
+  }
+  return note(primary, prior, nDrawn);
+}
+
 
 /** Fold a fit into the diagnostic blob. Called on the refusal paths too — a
  *  refusal that records WHY the fit was refused is what a field test reads. */

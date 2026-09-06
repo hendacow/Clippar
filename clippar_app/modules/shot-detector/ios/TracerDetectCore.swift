@@ -106,6 +106,86 @@ public struct TracerParams {
     /// passes over a ~50-frame window, and the ladder returns the moment one succeeds.
     public var impactSearchOffsets = [0, -8, 8, -16, 16, -24, 24, -32, 32, -45, 45,
                                       -60, 60, -75, 75, -90, 90]
+    // ---- IMPACT SCAN (Henry, 6 Sep: "it has a window when it trims of like 2 seconds
+    // so can't you just scan for the ball in that window and extend it out frame by frame").
+    //
+    // The detector is anchored to the impact it is handed at EVERY stage — the background
+    // stack, the address frames, the departure scan and the launch search — so a hint that is
+    // half a second out returns nothing at all.
+    //
+    // And the hint is not that good. The app's PRIMARY estimator for an import is swing-vision
+    // (`visionDetectAndTrim` runs first at both import call sites in `useEditorState.ts`, and
+    // `config.detection.swingVision` is true); `detectAndTrim`'s pose state machine is only
+    // the fallback. Both were compiled and run here over the 36 lab clips, against the labelled
+    // audio impacts:
+    //     swing-vision   median 0.17 s, 24/36 within 0.5 s, worst 5.70 s
+    //     detectAndTrim  median 0.84 s, 13/36 within 0.5 s, worst 4.93 s
+    // The primary is much better and still leaves ONE CLIP IN THREE beyond the half second that
+    // is total failure. The hint is not something to trust; it is something to search around.
+    //
+    // So: find the static ball ONCE at the head of the window, follow its own patch forward
+    // frame by frame, and let the frame where it leaves and never comes back define the impact.
+    /// Master switch. False = the old behaviour (trust the hint, then the offset ladder).
+    public var scanEnabled = true
+    /// Half-width of the window searched around the hint, in ms. Bounded to the clip.
+    public var scanRadiusMs = 3500.0
+    /// The departure must hold for this many 30 fps-equivalent frames after the step.
+    public var scanPersist = 6
+    /// ...and over the whole remaining window it may come back within `departFrac * cRef`
+    /// of the pre-step level on at most this fraction of frames. A ball does not come back.
+    public var scanReturnFrac = 0.12
+    /// Fraction of the pre-step window that may already be disturbed. NOT zero, and the
+    /// reason is measured: on IMG_3629 the ball's own patch reads 223, 223, ..., **98** for a
+    /// single frame at f146 (a waggle putting the club over the ball), then 223 again until
+    /// the real departure at f169. A max-deviation quietness rule threw that ball away.
+    public var scanPreNoiseFrac = 0.2
+    /// How many address candidates the scan carries forward. The address finder already ranks
+    /// them; this only bounds the per-frame work.
+    public var scanMaxCandidates = 24
+    /// How many derived impacts are handed to the full detector before giving up.
+    public var scanMaxTries = 3
+    /// Also try the impact the caller gave as an EXTRA pass after every scan candidate has
+    /// failed. MEASURED AND LEFT OFF: across 36 lab clips and 64 of Henry's own, the impact the
+    /// app gave rescued a clip the scan could not — **zero times** — while costing a full
+    /// detector pass on every clip that exhausted the scan.
+    ///
+    /// Turning it off does NOT stop the given impact being reported on: when the scan finds no
+    /// departing ball at all, `detect` still runs one pass at the impact it was handed, because
+    /// the caller is owed a reason about the impact it asked about. This flag only controls the
+    /// EXTRA pass after the scan already had candidates and they failed.
+    public var scanTryGivenLast = false
+    /// Softness of the preference for a departure near the hint, in 30 fps frames. This is a
+    /// TIE-BREAK, not a gate: it is what keeps a two-shot clip on the shot the app meant.
+    public var scanHintSigmaFrames = 60.0
+    /// Fall back to `impactSearchOffsets` when the scan finds no departing ball, or when every
+    /// derived impact it did find failed.
+    ///
+    /// THE SCAN DOES NOT STRICTLY DOMINATE THE LADDER, and pretending otherwise would be the
+    /// easy lie here. Measured on the 36 lab clips with the app's own hints, same binary:
+    ///
+    ///                        emitted   detector passes   total wall   median wall   max wall
+    ///     ladder only         19/36           404          2 417 s       61.4 s      282 s
+    ///     scan only           17/36            61            671 s        9.3 s      142 s
+    ///
+    /// The scan gains IMG_3640 and loses IMG_3622, IMG_3623 and IMG_3645 — on two of those the
+    /// scan simply did not see the ball's departure (IMG_3622 found six departures, none at the
+    /// f276 the ladder landed on). That is a sensitivity gap in `tracerScanDeparture`, not a
+    /// window problem, and `scanMaxTries` does not fix it.
+    ///
+    /// So this ships ON as a fallback, which is what the brief asked for once the measurement
+    /// came back: the scan runs first and settles it in one pass on the clips it can, and the
+    /// brute force is only paid for by a clip that was going to draw nothing anyway. See
+    /// docs/tracer-v3/impact-scan.md for the measured cost of that combination.
+    public var scanFallbackLadder = true
+
+    /// Wall-clock seconds the brute-force fallback may spend on ONE clip before giving up.
+    /// 0 = unlimited (the pre-budget behaviour). 25 s was chosen against the gate's own
+    /// timings: a 1080p rescue pass is ~3 s, so the offsets that matter are still tried,
+    /// while a 4K refusal stops costing 400-500 s. The scan itself is never budgeted —
+    /// only the fallback, which by construction is reached only by a clip that was going
+    /// to draw nothing.
+    public var scanFallbackBudgetSec = 25.0
+
     public var departScanLo = -4
     public var departScanHi = 6
     public var departPersist = 2
@@ -1638,6 +1718,91 @@ public func tracerDepartureFrame(series: [(k: Int, v: Double)], cRef: Double, pe
         return (series[i].k, pre)
     }
     return nil
+}
+
+/// [impact-scan] The departure test run across a WHOLE scan window, instead of across the ten
+/// frames either side of an impact that was assumed to be right.
+///
+/// It is the same test. The step / persistence / drift rules, `departFrac` and
+/// `departDriftMax` are `tracerDepartureFrame`'s, and the three shapes that must fail there
+/// fail here for the same reasons: a patch already changed before the window, a gradual ramp
+/// with no single-frame step, and a change with nothing left after it to confirm.
+///
+/// Three things differ, and each one only means anything over a long series:
+///
+///  * **The pre-level is local.** Over six seconds the sun moves. A median of the whole prefix
+///    would smear a lighting change into the level the step is measured against.
+///  * **The pre-level must be quiet.** A patch whose own frame-to-frame noise already exceeds
+///    the threshold can produce a "step" anywhere. Requiring the pre-window to be still is what
+///    stops grass, water and a moving crowd generating departures at random.
+///  * **It must not come back.** That is the half of "the ball left" a ten-frame window cannot
+///    test, and over a long window it is the discriminator that matters: a shadow crossing the
+///    disc, a club head passing over it, a foot and a bird all end. A struck ball does not
+///    come back. At most `scanReturnFrac` of the frames after the persistence horizon may
+///    return to within `departFrac * cRef` of the pre-step level.
+///
+/// Returns the BEST departure rather than the first. Over several seconds the first qualifying
+/// step is often the club entering the frame; the ball's own step is larger and cleaner, and
+/// taking the first one anchors the detector one swing-length early.
+public func tracerScanDeparture(series: [(k: Int, v: Double)], cRef: Double,
+                                persist: Int, params: TracerParams)
+    -> (launch: Int, preLevel: Double, strength: Double)? {
+    let vals = series.map { $0.v }
+    let n = vals.count
+    if n < persist + 3 { return nil }
+    let need = params.departFrac * cRef
+    if !(need > 0) || !need.isFinite { return nil }
+    // Local pre-window: long enough for a stable median, short enough not to span a lighting
+    // change. Four times the persistence horizon, which at the defaults is ~0.8 s.
+    let preN = max(4, 4 * persist)
+    var best: (launch: Int, preLevel: Double, strength: Double)?
+    var bestStrength = 0.0
+
+    for i in 1..<n {
+        // Nothing left to confirm the change with — the tail case `tracerDepartureFrame`
+        // already refuses.
+        if n - i <= persist { break }
+        let preLo = max(0, i - preN)
+        if i - preLo < 3 { continue }
+        let pre = tracerMedian(Array(vals[preLo..<i]))
+        let step = abs(vals[i] - vals[i - 1])
+        if step < need { continue }
+        // Quiet pre-window: the patch must have been still before it moved. Counted, not
+        // maxed — a golfer waggles, and one frame of club over the ball is not a reason to
+        // throw the ball away (IMG_3629 f146: 223 -> 98 -> 223, the real departure is f169).
+        var noisy = 0
+        for j in preLo..<i where abs(vals[j] - pre) >= need { noisy += 1 }
+        if Double(noisy) > params.scanPreNoiseFrac * Double(i - preLo) { continue }
+
+        let hi = min(n, i + persist + 1)
+        var persistent = true
+        var drift = 0.0
+        var depth = Double.greatestFiniteMagnitude
+        for j in i..<hi {
+            let dv = abs(vals[j] - pre)
+            if dv < need { persistent = false; break }
+            depth = min(depth, dv)
+            drift = max(drift, abs(vals[j] - vals[i]))
+        }
+        if !persistent { continue }
+        if drift > params.departDriftMax * step { continue }
+
+        // It must not come back.
+        var returned = 0, tail = 0
+        for j in hi..<n {
+            tail += 1
+            if abs(vals[j] - pre) < need { returned += 1 }
+        }
+        let returnRate = tail > 0 ? Double(returned) / Double(tail) : 0.0
+        if returnRate > params.scanReturnFrac { continue }
+
+        let strength = min(2.0, step / cRef) * min(2.0, depth / need) * (1.0 - returnRate)
+        if strength > bestStrength {
+            bestStrength = strength
+            best = (series[i].k, pre, strength)
+        }
+    }
+    return best
 }
 
 /// One address candidate carried through validation.
