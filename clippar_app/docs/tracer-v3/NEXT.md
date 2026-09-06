@@ -83,12 +83,12 @@ Henry's instruction, which is the design being implemented: *"it has a window wh
 like 2 seconds so can't you just scan for the ball in that window and extend it out frame by
 frame"* — derive the impact from the video instead of trusting the hint.
 
-- [ ] `bench` — repeatable measurement over ~180 clips (his ~64 + 84 unseen + 36 lab) under
+- [x] `bench` — repeatable measurement over ~180 clips (his ~64 + 84 unseen + 36 lab) under
       APP conditions (imported: no pitch, no lens, no GPS, app's own impact)
-- [ ] `impact-scan` — scan the window for a static ball that departs; that frame is the impact
-- [ ] `tune` — work down the ranked failure reasons against the bench
-- [ ] `verify` — independent re-measure, refusals still hold, no crashes, the honest number
-- [ ] Rebuild, verify the IPA, send Henry the link
+- [x] `impact-scan` — scan the window for a static ball that departs; that frame is the impact
+- [x] `tune` — work down the ranked failure reasons against the bench
+- [x] `verify` — independent re-measure, refusals still hold, no crashes, the honest number
+- [x] Rebuild, verify the IPA, send Henry the link — build e02d6018, commit 1695c33
 
 Landed already this round: the fit may now solve for a GUESSED camera angle (IMG_0601 rms 13.8
 -> 2.8 px, refused -> draws); the impact search is bounded so a 4.5 s import cannot crash it
@@ -96,3 +96,27 @@ Landed already this round: the fit may now solve for a GUESSED camera angle (IMG
 
 **Henry asked for a guarantee it will work on every shot. It cannot be given, and the verify
 agent is instructed to report the measured rate rather than a rounded one.**
+
+
+## Round 2 result (7 Sep 09:00) — build e02d6018 sent
+
+Henry's window-scan design works: at every impact offset from -3 s to +3 s the detector
+recovers the true instant to a median ~20 ms, in one pass. The failure that started the round
+(half a second of impact error -> zero detections) is closed.
+
+**Measured under app conditions, 121-clip corpus, the app's own impact estimator compiled and
+run here:** full swings drawing 15/51 -> **21/51 (41.2%)**; Henry's own clips 10/25 (40%);
+unseen 2/11 (18.2%); lab 9/15 (60%); ceiling with a perfect impact 17/26 (65.4%).
+False draws **1/49 -> 0/49**. 0 of 32 draws state a distance. No crashes on 121 clips.
+Worst-case refusal time 410 s -> 83 s after the wall-clock budget.
+
+**The single strongest lever, and it is Henry's to pull: capture format.**
+4K/60 62.5% vs 1080p/30 31.2% on his own full swings. It roughly doubles.
+
+**Next round, in priority order:**
+1. `detector_found_no_address_ball` on 18 of 51 full swings, 16 of them 1080p/30. This is now
+   the whole game and it is an address-finder sensitivity problem, not an impact problem.
+2. The renderer has still never run. "Draws" means a valid spec, not a painted arc.
+3. IMG_0601 truncates to 4 detections under the scan where the offset ladder got 44 — not
+   systematic (IMG_3652 still gets 45) but it is a quality loss worth understanding.
+4. `IMG_0596_2`, a putt, is one pitch-ladder quorum rung from drawing. Do not lower that quorum.
