@@ -1497,10 +1497,18 @@ export function useEditorState(roundId: string | undefined) {
             await persistSkipV3(rowSkip('no-impact'));
             continue;
           }
-          if (row.camera_pitch_deg === null) {
+          if (row.camera_pitch_deg === null && !config.tracer.v3.traceUnknownGeometry) {
             // Without CoreMotion's pitch the camera cannot be calibrated, and a
-            // guessed pitch maps 1:1 into launch angle. Old clips (recorded
-            // before tracer capture existed) land here permanently, correctly.
+            // guessed pitch maps 1:1 into launch angle.
+            //
+            // This USED to be a permanent skip for every clip recorded before
+            // tracer capture existed, which is every clip already on a phone
+            // and every import from Photos — the pitch is only sampled while
+            // the tracer is on. Under `traceUnknownGeometry` the ladder takes
+            // them instead on an assumed pitch and can never state a distance
+            // or an apex (`geometry_unknown`), so the guessed pitch reaches the
+            // arc and nothing else. Without this the ladder's own allowance was
+            // unreachable from the batch: the clip died here first.
             await persistSkipV3(rowSkip('no-camera-pitch'));
             continue;
           }

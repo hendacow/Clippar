@@ -569,3 +569,26 @@ test('the V3 force-trace bypass is never persisted, so opening the screen cannot
   // finding was about the V3 one.
   assert.match(code, /getSetting\(SETTING_DEBUG_FORCE_TRACE\)/);
 });
+
+// The batch's own pitch gate must not defeat the ladder's import allowance.
+// Found 6 Sep by reading the batch after the ladder change shipped: every clip
+// already on a phone has camera_pitch_deg NULL (pitch is only sampled while the
+// tracer is on), and the batch was skipping them BEFORE traceClip ever ran — so
+// the allowance was unreachable from the only place that calls it.
+test('the batch lets a pitchless clip reach the ladder when the import allowance is on', () => {
+  const src = read('hooks/useEditorState.ts');
+  const gate = /if \(row\.camera_pitch_deg === null([^)]*)\)/.exec(src);
+  assert.ok(gate, 'the batch must still have a pitch gate');
+  assert.match(
+    gate[1],
+    /traceUnknownGeometry/,
+    'the pitch gate must yield to config.tracer.v3.traceUnknownGeometry, or every ' +
+      'imported and pre-tracer clip dies before traceClip and the allowance is dead code'
+  );
+});
+
+test('the batch passes the import allowance and the assumed pitch to the ladder', () => {
+  const src = read('hooks/useEditorState.ts');
+  assert.match(src, /allowUnknownGeometry:\s*config\.tracer\.v3\.traceUnknownGeometry/);
+  assert.match(src, /assumedPitchDownDeg:\s*config\.tracer\.v3\.assumedPitchDownDeg/);
+});
