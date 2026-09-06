@@ -1474,7 +1474,7 @@ export function useEditorState(roundId: string | undefined) {
             nDetections: 0,
             selection: {
               mode: 'none', k: 0, throughApex: false, climbPx: null, frameRange: null,
-              kImpFit: null, impactSlackFrames: 0,
+              kImpFit: null, impactSlackFrames: 0, nNonFinite: 0,
             },
             ladder: [],
             detectorNotes: {},

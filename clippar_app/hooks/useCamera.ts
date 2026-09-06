@@ -594,7 +594,9 @@ export function useCamera({
         // that turning the engine back to 'v1' restores v1's inputs exactly —
         // v1's pairing gates read gps_accuracy_m, and effAccM is a different
         // number from the one-shot fix's accuracy radius. With the tracer off
-        // this whole block is skipped and the columns stay NULL.
+        // this whole block is skipped and the GPS columns stay NULL. (`capture_lens`
+        // and `capture_zoom` are NOT among them — they are bound below, outside
+        // this gate and deliberately so: see `constants/config.ts` item 3.)
         const tracerV3Gps = config.tracer.enabled && config.tracer.engine === 'v3';
         // Taken at the STOP PRESS, not read here: this line runs inside the
         // 5-10 s finalize window, where a tap could still change it (NEW-2).

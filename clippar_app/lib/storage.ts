@@ -162,10 +162,25 @@ async function migrateEditorColumns() {
     // pinch is deliberately not blocked mid-clip, so a zoom applied and
     // released still rescaled the frames the detector reads.
     //
-    // NULL on every row written before this, and on every tracer-disabled
-    // build. The ladder treats NULL as "unknown lens" and SKIPS, which is the
-    // point — a skip costs a trace, a wrong distance stated confidently is the
-    // worst thing this feature can do.
+    // NULL on every row written BEFORE this migration, and on any row whose
+    // caller did not supply the optics. NOT null on a tracer-disabled build:
+    // `app/(tabs)/record.tsx` supplies `getCaptureOptics` unconditionally and
+    // `hooks/useCamera.ts` binds both columns OUTSIDE the `if (tracerV3Gps)`
+    // block, deliberately — a clip saved without them is one the V3 ladder must
+    // refuse forever, so gating them behind the flag would silently poison
+    // every clip recorded before it was flipped. `constants/config.ts` item 3
+    // is the canonical statement of this and it says the same thing.
+    //
+    // FG-5 (docs/tracer-v3/final-gate.md). This comment said "NULL on every row
+    // written before this, AND ON EVERY TRACER-DISABLED BUILD" until 6 Sep — the
+    // exact claim `constants/config.ts` had already corrected twice (gate NEW-3,
+    // then GATE-3), left standing here so the two files disagreed about the same
+    // fact for a THIRD round. The disagreement is now what fails a test
+    // (`tests/tracerV3Wiring.test.ts`), not what the next gate has to find.
+    //
+    // The ladder treats NULL as "unknown lens" and SKIPS, which is the point —
+    // a skip costs a trace, a wrong distance stated confidently is the worst
+    // thing this feature can do.
     'ALTER TABLE local_clips ADD COLUMN capture_lens TEXT',
     'ALTER TABLE local_clips ADD COLUMN capture_zoom REAL',
     // Reel staleness flag — set to 1 whenever a clip in a round is edited

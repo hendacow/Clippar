@@ -836,3 +836,465 @@ For the same reason the §3c reproduction sweep asserts a **20 %** bar rather th
 - **`GolfBallDetector.mlpackage` is still on disk and still not in git** (review F3,
   unchanged). One `git add` by the seat, and without it the dev build measures a pipeline
   nobody built.
+
+---
+
+# fixes, round 4 — the final gate's five findings, applied
+
+**Agent:** `fix-fg`, 6 Sep 2026. **Branch:** `feat/tracer-v3`.
+**Input:** `docs/tracer-v3/final-gate.md` read in full, then this file's rounds 1-3.
+Reference for every algorithm: `~/projects/clippar/tracer-lab`.
+
+**Gate:** `npm run verify` — **tsc clean, 860 tests, 0 failures, 0 skipped, 0 todo, exit 0.**
+It arrived at 847. **+13 tests, none deleted, weakened, skipped or parked.**
+`grep -rnE "\.skip\(|\.todo\(|\.only\(|xit\(" tests/` exits 1. 62 test files, unchanged.
+
+| file | +tests |
+|---|---|
+| `tests/tracerV3Refusals.test.ts` | 36 → 48 |
+| `tests/tracerV3Wiring.test.ts` | 33 → 34 |
+| `tests/tracerFit.test.ts` | unchanged in count; **one existing test rewritten to the corrected contract and given four new assertions** (FG-2, below) |
+
+Two new fixtures, each with an anti-merge pin asserting that no sibling reproduces it:
+**`tests/fixtures/tracerV3AxisFallback.ts`** (FG-3) and
+**`tests/fixtures/tracerV3DroppedFrames.ts`** (FG-1).
+
+**I ran no `git` command and no `npm install`.**
+
+---
+
+## The headline, measured on ONE sweep run twice
+
+58 500 `traceClip` calls — 4 500 geometries × 13 GPS readings, six cameras of my own sharing
+no constant with any committed fixture, one seeded PRNG per geometry — run once against the
+code as round 3 left it and once against the code as it now stands. Not simulated from
+exposed diagnostics; the same generator, both times, 0 calls threw either time.
+
+| | before (round 3) | after (round 4) |
+|---|---|---|
+| clips that draw an arc | 22 186 | **22 481** (+295) |
+| … with a NUMBER on the pill | 16 844 | **12 398** (−26.4 %) |
+| … "no distance" | 4 683 | 9 375 |
+| … "down the line" | 659 | 708 |
+| **numbers more than 25 % from truth** | **1 393 (8.27 %)** | **52 (0.42 %)** |
+| numbers more than 15 % from truth | 2 534 | 505 |
+| **WORST number drawn** | **+484 %** | **+49 %** |
+| correct numbers (≤ 10 % out) | 13 019 | 11 263 (−13.5 %) |
+| GPS-backed numbers > 25 % out | 174 | **16** |
+| numbers stated on a CORRECT GPS reading | 1 065 | 844 (−21 %) |
+| **realistic capture** (≥ 1080 px, 30/60 fps): numbers | 5 485 | 4 100 |
+| **realistic capture: > 25 % out** | **398 (7.26 %)** | **11 (0.27 %)** |
+
+**The sentence for Henry:** *about one in four clips that used to show a distance now shows
+the arc with no number on it; in exchange the chance that a number it does show is more than
+a quarter wrong drops from about 1 in 14 to about 1 in 370.*
+
+**The arc count went UP, not down** (+295): FG-1(c) rescues clips that used to be refused
+outright because the fallback drew a poor fit that the physics gate then threw away.
+
+**What is left.** 52 rows on **18 distinct geometries**, worst **+49 %**, 16 of them
+GPS-backed. They are not a class — the worst is one geometry (a 12-point track at rms 1.0 px
+with sigma(v0)/v0 = 2 % that is nonetheless 49 % wrong) and no predictor I could find
+separates it from the 11 263 correct ones without costing several times as many of them.
+**It is 1 in 370 of the numbers still stated, and it is not zero.** §FG-1(a) has the sweep.
+
+---
+
+## FG-1 — HIGH, blocking · the pill stated a distance at a 5-10 m step whatever its own sigma
+
+**Reproduced first, on a new fixture, before touching a line.** The gate's own camera and
+launch family — 1284×2778 at 60 fps, flat 8.8° launch, dropped frames (every second one),
+detections starting 3 frames after impact, **no GPS anywhere near it**:
+
+```
+truth carry 65.4 m     fitted carry 280.7 m     +329 %
+LABEL "280 m" / "apex 33 m · no GPS"
+      the fit's own sigma on that carry is 110.9 m; the rounding step is 10 m
+```
+
+The gate's worst was +194 % on a 62 m shot; the family reproduces harder than the row it
+quoted, which is what the gate warned would happen — it says plainly that its CSV rounds
+geometry to 2 dp and that an ill-conditioned clip is chaotic, so **nothing here is a re-typed
+row.** `tests/fixtures/tracerV3DroppedFrames.ts` generates it, and a test asserts that all
+four sibling fixtures recover their own flight to within 15 % so they cannot be mistaken for
+reproductions.
+
+### (a) The rule, and the sweep that chose it
+
+**The gate's own proposal does not work, and I measured that rather than asserting it.**
+Withholding on `sigma > f × carry`, over all 16 495 numbers the code drew before this round's
+label change:
+
+| rule | withheld | > 25 % caught | correct (≤10 %) lost | remaining > 25 % | worst kept |
+|---|---|---|---|---|---|
+| `sigma > 0.15 × carry` | 46.4 % | 1 091 / 1 319 | 39.2 % | 250 | 71 % |
+| `sigma > 0.20 × carry` | 20.2 % | 834 / 1 319 | 12.8 % | **485** | 99 % |
+| `sigma > 0.25 × carry` | 7.7 % | 652 / 1 319 | 2.1 % | 689 | 111 % |
+| `sigma > 0.30 × carry` | 4.2 % | 544 / 1 319 | 0.3 % | 797 | 111 % |
+
+**Because the failures are CONFIDENTLY wrong** — a tight formal sigma with a large error —
+which is exactly the disease review F4 was invented for. So I swept every other quantity the
+fit exposes:
+
+| predictor | withheld | caught | correct lost | remaining | worst kept |
+|---|---|---|---|---|---|
+| **`sigma(v0)/v0` of the DRAWN fit > 5 %** | 18.2 % | **1 219 / 1 319** | **7.1 %** | 122 | 49 % |
+| `sigma(v0)/v0` > 8 % | 12.2 % | 1 124 | 2.9 % | 217 | 57 % |
+| `sigma(v0)/v0` > 10 % (F4's own bar) | 9.9 % | 1 059 | 1.5 % | 282 | 59 % |
+| **rms > 2 px @1080p** | 15.1 % | 1 036 | 5.1 % | 305 | 120 % |
+| rms > 4 px @1080p (`POOR_FIT_RMS_PX`) | 5.0 % | 519 | 0.7 % | 822 | 232 % |
+| `sigma(apex)/apex > 0.25` | 27.4 % | 985 | 22.0 % | 356 | 196 % |
+| spread of carries across ladder rungs > 0.2 × carry | 17.3 % | 418 | 14.0 % | 923 | 484 % |
+| K < 8 points | 28.7 % | 754 | 25.0 % | 587 | 196 % |
+| **the track did not reach the image apex** | **99.4 %** | **1 319 / 1 319** | **99.5 %** | **0** | **10 %** |
+
+That last row is worth reading twice and it is not a proposal. **Every single wrong number in
+the sweep came from a track that stopped before the apex, and among the 0.6 % that did reach
+it nothing was more than 10 % out.** Depth is what the carry rides on and the descent is what
+resolves depth. It is unusable as a rule — it withholds essentially everything, because
+`selectDetections` deliberately uses only the first ~15 (30 fps-equivalent) frames unless the
+track goes through the apex — but it is the strongest single fact in this sweep and it is why
+the withheld pill says *"not enough of the flight"* rather than confessing to a sigma.
+
+**The rule I shipped is three tests, any one of which withholds the number:**
+
+| | | anchored to |
+|---|---|---|
+| 1 | `sigma(v0)/v0` of the DRAWN fit ≥ **5 %** | review F4's own quantity, with F4's **azimuth conjunct removed** |
+| 2 | rms > **2 px @1080p** | `poor_fit`'s own question with its **`nPoints >= 10` conjunct removed**; 2 px is twice the per-point label noise `fitLaunch` itself assumes (`width/1080`) |
+| 3 | label sigma > **25 % of the drawn carry** | the vocabulary rule, relative. A backstop, not the rule |
+
+Each is an existing gate of this ladder with the conjunct that was blocking it taken out —
+the same move GATE-1 made on `AS_SCALE_FRAC`, for the same reason: *a threshold is a line the
+failure does not respect.* The gate's own analysis says where test 2 comes from: `poor_fit`
+requires `nPoints >= POOR_FIT_MIN_K = 10`, so a 5-8 frame track at rms 4-8 px draws carrying
+only a `large_pixel_residual` flag nobody reads.
+
+**The frontier, so the choice is auditable and not just asserted:**
+
+| rule | withheld | caught | correct lost | remaining (rate) | worst kept | numbers kept on a CORRECT GPS |
+|---|---|---|---|---|---|---|
+| test 1 alone, at F4's 10 % | 16.2 % | 1 138 | 5.5 % | 181 (1.31 %) | 57 % | 95 % |
+| test 1 alone, at 5 % | 18.2 % | 1 219 | 7.1 % | 122 (0.90 %) | 49 % | 91 % |
+| 1 or 2 | 25.7 % | 1 263 | 13.9 % | 56 (0.46 %) | 49 % | 87 % |
+| 1 or 3 | 25.7 % | 1 256 | 13.6 % | 63 (0.51 %) | 49 % | 87 % |
+| **1 or 2 or 3 — SHIPPED** | **24.7 %** | **1 266** | **12.4 %** | **53 (0.43 %)** | **49 %** | **87 %** |
+| 1 (at 4 %) or 2 or 3 | 28.1 % | 1 272 | 15.8 % | 47 (0.40 %) | 49 % | 83 % |
+| 1 or 2 or `sigma > 20 %` | 36.1 % | 1 290 | 23.3 % | 29 (0.28 %) | 49 % | 78 % |
+
+Everything tighter than the shipped rule buys single-digit numbers of wrong rows for whole
+percentage points of correct ones; everything looser leaves a tail with a worse worst case.
+
+**A latent finding closed as a side effect, and I checked rather than assuming it.** Review F7
+/ gate GATE-2 is the `prior` rung — K < 3 with a GPS carry — which the final gate measured at
+**701 of 993 of its numbers more than 25 % from truth, worst +66 % GPS-backed**, held off the
+product only by `detectMinTrackEmit >= 3` and the one test that machine-checks it. I re-ran it:
+**2 880 `prior`-rung calls, 1 and 2 detections, every GPS reading in the ladder — 0 numbers
+drawn.** The rung now draws a direction and never a distance, so the config assertion is no
+longer the only thing standing between that rung and a wrong number. It is still the thing
+keeping the rung unreachable and should stay.
+
+**One door closed after the sweep, which changes no number in it.** `v0RelSigma` answers 0
+for a fit that reports no formal sigma on `v0` — right for F4, where an unmeasurable rung must
+not be able to trigger a refusal on its own, and wrong for a number about to be stated. Test 1
+now treats that absence as its own reason to withhold (`sigma_v0=unknown`). **It did not arise
+once in 58 500 calls** — every drawn fit reported a finite sigma(v0) — so it is a closed door
+rather than a measured case, and the tables above are unaffected.
+
+**One deliberate refinement, found by a test rather than by the sweep.** Test 1 reads the
+conditioning of the **DRAWN** fit only, not `max(drawn, worst-rung)`. With the ladder term in
+it the SAME drawn arc kept its number at `gps=60` and lost it at `gps=40`, purely because a
+different rung had run — and the ladder term belongs to F4, which asks about the CLIP's
+geometry, where a rejected rung is evidence. Drawn-only is also strictly cheaper: 24.7 %
+withheld against 27.9 %, and 12.4 % of correct numbers lost against 15.4 %, for the same
+residual.
+
+**What I did NOT do:** apply the vocabulary rule literally. `sigma <= COARSEST_LABEL_STEP_M`
+on every number withholds **96 % of them and 97 % of the correct ones**, so 25 % is a measured
+product bar and not something that falls out of the rounding steps. Saying so is more honest
+than dressing it up.
+
+### (b) The wording when the distance is withheld
+
+**`"no distance" / "not enough of the flight"`**, and it reuses `buildLabel`'s existing
+`noDistance` argument — the same path `axis_degenerate` and `carry_as_scale`/`carry_tension`
+already take. There is no parallel path; the arc is untouched and still drawn.
+
+The wording is the sweep's own strongest finding turned into advice. The two existing pills
+name a cause (*"down the line"*, *"GPS unchecked"*) and the first of them is **actionable** —
+it tells the golfer to move. So does this one: the carry's uncertainty is dominated by depth,
+depth is resolved by seeing the ball descend, and 100 % of the wrong numbers in the sweep came
+from tracks that ended before the apex. It tells them the one thing they can change — frame
+more of the shot — instead of confessing to a quantity they cannot act on.
+
+### (c) `pixel_only_fallback` renders the best pixel-only fit in the ladder — FIXED, not deferred
+
+Filed as out of scope by rounds 2 and 3. It is `pickPixelOnly` in `lib/tracerV3.ts` now.
+
+**The rule has no threshold in it:** among the pixel-only companions the ladder produced, take
+the one with the lowest rms that the fitter calls `ok`; ties go to the incumbent, so it can
+only move the drawn arc when it has a measured reason to. A companion is not its rung — a rung
+is rejected for what its JOINT fit did, and its companion never saw the carry — which is
+review F1(b)'s principle pointed the other way.
+
+**Measured on its own, before the label rule went in** (same 58 500 calls):
+
+| | drawn-rung companion | best of ladder |
+|---|---|---|
+| numbers drawn | 16 208 | **16 495** (+287) |
+| of those > 25 % out | 1 341 | **1 319** |
+| correct numbers | 12 585 | **12 871** (+286) |
+| `decision = fit` with the carry rejected: > 25 % out | 219 / 300 (73.0 %) | 200 / 306 (65.4 %) |
+
+**Modest, and I am not going to inflate it.** It is a net gain on every axis — more clips
+draw, fewer numbers are wrong, no clip loses one — but it is not the large win the gate hoped
+for, because on many clips the ladder runs a single rung and there is nothing to choose
+between. The 65 % of that one path that is still wrong is handled by (a), which withholds all
+of it: after the label rule that row does not appear in the failure table at all.
+
+**Tests:** the reproduction fixture and the anti-merge pin; the withheld pill and its exact
+wording; that turning `labelRounding` off does not buy the number back (this is a rule about
+whether a distance may be STATED); that test 3 is reachable **alone** on
+`tracerV3AxisFallback` at 5 frames, so deleting the weakest of the three is visible rather
+than silent; the cost control across all twelve clean geometries both with and without a GPS
+carry; and, for (c), that the drawn fit IS the pick and the pick is strictly better than the
+incumbent.
+
+---
+
+## FG-2 — HIGH · `carry_untested` was a FLAG and not a STATUS, so the allowlist never saw it
+
+`lib/tracerFit.ts`. When the pixel-only companion has a finite carry but an unusable **sigma**,
+F1(a) substitutes `sc = 0` so the protective test still runs — right, and unchanged. But with
+`sc = 0` the two denominators differ by nothing:
+
+```ts
+const denom          = Math.sqrt(sigmaTest ** 2 + sc ** 2 + sigPxSys ** 2);
+const denomNoPxSigma = Math.sqrt(sigmaTest ** 2 +            sigPxSys ** 2);
+```
+
+so `z === zNoPixelSigma` exactly, **GATE-1's whole addition is a no-op on those rows**, and
+the verdict came back `carry_consistent` — which `lib/tracerV3.ts`'s allowlist reads as "the
+pixels confirmed the GPS". They did not; the one test that could be formed did not object.
+The gate measured it on **13.8 % of GPS-backed numbers**, `z === zNoPixelSigma` on 100 % of
+them, and its own worst GPS-backed row (+67.6 %) among them.
+
+**The fix is one branch and it takes nothing else with it.** `carry_as_scale` cannot pre-empt
+it (`rel = sc / cPx` is 0 when `sc` is 0, so `asScale` is false by construction here) and the
+two protective verdicts above still win, so the ONLY outcome that changes is
+`carry_consistent → carry_untested`. The flag string is unchanged, so anything filtering field
+rows on `carry_untested(no_usable_pixel_only_carry_sigma)` keeps matching.
+
+**Tests, and one of them is a rewrite I am naming rather than burying.**
+`tests/tracerFit.test.ts`'s F1 test asserted `carry_consistent` on this exact case — that was
+round 1's answer and FG-2 shows it went one step too far. It now asserts `carry_untested`,
+**and gains four assertions**: that the test still RAN (`carryZ !== null`, F1's property,
+untouched), that the reading genuinely agrees (`|z| <= 2`, the precondition), that
+`carryZNoPixelSigma === carryZ` exactly (the mechanism, so a later change that makes the sigma
+usable fails here rather than drifting), and the unchanged half — a carry that cannot be true
+still comes back `carry_inconsistent`. It runs on a **real clip**, `IMG_3631`, not a fixture.
+The product-level half is on `tracerV3FlatTension` at 6 frames / 30 fps, with a control
+asserting a clip whose companion sigma IS usable still gets its GPS-backed number.
+
+**The cost, measured on the same 58 500 calls.** `carry_consistent` went from **7 222 to
+6 190** and `carry_untested` from **0 to 1 045**: **1 032 clips, 14.3 % of the verdicts that
+used to license a GPS-backed number**, against the gate's independently measured 13.8 %. Every
+one of them now goes down the honest-sigma path, and because a missing companion sigma is
+treated as unknown-and-therefore-unbounded (round 3's rule, unchanged), that is a withheld
+distance rather than a widened step.
+
+---
+
+## FG-3 — MED-HIGH · the axis-degenerate refusal was lost on `pixel_only_fallback`
+
+`worstV0RelSigma` is accumulated over the rungs the ladder RAN. With a GPS carry supplied
+those rungs are the JOINT fits, which the carry keeps well conditioned — so the worst v0 sigma
+never gets large. The fit then DRAWN on the fallback is the pixel-only companion, precisely
+the ill-conditioned one F4 exists to catch, and one no rung of that ladder measured.
+
+**Reproduced on a new fixture** (`tests/fixtures/tracerV3AxisFallback.ts`, the gate's own
+camera: 720×1280 at 30 fps, 8° pitch, camera 1.30 m, 70° FOV, a 45° wedge at 16 m/s):
+
+```
+truth carry 23.8 m
+gps=null  dec=fit                 "down the line" / "no distance"   <- F4 fires
+          conditioning: worst 40 % / drawn 40 %   (every rung IS a pixel-only fit)
+gps=80    dec=pixel_only_fallback "30 m" / "apex 8 m · no GPS"      +42 %
+          conditioning: worst  1 % / drawn 40 %   <- the ladder never measured the drawn fit
+```
+
+Same clip, same drawn fit (33.7 m, azimuth fitted at 1.49° when the ball flew at 3.0°), same
+error. The only difference is whether a GPS carry was supplied and then thrown away. It also
+slips both residual gates, which is the gate's point about where these live: rms 7.66 px
+@1080p, under `MAX_RMS_PX` = 8, and `poor_fit` needs `nPoints >= 10` while the track is 7.
+
+**Fix:** measure the conditioning of the fit that is DRAWN as well as the ladder's worst rung,
+and take the larger. Both terms are load-bearing and neither replaces the other — the ladder
+term is F4's original case, where the drawn fit is the tight spin-bound rescue and only a
+rejected rung knows the geometry was bad; the drawn term is FG-3's, where the drawn fit is not
+a rung at all. When the drawn fit IS a rung the max is a no-op.
+
+**Two smaller instances of the same shape, fixed in passing and named here:** the
+implausible-flight refit runs its own ladder and its `worstV0RelSigma` was discarded with it,
+and the flag now reports both terms
+(`axis_degenerate(phi=…,worst_sigma_v0=…,drawn_sigma_v0=…)`) so a field row can tell F4's case
+from FG-3's. `meta.conditioning` carries both numbers on every drawn clip, because a flag that
+only appears when it fires tells a field test nothing about the clips where it nearly did.
+
+**Cost, measured:** `down the line` went from 659 to 708 across 58 500 calls — **49 more
+refusals in 22 481 drawn clips.** It has a test of its own asserting that a 12-frame track 4°
+off the line with a rejected carry keeps its number.
+
+---
+
+## FG-4 — MEDIUM, latent · a non-finite detection was dropped by the fitter but counted by the ladder
+
+`lib/tracerFit.ts:1038` has always filtered the track to finite points. `selectDetections` and
+every `sel.used.length` gate downstream counted the RAW array, so junk got past the one guard
+standing between "no evidence" and "a number".
+
+**Reproduced on my own geometry, against the code as round 3 left it** — i.e. with FG-1
+reverted as well, because otherwise FG-1 withholds the number and the reproduction is hidden.
+The gate measured `-65 %` on its geometry; this is mine, not a re-typing of that row:
+
+```
+truth carry 196.5 m, 10 detections, no GPS, forceTrace OFF
+  round 3     9 of 10 non-finite   nUsed=10   fitted ONE point   LABEL "110 m"   -44 %
+  FG-1 only   9 of 10 non-finite   nUsed=10   fitted ONE point   LABEL "no distance"
+  FG-4        9 of 10 non-finite   nUsed=1    too_few_detections_no_carry(1)
+```
+
+**The middle row is worth naming rather than hiding: with FG-1 in place, FG-4 no longer
+changes the NUMBER on this input — a one-point fit has a wide enough sigma that the label rule
+already withholds it.** What FG-4 changes is the COUNT: without it `meta.selection.k` reports
+10 when one point was usable, the `nUsed < MIN_FIT` guard is defeated, and a field test reads
+a track length that never existed. Two safety layers agreeing is the point of having two.
+
+**The fix is one exported helper, `finiteDetections`, and that is the actual repair** — the
+old shape had the count and the fit reading two different arrays, and the hold-out check
+re-read the raw one **twice** more (its own `HOLDOUT_MIN_N` count, and the all-frame refit).
+Every read inside the module now goes through the helper. `meta.nDetections` still reports what
+the detector emitted, because that is a fact about the detector;
+`meta.selection.nNonFinite` and a `non_finite_detections_dropped:N/M` flag say what was
+dropped, so a field row does not silently show a smaller K than the detector reported.
+
+**Reachability is still not demonstrated**, and the test says so: neither the gate nor I could
+make the Swift detector emit a non-finite coordinate, and nothing in `tracerApplyEmissionRule`
+checks. This closes a hole in the JS safety layer, which is the layer whose job is to be the
+last one.
+
+**Tests:** the reproduction under BOTH `forceTrace` settings (it is an absence of input, not a
+judgement about a shot); the same case with a GPS carry, where one point reaches the `prior`
+rung — it may draw a direction, it may not state a distance; the all-junk degenerate case
+refusing as `no_detections` rather than throwing; a clean control that still draws; and one
+for the hold-out path asserting its median is never NaN.
+
+---
+
+## FG-5 — LOW (honesty) · the fourth drift of one fact across three files
+
+`lib/storage.ts:165` still said the two capture columns are *"NULL on every row written before
+this, and on every tracer-disabled build"* — the exact claim `constants/config.ts` has now
+corrected twice (gate NEW-3, then GATE-3). They are written **non-null with the tracer off**,
+deliberately: `app/(tabs)/record.tsx` supplies `getCaptureOptics` unconditionally and
+`hooks/useCamera.ts` binds both columns outside the `if (tracerV3Gps)` block.
+
+Corrected, pointed at `constants/config.ts` item 3 as the canonical statement, and — because
+this is the fourth time — **given a test**, which is what GATE-3 did for the other file. It
+asserts the code fact first (the bind is still there, and still positioned outside the tracer
+gate — checked by source position, because `if (tracerV3Gps) { … }` closes before the save
+object and a span pattern cannot tell inside from after), then that the migration comment does
+not contradict it. Without the precondition the test would keep passing if someone re-gated
+the bind and made the old sentence true again.
+
+One line in `hooks/useCamera.ts` was clarified in the same pass: *"the columns stay NULL"* in
+the GPS section now says *"the GPS columns"*, and names the two capture columns as the
+exception.
+
+---
+
+## FG-6 — not fixed, and why
+
+The gate's own classification is LOW and its own sentence is *"It cannot produce a wrong V3
+number."* The persisted `SETTING_DEBUG_FORCE_TRACE` rehydration is the **v1** engine's bypass,
+read only by `lib/tracerMath.ts` and the v1 branch of `processAllTracers`. It was not in this
+round's brief, it is a behaviour change to a different engine, and touching it would put an
+unrequested edit in a change set that already moves the label rule. **Left open and named**,
+where the gate left it.
+
+---
+
+## The tests, and the proof that they are tests
+
+**Thirteen new, and each was run against the pre-fix code.** I took byte copies of
+`lib/tracerV3.ts`, `lib/tracerFit.ts` and `lib/storage.ts`, reverted **each fix separately**,
+ran the three tracer suites, restored, and verified SHA-256 identical every time
+(`f109bb75…` / `f9f727c2…` / `c2d728e7…`, the shipped bytes).
+
+```
+revert FG-1  (the `too_uncertain` rung dropped from the label chain)
+  ✖ FG-1: a fit too uncertain to state a distance draws the arc and withholds the number
+  ✖ FG-1: the label-sigma test is reachable on its own, so deleting it is visible
+revert FG-1(c) (pickPixelOnly returns the incumbent)
+  ✖ FG-1(c): the fallback draws the best pixel-only fit in the ladder, not the drawn rung's companion
+revert FG-2  (the `!scUsable` branch removed, back to carry_consistent)
+  ✖ FG-2: an unusable pixel-only carry sigma reaches the ALLOWLIST, not just the flag list
+  ✖ a missing pixel-only carry sigma runs the test (F1) and still reaches carry_untested (FG-2)
+revert FG-3  (axisV0RelSigma = worstV0RelSigma)
+  ✖ FG-3: the axis-degenerate refusal survives the pixel-only fallback
+revert FG-4  (finiteDetections returns the raw array)
+  ✖ FG-4: a non-finite detection is not counted by the guard that lets a number out
+  ✖ FG-4: the hold-out refit reads the same filtered array the counts and the fit do
+revert FG-5  (the old sentence restored in lib/storage.ts)
+  ✖ FG-5: lib/storage.ts and constants/config.ts agree about the two capture columns
+```
+
+**The controls passed under every one of those reverts** — "it did not turn the feature off",
+"a confirmed carry is still a GPS-backed number", "the same measurement does not spread to
+shots that are fine", and every pre-existing GATE-1 / NEW-1 / F1-F8 control. A change that
+made everything withhold would have failed them.
+
+**Three tests are preconditions rather than reproductions**, and they are labelled as such:
+that the two new fixtures actually reach the states they exist for, and that no sibling
+fixture does. Those are the anti-merge pins rounds 2 and 3 established — a later
+"simplification" that merges the fixtures fails a test instead of silently deleting a
+reproduction.
+
+---
+
+## What I could NOT verify
+
+- **Nothing ran on a device and no frame was rendered.** No Swift was compiled. Everything
+  here is `node --import tsx` against the TypeScript ladder, and the whole native half — Core
+  ML loading, Vision, the AVFoundation export — is as unmeasured as it was.
+- **My fixtures and my sweep are simulated flights projected through a known camera.** They
+  prove the ladder recovers, or honestly refuses to state, a flight it is *given*. They say
+  nothing about whether the Swift detector finds a ball on real footage, which is still the
+  biggest unmeasured thing in this branch.
+- **The 24.7 % withholding rate is a rate on MY synthetic distribution**, and the gate's
+  warning applies to it exactly as it did to the gate's own: how the real detector's
+  track-length and residual distribution compares to a uniform 3-20 frame sample is unknown,
+  and it decides whether "no distance" is a quarter of clips or most of them. **It is the
+  first thing to read off a field test**, and the three tests are named individually on the
+  row (`too_uncertain_no_distance(sigma_v0=…,rms=…,sigma=…)`) so that reading is a `grep`
+  rather than a re-run.
+- **The three bars — 5 %, 2 px, 25 % — are measured on that same synthetic distribution.**
+  Two of them are anchored to quantities that already exist in this code (F4's `sigma(v0)/v0`,
+  and the per-point label noise `fitLaunch` assumes); the third is a product judgement and is
+  labelled as one. None was re-derived from first principles.
+- **52 rows on 18 geometries still draw a number more than 25 % from truth, worst +49 %.**
+  That is 1 in 370 of the numbers still stated, against 1 in 14 before. It is not zero and I
+  did not find a rule that makes it zero without costing several correct numbers for each one
+  it removes. **Whether 1 in 370 clears Henry's "never" is his call, not mine** — the honest
+  statement is that the class the gate found is closed and a residue of individually
+  unpredictable geometries is not.
+- **`Z_INCONSISTENT = 4`, `Z_TENSION = 2`, `AS_SCALE_FRAC = 15 %`, `COARSEST_LABEL_STEP_M = 10`,
+  `POOR_FIT_MIN_K = 10`, `AXIS_DEGENERATE_*`** are unchanged and were not re-derived. They are
+  the lab's numbers and rounds 2-3's, reused.
+- **FG-4 is still not demonstrated reachable from Swift**, and FG-6 is untouched by design.
+- **`GolfBallDetector.mlpackage` is in git** (the gate verified it byte-identical) and round 3
+  landed as `3da9eff`, so `tracerV3FlatTension.ts` is tracked. **This round's two new fixtures
+  are not**: `tests/fixtures/tracerV3AxisFallback.ts` and
+  `tests/fixtures/tracerV3DroppedFrames.ts` must be `git add`ed BY NAME — six tests import
+  them and a fresh clone is red without them. `git add -A` is not safe in this tree; seven
+  unrelated untracked paths predate this work.

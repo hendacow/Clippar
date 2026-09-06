@@ -1384,6 +1384,11 @@ export function fitLaunch(a: FitOptions): FitResult {
     // So: `sc = 0` when the sigma is unusable, exactly as fit.py:889
     // (`sc = float(sc) if np.isfinite(sc) else 0.0`), and `carry_untested` stays as an ADDITIONAL
     // flag saying the denominator is missing a term — never as a replacement for the test.
+    //
+    // FG-2 amends the SECOND half of that, not the first. Running the test with `sc = 0` is still
+    // right and still happens. But when the test comes back with no objection, "the one test that
+    // could be formed did not object" is not the same claim as `carry_consistent`, and the
+    // allowlist downstream reads the status, not the flags. See the branch below.
     const scPx = pixelOnly?.summarySigma.carryM;
     const scUsable = scPx != null && Number.isFinite(scPx) && (pixelOnly?.ok ?? false);
     // The lab gates on `pixel_only is not None` alone. The one thing the test genuinely cannot be
@@ -1495,6 +1500,37 @@ export function fitLaunch(a: FitOptions): FitResult {
       } else if (Math.abs(z) > Z_TENSION) {
         carryStatus = 'carry_tension';
         flags.push(`carry_tension(z=${z.toFixed(1)}sigma)`);
+      } else if (!scUsable) {
+        // FG-2 (docs/tracer-v3/final-gate.md). `carry_untested` was a FLAG here
+        // and not a STATUS, so the doubt it names never reached the deciding
+        // code: `lib/tracerV3.ts`'s allowlist reads `carryStatus`, and this
+        // branch handed it `carry_consistent`.
+        //
+        // WHY THAT IS NOT A CONSISTENT VERDICT. F1(a) substitutes `sc = 0` when
+        // the pixel-only carry sigma is unusable, so that the PROTECTIVE test
+        // still runs — that part is right and stays. But with `sc = 0` the two
+        // z-scores are ARITHMETICALLY IDENTICAL (`denom` and `denomNoPxSigma`
+        // differ only by `sc`), so GATE-1's second z-score buys literally
+        // nothing on these rows, and reaching this branch means only that the
+        // ONE test that could be formed did not object. The gate measured it on
+        // 13.8 % of GPS-backed numbers: `z === zNoPixelSigma` on 100 % of them,
+        // and 1.8 % of them more than 25 % from truth against 1.2 % for
+        // GPS-backed rows without it — including the worst GPS-backed row in its
+        // whole 58 500-call sweep, +67.6 %.
+        //
+        // `carry_as_scale` cannot pre-empt this: `rel = sc / cPx` is 0 when
+        // `sc` is 0, so `asScale` is false by construction here. The only
+        // outcomes this branch takes from are `carry_consistent` (never
+        // justified — nothing checked the sigma) and the two protective ones
+        // above, which already win. So this is exactly the case the flag is
+        // named for and nothing else moves.
+        //
+        // The flag string is unchanged, so anything filtering field rows on
+        // `carry_untested(no_usable_pixel_only_carry_sigma)` keeps matching; what
+        // changes is that the STATUS now says the same thing, and the allowlist
+        // in `lib/tracerV3.ts` — `carry_consistent` is the only verdict that
+        // licenses a GPS-backed number — finally sees it.
+        carryStatus = 'carry_untested';
       } else {
         carryStatus = 'carry_consistent';
       }

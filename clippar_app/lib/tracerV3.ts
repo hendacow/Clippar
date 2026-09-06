@@ -233,6 +233,74 @@ const AXIS_DEGENERATE_V0_REL_SIGMA = 0.1;
  */
 const COARSEST_LABEL_STEP_M = 10;
 
+// ─── FG-1: when a fit is too uncertain to STATE a distance ──────────────────
+//
+// Three tests, all three measured over 58 500 `traceClip` calls before being
+// chosen, and each one an EXISTING gate of this ladder with the conjunct that
+// was blocking it removed. Any one of them withholds the number; the arc is
+// unaffected. `docs/tracer-v3/fixes.md` round 4 has the full sweep, including
+// the rules that were tried and rejected.
+//
+// WHY NOT THE OBVIOUS RULE. The gate proposed keying this on the fit's own
+// sigma as a fraction of the carry, and measured that it is a weak predictor of
+// the fit's own error. My sweep says the same and worse: `sigma > 0.20 * carry`
+// withholds 20.2 % of numbers, loses 12.8 % of the CORRECT ones, and still
+// leaves 485 of 1 319 wrong ones on the table with a worst case of 99 %. The
+// reason is that the failures are CONFIDENTLY wrong — a tight formal sigma with
+// a large error — which is precisely the disease F4 was invented for, so F4's
+// test, not the sigma, is the one that generalises.
+
+/**
+ * (1) The fit could not pin the ball speed to better than this fraction of it.
+ *
+ * This is review F4's own quantity with F4's azimuth conjunct removed — the
+ * same move GATE-1 made on `AS_SCALE_FRAC`, for the same reason: a threshold is
+ * a line the failure does not respect, and the conjunct was what let it through.
+ * `AXIS_DEGENERATE_V0_REL_SIGMA` (10 %) stays where it is, because that one
+ * governs the stronger claim that the whole GEOMETRY is degenerate and refuses
+ * the apex too; this one only withholds a number, so it can afford to be
+ * stricter. Measured over 58 500 calls: on its own it catches 1 229 of the
+ * 1 319 wrong numbers for 11.9 % of the correct ones, which is a better trade
+ * than any rule keyed on the carry sigma at any threshold.
+ */
+const LOOSE_V0_REL_SIGMA = 0.05;
+
+/**
+ * (2) The fitted flight misses the detections by more than this, @1080p.
+ *
+ * `poor_fit` already refuses on rms, but only at `nPoints >= POOR_FIT_MIN_K`
+ * (10) and only above `POOR_FIT_RMS_PX` (4) — and the gate showed the failures
+ * are concentrated exactly in the hole that leaves: 5-8 frame tracks with an rms
+ * between 4 and 8 px, which draw carrying only a `large_pixel_residual` flag
+ * nobody reads. So the SAME question is asked with no length conjunct, and at a
+ * bar anchored to the fit's own noise model rather than invented: `fitLaunch`
+ * defines the label noise as `width / 1080` px per point, so this is two sigma
+ * of the error the fit itself assumes.
+ */
+const LOOSE_RMS_PX_1080 = 2.0;
+
+/**
+ * (3) The label's own 1-sigma as a fraction of the carry it is about to state.
+ *
+ * The weak predictor, kept as a backstop rather than as the rule: it is the only
+ * one of the three that catches a fit which is well conditioned AND follows the
+ * pixels AND is still wrong, and it removes 16 of the 63 rows the other two
+ * leave. It is NOT the vocabulary rule taken literally — `sigma <=
+ * COARSEST_LABEL_STEP_M` applied to every number withholds 96 % of them and
+ * 97 % of the correct ones, which is not a product, and saying so is more honest
+ * than pretending 25 % falls out of the rounding steps. It is a measured bar.
+ */
+const LOOSE_CARRY_SIGMA_FRAC = 0.25;
+
+/**
+ * CT-6. The apex is stated only when the fit's own 1-sigma on it is inside this
+ * fraction of the apex. 0.25 is the value the FG-1 sweep already measured for
+ * this quantity (`sigma(apex)/apex > 0.25` caught 985 of 1319 wrong CARRIES),
+ * reused here for the number it actually describes rather than as a proxy.
+ * Measured on synthetic geometry, not on a phone.
+ */
+const LOOSE_APEX_SIGMA_FRAC = 0.25;
+
 // ─── Knobs (structural read of config.tracer.v3) ────────────────────────────
 
 /**
@@ -434,6 +502,8 @@ export interface TracerV3Meta {
     kImpFit: number | null;
     /** F2: frames of slack the fit was given on t0's lower bound. */
     impactSlackFrames: number;
+    /** FG-4: emitted detections dropped as non-finite before any count or gate. */
+    nNonFinite: number;
     holdoutMedianPx?: number;
   };
   camera?: {
@@ -460,6 +530,17 @@ export interface TracerV3Meta {
     lateralM: number;
   };
   sigmaTotal?: { thetaDeg: number; v0: number; carryM: number; apexM: number };
+  /**
+   * How well the ball speed could be pinned, as a fraction of it — the quantity
+   * F4's `axis_degenerate` refusal and FG-3's correction to it are keyed on.
+   *
+   * `worst` is over every rung of the ladder that produced the drawn fit
+   * (including rejected ones); `drawn` is the fit that is ACTUALLY DRAWN, which
+   * on `pixel_only_fallback` is a pixel-only companion no rung measured. It is
+   * on the row because a flag that only appears when it fires tells a field test
+   * nothing about the clips where it nearly did (FG-3).
+   */
+  conditioning?: { worstV0RelSigma: number; drawnV0RelSigma: number };
   fit?: { rmsPx: number; maxResidPx: number; nPoints: number; ok: boolean };
   carry?: {
     inputM: number | null;
@@ -562,6 +643,8 @@ export interface Selection {
    * and REVIEW F2.
    */
   impactSlackFrames: number;
+  /** How many emitted detections were dropped as non-finite (FG-4). */
+  nNonFinite: number;
 }
 
 /**
@@ -572,8 +655,39 @@ export interface Selection {
  * the fit report shows the lob chips only resolve speed against launch angle on
  * the descent. Fewer than 3 in the early window -> the first 3.
  */
+/**
+ * The detections the ladder is allowed to count — FG-4, `docs/tracer-v3/final-gate.md`.
+ *
+ * A detection whose frame, x or y is not finite is DROPPED BY THE FITTER
+ * (`lib/tracerFit.ts:1038` filters the track to finite points) but used to be
+ * COUNTED by the refusal ladder, so junk got past the one guard standing
+ * between "no evidence" and "a number": `chooseModel`'s `nUsed < MIN_FIT` and
+ * every downstream `sel.used.length` test read the raw array. The gate measured
+ * 9 of 10 NaN coordinates fitting ONE point at rms 0 — the residual gates are
+ * vacuous with a single point — and drawing "70 m" for a 195 m shot.
+ *
+ * EVERY read of `det.detections` inside this module goes through here, which is
+ * the actual fix: the previous shape had the count and the fit reading two
+ * different arrays, and the hold-out refit below re-read the raw one a second
+ * time. `meta.nDetections` still reports what the detector EMITTED, because
+ * that is a fact about the detector; everything that decides goes through this.
+ *
+ * The gate could not show the Swift detector emitting a non-finite coordinate
+ * (`tracerApplyEmissionRule` does not check finiteness, but no input was found
+ * that produces a NaN centroid), so this closes a hole in the JS safety layer
+ * rather than a demonstrated field failure. It is cheap and the failure it
+ * prevents is the worst one this feature has.
+ */
+export function finiteDetections(det: TracerDetectResultV3): BallDetection[] {
+  return (det.detections ?? []).filter(
+    (d) => Number.isFinite(d.frame) && Number.isFinite(d.x) && Number.isFinite(d.y)
+  );
+}
+
 export function selectDetections(det: TracerDetectResultV3): Selection {
-  const dets = [...(det.detections ?? [])].sort((a, b) => a.frame - b.frame);
+  const raw = det.detections ?? [];
+  const finite = finiteDetections(det);
+  const dets = [...finite].sort((a, b) => a.frame - b.frame);
   const fr = det.fps / 30.0;
   const u = det.width / 1080.0;
   const out: Selection = {
@@ -589,6 +703,7 @@ export function selectDetections(det: TracerDetectResultV3): Selection {
     earlyWindowFrames: null,
     climbPx: null,
     impactSlackFrames: 0,
+    nNonFinite: raw.length - finite.length,
   };
   if (dets.length === 0) return out;
 
@@ -1030,6 +1145,15 @@ interface LadderRun {
    * the tight one.
    */
   worstV0RelSigma: number;
+  /**
+   * Every pixel-only companion this ladder produced, in the order the rungs ran
+   * (FG-1(c)). A joint fit builds one to seed and calibrate itself, so there is
+   * one per rung that had a GPS carry — and they are DIFFERENT FITS, not the
+   * rungs: a rung rejected because its joint fit was worse can still have a
+   * perfectly good pixel-only companion, and the rung that won can have a poor
+   * one. `pickPixelOnly` is what reads this.
+   */
+  pixelOnly: FitResult[];
 }
 
 function runFitLadder(
@@ -1048,6 +1172,7 @@ function runFitLadder(
   const u = width / 1080.0;
   const log: LadderEntry[] = [];
   let worstV0RelSigma = 0;
+  const pixelOnly: FitResult[] = [];
 
   const run = (v: FitVariant, tag: string): FitResult => {
     const dropped = new Set(v.dropFrames);
@@ -1085,10 +1210,8 @@ function runFitLadder(
     // F4: how well this rung could pin the ball speed. Every rung counts,
     // including the rejected ones — a rung that could not determine v0 is
     // evidence about the geometry, whichever rung ends up drawn.
-    const sv0 = f.sigma.v0;
-    if (sv0 != null && Number.isFinite(sv0) && f.params.v0 > 1e-6) {
-      worstV0RelSigma = Math.max(worstV0RelSigma, sv0 / f.params.v0);
-    }
+    worstV0RelSigma = Math.max(worstV0RelSigma, v0RelSigma(f));
+    if (f.pixelOnly) pixelOnly.push(f.pixelOnly);
     return f;
   };
 
@@ -1144,7 +1267,66 @@ function runFitLadder(
   }
 
   if (!log.some((e) => e.accepted)) log[0].accepted = true;
-  return { fit, variant, log, worstV0RelSigma };
+  return { fit, variant, log, worstV0RelSigma, pixelOnly };
+}
+
+/**
+ * How well a single fit could pin the ball speed: `sigma(v0) / v0`, or 0 when
+ * the fit reports no formal sigma for it (a fixed parameter, or an inestimable
+ * one). Zero is the right absence value — F4's test is `>=` a threshold, so an
+ * unmeasurable rung must not be able to TRIGGER the refusal on its own.
+ *
+ * Pulled out of `runFitLadder` for FG-3, which needs the same measurement on a
+ * fit that is not a ladder rung at all: the pixel-only companion.
+ */
+function v0RelSigma(f: FitResult): number {
+  const sv0 = f.sigma.v0;
+  if (sv0 == null || !Number.isFinite(sv0) || !(f.params.v0 > 1e-6)) return 0;
+  return sv0 / f.params.v0;
+}
+
+/**
+ * Which pixel-only fit the fallback DRAWS — FG-1(c), `docs/tracer-v3/final-gate.md`.
+ *
+ * THE FINDING. When the GPS carry is thrown away the ladder rendered
+ * `fit.pixelOnly`: the companion of whichever rung happened to win the JOINT
+ * competition. That competition is about the joint fit, and the companion rides
+ * along on its model — so on a spin-bound rescue rung the companion is a
+ * spin-fixed pixel-only fit which can be a poor one (round 2 measured rms 23 px,
+ * refused by the physics gate, while a full-freedom pixel-only run of the same
+ * detections drew 257 m against a 251 m truth). The gate then measured the
+ * consequence at product level: `pixel_only_fallback` is the single largest
+ * source of wrong numbers, 6.4 % of its numbers more than 25 % from truth
+ * against 4.2 % for pixel-only-by-design, worst +216 %. Two rounds filed it as
+ * out of scope; round 3 made it fire 145 times more often.
+ *
+ * THE CHOICE, and why it has no threshold in it. Among the companions the
+ * ladder produced, take the one that BEST EXPLAINS THE PIXELS — lowest rms —
+ * and require `ok`, which is the fitter's own statement that the optimiser
+ * converged onto a physical flight with finite parameters. There is nothing to
+ * tune: rms is the residual of the same detections through the same camera on
+ * every candidate, and "the fit that follows the ball best" is the only
+ * defensible answer to "which of these is the pixel-only measurement".
+ *
+ * WHY NOT the drawn rung's own, i.e. why a rejected rung's companion is
+ * eligible: it is not the rung. A rung is rejected for what its JOINT fit did
+ * (its rms did not halve, or backspin stayed on a bound); its companion never
+ * saw the carry at all. This is F1(b)'s principle pointed the other way — there,
+ * a rejected rung's opinion of the GPS still counted; here, a rejected rung's
+ * pixel-only answer still counts.
+ *
+ * TIES GO TO THE INCUMBENT (`current`), so this can only ever move the drawn arc
+ * when it has a measured reason to.
+ */
+function pickPixelOnly(candidates: FitResult[], current: FitResult | null): FitResult | null {
+  let best = current !== null && current.ok ? current : null;
+  for (const c of candidates) {
+    if (!c.ok || !Number.isFinite(c.rmsPx)) continue;
+    if (best === null || c.rmsPx < best.rmsPx) best = c;
+  }
+  // Every candidate unusable -> keep exactly what the branch used to do, so a
+  // ladder with no `ok` companion behaves as it did rather than newly skipping.
+  return best ?? current;
 }
 
 function medianOf(nums: number[]): number {
@@ -1320,7 +1502,7 @@ export function buildLabel(
    *                      did not CONFIRM (too loose to check, in tension with,
    *                      or untestable against).
    */
-  noDistance: 'axis_degenerate' | 'gps_unchecked' | null = null,
+  noDistance: 'axis_degenerate' | 'gps_unchecked' | 'too_uncertain' | null = null,
   /**
    * 1-sigma the rounding step is taken from, metres. Defaults to the fit's own
    * `sigmaTotal.carryM`; the unconfirmed-GPS case passes a WIDER one, because
@@ -1350,12 +1532,53 @@ export function buildLabel(
   if (noDistance === 'gps_unchecked') {
     return { labelText: 'no distance', labelSubText: 'GPS unchecked' };
   }
+  // FG-1 (docs/tracer-v3/final-gate.md), and it is the rung this feature was
+  // missing rather than a third special case. The two above are about a
+  // PARTICULAR cause — the geometry lost the scale, the GPS was never confirmed.
+  // This one is the general statement both of them are instances of: the fit's
+  // own 1-sigma is too wide for any step in the vocabulary to describe, so a
+  // number would read as a measurement it is not.
+  //
+  // THE WORDING. It has to be useful as well as honest, because withholding is
+  // now common enough that "no distance" alone would be most of what a golfer
+  // sees. "Not enough of the flight" is the actual cause and the actionable one:
+  // the carry's uncertainty is dominated by depth, depth is resolved by seeing
+  // the ball descend, and the gate's own failure table is concentrated on the
+  // 5-8 frame tracks that stop before the apex. It tells the golfer the one
+  // thing they can change — frame more of the shot — rather than confessing to
+  // an internal quantity they cannot act on.
+  if (noDistance === 'too_uncertain') {
+    return { labelText: 'no distance', labelSubText: 'not enough of the flight' };
+  }
   const sigmaM = labelSigmaM ?? fit.sigmaTotal.carryM;
   const carryM = labelRounding ? roundLabelM(fit.summary.carryM, sigmaM) : Math.round(fit.summary.carryM);
-  const apexM = Math.round(fit.summary.apexM);
+
+  // CT-6 (docs/tracer-v3/certify.md). Four review rounds gated the CARRY and
+  // none of them touched the APEX, which sits on the same pill with nothing
+  // between it and the golfer. The certifying sweep found a clip whose pill
+  // read "apex 39 m" for a shot that peaked at 7.5 m — a 5x error next to a
+  // carry that had passed every gate — and measured the apex as materially
+  // less reliable than the carry the rounds were about (+50 % on a clean
+  // 20-frame track where the carry was 3.3 % out).
+  //
+  // The reason is geometric, not a bug: apex is resolved by the ball's
+  // VERTICAL travel late in the flight, which is exactly what a track that
+  // stops early does not contain, and unlike the carry it has no GPS
+  // constraint to fall back on. So it gets the rule the carry already has,
+  // applied to its own sigma: state it only when the fit's own 1-sigma on
+  // apex is inside LOOSE_APEX_SIGMA_FRAC of the apex. Withheld, the sub-line
+  // keeps the GPS provenance marker, because that describes the CARRY on the
+  // line above and is still true.
+  const apexSigmaM = fit.sigmaTotal.apexM;
+  const apexUsable =
+    Number.isFinite(fit.summary.apexM) &&
+    fit.summary.apexM > 0 &&
+    Number.isFinite(apexSigmaM) &&
+    apexSigmaM <= LOOSE_APEX_SIGMA_FRAC * fit.summary.apexM;
+  const apexPart = apexUsable ? `apex ${Math.round(fit.summary.apexM)} m` : 'apex —';
   return {
     labelText: `${carryM} m`,
-    labelSubText: hasGps ? `apex ${apexM} m` : `apex ${apexM} m · no GPS`,
+    labelSubText: hasGps ? apexPart : `${apexPart} · no GPS`,
   };
 }
 
@@ -1409,7 +1632,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     nDetections: det.detections?.length ?? 0,
     selection: {
       mode: 'none', k: 0, throughApex: false, climbPx: null, frameRange: null,
-      kImpFit: null, impactSlackFrames: 0,
+      kImpFit: null, impactSlackFrames: 0, nNonFinite: 0,
     },
     ladder: [],
     detectorNotes: det.notes ?? {},
@@ -1468,7 +1691,13 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     frameRange: sel.frameRange,
     kImpFit: sel.kImpFit,
     impactSlackFrames: sel.impactSlackFrames,
+    nNonFinite: sel.nNonFinite,
   };
+  // FG-4: a field row must say the detector emitted junk, not silently show a
+  // smaller K than the detector reported.
+  if (sel.nNonFinite > 0) {
+    flags.push(`non_finite_detections_dropped:${sel.nNonFinite}/${meta.nDetections}`);
+  }
 
   const carryM = input.carryM ?? null;
   const model = chooseModel(sel.used.length, carryM, sel, fps, knobs);
@@ -1556,6 +1785,8 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   meta.ladder = run.log;
   // F4: the worst-conditioned rung of whichever ladder produced the drawn fit.
   let worstV0RelSigma = run.worstV0RelSigma;
+  // FG-1(c): every pixel-only companion that ladder produced, for the fallback.
+  let pixelOnlyCandidates = run.pixelOnly;
 
   // ── Held-out check: does the early fit predict the detections it did NOT
   //    use? IMG_2331's 14-frame early fit was 25 px off the 9 later detections
@@ -1563,7 +1794,10 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   if (sel.mode !== 'all' && sel.used.length >= MIN_FIT) {
     const usedFrames = new Set(fit.frames);
     const dropped = new Set(variant.dropFrames);
-    const held = (det.detections ?? []).filter(
+    // FG-4: `finiteDetections`, not `det.detections` — a non-finite point here
+    // would be counted toward `HOLDOUT_MIN_N` and then produce a NaN offset the
+    // median silently drops.
+    const held = finiteDetections(det).filter(
       (d) => !usedFrames.has(Math.round(d.frame)) && !dropped.has(Math.round(d.frame))
     );
     if (held.length >= HOLDOUT_MIN_N) {
@@ -1574,7 +1808,8 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
       const med = offs.length ? medianOf(offs) : NaN;
       meta.selection.holdoutMedianPx = Number.isFinite(med) ? med : undefined;
       if (Number.isFinite(med) && med > HOLDOUT_REFIT_PX * u) {
-        const all = [...(det.detections ?? [])].sort((a, b) => a.frame - b.frame);
+        // FG-4: same array the counts and the fit see, not the raw one.
+        const all = [...finiteDetections(det)].sort((a, b) => a.frame - b.frame);
         const sel2: Selection = {
           ...sel,
           used: all,
@@ -1601,6 +1836,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
             fit = run2.fit;
             variant = run2.variant;
             worstV0RelSigma = run2.worstV0RelSigma;
+            pixelOnlyCandidates = run2.pixelOnly;
             meta.selection = {
               mode: 'all_holdout',
               k: all.length,
@@ -1609,6 +1845,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
               frameRange: sel2.frameRange,
               kImpFit: sel2.kImpFit,
               impactSlackFrames: sel2.impactSlackFrames,
+              nNonFinite: sel2.nNonFinite,
               holdoutMedianPx: med,
             };
           } else {
@@ -1649,19 +1886,33 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
       ...ladderInconsistent,
     ];
     const worse = fit.flags.some((f) => f.startsWith('joint_fit_worse_pixel_minimum'));
-    const pixelOnly = fit.pixelOnly;
+    // FG-1(c): the best pixel-only fit the ladder produced, not blindly the
+    // drawn rung's companion. See `pickPixelOnly`.
+    const pixelOnly = pickPixelOnly(pixelOnlyCandidates, fit.pixelOnly);
+    // Recorded only when the companion is actually DRAWN, so a field row never
+    // carries a note about a fit nobody saw.
+    const notePick = () => {
+      if (pixelOnly !== null && pixelOnly !== fit.pixelOnly) {
+        flags.push(
+          `pixel_only_best_of_ladder(rms ${(fit.pixelOnly?.rmsPx ?? NaN).toFixed(2)}->` +
+            `${pixelOnly.rmsPx.toFixed(2)} px over ${pixelOnlyCandidates.length} companions)`
+        );
+      }
+    };
     if (pixelOnly && worse) {
       // The optimiser, not the data: the joint fit found a worse pixel minimum
       // than its own pixel-only companion. Render the companion.
       flags.push(
-        `joint_fit_rejected:worse_pixel_minimum(chi2_px ${fit.chi2Px.toFixed(1)} vs ${pixelOnly.chi2Px.toFixed(1)})`
+        `joint_fit_rejected:worse_pixel_minimum(chi2_px ${fit.chi2Px.toFixed(1)} vs ${(fit.pixelOnly?.chi2Px ?? NaN).toFixed(1)})`
       );
+      notePick();
       usedFit = pixelOnly;
     } else if (inconsistent.length) {
       // The DATA: the GPS distance and the pixels cannot both be right, so drop
       // the GPS rather than bend the arc to it.
       decision = 'pixel_only_fallback';
       flags.push('inconsistent');
+      if (pixelOnly) notePick();
       usedFit = pixelOnly ?? fit;
       meta.reason = inconsistent[0];
     } else if (fit.flags.some((f) => f.startsWith('carry_tension'))) {
@@ -1718,6 +1969,11 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
           );
           usedFit = reduced.fit;
           check = reducedCheck;
+          // FG-3, same shape: this refit runs its OWN ladder, and the drawn fit
+          // is now one of its rungs, so its conditioning is part of "the worst
+          // any rung of the ladder that produced the drawn fit reported".
+          // Discarding it lost F4's evidence exactly the way the fallback did.
+          worstV0RelSigma = Math.max(worstV0RelSigma, reduced.worstV0RelSigma);
         }
       } catch {
         /* the reduced refit is a bonus; its failure just leaves the check as it was */
@@ -1799,13 +2055,41 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   // ill-conditioned rung to notice, so this cannot fire for it. Those fits are
   // the ones the plausibility cap judges hardest, which is the only thing
   // standing in for it there.
+  //
+  // FG-3 (docs/tracer-v3/final-gate.md). The refusal above was SILENTLY LOST on
+  // `pixel_only_fallback`, and the mechanism is the mirror image of the one this
+  // flag was invented for. `worstV0RelSigma` is accumulated over the rungs the
+  // ladder RAN; with a GPS carry supplied those rungs are the JOINT fits, which
+  // the carry keeps well conditioned, so the worst v0 sigma never gets large.
+  // The fit then DRAWN on the fallback is the pixel-only companion — precisely
+  // the ill-conditioned one this exists to catch, and one no rung of that ladder
+  // ever measured. Supplying a GPS carry the ladder then throws away removed F4's
+  // protection from the very fit it was written for.
+  //
+  // The gate measured it: 52 geometries where the no-GPS control correctly
+  // refuses with "down the line / no distance" state a number once some GPS
+  // carry is supplied, 18 of them more than 25 % wrong, worst +216 %. And it is
+  // a wrong ARC as well as a wrong number — a near-vertical pole down the camera
+  // axis with a distance on it.
+  //
+  // So: the worst of the ladder's rungs AND the fit that is actually drawn. Both
+  // terms are load-bearing and neither replaces the other —
+  //   * the ladder term is F4's original case, where the drawn fit is the TIGHT
+  //     spin-bound rescue and only a rejected rung knows the geometry was bad;
+  //   * the drawn term is FG-3's case, where the drawn fit is not a rung at all.
+  // When the drawn fit IS a rung the max is a no-op, because `runFitLadder`
+  // already folded it in.
+  const drawnV0RelSigma = v0RelSigma(usedFit);
+  const axisV0RelSigma = Math.max(worstV0RelSigma, drawnV0RelSigma);
   const axisDegenerate =
     Math.abs(usedFit.params.phiDeg) < AXIS_DEGENERATE_PHI_DEG &&
-    worstV0RelSigma >= AXIS_DEGENERATE_V0_REL_SIGMA;
+    axisV0RelSigma >= AXIS_DEGENERATE_V0_REL_SIGMA;
+  meta.conditioning = { worstV0RelSigma, drawnV0RelSigma };
   if (axisDegenerate) {
     flags.push(
       `axis_degenerate(phi=${usedFit.params.phiDeg.toFixed(2)}deg,` +
-        `worst_sigma_v0=${(100 * worstV0RelSigma).toFixed(0)}%_of_v0)`
+        `worst_sigma_v0=${(100 * axisV0RelSigma).toFixed(0)}%_of_v0,` +
+        `drawn_sigma_v0=${(100 * drawnV0RelSigma).toFixed(0)}%_of_v0)`
     );
   }
 
@@ -1895,6 +2179,80 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     : null;
   const gpsUncheckedNoDistance =
     unverifiedSigmaM !== null && !(unverifiedSigmaM <= COARSEST_LABEL_STEP_M);
+
+  // ── FG-1: "too uncertain to state" as a rung of its own.
+  //
+  // THE FINDING. Everything above decides whether the GPS distance may be
+  // BELIEVED. Nothing decided whether the number may be STATED. `roundLabelM`
+  // widens the step to 1 / 5 / 10 m from the fit's own sigma and then stops,
+  // because `COARSEST_LABEL_STEP_M` is the coarsest step the vocabulary has — so
+  // past about 10 m of sigma the pill stops describing its own uncertainty and
+  // starts reading like a measurement. The gate measured the consequence over
+  // 58 500 clips: 1 719 of 39 086 drawn numbers more than 25 % from truth, worst
+  // +194 % — a 62 m shot drawn "180 m" — and the worst rows have NO GPS in them,
+  // so three rounds of carry-verdict fixes could never have reached it.
+  //
+  // The same argument F4 and NEW-1(b) already make, generalised: when no step in
+  // the vocabulary describes the error, the honest pill has no number on it. The
+  // difference is only that those two knew WHY the sigma was untrustworthy and
+  // this one does not have to.
+  //
+  // THE SAME PATH, NOT A PARALLEL ONE. This feeds `buildLabel`'s `noDistance`
+  // argument, which is what `carry_as_scale` / `carry_tension` / `axis_degenerate`
+  // already use; the arc is unchanged and still drawn.
+  //
+  // WHICH SIGMA in test (3). `unverifiedSigmaM` when the GPS was used but not
+  // confirmed — that is the wider, honest one round 3 built — and otherwise the
+  // fit's own `sigmaTotal.carryM`, which already carries the formal, pitch and
+  // +-12 % f_px terms. Relative to the carry, because a 12 m sigma means
+  // something different on a 40 m pitch and a 240 m drive.
+  //
+  // WHICH CONDITIONING in test (1): `drawnV0RelSigma` — the fit that is actually
+  // DRAWN, and ONLY that fit. Deliberately NOT `axisV0RelSigma`, which folds in
+  // the worst rung of the ladder: that term is F4's, and F4 asks a question
+  // about the CLIP's geometry, where a rejected rung's ill-conditioning is
+  // evidence. This question is about one number's own uncertainty, so a rung
+  // nobody drew has nothing to say about it — and using the ladder term made the
+  // SAME drawn arc keep its number at gps=60 and lose it at gps=40, purely
+  // because a different rung ran. Measured over the sweep, the drawn-only term
+  // is also strictly cheaper: it withholds 24.7 % of numbers against 27.9 % and
+  // loses 12.4 % of the correct ones against 15.4 %, for the same residual.
+  // FG-3's correction is what makes `drawnV0RelSigma` meaningful on the
+  // `pixel_only_fallback` path at all — before it, nothing measured that fit.
+  const labelSigmaM = unverifiedSigmaM ?? usedFit.sigmaTotal.carryM;
+  const drawnCarryM = usedFit.summary.carryM;
+  const rms1080 = usedFit.rmsPx / u;
+  const uncertainWhy: string[] = [];
+  // `v0RelSigma` answers 0 for a fit that reports no formal sigma on v0, which
+  // is right for F4 (an unmeasurable rung must not be able to TRIGGER a refusal
+  // on its own) and wrong here: for a number about to be stated, "the fit cannot
+  // say how well it pinned the speed" is a reason to withhold, not to proceed.
+  // So the absence is tested separately rather than folded into the comparison.
+  // It did not arise once in 58 500 calls — every drawn fit reported a finite
+  // sigma(v0) — so this is a closed door rather than a measured case.
+  const drawnV0Sigma = usedFit.sigma.v0;
+  if (drawnV0Sigma == null || !Number.isFinite(drawnV0Sigma) || !(usedFit.params.v0 > 1e-6)) {
+    uncertainWhy.push('sigma_v0=unknown');
+  } else if (!(drawnV0RelSigma < LOOSE_V0_REL_SIGMA)) {
+    uncertainWhy.push(`sigma_v0=${(100 * drawnV0RelSigma).toFixed(0)}%>=${Math.round(100 * LOOSE_V0_REL_SIGMA)}%`);
+  }
+  if (!(rms1080 <= LOOSE_RMS_PX_1080)) {
+    uncertainWhy.push(`rms=${rms1080.toFixed(1)}px>${LOOSE_RMS_PX_1080}px@1080`);
+  }
+  // Every comparison is a NEGATED one, so a NaN withholds rather than states.
+  if (!(labelSigmaM <= LOOSE_CARRY_SIGMA_FRAC * drawnCarryM)) {
+    uncertainWhy.push(
+      `sigma=${Number.isFinite(labelSigmaM) ? labelSigmaM.toFixed(0) : 'unknown'}m>` +
+        `${Math.round(100 * LOOSE_CARRY_SIGMA_FRAC)}%_of_${drawnCarryM.toFixed(0)}m`
+    );
+  }
+  const tooUncertain = uncertainWhy.length > 0;
+  if (tooUncertain && !gpsUncheckedNoDistance && !axisDegenerate) {
+    // Named per TEST, so a field row says which of the three withheld it and a
+    // later change to one of them is visible in the data rather than only in the
+    // count of numbers that stopped appearing.
+    flags.push(`too_uncertain_no_distance(${uncertainWhy.join(',')})`);
+  }
   if (gpsUncheckedNoDistance) {
     // Named per verdict, so a field row says WHICH rung withheld the number and
     // nothing filtering on `carry_as_scale_no_distance` — the name this flag had
@@ -1910,7 +2268,13 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     usedFit,
     gpsBackedLabel,
     knobs.labelRounding,
-    axisDegenerate ? 'axis_degenerate' : gpsUncheckedNoDistance ? 'gps_unchecked' : null,
+    axisDegenerate
+      ? 'axis_degenerate'
+      : gpsUncheckedNoDistance
+        ? 'gps_unchecked'
+        : tooUncertain
+          ? 'too_uncertain'
+          : null,
     unverifiedSigmaM ?? undefined
   );
   const built = buildSpec(usedFit, input, knobs, arcEnd, labelText, labelSubText);

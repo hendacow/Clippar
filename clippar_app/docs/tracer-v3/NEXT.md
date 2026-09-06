@@ -20,7 +20,20 @@ the DEV BUILD, behind a config so it is trivially revertible, wired to GPS/locat
 - [x] **Review** — GO conditional on 3 fixes; `docs/tracer-v3/review.md` (725 lines): adversarial skeptic → `docs/tracer-v3/review.md`, go/no-go
 - [x] **Fixes** rounds 1-2 (`wf_c5a4dafb-f17`, `wf_942ef400-5a1`): F1 carry-inconsistent laundering, F2 impact slack, F3a lens/zoom skip, F4 axis-degenerate, F5 label honesty, F6 persisted bypass, F8 landing flag, refusal test suite → `docs/tracer-v3/fixes.md` + `re-verify.md`
 - [x] Commit + push — `d32faa1` on `feat/tracer-v3`, 46 files, verify 838/838 (baseline 652). CoreML model tracked.
-- [ ] **GATE-1** (workflow `wf_cd1c058d-a03`): a wrong GPS carry still reaching a confident label via `carry_tension`, one threshold below the last fix; close the CLASS (test the pixel-sigma-free z on every fit), then a final independent gate → `docs/tracer-v3/final-gate.md`
+- [x] **GATE-1** (workflow `wf_cd1c058d-a03`): closed as a class; a final independent gate then FAILED the branch on the LABEL rather than the carry verdict → `docs/tracer-v3/final-gate.md`
+- [x] **Fixes round 4** (`fix-fg`): all five gate findings closed → `docs/tracer-v3/fixes.md` round 4.
+      FG-1 the "too uncertain to state" rung (+ the `pixel_only_fallback` companion choice),
+      FG-2 `carry_untested` as a status, FG-3 the axis refusal on the fallback, FG-4 non-finite
+      detections, FG-5 the `lib/storage.ts` drift. Verify **860/860**, tsc clean.
+      Measured on 58 500 `traceClip` calls run before and after: drawn numbers more than 25 %
+      from truth **8.27 % -> 0.42 %**, worst **+484 % -> +49 %**, at the cost of **26 % of the
+      numbers** (the arc always draws). **52 rows on 18 geometries still exceed 25 %.**
+- [ ] **Two untracked fixture files must be `git add`ed BY NAME** (never `git add -A` in this tree —
+      seven unrelated untracked paths are sitting in it):
+      `clippar_app/tests/fixtures/tracerV3AxisFallback.ts` and
+      `clippar_app/tests/fixtures/tracerV3DroppedFrames.ts`. Six tests import them and a fresh
+      clone is red without them. (Round 3's `tracerV3FlatTension.ts` is already tracked, in
+      `3da9eff`.)
 - [ ] Second commit + push; write back; write back to `company-brain/org/cto/STATUS.md` and the daily report;
       hand Henry the build command (do NOT spend EAS credits — nearly exhausted as of 5 Sep)
 

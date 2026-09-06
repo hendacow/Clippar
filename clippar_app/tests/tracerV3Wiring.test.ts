@@ -501,6 +501,49 @@ test('GATE-3: the revert note lists everything that survives, and each item is t
   assert.match(revert[0], /CoreML/);
 });
 
+test('FG-5: lib/storage.ts and constants/config.ts agree about the two capture columns', () => {
+  // The FOURTH drift of one fact across three files, and the first one this
+  // suite could not catch: GATE-3's test reads `constants/config.ts` alone, so
+  // `lib/storage.ts:165` kept the sentence config.ts had already corrected twice
+  // — "NULL on every row written before this, AND ON EVERY TRACER-DISABLED
+  // BUILD" — for a third round. The final gate found it by reading both files.
+  //
+  // So this test does what GATE-3's does, on the OTHER file: assert the code
+  // fact first (the bind is ungated), then that the migration comment does not
+  // contradict it. Both halves matter — without the precondition this would keep
+  // passing if someone re-gated the bind and made the old sentence true again,
+  // and the comment would then be right for a reason nobody had checked.
+  const camera = codeOnly(cameraSrc);
+  assert.match(
+    camera,
+    /capture_lens: captureOptics\?\.lens \?\? undefined,/,
+    'the precondition: the columns are still written from the save'
+  );
+  // ...and still OUTSIDE the tracer gate. Checked by position rather than by a
+  // regex spanning the gate, because `if (tracerV3Gps) { ... }` closes before
+  // the save object and a span pattern cannot tell inside from after: the
+  // capture value must be resolved BEFORE the gate opens, and the gate must
+  // close before the bind.
+  const iOptics = camera.indexOf('let captureOptics');
+  const iGate = camera.indexOf('if (tracerV3Gps) {');
+  const iBind = camera.indexOf('capture_lens: captureOptics');
+  assert.ok(iOptics > 0 && iGate > 0 && iBind > 0, 'all three landmarks must still exist');
+  assert.ok(iOptics < iGate, 'the optics are resolved before the tracer gate opens');
+  assert.ok(iGate < iBind, 'and the gate has closed by the time the row is bound');
+
+  const note = /capture_lens: '1x'[\s\S]*?ADD COLUMN capture_zoom REAL/.exec(storageSrc);
+  assert.ok(note, "expected lib/storage.ts's comment on the two capture columns");
+  assert.doesNotMatch(
+    note[0],
+    /NULL on every row written before this, and on every tracer-disabled/,
+    'the corrected sentence: they are NOT null on a tracer-disabled build'
+  );
+  assert.match(note[0], /NOT null on a tracer-disabled build/i, 'say plainly what is true');
+  // And it must point at the one place the fact lives, so the next reader does
+  // not have to work out which of the two files to believe.
+  assert.match(note[0], /constants\/config\.ts/, 'and defer to the canonical statement');
+});
+
 test('an unknown lens is a refusal in the ladder, not a default', () => {
   // The runtime half of the test above — the type makes `capture` optional, so
   // only this says what omitting it MEANS.

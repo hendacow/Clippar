@@ -32,7 +32,8 @@ import assert from 'node:assert/strict';
 import { config } from '../constants/config';
 import { BALL_RADIUS_M, simulate } from '../lib/tracerPhysics';
 import { TracerCamera } from '../lib/tracerCamera';
-import { traceClip, type BallDetection, type TraceClipResult } from '../lib/tracerV3';
+import { buildLabel, traceClip, type BallDetection, type TraceClipResult } from '../lib/tracerV3';
+import { fitLaunch } from '../lib/tracerFit';
 
 import {
   BALL_START,
@@ -58,6 +59,14 @@ import * as shortTrack from './fixtures/tracerV3ShortTrack';
 // because GATE-1 lives in the band BETWEEN the other two — see §3c and the
 // fixture's own header.
 import * as flatTension from './fixtures/tracerV3FlatTension';
+// The 720x1280/30 fps wedge, namespaced for the same reason. It exists because
+// FG-3 needs a clip whose PIXEL-ONLY fit is ill-conditioned while its JOINT fits
+// are not, and none of the three above is — see §10 and the fixture's header.
+import * as axisFallback from './fixtures/tracerV3AxisFallback';
+// The 1284x2778/60 fps dropped-frame track, namespaced for the same reason. It
+// exists because FG-1 needs a clip the fit gets CONFIDENTLY and enormously
+// wrong, and all four fixtures above recover their own flight to within 5 %.
+import * as dropped from './fixtures/tracerV3DroppedFrames';
 
 /** A refusal, with the reason it gave — `reason` is what a field test reads. */
 function refusal(r: TraceClipResult): string {
@@ -995,5 +1004,472 @@ test('every refusal carries the diagnostic blob a field test is read from', () =
     assert.equal(r.meta.reason, r.reason);
     assert.ok(Array.isArray(r.meta.flags));
     assert.ok(typeof r.meta.elapsedMs === 'number');
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// 10. The final gate's findings (docs/tracer-v3/final-gate.md), round 4.
+// ═══════════════════════════════════════════════════════════════════════════
+
+test('FG-4: a non-finite detection is not counted by the guard that lets a number out', () => {
+  // THE REPRODUCTION, the gate's own shape on this fixture's geometry. The
+  // fitter has always filtered the track to finite points (`lib/tracerFit.ts`),
+  // but `selectDetections` and every `sel.used.length` gate downstream counted
+  // the RAW array — so nine NaN coordinates out of ten left `nUsed = 10`, sailed
+  // past `MIN_FIT`, fitted ONE point at rms 0 (the residual gates are vacuous
+  // with a single point) and drew "70 m" for a 195 m shot.
+  //
+  // Reachability is NOT demonstrated: the gate could not make the Swift detector
+  // emit a non-finite coordinate and neither could I, and nothing in
+  // `tracerApplyEmissionRule` checks. This closes the hole in the JS safety
+  // layer, which is the layer whose job is to be the last one.
+  const truth = simulate({ v0: 62, thetaDeg: 11, phiDeg: 4, rpmBack: 3000, rpmSide: 0, z0: BALL_RADIUS_M }).summary;
+  const nan = (n: number) =>
+    flightDetections({ frames: 10, thetaDeg: 11 }).map((d, i) => (i < n ? { ...d, x: NaN, y: NaN } : d));
+
+  // The control first, so a refusal below is the junk's doing and not the
+  // fixture's: with nothing corrupted this clip draws, and draws correctly.
+  const clean = traceClip(traceInput({ detection: detectionResult(nan(0)) }));
+  assert.ok(clean.spec, `the control must draw: ${clean.reason}`);
+  assert.equal(clean.meta.selection.nNonFinite, 0);
+  assertNeverConfidentlyWrong(clean, truth.carryM, 'the uncorrupted control');
+
+  // Nine of ten junk: ONE usable point, which is below `MIN_FIT`, so there is
+  // no evidence and the ladder must say so — under BOTH `forceTrace` settings,
+  // because this is an absence of input and not a judgement about a shot.
+  for (const knobs of [undefined, { forceTrace: true }]) {
+    const r = traceClip(traceInput({ detection: detectionResult(nan(9)), knobs }));
+    assert.match(refusal(r), /too_few_detections_no_carry\(1\)/);
+    assert.equal(r.meta.selection.k, 1, 'the COUNT must see one point, not ten');
+    assert.equal(r.meta.selection.nNonFinite, 9);
+    assert.ok(
+      r.flags.some((f) => f === 'non_finite_detections_dropped:9/10'),
+      `a field row must say the detector emitted junk: ${r.flags.join(';')}`
+    );
+  }
+
+  // And with a GPS carry, where one point is enough to reach the `prior` rung —
+  // the rung whose numbers the gate measured at 70 % more than 25 % out. It may
+  // draw a direction; it may not state a distance.
+  const withGps = traceClip(traceInput({ detection: detectionResult(nan(9)), carryM: 150, carrySigmaGpsM: 6 }));
+  assertNeverConfidentlyWrong(withGps, truth.carryM, 'nine of ten non-finite, with a GPS carry');
+  if (withGps.spec) {
+    assert.doesNotMatch(withGps.spec.labelText ?? '', /^\d+ m$/, 'one usable pixel states no distance');
+  }
+
+  // Every point junk is the degenerate case, and it must be the ordinary
+  // "no detections" refusal rather than a throw out of the fitter.
+  assert.match(refusal(traceClip(traceInput({ detection: detectionResult(nan(10)) }))), /no_detections/);
+});
+
+test('FG-4: the hold-out refit reads the same filtered array the counts and the fit do', () => {
+  // The second read site, and the one that made this a helper rather than two
+  // lines: `traceClip`'s hold-out check re-read `det.detections` RAW, twice — so
+  // junk counted toward `HOLDOUT_MIN_N` and then produced a NaN offset the
+  // median silently dropped. Asserted here as the property that survives a
+  // refactor: whatever the counts say, no arithmetic downstream sees a NaN.
+  const dets = flightDetections({ frames: 20 }).map((d, i) => (i % 5 === 0 ? { ...d, y: Number.NaN } : d));
+  const r = traceClip(traceInput({ detection: detectionResult(dets) }));
+  assert.equal(r.meta.selection.nNonFinite, 4);
+  assert.equal(r.meta.nDetections, 20, 'what the DETECTOR emitted is still reported honestly');
+  assert.ok(r.meta.selection.k <= 16, 'but the count that gates is the usable one');
+  const hm = r.meta.selection.holdoutMedianPx;
+  assert.ok(hm === undefined || Number.isFinite(hm), `the held-out median must not be NaN: ${hm}`);
+});
+
+test('FG-3: this fixture has an ill-conditioned PIXEL-ONLY fit and well-conditioned JOINT fits — the siblings do not', () => {
+  // The reproduction has to be live, or every assertion in the next test passes
+  // for the wrong reason. FG-3 is not "the flag is missing"; it is "the ladder
+  // measured the wrong fit", and that needs the two conditioning numbers to
+  // DISAGREE. Checked here, on all four fixtures, rather than asserted.
+  const det = axisFallback.detectionResult(axisFallback.flightDetections());
+
+  // With no carry every rung IS a pixel-only fit, so the ladder sees the bad
+  // conditioning and F4 fires exactly as designed.
+  const ctl = traceClip(axisFallback.traceInput({ detection: det }));
+  assert.ok(ctl.spec, `the control must still draw the arc: ${ctl.reason}`);
+  assert.ok(ctl.meta.conditioning!.worstV0RelSigma >= 0.10, 'the ladder itself is ill-conditioned here');
+  assert.ok(
+    ctl.flags.some((f) => f.startsWith('axis_degenerate')),
+    `the no-GPS control must refuse the distance: ${ctl.flags.join(';')}`
+  );
+
+  // With a carry the rungs are JOINT fits, which the carry keeps well
+  // conditioned — this is the whole mechanism, and it is a fact about the clip.
+  const withGps = traceClip(axisFallback.traceInput({ detection: det, carryM: 80, carrySigmaGpsM: 6 }));
+  assert.equal(withGps.decision, 'pixel_only_fallback', 'and the carry is then thrown away');
+  const c = withGps.meta.conditioning!;
+  assert.ok(c.worstV0RelSigma < 0.10, `the LADDER looks fine: ${(100 * c.worstV0RelSigma).toFixed(0)} %`);
+  assert.ok(c.drawnV0RelSigma >= 0.10, `the DRAWN fit does not: ${(100 * c.drawnV0RelSigma).toFixed(0)} %`);
+
+  // And no sibling fixture reaches that state, on any carry — so this file is
+  // where the reproduction lives and merging it away deletes it.
+  for (const [name, F] of [['clip', { traceInput, detectionResult, flightDetections }], ['short', shortTrack], ['flat', flatTension]] as const) {
+    for (const carryM of [35, 80, 150, 260]) {
+      const r = traceClip((F as typeof flatTension).traceInput({ carryM, carrySigmaGpsM: 6 }));
+      const cc = r.meta.conditioning;
+      if (!cc) continue;
+      assert.ok(
+        !(cc.worstV0RelSigma < 0.10 && cc.drawnV0RelSigma >= 0.10),
+        `${name} gps=${carryM} unexpectedly reproduces FG-3 — if that is now true, this test is the wrong shape, not the fixture`
+      );
+    }
+  }
+});
+
+test('FG-3: the axis-degenerate refusal survives the pixel-only fallback', () => {
+  // THE REPRODUCTION. Same clip, same DRAWN fit, same 42 % error. The only
+  // difference between the two rows is whether a GPS carry was supplied and then
+  // rejected — and before this fix that difference decided whether the number
+  // was stated, because `worstV0RelSigma` was accumulated over the rungs the
+  // ladder RAN (the joint fits, which the carry keeps well conditioned) while
+  // the fit actually DRAWN was the pixel-only companion no rung had measured.
+  //
+  //   gps=null  dec=fit                  "down the line" / "no distance"   <- F4 fires
+  //   gps=80    dec=pixel_only_fallback   "34 m"                           <- +42 %, 23.8 m shot
+  //
+  // The gate counted 52 geometries that flip that way and 18 of them more than
+  // 25 % wrong, worst +216 %. It is a wrong ARC as well as a wrong number: a
+  // near-vertical pole down the camera axis with a distance on it.
+  const det = axisFallback.detectionResult(axisFallback.flightDetections());
+  const truth = axisFallback.truthSummary().carryM;
+
+  for (const carryM of [80, 110, 150]) {
+    const r = traceClip(axisFallback.traceInput({ detection: det, carryM, carrySigmaGpsM: 6 }));
+    const what = `gps=${carryM}`;
+    assert.ok(r.spec, `${what}: the arc is still drawn — it is the number that is not supportable`);
+    // The precondition: this really is the drawn-fit case, not a lucky refusal
+    // by some other gate. If the ladder ever measures it, this stops being a
+    // reproduction and the assertion below stops being evidence.
+    assert.ok(r.meta.conditioning!.worstV0RelSigma < 0.10, `${what}: the ladder still looks fine`);
+    assert.ok(
+      r.flags.some((f) => f.startsWith('axis_degenerate')),
+      `${what}: expected axis_degenerate on the DRAWN fit: ${r.flags.join(';')}`
+    );
+    // ...and the flag says which of the two terms decided it, so a field row can
+    // tell F4's original case from FG-3's.
+    const flag = r.flags.find((f) => f.startsWith('axis_degenerate')) as string;
+    assert.match(flag, /drawn_sigma_v0=\d+%_of_v0/, `${what}: ${flag}`);
+    assert.equal(r.spec.labelText, 'down the line');
+    assert.equal(r.spec.labelSubText, 'no distance');
+    assertNeverConfidentlyWrong(r, truth, what);
+  }
+});
+
+test('FG-3: the same measurement does not spread to shots that are fine', () => {
+  // The cost control. Adding the drawn fit to the conditioning test must not
+  // start refusing well-determined shots: F4's own "one degree of azimuth is
+  // enough" case is asserted elsewhere, and this is the same question asked of
+  // the fallback path, where the new term actually applies. A clip whose GPS is
+  // rejected but whose pixels are sound keeps its number.
+  for (const carryM of [40, 60, 100, 500]) {
+    const r = traceClip(traceInput({ carryM, carrySigmaGpsM: 6 }));
+    assert.ok(r.spec, `carry=${carryM}: ${r.reason}`);
+    assert.ok(
+      !r.flags.some((f) => f.startsWith('axis_degenerate')),
+      `carry=${carryM}: a 12-frame track 4 degrees off the line is not degenerate: ${r.flags.join(';')}`
+    );
+    assert.match(r.spec.labelText ?? '', /^\d+ m$/, `carry=${carryM} must keep its distance`);
+  }
+});
+
+test('FG-2: an unusable pixel-only carry sigma reaches the ALLOWLIST, not just the flag list', () => {
+  // THE REPRODUCTION at product level. `carry_untested(no_usable_pixel_only_carry_sigma)`
+  // was pushed as a FLAG while the status came back `carry_consistent`, and
+  // `lib/tracerV3.ts`'s allowlist — "carry_consistent is the only verdict that
+  // licenses a GPS-backed number" — reads the STATUS. So one GPS-backed clip in
+  // seven got a confident, GPS-marked number out of a test that could not run:
+  // with the pixel-only sigma substituted to zero the two z-scores are
+  // arithmetically identical, so GATE-1's second z-score buys literally nothing
+  // on those rows. The gate measured 13.8 % of GPS-backed numbers, `z ===
+  // zNoPixelSigma` on 100 % of them, and its own worst GPS-backed row (+67.6 %)
+  // among them.
+  //
+  // Six 30 fps frames on the flat fixture is where that state is reachable; the
+  // fit-level half, on a REAL clip, is in `tests/tracerFit.test.ts`.
+  const det = flatTension.detectionResult(flatTension.flightDetections({ frames: 6, fps: 30 }), { fps: 30 });
+  const truth = flatTension.truthSummary().carryM;
+
+  let reached = 0;
+  for (const carryM of [150, 165, 180, 200]) {
+    const r = traceClip(flatTension.traceInput({ detection: det, carryM, carrySigmaGpsM: 6 }));
+    const what = `gps=${carryM}`;
+    if (!r.flags.some((f) => f === 'carry_untested(no_usable_pixel_only_carry_sigma)')) continue;
+    reached++;
+    // The mechanism, asserted: the second z-score cannot object to anything the
+    // first missed, because they are the same number.
+    assert.equal(r.meta.carry?.zNoPixelSigma, r.meta.carry?.z, `${what}: the two z-scores must be identical`);
+    assert.ok(Math.abs(r.meta.carry?.z ?? 0) <= 2, `${what}: the precondition — this reading AGREES`);
+    // ...and the finding: the doubt is in the STATUS now, so the allowlist sees
+    // it and the pill does not claim a measured distance.
+    assert.equal(r.meta.carry?.status, 'carry_untested', what);
+    assert.equal(isGpsBackedNumber(r), false, `${what}: a GPS-backed number on an untested carry`);
+    assertNeverConfidentlyWrong(r, truth, what);
+  }
+  assert.ok(reached >= 2, `the reproduction must be LIVE — reached it on ${reached} readings`);
+});
+
+test('FG-2: it did not turn the GPS off — a confirmed carry is still a GPS-backed number', () => {
+  // The cost control, and the one that stops FG-2 becoming "distrust every
+  // carry". The change is confined to the case where the pixel-only sigma was
+  // unusable: a clip whose companion HAS a usable sigma and agrees with the GPS
+  // still reaches `carry_consistent`, still states its distance, and still drops
+  // the "· no GPS" marker. If this fails, FG-2 has eaten the joint fit.
+  const px = traceClip(traceInput());
+  assert.ok(px.spec);
+  const r = traceClip(traceInput({ carryM: px.meta.flight!.carryM, carrySigmaGpsM: 6 }));
+  assert.ok(r.spec, `a confirmed carry must draw: ${r.reason}`);
+  assert.equal(r.meta.carry?.status, 'carry_consistent');
+  assert.ok(
+    !r.flags.some((f) => f.startsWith('carry_untested')),
+    `and this clip's companion sigma IS usable: ${r.flags.join(';')}`
+  );
+  assert.equal(isGpsBackedNumber(r), true, 'a confirmed carry keeps its GPS-backed number');
+});
+
+test('FG-1(c): the fallback draws the best pixel-only fit in the ladder, not the drawn rung s companion', () => {
+  // THE FINDING. When the GPS carry is thrown away the ladder used to render
+  // `fit.pixelOnly` — the companion of whichever rung won the JOINT competition.
+  // A companion rides on its rung's model, so the rung that best fits the carry
+  // can carry the worst pixel-only fit, and the gate measured the consequence:
+  // `pixel_only_fallback` became the single largest source of wrong numbers,
+  // 6.4 % of its numbers more than 25 % from truth against 4.2 % for
+  // pixel-only-by-design. Round 2 filed it, round 3 made it fire 145 times more
+  // often, and both called it out of scope.
+  //
+  // The rule has no threshold in it: among the companions the ladder produced,
+  // take the one with the lowest rms that the fitter calls `ok`. Ties go to the
+  // incumbent, so it can only move the arc when it has a measured reason to.
+  let fired = 0;
+  for (const frames of [8, 10, 12]) {
+    for (const carryM of [5, 20, 35, 60]) {
+      const r = traceClip(traceInput({ detection: detectionResult(flightDetections({ frames })), carryM, carrySigmaGpsM: 6 }));
+      const flag = r.flags.find((f) => f.startsWith('pixel_only_best_of_ladder'));
+      if (!flag) continue;
+      fired++;
+      const m = /rms ([\d.]+)->([\d.]+) px over (\d+) companions/.exec(flag);
+      assert.ok(m, `the row must say what moved and by how much: ${flag}`);
+      const [, was, now, n] = m;
+      assert.ok(Number(n) >= 2, 'a choice needs something to choose between');
+      assert.ok(Number(now) < Number(was), `the pick must be strictly better: ${flag}`);
+      // And the fit that was actually DRAWN is the one it picked, not the one it
+      // reported. Reverting `pickPixelOnly` to the incumbent fails here.
+      assert.ok(
+        Math.abs((r.meta.fit?.rmsPx ?? -1) - Number(now)) < 0.005,
+        `the drawn fit must BE the pick: drawn rms ${r.meta.fit?.rmsPx} vs ${now}`
+      );
+      assert.equal(isGpsBackedNumber(r), false, 'a rejected carry never claims GPS backing (F5)');
+    }
+  }
+  assert.ok(fired >= 3, `the reproduction must be LIVE — it fired on ${fired} clips`);
+});
+
+test('FG-1: this fixture is CONFIDENTLY wrong, and none of the four siblings is', () => {
+  // The reproduction has to be live, or the next test passes for the wrong
+  // reason. FG-1 is not "the fit is noisy" — every sibling fixture recovers its
+  // own flight to within 5 %, which is what makes them controls. It is "the fit
+  // converges on a completely different flight and the pill states it to the
+  // nearest 10 m". Asserted here, on all five, rather than described.
+  const truth = dropped.truthSummary().carryM;
+  const drawnFit = traceClip(dropped.traceInput({ knobs: { labelRounding: false } }));
+  assert.ok(drawnFit.meta.flight, `the fixture must still FIT: ${drawnFit.reason}`);
+  const err = (drawnFit.meta.flight.carryM - truth) / truth;
+  assert.ok(err > 2.0, `expected a >200 % error to reproduce FG-1, got ${(100 * err).toFixed(0)} %`);
+  assert.equal(drawnFit.meta.carry?.inputM ?? null, null, 'and NO GPS is involved — that is the finding');
+
+  // The three CLEAN fixtures. `tracerV3AxisFallback` is deliberately not in this
+  // list: it is FG-3's reproduction and is itself 42 % wrong by construction, so
+  // it is a second wrong-fit fixture rather than a control — and the two are
+  // wrong for DIFFERENT reasons, which is why both exist (that one loses the
+  // azimuth, this one loses the depth).
+  for (const [name, r] of [
+    ['clip', traceClip(traceInput())],
+    ['short', traceClip(shortTrack.traceInput())],
+    ['flat', traceClip(flatTension.traceInput())],
+  ] as const) {
+    assert.ok(r.meta.flight, `${name}: the control must fit`);
+    const t =
+      name === 'clip' ? simulate({ v0: 62, thetaDeg: 13, phiDeg: 4, rpmBack: 3000, rpmSide: 0, z0: BALL_RADIUS_M }).summary.carryM
+      : name === 'short' ? shortTrack.truthSummary().carryM
+      : flatTension.truthSummary().carryM;
+    assert.ok(
+      Math.abs((r.meta.flight.carryM - t) / t) < 0.15,
+      `${name} is a CONTROL: it must recover its own flight, got ${(100 * (r.meta.flight.carryM - t) / t).toFixed(0)} %`
+    );
+  }
+});
+
+test('FG-1: a fit too uncertain to state a distance draws the arc and withholds the number', () => {
+  // THE REPRODUCTION. `COARSEST_LABEL_STEP_M` caps how far `roundLabelM` can
+  // widen the step, so past about 10 m of sigma the pill stops describing its
+  // own uncertainty and starts reading like a measurement. The gate swept 58 500
+  // clips and found 1 719 of 39 086 drawn numbers more than 25 % from truth,
+  // worst +194 % — a 62 m shot drawn "180 m" — and the worst rows had NO GPS in
+  // them at all, which is why three rounds of carry-verdict fixes never reached
+  // it. Here it is a 65 m shot the fit puts at 281 m.
+  //
+  // Henry's rule decides what happens next: the feature may skip, and it may
+  // draw a trace with no distance, but it must never show a confidently wrong
+  // number. So the number is withheld and the ARC IS STILL DRAWN.
+  const r = traceClip(dropped.traceInput());
+  const truth = dropped.truthSummary().carryM;
+
+  assert.ok(r.spec, `the arc is the feature and it must survive: ${r.reason}`);
+  assert.ok(r.spec.samples.length > 1, 'and it is a real polyline, not an empty one');
+  assert.equal(r.spec.labelText, 'no distance');
+  assert.equal(r.spec.labelSubText, 'not enough of the flight');
+  assertNeverConfidentlyWrong(r, truth, 'the dropped-frame fixture');
+
+  // The row says WHICH of the three tests withheld it, so a field test can tell
+  // them apart and a later change to one of them is visible in the data.
+  const flag = r.flags.find((f) => f.startsWith('too_uncertain_no_distance('));
+  assert.ok(flag, `the withholding must be on the row: ${r.flags.join(';')}`);
+  assert.match(flag as string, /sigma_v0=\d+%>=5%/, `test 1, the conditioning: ${flag}`);
+  assert.match(flag as string, /rms=[\d.]+px>2px@1080/, `test 2, the residual: ${flag}`);
+  assert.match(flag as string, /sigma=\d+m>25%_of_\d+m/, `test 3, the label sigma: ${flag}`);
+
+  // It is NOT the GPS path wearing a different hat: no carry was supplied, the
+  // verdict machinery never ran, and the two older "no distance" rungs are silent.
+  assert.equal(r.meta.carry?.inputM ?? null, null, 'no carry was supplied');
+  assert.equal(r.meta.carry?.status ?? null, null, 'so no verdict was reached');
+  assert.ok(!r.flags.some((f) => f.startsWith('axis_degenerate')), 'not F4');
+  assert.ok(!r.flags.some((f) => /carry_\w+_no_distance/.test(f)), 'not NEW-1(b)/GATE-1');
+
+  // And turning the rounding off does not buy the number back: this is a product
+  // rule about whether a distance may be STATED, not about how it is rounded.
+  const raw = traceClip(dropped.traceInput({ knobs: { labelRounding: false } }));
+  assert.equal(raw.spec?.labelText, 'no distance');
+});
+
+test('FG-1: the label-sigma test is reachable on its own, so deleting it is visible', () => {
+  // The three tests fire together on the reproduction above, which means that
+  // test alone cannot tell whether all three are load-bearing. This one pins the
+  // third — the weakest predictor and therefore the one most likely to be
+  // "simplified" away — by finding a clip where it is the ONLY one that fires.
+  // Measured over the sweep it removes 16 of the 63 rows the other two leave.
+  const r = traceClip(
+    axisFallback.traceInput({ detection: axisFallback.detectionResult(axisFallback.flightDetections({ frames: 5 })) })
+  );
+  assert.ok(r.spec, `the arc must still draw: ${r.reason}`);
+  const flag = r.flags.find((f) => f.startsWith('too_uncertain_no_distance('));
+  assert.ok(flag, `expected the label-sigma test to fire alone: ${r.flags.join(';')}`);
+  assert.doesNotMatch(flag as string, /sigma_v0=/, 'the conditioning test must NOT be what fired');
+  assert.doesNotMatch(flag as string, /rms=/, 'nor the residual test');
+  assert.match(flag as string, /sigma=\d+m>25%_of_\d+m/);
+  assert.equal(r.spec.labelText, 'no distance');
+});
+
+test('FG-1: it did not turn the feature off — a well-determined clip still states its distance', () => {
+  // The cost side, and the control that stops "never show a wrong number" from
+  // becoming "never show a number". Every sibling fixture is a clip whose pixels
+  // pin the flight, and every one of them must keep its number — with no GPS,
+  // and with a correct GPS carry. Measured over 58 500 calls the rule withholds
+  // 24.7 % of the numbers that used to be drawn and 12.4 % of the CORRECT ones;
+  // if that ever becomes "all of them", this fails.
+  let stated = 0;
+  for (const [name, F, frames] of [
+    ['clip', { traceInput, detectionResult, flightDetections }, [8, 10, 12, 14]],
+    ['short', shortTrack, [6, 8, 10, 12]],
+    ['flat', flatTension, [6, 8, 10, 12]],
+  ] as const) {
+    for (const n of frames) {
+      const det = (F as typeof flatTension).detectionResult((F as typeof flatTension).flightDetections({ frames: n }));
+      const px = traceClip((F as typeof flatTension).traceInput({ detection: det }));
+      assert.ok(px.spec, `${name} f${n}: ${px.reason}`);
+      assert.match(px.spec.labelText ?? '', /^\d+ m$/, `${name} f${n}: a clean pixel track must keep its distance`);
+      assert.match(px.spec.labelSubText ?? '', /· no GPS$/, `${name} f${n}`);
+      stated++;
+
+      // With a correct carry the number may still be withheld — but only by the
+      // GPS rungs, never by FG-1: adding a reading the pixels agree with cannot
+      // make the PIXELS less certain. Round 2 measured that cost (about one
+      // short-track clip in twelve) and it is not this round's to re-litigate,
+      // so what is asserted here is that FG-1 is not the thing taking it.
+      const gps = traceClip(
+        (F as typeof flatTension).traceInput({ detection: det, carryM: px.meta.flight!.carryM, carrySigmaGpsM: 6 })
+      );
+      assert.ok(gps.spec, `${name} f${n} +gps: ${gps.reason}`);
+      assert.ok(
+        !gps.flags.some((f) => f.startsWith('too_uncertain_no_distance')),
+        `${name} f${n}: FG-1 must not fire on a clip whose pixels alone stated a number: ${gps.flags.join(';')}`
+      );
+    }
+  }
+  assert.equal(stated, 12, 'all twelve geometries state a pixel-only distance');
+});
+
+// ─── CT-6: the apex number is gated the way the carry is ────────────────────
+// Four review rounds gated the CARRY and none of them touched the APEX, which
+// sits on the same pill with nothing between it and the golfer. The certifying
+// sweep (docs/tracer-v3/certify.md) found a pill reading "apex 39 m" for a shot
+// that peaked at 7.5 m, beside a carry that had passed every gate. The apex is
+// resolved by the ball's vertical travel LATE in the flight — exactly what a
+// track that stops early lacks — and unlike the carry it has no GPS constraint
+// to fall back on, so it needs its own rule.
+//
+// These use a REAL fit from the clip fixture and then move only the two apex
+// fields, so what is under test is the label rule and not a hand-built object.
+
+function realFit() {
+  const cam = truthCamera();
+  const dets = flightDetections();
+  const fit = fitLaunch({
+    track: dets.map((d) => ({ frame: d.frame, x: d.x, y: d.y, conf: d.conf })),
+    camera: cam,
+    addressPx: addressCue(cam),
+    impactFrame: K_IMPACT,
+    fps: FPS,
+    bucket: 'driver',
+  });
+  // Deliberately NOT asserting fit.ok: buildLabel reads only `summary` and
+  // `sigmaTotal`, and these tests replace both apex fields. The fit is here so
+  // the object under test is a real FitResult with real siblings — a
+  // hand-built literal would pass even if the shape changed underneath it.
+  assert.ok(Number.isFinite(fit.summary.carryM), 'the fit must at least produce a carry to label');
+  return fit;
+}
+
+test('CT-6: an apex the fit cannot pin is withheld, and the carry beside it is not', () => {
+  const fit = realFit();
+  // Well-determined carry, badly-determined apex — the shape the certifier
+  // found, and the one the carry's own gates cannot see.
+  const wide = {
+    ...fit,
+    summary: { ...fit.summary, apexM: 8 },
+    sigmaTotal: { ...fit.sigmaTotal, apexM: 40 },
+  };
+  const label = buildLabel(wide, false, true);
+  assert.match(label.labelText, /^\d+ m$/, 'the carry is still stated — this rule is about the apex alone');
+  assert.ok(
+    !/apex \d/.test(label.labelSubText),
+    `a 5x-uncertain apex must be withheld, got "${label.labelSubText}"`
+  );
+  assert.match(label.labelSubText, /no GPS/, 'the GPS provenance marker describes the CARRY and must survive');
+});
+
+test('CT-6: an apex the fit DOES pin is still stated', () => {
+  const fit = realFit();
+  const tight = {
+    ...fit,
+    summary: { ...fit.summary, apexM: 30 },
+    sigmaTotal: { ...fit.sigmaTotal, apexM: 3 },
+  };
+  assert.match(
+    buildLabel(tight, true, true).labelSubText,
+    /apex 30 m/,
+    'a 10 % apex sigma is inside the bar and must keep its number'
+  );
+});
+
+test('CT-6: a non-finite or non-positive apex never reaches the pill', () => {
+  const fit = realFit();
+  for (const apexM of [NaN, 0, -1]) {
+    const bad = {
+      ...fit,
+      summary: { ...fit.summary, apexM },
+      sigmaTotal: { ...fit.sigmaTotal, apexM: 0.1 },
+    };
+    const sub = buildLabel(bad, true, true).labelSubText;
+    assert.ok(!/apex (\d|NaN|-)/.test(sub), `apex ${apexM} must not be printed, got "${sub}"`);
   }
 });

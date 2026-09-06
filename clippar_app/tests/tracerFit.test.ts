@@ -499,16 +499,31 @@ test('the joint fit is seeded from the pixel-only optimum and never lands in a w
   }
 });
 
-test('a missing pixel-only carry sigma FLAGS carry_untested but still runs the test (F1)', () => {
-  // This test used to assert `carryStatus === 'carry_untested'`, i.e. that a
-  // missing Monte Carlo made the port skip the consistency test entirely. The
-  // adversarial review (docs/tracer-v3/review.md, F1) showed that is the
-  // opposite of conservative: `fixSpin` makes the pixel-only covariance
-  // singular, so a wrong GPS carry was USED, untested, and drawn as a confident
-  // distance. fit.py:889 substitutes sigma = 0 and computes z anyway, which
-  // costs only the PERMISSIVE `carry_as_scale` rung and keeps the protective
-  // one. The contract asserted here is now that behaviour: the flag survives as
-  // a caveat, the verdict is still reached.
+test('a missing pixel-only carry sigma runs the test (F1) and still reaches carry_untested (FG-2)', () => {
+  // TWO findings meet on one real clip, and the assertions below are the whole
+  // of what separates them. Read in order, because each round moved this test:
+  //
+  //  * ORIGINALLY it asserted `carry_untested` meaning "the consistency test was
+  //    SKIPPED and the GPS carry used anyway". Review F1 showed that is the
+  //    opposite of conservative — `fixSpin` makes the pixel-only covariance
+  //    singular, so a wrong carry was used, untested, and drawn as a confident
+  //    distance. fit.py:889 substitutes sigma = 0 and computes z regardless.
+  //  * ROUND 1 therefore asserted `carry_consistent` on an agreeing carry: the
+  //    test runs, the flag survives as a caveat.
+  //  * FG-2 (docs/tracer-v3/final-gate.md) shows the round-1 answer went one
+  //    step too far. With `sc = 0` the two z-scores are ARITHMETICALLY IDENTICAL,
+  //    so GATE-1's second z-score buys nothing here and "the one test that could
+  //    be formed did not object" is not the same claim as "the pixels confirmed
+  //    the GPS". The status now says so, and `lib/tracerV3.ts`'s allowlist —
+  //    which reads the STATUS, never the flags — finally sees the doubt the flag
+  //    has been carrying all along. The gate measured this on 13.8 % of
+  //    GPS-backed numbers, including the worst GPS-backed row in its 58 500-call
+  //    sweep (+67.6 %).
+  //
+  // What is NOT weakened, and is asserted below rather than described: the test
+  // still RUNS (`carryZ !== null`), and a carry that cannot be true still comes
+  // back `carry_inconsistent` — F1's property is untouched. FG-2 only takes away
+  // the ability to say `carry_consistent` when nothing checked the sigma.
   const f = clipFixture('IMG_3631');
   const base = {
     track: f.track,
@@ -520,14 +535,27 @@ test('a missing pixel-only carry sigma FLAGS carry_untested but still runs the t
     mcSamples: 0,
   };
 
-  // A carry that agrees with the pixels: consistent, and the caveat is recorded.
+  // A carry that agrees with the pixels: the test RUNS (F1), and the verdict is
+  // `carry_untested` rather than `carry_consistent` (FG-2).
   const agree = fitLaunch({ ...base, carryM: 240 });
   assert.ok(
     agree.flags.includes('carry_untested(no_usable_pixel_only_carry_sigma)'),
     `the caveat must survive: ${agree.flags.join(';')}`
   );
-  assert.ok(agree.carryZ !== null, 'the consistency test must have RUN, not been skipped');
-  assert.equal(agree.carryStatus, 'carry_consistent');
+  assert.ok(agree.carryZ !== null, 'F1: the consistency test must have RUN, not been skipped');
+  assert.ok(Math.abs(agree.carryZ as number) <= 2, 'the precondition: this carry AGREES');
+  assert.equal(agree.carryStatus, 'carry_untested');
+
+  // FG-2's mechanism, asserted rather than described: with `sc` substituted to
+  // zero the two denominators differ by nothing, so GATE-1's second z-score is
+  // the same number as the first and cannot object to anything the first missed.
+  // If a later change makes the pixel-only sigma usable on this clip, this fails
+  // and the verdict above has to be re-argued instead of drifting.
+  assert.equal(
+    agree.carryZNoPixelSigma,
+    agree.carryZ,
+    'z and z_no_pixel_sigma must be IDENTICAL when the pixel-only sigma is dropped'
+  );
 
   // The F1 reproduction at the fit level: the SAME missing sigma with a carry
   // that cannot be true must come back inconsistent, not untested.
