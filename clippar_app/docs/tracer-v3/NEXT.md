@@ -34,7 +34,8 @@ the DEV BUILD, behind a config so it is trivially revertible, wired to GPS/locat
       `clippar_app/tests/fixtures/tracerV3DroppedFrames.ts`. Six tests import them and a fresh
       clone is red without them. (Round 3's `tracerV3FlatTension.ts` is already tracked, in
       `3da9eff`.)
-- [ ] Second commit + push; write back; write back to `company-brain/org/cto/STATUS.md` and the daily report;
+- [x] Second/third commit + push — `3da9eff`, `9013e2e`; verify 863/863
+- [ ] Write back; write back to `company-brain/org/cto/STATUS.md` and the daily report;
       hand Henry the build command (do NOT spend EAS credits — nearly exhausted as of 5 Sep)
 
 ## Resuming
@@ -47,3 +48,25 @@ a missing report means that agent did not finish.
 
 **Model policy (Henry, 5 Sep):** every Workflow agent runs `{ model: 'claude-opus-5' }`.
 **Nothing is submitted to Apple, and no EAS build is started, without Henry's explicit instruction.**
+
+
+## Done — 6 Sep 2026, 17:30
+
+Five commits on `feat/tracer-v3` (pushed): plan, the integration, GATE-1, round 4 + the apex
+gate. `npm run verify` **863/863**, tsc clean, baseline was 652.
+
+**Six independent adversarial passes**, each of which found real defects that are fixed here:
+`review.md` → `re-verify.md` → `gate.md` → `final-gate.md` → `certify.md`, with `fixes.md`
+carrying four rounds of remedies. The through-line: one bug — a disagreement test skipped or
+diluted by a sigma that was itself unreliable — kept reappearing at lower thresholds until it
+was closed as a class rather than an instance, and the last round moved the argument from the
+carry VERDICT to what the label is allowed to SAY.
+
+**Certified state:** 1 stated distance in 92 is still more than 25 % from truth (1 in 139 on a
+realistic capture, worst +46 %), down from 1 in 14. Not zero, and not hidden.
+
+**Next, and it is not more of this:** the on-device field test. Nothing here has run on a
+phone, no Swift has been compiled and no frame has been rendered. The single most valuable
+measurement is `meta.selection.throughApex` — every wrong number in 63,772 simulated calls
+came from a track that stopped before the apex, and nothing whose track reached the apex was
+more than 12 % out.
