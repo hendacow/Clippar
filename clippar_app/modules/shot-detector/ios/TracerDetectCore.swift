@@ -89,6 +89,15 @@ public struct TracerParams {
     public var motionMinStepR = 3.0
 
     // detect2 (f): the departure cue defines the launch frame.
+    /// Impact offsets to retry a FAILED detection at, in 30 fps-equivalent frames,
+    /// nearest first. 0 must come first: a clip whose impact is already right returns on
+    /// the first pass and pays nothing.
+    ///
+    /// Measured 6 Sep on IMG_0601: the true impact gives 44 detections and +-15 frames
+    /// (half a second) gives zero. The app's impact on IMPORTED clips is regularly worse
+    /// than that, so the window reaches +-1.5 s. Beyond that a "shot" found by search is
+    /// more likely to be a different swing in the same clip than a rescue of this one.
+    public var impactSearchOffsets = [0, -8, 8, -16, 16, -24, 24, -32, 32, -45, 45]
     public var departScanLo = -4
     public var departScanHi = 6
     public var departPersist = 2

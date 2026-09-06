@@ -592,3 +592,30 @@ test('the batch passes the import allowance and the assumed pitch to the ladder'
   assert.match(src, /allowUnknownGeometry:\s*config\.tracer\.v3\.traceUnknownGeometry/);
   assert.match(src, /assumedPitchDownDeg:\s*config\.tracer\.v3\.assumedPitchDownDeg/);
 });
+
+// The detector must SEARCH for the impact, not trust the one it is handed.
+// Measured on Henry's own footage 6 Sep (IMG_0601, macOS harness around the real
+// Swift): the true impact returns 44 detections and HALF A SECOND either side
+// returns ZERO — every frame the detector reads is anchored to the impact. The
+// app's impact_time_ms on IMPORTED clips is regularly worse than that, which is
+// why four of six imported clips traced nothing in the field. With the search:
+// 42-47 detections across the whole +-1.5 s band, and no extra cost when the
+// impact was already right (offset 0 is tried first and returns immediately).
+test('the native detector searches for the impact around the one it is given', () => {
+  const src = read('modules/shot-detector/ios/TracerDetect.swift');
+  assert.match(src, /impactSearchOffsets/, 'the impact search must still exist');
+  assert.match(
+    src,
+    /private static func detectOnce/,
+    'the single-attempt worker must stay private behind the searching entry point'
+  );
+  const core = read('modules/shot-detector/ios/TracerDetectCore.swift');
+  const decl = /impactSearchOffsets\s*=\s*\[([^\]]*)\]/.exec(core);
+  assert.ok(decl, 'impactSearchOffsets must be declared with its ladder');
+  const offsets = decl[1].split(',').map((t) => Number(t.trim()));
+  assert.equal(offsets[0], 0, 'offset 0 MUST be first — a clip whose impact is right pays nothing');
+  assert.ok(
+    Math.max(...offsets.map(Math.abs)) >= 45,
+    'the search must reach at least +-1.5 s at 30 fps; the field failures were beyond +-0.5 s'
+  );
+});

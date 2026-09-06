@@ -558,10 +558,87 @@ public enum TracerDetect {
                       options: TracerDetectOptions(json: optionsJson))
     }
 
-    /// Detect the ball's first frames of flight. Never throws; a failure is `found: false`
-    /// with a reason in `notes`.
+    /// Detect the ball's first frames of flight, searching for the impact rather than
+    /// trusting the one it was handed.
+    ///
+    /// WHY THIS SEARCHES. Every frame the detector looks at is anchored to the impact:
+    /// the background stack, the three address frames (`addrFrames` = impact-24/-15/-6),
+    /// the departure scan and the launch search. Measured on Henry's own footage
+    /// (IMG_0601, 6 Sep) the sensitivity is brutal — with the true impact it returns 44
+    /// detections, and HALF A SECOND either side it returns ZERO, failing as
+    /// "no address ball", "weak contrast" or "no persistent departure" depending on
+    /// which way it is wrong. The app's `impact_time_ms` comes from the swing detector
+    /// and on IMPORTED footage it is regularly further out than that, which is why four
+    /// of six imported clips traced nothing in the field while the same clips detect
+    /// cleanly here from an audio-derived impact.
+    ///
+    /// So a failure is retried at offsets around the given impact, nearest first, and the
+    /// first attempt that actually emits a track wins. A clip whose impact is already
+    /// right pays nothing: offset 0 is tried first and returns immediately. A clip that
+    /// was going to fail outright pays at most `impactSearchOffsets.count` passes over a
+    /// ~50-frame window, which is the cost of the difference between a trace and nothing.
     public static func detect(assetURL: URL, impactTimeMs: Double,
                               options: TracerDetectOptions) -> [String: Any] {
+        let offsets = options.params.impactSearchOffsets
+        var firstResult: [String: Any]? = nil
+        for (i, offFrames30Base) in offsets.enumerated() {
+            var offFrames30 = offFrames30Base
+            let offMs = Double(offFrames30) * (1000.0 / 30.0)
+            let tryMs = impactTimeMs + offMs
+            if tryMs < 0 { continue }
+            var r = detectOnce(assetURL: assetURL, impactTimeMs: tryMs, options: options)
+            var dets = (r["detections"] as? [[String: Any]]) ?? []
+            if !dets.isEmpty {
+                // LOCAL REFINEMENT. The coarse ladder steps 8 frames, so the offset that
+                // first succeeds can be a few frames off the real impact and return a
+                // stunted track — measured on IMG_0601 at +500 ms: the coarse hit gave 4
+                // detections where the true anchor gives 44, and the fit needs the frames
+                // far more than it needs the milliseconds. So on a RESCUE (never on the
+                // clean offset-0 path) the two neighbouring half-steps are also tried and
+                // the longest track wins. At most two extra passes, and only for a clip
+                // that had already failed at the impact it was given.
+                if offFrames30 != 0 {
+                    var bestOff = offFrames30
+                    for refine in [offFrames30 - 4, offFrames30 + 4] {
+                        let rMs = impactTimeMs + Double(refine) * (1000.0 / 30.0)
+                        if rMs < 0 { continue }
+                        let rr = detectOnce(assetURL: assetURL, impactTimeMs: rMs, options: options)
+                        let rd = (rr["detections"] as? [[String: Any]]) ?? []
+                        if rd.count > dets.count {
+                            r = rr
+                            dets = rd
+                            bestOff = refine
+                        }
+                    }
+                    offFrames30 = bestOff
+                }
+                if offFrames30 != 0 {
+                    var n = (r["notes"] as? [String: Any]) ?? [:]
+                    // The offset is on the row so a field sweep can tell "the detector
+                    // rescued a bad impact" from "the impact was right all along" — and
+                    // so a systematic bias in the app's impact shows up as a pattern.
+                    n["impact_searched"] = "found at \(offFrames30 >= 0 ? "+" : "")\(offFrames30) frames (30fps-equiv) from the given impact"
+                    n["impact_search_attempts"] = i + 1
+                    r["notes"] = n
+                }
+                return r
+            }
+            if firstResult == nil { firstResult = r }
+        }
+        // Nothing anywhere in the window. Report the attempt at the GIVEN impact, so the
+        // reason describes what the caller asked about rather than some distant offset.
+        var r = firstResult ?? detectOnce(assetURL: assetURL, impactTimeMs: impactTimeMs, options: options)
+        var n = (r["notes"] as? [String: Any]) ?? [:]
+        n["impact_search_attempts"] = offsets.count
+        n["impact_searched"] = "no track at any offset in the search window"
+        r["notes"] = n
+        return r
+    }
+
+    /// One detection attempt at exactly the impact given. This is the original
+    /// `detect`, unchanged; `detect` above wraps it in the impact search.
+    private static func detectOnce(assetURL: URL, impactTimeMs: Double,
+                                   options: TracerDetectOptions) -> [String: Any] {
         var notes: [String: Any] = [
             "coords": "native px, top-left origin, display-oriented",
             "conf": "heuristic ordinal, uncalibrated, capped 0.7 for r<1.5px"
