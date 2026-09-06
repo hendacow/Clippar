@@ -466,6 +466,11 @@ export interface TracerV3Meta {
     sigmaGpsM: number | null;
     status: CarryStatus | null;
     z: number | null;
+    /** GATE-1: the same z with the pixel-only carry sigma dropped from the
+     *  denominator. It is half the verdict now, so it has to reach the row a
+     *  field test is read from — the whole finding was a number the code
+     *  computed and nobody looked at. */
+    zNoPixelSigma: number | null;
     sigmaM: number | null;
     labelM: number | null;
     labelStepM: number | null;
@@ -1310,14 +1315,16 @@ export function buildLabel(
   /**
    * Why this pill must not state a distance, or null to state one.
    *   `axis_degenerate`  REVIEW F4 — the geometry lost the scale (see below).
-   *   `carry_as_scale`   GATE NEW-1(b) — the number's scale came from a GPS
-   *                      distance the pixels were too loose to check.
+   *   `gps_unchecked`    GATE NEW-1(b), widened to the whole class by GATE-1 —
+   *                      the number's scale came from a GPS distance the pixels
+   *                      did not CONFIRM (too loose to check, in tension with,
+   *                      or untestable against).
    */
-  noDistance: 'axis_degenerate' | 'carry_as_scale' | null = null,
+  noDistance: 'axis_degenerate' | 'gps_unchecked' | null = null,
   /**
    * 1-sigma the rounding step is taken from, metres. Defaults to the fit's own
-   * `sigmaTotal.carryM`; NEW-1(b) passes a WIDER one when the fit's sigma is
-   * not the whole error (a GPS-set scale the pixels could not confirm).
+   * `sigmaTotal.carryM`; the unconfirmed-GPS case passes a WIDER one, because
+   * there the fit's own sigma is not the whole error.
    */
   labelSigmaM?: number
 ): { labelText: string; labelSubText: string } {
@@ -1333,13 +1340,14 @@ export function buildLabel(
   if (noDistance === 'axis_degenerate') {
     return { labelText: 'down the line', labelSubText: 'no distance' };
   }
-  // GATE NEW-1(b). Same remedy, different cause: under `carry_as_scale` the
-  // pixel-only carry is too loose to test the GPS distance, so the drawn number
-  // rides on a GPS reading nothing in this pipeline has checked. Measured: a
-  // 130 m GPS carry on a 251 m shot drew "220 m", and a 5-80 m one drew
-  // "170 m".."200 m" before NEW-1(a) sent those to the inconsistency branch.
-  // The trace is still drawn; the number is not claimed.
-  if (noDistance === 'carry_as_scale') {
+  // GATE NEW-1(b), widened by GATE-1. Same remedy, different cause: the drawn
+  // number's scale came from a GPS reading the pixels did not confirm — too
+  // loose to test it (`carry_as_scale`), in 2-4 sigma tension with it
+  // (`carry_tension`), or with no pixel-only companion to test it against at
+  // all (`carry_untested`). Measured: a 130 m GPS carry on a 251 m shot drew
+  // "220 m"; an 80 m one on a 164.6 m shot drew "100 m". The trace is still
+  // drawn; the number is not claimed.
+  if (noDistance === 'gps_unchecked') {
     return { labelText: 'no distance', labelSubText: 'GPS unchecked' };
   }
   const sigmaM = labelSigmaM ?? fit.sigmaTotal.carryM;
@@ -1657,6 +1665,12 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
       usedFit = pixelOnly ?? fit;
       meta.reason = inconsistent[0];
     } else if (fit.flags.some((f) => f.startsWith('carry_tension'))) {
+      // GATE-1: this is a diagnostic flag ONLY. Until 6 Sep it was the whole of
+      // what `carry_tension` did — pushed here and never read again — which is
+      // byte-for-byte the shape `carry_as_scale` had before NEW-1(b), and it let
+      // an 80 m GPS reading be drawn as "100 m" on a 164.6 m shot. What the
+      // verdict now costs the LABEL is decided below, next to `gpsBackedLabel`,
+      // for every unconfirmed verdict at once. Do not re-derive it here.
       flags.push('carry_tension');
     }
     if (fit.carryStatus === 'carry_as_scale') flags.push('carry_as_scale');
@@ -1805,46 +1819,89 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     decision !== 'pixel_only_fallback' &&
     !flags.some((f) => f.startsWith('joint_fit_rejected'));
 
-  // ── GATE NEW-1(b): a GPS-set scale the pixels could not check.
+  // ── GATE-1: a GPS-set scale the pixels did not CONFIRM — every rung of it.
   //
-  // `carry_as_scale` was pushed as a flag here and otherwise ignored, so the
-  // pill read exactly like a measured distance — same rounding step, and no
-  // "· no GPS", because the GPS genuinely WAS used. But the verdict's own
-  // definition is that NO consistency claim is made: the pixel-only carry is
-  // looser than 15 % of itself, so nothing in this pipeline has tested the GPS
-  // reading, and the GPS reading's real failure modes (the golfer laid up, the
-  // successor fix landed on the cart path, the phone was in the bag) are in no
-  // sigma the fit computes. NEW-1(a) now catches the ones the geometry can
-  // reject outright; what is left is the ones it cannot.
+  // This began as NEW-1(b), which covered `carry_as_scale` alone: that verdict
+  // was pushed as a flag here and otherwise ignored, so the pill read exactly
+  // like a measured distance — same rounding step, and no "· no GPS", because
+  // the GPS genuinely WAS used. `carry_tension` had the identical shape one rung
+  // below (`flags.push('carry_tension')` and nothing else, a few lines above),
+  // and the gate agent walked straight through it: a GPS reading of 80 m against
+  // a 164.6 m shot whose own pixels said 171.8 m was drawn "100 m" / "apex 6 m",
+  // decision `fit`, no "· no GPS". 39 % wrong, and worse than the NEW-1(b)
+  // reproduction. Reproduced here on `tests/fixtures/tracerV3FlatTension.ts`
+  // before this was written.
   //
-  // So the label's sigma is the WIDEST of the three things the number rides on:
-  // the fit's own total, the GPS distance's own sigma_D, and — the term that
-  // decides it — the pixel-only carry sigma, which under this verdict is >= 15 %
-  // of the carry by construction and was 34-69 % on 8-10 frame tracks. When that
-  // exceeds the coarsest step `labelStepM` can offer, no rounding describes the
-  // error and the distance is dropped the way F4 drops it; when it does not (a
-  // genuinely short shot, where 15 % is a few metres) the step simply widens.
-  const carryAsScale =
-    carryM !== null &&
-    decision !== 'pixel_only_fallback' &&
-    (usedFit.carryStatus === 'carry_as_scale' || flags.includes('carry_as_scale'));
-  const pxCarrySigmaM = (usedFit.pixelOnly ?? fit.pixelOnly)?.summarySigma.carryM;
-  const asScaleSigmaM = carryAsScale
+  // SO THE RULE IS AN ALLOWLIST, NOT A LIST OF KNOWN-BAD RUNGS. Exactly one
+  // carry verdict says the pixels agreed with the GPS — `carry_consistent`.
+  // Every other value means the reading was not confirmed: too loose to test
+  // (`carry_as_scale`), tested and in 2-4 sigma tension (`carry_tension`), or
+  // with no pixel-only companion to test against at all (`carry_untested`). A
+  // denylist is what produced three findings at three thresholds (review F1,
+  // gate NEW-1, gate GATE-1); an allowlist means a verdict added to
+  // `CarryStatus` later is unverified until someone deliberately says otherwise.
+  // `carry_inconsistent` never reaches here as a GPS-backed label — it becomes
+  // `pixel_only_fallback` above — but it is covered by the same rule anyway,
+  // because it can arrive on the implausible-flight refit AFTER that decision.
+  //
+  // WHAT THE HONEST SIGMA IS. The widest of four things the number rides on:
+  //   1. the fit's own `sigmaTotal.carryM`;
+  //   2. the GPS distance's own sigma_D;
+  //   3. the pixel-only carry sigma — >= 15 % of the carry by construction under
+  //      `carry_as_scale`, and 34-69 % on 8-10 frame tracks;
+  //   4. THE DISAGREEMENT ITSELF: how far the GPS dragged the drawn carry away
+  //      from the pixel-only companion's own answer.
+  // (4) is the term GATE-1 forces and it is not an extra rule, it is the same
+  // disease at the label that NEW-1(a) fixed at the verdict: sizing a label from
+  // a sigma that the evidence has already contradicted. Under tension the fit's
+  // own sigma was 12.7 m while the error was 65 m, and on a 43 m pitch the gate
+  // measured a 13 m error against a claimed 6.5 m sigma — terms 1-3 miss both,
+  // because a short shot's 15 % is only a few metres. Two estimates that
+  // disagree by X bound the error of whichever one is wrong at X, and nothing in
+  // this pipeline knows which.
+  //
+  // Then, unchanged from NEW-1(b): when that sigma exceeds the coarsest step
+  // `labelStepM` can offer, no rounding describes the error and the distance is
+  // dropped the way F4 drops it; when it does not, the step simply widens and
+  // the number survives. That is why this is a rule and not a special case.
+  const carryVerdict =
+    usedFit.carryStatus !== 'carry_consistent'
+      ? usedFit.carryStatus
+      : fit.carryStatus !== 'carry_consistent'
+        ? fit.carryStatus
+        : 'carry_consistent';
+  // `fit` as well as `usedFit`, because the implausible-flight refit can replace
+  // the drawn fit AFTER the carry decision was taken, and the primary rung's
+  // opinion of the GPS is a statement about the DATA (REVIEW F1(b)).
+  const gpsUnverified = gpsBackedLabel && carryVerdict !== 'carry_consistent';
+  const pxCompanion = usedFit.pixelOnly ?? fit.pixelOnly;
+  const pxCarrySigmaM = pxCompanion?.summarySigma.carryM;
+  const pxCarryM = pxCompanion?.summary.carryM;
+  const unverifiedSigmaM = gpsUnverified
     ? Math.max(
         usedFit.sigmaTotal.carryM,
         usedFit.carrySigmaM ?? 0,
         // A missing companion sigma is not a small one: it is unknown, and the
         // whole finding is that an unusable sigma must never read as agreement.
+        // Same for a missing companion carry — with nothing to disagree with,
+        // there is no bound on the disagreement.
         pxCarrySigmaM != null && Number.isFinite(pxCarrySigmaM)
           ? pxCarrySigmaM
+          : Number.POSITIVE_INFINITY,
+        pxCarryM != null && Number.isFinite(pxCarryM)
+          ? Math.abs(usedFit.summary.carryM - pxCarryM)
           : Number.POSITIVE_INFINITY
       )
     : null;
-  const asScaleNoDistance = asScaleSigmaM !== null && !(asScaleSigmaM <= COARSEST_LABEL_STEP_M);
-  if (asScaleNoDistance) {
+  const gpsUncheckedNoDistance =
+    unverifiedSigmaM !== null && !(unverifiedSigmaM <= COARSEST_LABEL_STEP_M);
+  if (gpsUncheckedNoDistance) {
+    // Named per verdict, so a field row says WHICH rung withheld the number and
+    // nothing filtering on `carry_as_scale_no_distance` — the name this flag had
+    // when it covered one rung — silently stops matching the others.
     flags.push(
-      `carry_as_scale_no_distance(honest_sigma=${
-        Number.isFinite(asScaleSigmaM as number) ? Math.round(asScaleSigmaM as number) : 'unknown'
+      `${carryVerdict ?? 'carry_unverified'}_no_distance(honest_sigma=${
+        Number.isFinite(unverifiedSigmaM as number) ? Math.round(unverifiedSigmaM as number) : 'unknown'
       }m>${COARSEST_LABEL_STEP_M}m)`
     );
   }
@@ -1853,8 +1910,8 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     usedFit,
     gpsBackedLabel,
     knobs.labelRounding,
-    axisDegenerate ? 'axis_degenerate' : asScaleNoDistance ? 'carry_as_scale' : null,
-    asScaleSigmaM ?? undefined
+    axisDegenerate ? 'axis_degenerate' : gpsUncheckedNoDistance ? 'gps_unchecked' : null,
+    unverifiedSigmaM ?? undefined
   );
   const built = buildSpec(usedFit, input, knobs, arcEnd, labelText, labelSubText);
   if (built.spec === null) {
@@ -1925,6 +1982,7 @@ function recordFit(
     sigmaGpsM: input.carrySigmaGpsM ?? null,
     status: fit.carryStatus,
     z: fit.carryZ,
+    zNoPixelSigma: fit.carryZNoPixelSigma,
     sigmaM: fit.carrySigmaM,
     labelM: Number.isFinite(fit.carryLabelM) ? fit.carryLabelM : null,
     labelStepM: fit.labelStepM,

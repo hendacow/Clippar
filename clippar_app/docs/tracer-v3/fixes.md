@@ -571,3 +571,268 @@ thing a later agent finds.
   finds a ball on real footage.
 - **F3, unchanged and still blocking any build:** `GolfBallDetector.mlpackage` is on disk
   and still not in git. One `git add` by the seat. Not mine to run.
+
+---
+
+# fixes, round 3 — the gate's GATE-1 and GATE-3, applied as a CLASS fix
+
+**Agent:** `fix3`, 6 Sep 2026. **Branch:** `feat/tracer-v3`.
+**Input:** `docs/tracer-v3/gate.md` (read in full), then this file's rounds 1 and 2 and
+`re-verify.md`. Reference for every algorithm: `~/projects/clippar/tracer-lab`.
+
+**Gate:** `npm run verify` — **tsc clean, 847 tests, 0 failures, 0 skipped, 0 todo, exit 0.**
+It arrived at 838. **+9 tests, none deleted, weakened, skipped or parked.**
+`grep -rnE "\.skip\(|\.todo\(|\.only\(|xit\(" tests/` exits 1. 62 test files, unchanged.
+
+| file | +tests |
+|---|---|
+| `tests/tracerFit.test.ts` | 28 → 30 |
+| `tests/tracerV3Refusals.test.ts` | 30 → 36 |
+| `tests/tracerV3Wiring.test.ts` | 32 → 33 |
+
+New fixture: **`tests/fixtures/tracerV3FlatTension.ts`** — 1440x2560, 60 fps (and 30 on
+request), 4.5 deg pitch, camera 1.48 m, ball 2.4 m out / 1.1 m left, 73 deg FOV, flat
+10-degree launch. The gate agent's own geometry, because **neither existing fixture reaches
+this band** and one of the new tests asserts exactly that.
+
+**I ran no `git` command and no `npm install`.**
+
+---
+
+## GATE-1 — HIGH, blocking · a wrong GPS carry reaching a confident label through `carry_tension`
+
+### Reproduced first, on the new fixture, before touching a line
+
+```
+=== f5@60  TRUTH carry 164.6 m         (no-GPS control: "170 m" / "apex 17 m · no GPS", fit 171.9)
+  gps=  60 dec=pixel_only_fallback                     "170 m" / "apex 20 m · no GPS"
+  gps=  80 dec=fit  st=carry_tension  z=3.18           "100 m" / "apex 6 m"      -39 %
+  gps= 100 dec=fit  st=carry_tension  z=2.55           "110 m" / "apex 7 m"      -33 %
+  gps= 120 dec=fit  st=carry_tension  z=2.77           "170 m" / "apex 19 m"
+=== f6@60
+  gps=  60 dec=fit  st=carry_tension  z=3.94           "100 m" / "apex 6 m"      -39 %
+```
+
+The gate agent's headline row, on my own run: **a 164.6 m shot the pixels get right on
+their own is drawn "100 m", `decision=fit`, `carry_tension`, no "· no GPS".**
+
+At the fit level, the mechanism, also reproduced rather than taken on trust:
+
+```
+pixel-only carry  171.84  sigma 24.33
+rel = sc / cPx    14.16%   (AS_SCALE_FRAC = 15%)  -> asScale = FALSE
+D= 60  status=carry_tension  z=3.45  zNoPixelSigma=5.22
+D= 80  status=carry_tension  z=2.83  zNoPixelSigma=4.29
+```
+
+**The code computed 5.22 and 4.29 — both over the 4-sigma bar — and never looked at them**,
+because `lib/tracerFit.ts:1436` tested `zScale` only when `asScale` was true, and 14.16 %
+is below 15 %.
+
+### (a) `lib/tracerFit.ts` — the second z-score is now part of every verdict
+
+One conjunct removed. `carryZNoPixelSigma` was already computed on every fit that has a
+carry; it is now **tested** on every one of them, and `rel` decides only which explanatory
+flag is attached.
+
+**Why this is the CLASS and not the instance.** The same shape has been found three times
+at three thresholds — review F1 at `carry_untested`, gate NEW-1 at `carry_as_scale`,
+GATE-1 at `carry_tension` — and every time the cause was a disagreement test skipped, or
+diluted, by a sigma that was itself unreliable. F1(a) fixed it for a **non-finite** sigma
+(substitute 0, never skip the test). NEW-1(a) fixed it for an **enormous** one, but behind
+a 15 % gate. **A threshold is a line the failure does not respect**; the only version of
+the rule that cannot be walked under has no threshold in it at all.
+
+**Confirmed on real clips, not only the synthetic fixture** — this is the band, on data
+from a phone:
+
+| clip | K | rel | z (lab's own) | z_no_pixel_sigma | before | after |
+|---|---|---|---|---|---|---|
+| IMG_3649 | 6 | **14.3 %** | 2.65 | **4.06** | `carry_tension` | `carry_inconsistent` |
+| IMG_3632 | 6 | 12.6 % | 2.81 | **4.01** | `carry_tension` | `carry_inconsistent` |
+| IMG_3649 | 6 | 14.3 % | 2.12 | 3.25 (−40 % reading) | `carry_tension` | **unchanged** |
+
+The last row is the bound, and it has its own test: the lab's ~55 % calibration is
+preserved and **dropping the conjunct moved the boundary for nobody who was inside it.**
+
+### (b) `lib/tracerV3.ts` — the label rule is now an ALLOWLIST
+
+`carry_tension` was `flags.push('carry_tension')` and nothing else — byte-for-byte the
+shape `carry_as_scale` had before round 2. Rather than add a second name to a denylist
+(which is what produced three findings), the rule is inverted:
+
+> **`carry_consistent` is the only verdict that licenses a GPS-backed number.**
+
+Every other value — `carry_as_scale`, `carry_tension`, `carry_untested`, and
+`carry_inconsistent` if it arrives on the implausible-flight refit after the carry decision
+— goes down the NEW-1(b) path: honest sigma, and the distance dropped when it exceeds the
+coarsest step `labelStepM` can offer. **The same code path, generalised — there is no
+parallel one.** A verdict added to `CarryStatus` later is unverified until someone
+deliberately says otherwise, which is the safe direction for a number a golfer reads.
+
+**The honest sigma gained a fourth term, and it is the load-bearing one.** NEW-1(b) took
+the widest of the fit's own total, sigma_D, and the pixel-only carry sigma. Those three are
+enough under `carry_as_scale`, where the third is ≥ 15 % of the carry by construction. They
+are **not** enough under tension: the gate agent measured a 13 m error against a claimed
+6.5 m sigma on a 43 m pitch, because a short shot's 15 % is a few metres. So the fourth
+term is **the disagreement itself** — how far the GPS dragged the drawn carry away from the
+pixel-only companion's own answer. On the reproduction that term is 58 m against the fit's
+own 21 m, and it is what withholds the number.
+
+That is not an extra rule bolted on. It is NEW-1(a)'s principle applied at the label:
+**sizing a claim with a sigma the evidence has already contradicted is the whole disease.**
+Two estimates that disagree by X bound the error of whichever one is wrong at X, and
+nothing in this pipeline knows which. It is confined to the unconfirmed verdicts on
+purpose — under `carry_consistent` the fit has *tested* that gap against its own sigma and
+explained it, and applying the term there would drop a correct GPS reading whenever the
+pixels happened to be 4 % off. I checked that, rather than assuming it.
+
+`meta.carry` also gains **`zNoPixelSigma`**, because it is half the verdict now and the
+whole finding was a number the code computed and nobody looked at. It must reach the row a
+field test is read from.
+
+### After
+
+```
+  gps=  80 dec=pixel_only_fallback  "170 m" / "apex 17 m · no GPS"
+           reason  carry_inconsistent(z=3.2sigma,z_no_pixel_sigma=4.7sigma)
+  gps= 100 dec=fit  st=carry_tension  "no distance" / "GPS unchecked"
+           carry_tension_no_distance(honest_sigma=58m>10m)
+  gps= 120 dec=fit  st=carry_tension  "no distance" / "GPS unchecked"
+  gps= 165 dec=fit  st=carry_consistent  "160 m" / "apex 13 m"     <- still used, still labelled
+```
+
+### What it costs — MEASURED by running the sweep twice, not simulated
+
+3 888 `traceClip` calls: 648 geometries (fps {30,60} x frames {4,5,6,8,10,14} x v0
+{55,68,78} x theta {10,14,18} x rpm {2200,3400,5200} x phi {1,5}) x 6 GPS readings, once
+against the code as it stood and once against the code as it now stands.
+
+| | before | after |
+|---|---|---|
+| GPS within ±5 % of truth: **GPS-backed numbers** | 1769 / 1944 | **1767 / 1944** |
+| …of those, more than 15 % from truth | 12 | 10 |
+| …any drawn number more than 25 % from truth | 0 | 0 |
+| GPS at 0.35x / 0.5x / 2x of truth: **GPS-backed numbers** | 155 | **0** |
+| …of those, more than 15 % from truth | 98 | **0** |
+| …any drawn number more than 25 % from truth | **52** | **1** |
+| `carry_tension` verdicts across the sweep | 157 | 12 |
+
+**Two correct readings lost out of 1769 (0.11 %); 155 wrong ones stopped.** The single
+remaining >25 % row is `pixel_only_fallback`, honestly marked "· no GPS" — a pixel failure,
+not a GPS one. The gate agent's offline estimate was 0.2 % / 95.9 %; measured after the
+edit it is 0.11 % and 100 %.
+
+---
+
+## GATE-3 — LOW (honesty) · "FOUR things survive the revert" was short by two
+
+`constants/config.ts` now says **SIX**, and both new items were verified against the code
+rather than copied from the gate report:
+
+5. `lib/gpsSession.ts:623` constructs the module-level `gpsSession` singleton on import,
+   unconditionally — the flag is read *inside* it, not around it.
+6. The native payload ships in every binary: the 5.9 MB `GolfBallDetector.mlpackage`
+   resource bundle and the `CoreML` framework link (both in `ShotDetector.podspec`), plus
+   the `detectShotV3` and `renderTracerV3` `AsyncFunction` registrations.
+
+This is the **third** drift of this one comment (F9/F10 "byte-identical", NEW-3 "no new
+columns WRITTEN", now the count), so it gets a test rather than a footnote:
+`GATE-3: the revert note lists everything that survives, and each item is true in the code`
+asserts both halves — the note names them, **and** the singleton and the podspec entries
+are still there. Removing either now shortens the note deliberately instead of silently.
+
+---
+
+## The tests, and the proof that they are tests
+
+**Nine, and each was run against the pre-fix code.** I took byte copies of the three
+changed source files, reverted **each half separately**, ran the new suite, and restored —
+SHA-256 identical on all three afterwards (`f9faf54c…` / `70ac3382…` / `1560f36d…`).
+
+```
+revert (a) only — the fit-level conjunct restored
+  ✖ GATE-1: the pixel-sigma-free z is tested with NO threshold on `rel`, on a real clip
+  ✖ GATE-1: the two halves of the fix are distinguishable
+revert (b) only — the label rule back to carry_as_scale alone
+  ✖ GATE-1: a ~165 m shot with GPS carries from 5 m to 500 m never draws an unconfirmed GPS number
+        -> {"frames":5,"fps":60} gps=100: a GPS-backed number on verdict "carry_tension"
+  ✖ GATE-1: the two halves of the fix are distinguishable
+revert (c) only — the revert comment back to FOUR
+  ✖ GATE-3: the revert note lists everything that survives, and each item is true in the code
+```
+
+**The controls passed under every one of those reverts** — "the fix did not turn the GPS
+off", "a genuinely tight pixel carry still gets its number", "the unconditional test is
+still bounded". A fix that made everything withhold its number would have failed them.
+
+Note that the reproduction test does **not** fail when only (a) is reverted, because (b)
+catches those rows too. That overlap is deliberate and it is why the halves also have a
+test that separates them by mechanism — one asserts the ladder *rejected the carry* (with
+`z < 4` and `z_no_pixel_sigma > 4` parsed out of the row), the other that it *withheld the
+number* (with `z_no_pixel_sigma < 4` and the honest sigma parsed out of the flag).
+
+**The anti-merge pin.** `GATE-1: this fixture reaches carry_tension in the diluted band
+NEITHER sibling reaches` measures **`|z_no_pixel_sigma| / |z|`** — which is
+`sqrt(1 + sc² / (sigma_D² + sigma_fpx²))`, i.e. exactly how much the pixel-only sigma
+dilutes the ordinary test. It is **1.457 on the new fixture**, **1.117 on `tracerV3Clip.ts`**
+(too tight — the two tests agree, so a fix tuned there cannot see this), and
+`tracerV3ShortTrack.ts` lands on `carry_as_scale` instead. A later "simplification" that
+merges the three fixtures deletes the reproduction, and that test says so.
+
+---
+
+## The residue, named rather than smoothed over
+
+At 8 detections a GPS reading of 120 m against a 164.6 m shot scores **z = 1.99 against
+`Z_TENSION` = 2.0**. The verdict is `carry_consistent` — correctly: the pixel-only carry is
+168.6 m with a sigma wide enough that 120 m is a two-sigma reading, and nothing here knows
+which of the two is wrong. The pill then states **"130 m", 18.8 % from truth.**
+
+**That is not the carry ladder. It is `labelStepM` saturating**: the drawn fit's own
+1-sigma is **26.8 m**, nearly three times the coarsest rounding step the pill has, so the
+number is stated at a precision the fit never claimed. It has a test —
+`GATE-1: the residue is the LABEL VOCABULARY, not the carry verdict` — whose assertions are
+on the things that are *true* (the verdict, the z, the sigma), not on the wrong number, so
+it keeps passing when that decision is taken.
+
+For the same reason the §3c reproduction sweep asserts a **20 %** bar rather than the 15 %
+§3b uses. That is one row, named in the test comment with its z and its sigma, not a hedge.
+
+---
+
+## Not attempted, on instruction — named again
+
+- **The `pixel_only_fallback` companion choice.** When a carry is rejected the ladder
+  renders the drawn rung's pixel-only *companion*, which on a spin-fixed rung can be a poor
+  fit, rather than the best pixel-only fit across the whole ladder. Round 2 filed it; this
+  round makes it fire more often still: across the sweep the `pixel_only_fallback`
+  decision went from 1 622 to 1 767, so **145 more readings now take that path**. **It is a
+  behaviour change to the drawn arc and needs its own decision.**
+- **`labelStepM` saturating at 10 m.** Above, and it is what the residue is. Giving every
+  label a "too uncertain to state" rung would change what the golfer sees on most clips —
+  pixel-only sigmas are routinely 30–40 m — so it needs its own decision too.
+
+## What I could NOT verify
+
+- **Nothing ran on a device and no frame was rendered.** No Swift was compiled. Everything
+  here is `node --import tsx` against the TypeScript ladder.
+- **My fixture is a simulated flight projected through a known camera.** It proves the
+  ladder recovers a flight it is *given*; it says nothing about whether the Swift detector
+  finds a ball on real footage, which is still the biggest unmeasured thing in this branch.
+  The two fit-level tests do run on real clips (`IMG_3649`, `IMG_3632`).
+- **GATE-1's field frequency is still unmeasured.** I know it needs a launch angle around
+  10 degrees, 4–8 detections and a pixel-only carry sigma roughly in the 8–15 % band, and
+  that `carry_tension` fell from 157 to 12 across my sweep. **What fraction of real clips
+  land there is unknown**, and it decides whether "no distance" is rare or common. It is
+  the first thing to read off a field test.
+- **I did not re-derive `Z_INCONSISTENT` = 4, `Z_TENSION` = 2, `AS_SCALE_FRAC` = 15 % or
+  `COARSEST_LABEL_STEP_M` = 10.** They are the lab's numbers and round 2's, reused. The
+  point of this round is that the fix no longer *depends* on `AS_SCALE_FRAC` being right.
+- **The fourth honest-sigma term (the disagreement) is my own reasoning, not the lab's.**
+  The lab has no equivalent — `tracer.py:837` appends a flag and draws the number. It is
+  justified in the code comment and measured in the table above, and it is the one part of
+  this round a reviewer should push on hardest.
+- **`GolfBallDetector.mlpackage` is still on disk and still not in git** (review F3,
+  unchanged). One `git add` by the seat, and without it the dev build measures a pipeline
+  nobody built.

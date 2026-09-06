@@ -61,11 +61,19 @@ export interface TrackPoint {
  * against the measured distance D:
  *   carry_as_scale     the pixel-only carry is loose (sigma > 15 % of it) — the GPS is setting
  *                      the depth scale the pixels cannot see, and NO consistency claim is made.
- *   carry_consistent   |z| <= 2.
+ *   carry_consistent   |z| <= 2 AND |z_no_pixel_sigma| <= 4.
  *   carry_tension      2 < |z| <= 4. The lab's sweep puts a 30 % wrong D here, not at
  *                      inconsistent, once the f_px systematic is honestly in sigma_D.
- *   carry_inconsistent |z| > 4. Needs roughly a 55 % error at the metadata f_px prior.
+ *   carry_inconsistent |z| > 4, OR |z_no_pixel_sigma| > 4 (GATE-1). Needs roughly a 55 % error
+ *                      at the metadata f_px prior on the first; the second catches the smaller
+ *                      errors that a loose pixel-only sigma divides out of the first.
  *   carry_untested     a carry was supplied but the pixel-only companion could not be formed.
+ *
+ * EXACTLY ONE of these licenses a stated distance: `carry_consistent`. Every other value means
+ * the GPS reading has NOT been confirmed by the pixels, and `lib/tracerV3.ts` sizes the label
+ * from an honest sigma rather than the fit's own — see GATE-1 there. That is an allowlist on
+ * purpose: a status added to this union later is unverified until someone says otherwise, which
+ * is the safe direction for a number a golfer reads.
  */
 export type CarryStatus =
   | 'carry_as_scale'
@@ -1433,12 +1441,44 @@ export function fitLaunch(a: FitOptions): FitResult {
       // must never show a confidently wrong number. So the PROTECTIVE verdict is
       // tested first and against BOTH z-scores, and `carry_as_scale` keeps only
       // the case it was designed for: a loose pixel carry the GPS AGREES with.
-      if (Math.abs(z) > Z_INCONSISTENT || (asScale && Math.abs(zScale) > Z_INCONSISTENT)) {
+      //
+      // GATE-1, and it is why `zScale` is tested UNCONDITIONALLY rather than
+      // only when `asScale` holds. NEW-1(a) shipped with `asScale &&` in front
+      // of it, so the pixel-sigma-free z was computed on every fit and LOOKED AT
+      // only when the pixel-only carry sigma passed 15 % of the carry. That is a
+      // threshold, and the failure does not respect it: on the gate agent's
+      // 1440x2560 clip `rel` was 14.16 %, so a GPS reading of 80 m against a
+      // 164.6 m shot the pixels had right to 4 % scored zScale = 4.3, was never
+      // tested, came back `carry_tension`, and was drawn "100 m" with no
+      // "· no GPS" — 39 % wrong, worse than the reproduction NEW-1(a) closed.
+      //
+      // THE CLASS, not the instance. This same shape has now been found three
+      // times at successively lower thresholds (review F1 -> gate NEW-1 ->
+      // gate GATE-1), every time because a disagreement test was skipped, or
+      // diluted, by a sigma that was itself unreliable. F1(a) established the
+      // rule for a NON-FINITE sigma (drop it from the denominator, never skip
+      // the test); NEW-1(a) applied it to an ENORMOUS one; this applies it with
+      // no threshold at all, which is the only version of the rule that cannot
+      // be walked under. `zScale` is now part of the verdict on every fit that
+      // has a GPS carry to check, and `rel` decides only which explanatory flag
+      // is attached.
+      //
+      // MEASURED, by running the same 3 888 `traceClip` calls over 648 geometries
+      // (a flat-launch grid, `tests/fixtures/tracerV3FlatTension.ts`) against the
+      // code before this change and after it — not simulated from the exposed
+      // z-score:
+      //   GPS readings within +-5 % of truth: GPS-backed numbers 1769 -> 1767.
+      //     TWO lost out of 1769, 0.11 %.
+      //   GPS readings at 0.35x / 0.5x / 2x of truth: GPS-backed numbers
+      //     155 -> 0, of which 98 were more than 15 % from truth. Drawn numbers
+      //     more than 25 % from truth: 52 -> 1, and that one is an honest
+      //     pixel-only failure marked "· no GPS", not a GPS one.
+      // Both halves of the trade in one line: 2 correct readings lost, 155 wrong
+      // ones stopped. See `docs/tracer-v3/fixes.md`, round 3.
+      if (Math.abs(z) > Z_INCONSISTENT || Math.abs(zScale) > Z_INCONSISTENT) {
         carryStatus = 'carry_inconsistent';
         flags.push(
-          `carry_inconsistent(z=${z.toFixed(1)}sigma` +
-            (asScale ? `,z_no_pixel_sigma=${zScale.toFixed(1)}sigma` : '') +
-            ')'
+          `carry_inconsistent(z=${z.toFixed(1)}sigma,z_no_pixel_sigma=${zScale.toFixed(1)}sigma)`
         );
         if (asScale) {
           // Why the as-scale rung did not save it. Named so nothing filtering on

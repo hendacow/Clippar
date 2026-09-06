@@ -18,8 +18,10 @@ the DEV BUILD, behind a config so it is trivially revertible, wired to GPS/locat
       editor batch, GPS wiring, dev settings, tests
 - [x] **Verify** — green first run: tsc clean, 799 tests (652 baseline + 147 new): `npm run verify` green, Swift parse/typecheck, reversibility proof (flag off = no-op)
 - [x] **Review** — GO conditional on 3 fixes; `docs/tracer-v3/review.md` (725 lines): adversarial skeptic → `docs/tracer-v3/review.md`, go/no-go
-- [ ] **Fixes** (workflow `wf_c5a4dafb-f17`): F1 carry-inconsistent laundering, F2 impact slack, F3a lens/zoom skip, F4 axis-degenerate, F5 label honesty, F6 persisted bypass, F8 landing flag, refusal test suite → `docs/tracer-v3/fixes.md` + `re-verify.md`
-- [ ] Commit + push the branch; write back to `company-brain/org/cto/STATUS.md` and the daily report;
+- [x] **Fixes** rounds 1-2 (`wf_c5a4dafb-f17`, `wf_942ef400-5a1`): F1 carry-inconsistent laundering, F2 impact slack, F3a lens/zoom skip, F4 axis-degenerate, F5 label honesty, F6 persisted bypass, F8 landing flag, refusal test suite → `docs/tracer-v3/fixes.md` + `re-verify.md`
+- [x] Commit + push — `d32faa1` on `feat/tracer-v3`, 46 files, verify 838/838 (baseline 652). CoreML model tracked.
+- [ ] **GATE-1** (workflow `wf_cd1c058d-a03`): a wrong GPS carry still reaching a confident label via `carry_tension`, one threshold below the last fix; close the CLASS (test the pixel-sigma-free z on every fit), then a final independent gate → `docs/tracer-v3/final-gate.md`
+- [ ] Second commit + push; write back; write back to `company-brain/org/cto/STATUS.md` and the daily report;
       hand Henry the build command (do NOT spend EAS credits — nearly exhausted as of 5 Sep)
 
 ## Resuming

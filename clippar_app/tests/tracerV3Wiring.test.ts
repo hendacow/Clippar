@@ -461,6 +461,46 @@ test('GATE NEW-3: the revert note and the code agree about the two capture colum
   assert.match(revert[0], /WRITTEN, non-null/, 'and say plainly that they are written');
 });
 
+test('GATE-3: the revert note lists everything that survives, and each item is true in the code', () => {
+  // The THIRD drift of this one comment, and the reason it now has a test of its
+  // own rather than a footnote. It said "byte-identical" (review F9/F10), then
+  // "no new columns WRITTEN" (gate NEW-3), then "FOUR things survive" while the
+  // list was six long (gate GATE-3). Each version read as exhaustive, which is
+  // exactly what makes a short list worse than no list.
+  //
+  // So both halves are asserted: the note names the two items it used to omit,
+  // AND those items are genuinely still there in the source it describes. If
+  // someone removes the singleton or the model bundle, this fails and the note
+  // gets shortened deliberately instead of drifting again.
+  const revert = /THE ONE-LINE REVERT:[\s\S]*?const ENABLE_TRACER_ON_DEV_VARIANT/.exec(configSrc);
+  assert.ok(revert, 'expected the revert note above ENABLE_TRACER_ON_DEV_VARIANT');
+  assert.doesNotMatch(revert[0], /FOUR things survive/, 'the count was short by two');
+  assert.match(revert[0], /SIX things survive/);
+  for (let i = 1; i <= 6; i++) {
+    assert.match(revert[0], new RegExp(`^//\\s+${i}\\. `, 'm'), `item ${i} must be listed`);
+  }
+
+  // Item 5, in the code: the singleton is constructed at module scope, so it is
+  // built on import whatever the flag says. The flag is read INSIDE it.
+  const gpsSrc = codeOnly(read('lib/gpsSession.ts'));
+  assert.match(
+    gpsSrc,
+    /^export const gpsSession = new GpsSession\(/m,
+    'the singleton must still be module-level, or item 5 is stale'
+  );
+  assert.match(revert[0], /gpsSession/, 'and the note must name it');
+
+  // Item 6, in the code: the model bundle and the CoreML link are in the podspec,
+  // and the two V3 entry points are registered in the module, all ungated.
+  const podspec = read('modules/shot-detector/ios/ShotDetector.podspec');
+  assert.match(podspec, /GolfBallDetector\.mlpackage/, 'the model still ships in every binary');
+  assert.match(podspec, /s\.frameworks[^\n]*CoreML/, 'and CoreML is still linked');
+  assert.match(swiftSrc, /AsyncFunction\("detectShotV3"\)/);
+  assert.match(swiftSrc, /AsyncFunction\("renderTracerV3"\)/);
+  assert.match(revert[0], /mlpackage/i, 'and the note must name the payload');
+  assert.match(revert[0], /CoreML/);
+});
+
 test('an unknown lens is a refusal in the ladder, not a default', () => {
   // The runtime half of the test above — the type makes `capture` optional, so
   // only this says what omitting it MEANS.

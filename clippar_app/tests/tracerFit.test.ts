@@ -404,6 +404,65 @@ test('GATE NEW-1(a): a loose pixel carry no longer PRE-EMPTS the inconsistency t
   );
 });
 
+test('GATE-1: the pixel-sigma-free z is tested with NO threshold on `rel`, on a real clip', () => {
+  // THE REPRODUCTION at the fit level, one rung BELOW the one NEW-1(a) closed.
+  //
+  // NEW-1(a) shipped the second z-score behind `asScale &&`, i.e. it was computed on every fit and
+  // LOOKED AT only when the pixel-only carry sigma passed 15 % of the carry. The gate agent walked
+  // under that threshold: on its clip `rel` was 14.16 %, the ordinary z was 2.8 and the
+  // pixel-sigma-free z was 4.3, and the reading came back `carry_tension` and was drawn.
+  //
+  // IMG_3649 at K=6 is the same band on REAL data, which is why this test is here and not only on
+  // the synthetic fixture: rel = 14.3 %, so `asScale` is FALSE and the previous round's fix could
+  // never have fired; the lab's own z is 2.65, INSIDE the 4-sigma bar; and the pixel-sigma-free z
+  // is 4.06, outside it. All three halves are asserted, so the test cannot pass for the wrong
+  // reason — if `rel` ever drifts above 15 % this fails on the first assertion rather than
+  // silently becoming a duplicate of the NEW-1(a) test above.
+  for (const [clip, k] of [
+    ['IMG_3649', 6],
+    ['IMG_3632', 6],
+  ] as const) {
+    const { pixelOnly, joint } = carryCase(clip, k, -0.5, 'carry');
+    const rel = pixelOnly.summarySigma.carryM / pixelOnly.summary.carryM;
+    assert.ok(
+      rel < 0.15,
+      `${clip} K=${k}: this must NOT be the as-scale case, or it proves nothing — rel=${(100 * rel).toFixed(1)} %`
+    );
+    assert.ok(
+      Math.abs(joint.carryZ ?? 0) < Z_INCONSISTENT_FOR_TEST,
+      `${clip} K=${k}: the lab's own z must not be what caught it: z=${joint.carryZ}`
+    );
+    assert.ok(
+      Math.abs(joint.carryZNoPixelSigma ?? 0) > Z_INCONSISTENT_FOR_TEST,
+      `${clip} K=${k}: the pixel-sigma-free z is what catches it: ${joint.carryZNoPixelSigma}`
+    );
+    assert.equal(joint.carryStatus, 'carry_inconsistent', `${clip} K=${k}`);
+    // And both numbers reach the row a field test is read from, unconditionally now — the whole
+    // finding was a number the code computed and nobody looked at.
+    assert.ok(
+      joint.flags.some(
+        (fl) => fl.startsWith('carry_inconsistent(') && fl.includes('z=') && fl.includes('z_no_pixel_sigma=')
+      ),
+      `${clip} K=${k}: the flag must show both z-scores: ${joint.flags.join(';')}`
+    );
+  }
+});
+
+test('GATE-1: the unconditional test is still bounded — a 40 % error in the same band is tension, not a refusal', () => {
+  // The other half of the trade, and the reason this is not "any GPS reading is thrown away".
+  // Same clip, same K, same `rel` — a -40 % reading scores 3.25 on the pixel-sigma-free z, inside
+  // the bar, and keeps working as a carry. The lab's calibration (~55 % at the metadata f_px
+  // prior) is preserved rather than quietly tightened, and dropping `asScale &&` moved the
+  // boundary for nobody who was inside it.
+  const { pixelOnly, joint } = carryCase('IMG_3649', 6, -0.4, 'carry');
+  assert.ok(pixelOnly.summarySigma.carryM / pixelOnly.summary.carryM < 0.15, 'the same band');
+  assert.ok(
+    Math.abs(joint.carryZNoPixelSigma ?? 0) < Z_INCONSISTENT_FOR_TEST,
+    `z_no_pixel_sigma=${joint.carryZNoPixelSigma}`
+  );
+  assert.notEqual(joint.carryStatus, 'carry_inconsistent');
+});
+
 test('GATE NEW-1(a): the deviation is bounded — a 30 % error is still the as-scale case, not a refusal', () => {
   // The fix must not become "any loose track throws its GPS away". The lab's calibration says a
   // ~55 % error is what `carry_inconsistent` is for at the metadata f_px prior, and that band is

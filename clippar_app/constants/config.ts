@@ -532,7 +532,15 @@ export const config = {
 // detection, no render, and no UI reachable by tapping.
 //
 // Said precisely, because "byte-identical" was overstated and the review caught
-// it (docs/tracer-v3/review.md, F9 and F10). FOUR things survive the revert:
+// it (docs/tracer-v3/review.md, F9 and F10). SIX things survive the revert.
+//
+// It said FOUR until 6 Sep and the list stopped at item 4 — the gate agent read
+// it against the code and found the count short (GATE-3, docs/tracer-v3/gate.md).
+// That is the SECOND time this comment has drifted (gate NEW-3 was the first), so
+// items 5 and 6 are spelled out here rather than left to the documents that
+// already disclose them, because a comment that reads as exhaustive and is not is
+// worse than no list: the first four are the JS layer, and the binary payload and
+// the module singleton are not in it.
 //
 //  1. `app/profile/tracer-dev-settings.tsx` is an expo-router route file, so
 //     `/profile/tracer-dev-settings` is REGISTERED in every binary including
@@ -553,6 +561,18 @@ export const config = {
 //     location, no identifier and nothing about the golfer.
 //  4. One navigation focus subscription and one state object per mount of the
 //     record screen (review F11).
+//  5. `lib/gpsSession.ts` constructs its module-level `gpsSession` singleton on
+//     import, unconditionally — the flag is read INSIDE it, not around it
+//     (review F11's second half). It allocates one object and starts nothing:
+//     every location call lives in `startWatch`, below `hooks/useGpsSession.ts`'s
+//     `isActive` early return.
+//  6. The native payload ships in every binary regardless of the flag (review
+//     F12): the 5.9 MB `GolfBallDetector.mlpackage` resource bundle and the
+//     `CoreML` framework link, both in `modules/shot-detector/ios/
+//     ShotDetector.podspec`, plus the `detectShotV3` and `renderTracerV3`
+//     `AsyncFunction` registrations in `ShotDetectorModule.swift`. Model loading
+//     is lazy, so with the flag off the `.mlpackage` is never compiled or read —
+//     it is bytes on disk and in the download, not work.
 //
 // None of it executes work, prompts the user or touches a hot path, and only
 // item 3 writes anything — but it is not nothing, and rounding it to
