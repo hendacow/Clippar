@@ -1570,6 +1570,12 @@ export function useEditorState(roundId: string | undefined) {
             // describes the 1x wide lens's format and nothing else, so a 0.5x
             // or pinch-zoomed clip is off by up to a factor of two.
             capture: { lens: row.capture_lens, zoom: row.capture_zoom },
+            // Imported and pre-tracer clips: trace them, never state a number.
+            // Without this every clip already on the phone refuses, because
+            // neither the lens columns nor the CoreMotion pitch existed when
+            // they were recorded. See config.tracer.v3.traceUnknownGeometry.
+            allowUnknownGeometry: config.tracer.v3.traceUnknownGeometry,
+            assumedPitchDownDeg: config.tracer.v3.assumedPitchDownDeg,
             carryM: carryUsable && carry ? carry.carryM : null,
             carrySigmaGpsM: carryUsable && carry ? carry.sigmaGpsM : null,
             shotType: row.shot_type === 'putt' ? 'putt' : 'swing',

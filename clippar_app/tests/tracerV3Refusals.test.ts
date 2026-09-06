@@ -1473,3 +1473,82 @@ test('CT-6: a non-finite or non-positive apex never reaches the pill', () => {
     assert.ok(!/apex (\d|NaN|-)/.test(sub), `apex ${apexM} must not be printed, got "${sub}"`);
   }
 });
+
+// ─── Imported and pre-tracer clips (Henry, 6 Sep) ───────────────────────────
+// "can it work for import round and shots already recorded and it does its best
+// estimate?" Every clip already on a phone was recorded with the tracer off, so
+// it has no capture_lens/capture_zoom and no CoreMotion pitch; an import from
+// Photos has none of the three. Before this they all refused. Now they trace
+// with no number on the pill. These pin both halves of that: the arc appears,
+// and the distance never does.
+
+function unknownGeometryInput(over: Record<string, unknown> = {}) {
+  return traceInput({
+    // A clip recorded before the columns existed: both null, not "1x"/0.
+    capture: { lens: null, zoom: null },
+    allowUnknownGeometry: true,
+    assumedPitchDownDeg: 4,
+    ...over,
+  });
+}
+
+test('IMPORT: a clip with no lens and no zoom is traced, with no distance claimed', () => {
+  const r = traceClip(unknownGeometryInput());
+  assert.ok(r.spec !== null, `an unknown-geometry clip must still draw an arc, got ${r.meta.reason ?? 'no reason'}`);
+  assert.equal(r.spec!.labelText, 'no distance');
+  assert.equal(r.spec!.labelSubText, 'camera unknown');
+  assert.ok(
+    r.meta.flags.some((f) => f.startsWith('geometry_unknown(')),
+    `the reason must be on the row for a field sweep, got ${r.meta.flags.join(';')}`
+  );
+});
+
+test('IMPORT: a clip with no CoreMotion pitch is traced on an assumed pitch, still with no distance', () => {
+  const r = traceClip(unknownGeometryInput({ pitchDownDeg: null }));
+  assert.ok(r.spec !== null, `a pitchless clip must still draw an arc, got ${r.meta.reason ?? 'no reason'}`);
+  assert.equal(r.spec!.labelText, 'no distance');
+  assert.ok(
+    r.meta.flags.some((f) => f.startsWith('pitch_assumed(')),
+    `the assumed pitch must be on the row, got ${r.meta.flags.join(';')}`
+  );
+});
+
+test('IMPORT: no GPS distance can put a number back on an unknown-geometry clip', () => {
+  // The GPS carry is in real metres, so it is tempting to let it rescue the
+  // label. It must not: the ARC is still drawn in an unknown world, so a
+  // distance beside it would describe a different geometry from the picture.
+  for (const carryM of [80, 150, 240]) {
+    const r = traceClip(unknownGeometryInput({ carryM, carrySigmaGpsM: 4 }));
+    assert.ok(r.spec !== null, `carry ${carryM} must still draw`);
+    assert.equal(r.spec!.labelText, 'no distance', `carry ${carryM} put a number back on the pill`);
+  }
+});
+
+test('IMPORT: a KNOWN-bad lens or a real pinch zoom is still refused outright', () => {
+  // Unknown is not the same as wrong. A 0.5x lens or a real pinch is known to
+  // be off by up to 2x, which distorts the arc itself, not just the number.
+  for (const capture of [
+    { lens: '0.5x', zoom: 0 },
+    { lens: '1x', zoom: 0.4 },
+  ]) {
+    const r = traceClip(unknownGeometryInput({ capture }));
+    assert.equal(r.spec, null, `${JSON.stringify(capture)} must refuse, not draw`);
+    assert.match(refusal(r), /lens_unsupported/);
+  }
+});
+
+test('IMPORT: with the allowance OFF, an unknown-geometry clip refuses as before', () => {
+  const r = traceClip(unknownGeometryInput({ allowUnknownGeometry: false }));
+  assert.equal(r.spec, null, 'the allowance must be the only thing that opens this path');
+  assert.match(refusal(r), /lens_unsupported/);
+});
+
+test('IMPORT: a clip that DOES know its geometry is unaffected and keeps its number', () => {
+  const r = traceClip(traceInput({ allowUnknownGeometry: true, assumedPitchDownDeg: 4 }));
+  assert.ok(r.spec !== null, `the ordinary path must be untouched, got ${r.meta.reason ?? 'no reason'}`);
+  assert.ok(
+    !r.meta.flags.some((f) => f.startsWith('geometry_unknown(') || f.startsWith('pitch_assumed(')),
+    `a fully-known clip must raise neither flag, got ${r.meta.flags.join(';')}`
+  );
+  assert.match(r.spec!.labelText ?? '', /^\d+ m$/, 'a known-geometry clip still states its distance');
+});

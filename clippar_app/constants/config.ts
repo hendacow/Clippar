@@ -435,6 +435,28 @@ export const config = {
       // detect.py P['conf_floor'] = 0.4 — every wrong output the vision skeptic
       // found had conf <= 0.33), and a track shorter than this many detections
       // is not emitted either (P['min_track_emit'] = 3).
+      // IMPORTED AND PRE-TRACER CLIPS (Henry, 6 Sep). Every clip already on a
+      // phone, and every clip imported from Photos, was recorded without the
+      // capture geometry the fit needs: no lens/zoom columns, and no CoreMotion
+      // pitch (both are only captured while the tracer is on). With this true
+      // those clips are TRACED instead of refused, and can never state a
+      // distance or an apex — the pill reads "no distance / camera unknown".
+      //
+      // Why the arc is still worth drawing without the number: the focal length
+      // is degenerate in the fit (the physics skeptic measured the reprojection
+      // error flat to 0.03 px across the whole +-12 % band while ball speed
+      // moved 1:1), so an unknown scale moves the METRES and leaves the drawn
+      // line on the ball. What it does move is the extrapolated tail and the
+      // horizon the arc lands against — which is exactly why nothing is claimed.
+      //
+      // A KNOWN-bad geometry (an explicit 0.5x lens, a real pinch zoom) still
+      // refuses: that scale is not unknown, it is wrong by up to 2x.
+      traceUnknownGeometry: true,
+      // Pitch assumed for a clip that carries none. Only consulted under
+      // traceUnknownGeometry, and it forces the no-distance rung. A phone on a
+      // bag mount or a tripod behind the ball sits a few degrees down; the lab's
+      // eight calibrated clips ran -3.0 to +7.2 deg (experiments/camera).
+      assumedPitchDownDeg: 4,
       detectConfFloor: 0.4,
       detectMinTrackEmit: 3,
       // Analysis window around impact, in 30 fps-equivalent frames, scaled by

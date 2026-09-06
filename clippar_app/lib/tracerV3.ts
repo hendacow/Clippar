@@ -445,6 +445,28 @@ export interface TraceClipInput {
      *  lens's native framing. null = unknown. */
     zoom: number | null;
   } | null;
+  /**
+   * IMPORTED AND PRE-TRACER CLIPS. When true, a clip whose capture geometry was
+   * never recorded — unknown lens, unknown pinch zoom, or no CoreMotion pitch —
+   * is TRACED rather than refused, and can never state a distance or an apex
+   * (`geometry_unknown`). This is what makes the feature work on a round that
+   * was imported from Photos or recorded before the tracer existed, which is
+   * every clip already on the phone.
+   *
+   * It does NOT relax the case where the geometry is KNOWN and unusable: an
+   * explicit 0.5x lens or a real pinch zoom still refuses outright, because
+   * there the scale is not unknown, it is known to be wrong by up to a factor
+   * of two, and a wrong scale distorts the extrapolated tail as well as the
+   * number.
+   */
+  allowUnknownGeometry?: boolean;
+  /**
+   * Pitch to assume when the clip carries none (imports; anything recorded with
+   * the tracer off). Only consulted under `allowUnknownGeometry`, and it forces
+   * `geometry_unknown`, so it can never put a number on a pill. A phone on a
+   * bag mount or a tripod behind the ball sits a few degrees down.
+   */
+  assumedPitchDownDeg?: number;
   /** GPS distance to the NEXT same-hole shot, metres. Null = pixel-only. */
   carryM?: number | null;
   /** GPS-only 1-sigma of that distance (`gpsSession.carryBetween().sigmaGpsM`). */
@@ -1502,7 +1524,7 @@ export function buildLabel(
    *                      did not CONFIRM (too loose to check, in tension with,
    *                      or untestable against).
    */
-  noDistance: 'axis_degenerate' | 'gps_unchecked' | 'too_uncertain' | null = null,
+  noDistance: 'axis_degenerate' | 'gps_unchecked' | 'too_uncertain' | 'geometry_unknown' | null = null,
   /**
    * 1-sigma the rounding step is taken from, metres. Defaults to the fit's own
    * `sigmaTotal.carryM`; the unconfirmed-GPS case passes a WIDER one, because
@@ -1549,6 +1571,22 @@ export function buildLabel(
   // an internal quantity they cannot act on.
   if (noDistance === 'too_uncertain') {
     return { labelText: 'no distance', labelSubText: 'not enough of the flight' };
+  }
+  // IMPORTED / PRE-TRACER CLIPS (Henry, 6 Sep: "can it work for import round and
+  // shots already recorded and it does its best estimate"). The capture geometry
+  // was not recorded — no lens, no pinch zoom, or no CoreMotion pitch — so the
+  // world's SCALE is unknown and no distance may be claimed.
+  //
+  // The ARC is still drawn, and that is not a compromise. The fit is anchored to
+  // the pixels the ball was actually seen at, and the focal length is degenerate
+  // in that fit — the physics skeptic measured the reprojection error FLAT to
+  // 0.03 px across the whole +-12 % f_px band while the recovered ball speed
+  // moved 1:1. A wrong scale therefore moves the metres and leaves the drawn
+  // line where the ball was. What it does move is the extrapolated tail after
+  // the ball is lost, and the assumed pitch shifts the horizon the arc lands
+  // against, which is why this rung states nothing and says so on the pill.
+  if (noDistance === 'geometry_unknown') {
+    return { labelText: 'no distance', labelSubText: 'camera unknown' };
   }
   const sigmaM = labelSigmaM ?? fit.sigmaTotal.carryM;
   const carryM = labelRounding ? roundLabelM(fit.summary.carryM, sigmaM) : Math.round(fit.summary.carryM);
@@ -1667,7 +1705,15 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   const capZoom = input.capture?.zoom ?? null;
   const lensOk = capLens === SUPPORTED_CAPTURE_LENS;
   const zoomOk = capZoom !== null && Number.isFinite(capZoom) && Math.abs(capZoom) <= CAPTURE_ZOOM_EPSILON;
-  if (!lensOk || !zoomOk) {
+  // UNKNOWN is not the same as WRONG, and the difference is what lets this run
+  // on the footage already on the phone. A null lens or a null zoom is a clip
+  // recorded before those columns existed, or imported from Photos: the scale
+  // is unknown, so it is traced with no distance (`geometry_unknown` below).
+  // An explicitly non-1x lens, or a real pinch zoom, is still refused — there
+  // the scale is known to be wrong by up to 2x, which distorts the arc itself.
+  const geometryUnknown =
+    (input.allowUnknownGeometry ?? false) && (capLens === null || capZoom === null);
+  if ((!lensOk || !zoomOk) && !geometryUnknown) {
     return skip(
       `lens_unsupported:shot at lens=${capLens ?? 'unknown'} zoom=${capZoom === null ? 'unknown' : capZoom.toFixed(3)}; ` +
         `f_px is only known for the ${SUPPORTED_CAPTURE_LENS} wide lens at zoom 0, and every distance scales with it`,
@@ -1725,9 +1771,14 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
   }
 
   // ── Camera. The address ball gives the height; CoreMotion gives the pitch.
-  if (input.pitchDownDeg === null || !Number.isFinite(input.pitchDownDeg)) {
+  const havePitch = input.pitchDownDeg !== null && Number.isFinite(input.pitchDownDeg);
+  const assumedPitch = input.assumedPitchDownDeg;
+  const pitchAssumed =
+    !havePitch && (input.allowUnknownGeometry ?? false) && Number.isFinite(assumedPitch);
+  if (!havePitch && !pitchAssumed) {
     return skip('no_camera_pitch(CoreMotion sample missing)', flags, meta, startedAt);
   }
+  const pitchForCamera = havePitch ? (input.pitchDownDeg as number) : (assumedPitch as number);
   let camParams: CameraParams;
   try {
     camParams = calibrateFromAddressBall({
@@ -1736,7 +1787,7 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
       fPx: input.fPx,
       width,
       height,
-      pitchDownDeg: input.pitchDownDeg,
+      pitchDownDeg: pitchForCamera,
       rollDeg: input.rollDeg ?? 0,
       // TRUE unless the focal length came from AVCaptureDevice intrinsics. It
       // never does today (native reports `videoFieldOfView`, a format prior),
@@ -1749,6 +1800,16 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     return skip(`camera_calibration_failed:${err instanceof Error ? err.message : String(err)}`, flags, meta, startedAt);
   }
   const camera = new TracerCamera(camParams);
+  // Recorded so a field row says WHY a clip has no number on it, and so the
+  // two causes are distinguishable in a later sweep of real rounds.
+  if (geometryUnknown) {
+    flags.push(
+      `geometry_unknown(lens=${capLens ?? 'unknown'},zoom=${capZoom === null ? 'unknown' : capZoom.toFixed(3)})`
+    );
+  }
+  if (pitchAssumed) {
+    flags.push(`pitch_assumed(${(assumedPitch as number).toFixed(1)}deg)`);
+  }
   meta.camera = {
     fPx: camParams.fPx,
     fPxSource: input.fPxSource,
@@ -2268,13 +2329,19 @@ export function traceClip(input: TraceClipInput): TraceClipResult {
     usedFit,
     gpsBackedLabel,
     knobs.labelRounding,
-    axisDegenerate
-      ? 'axis_degenerate'
-      : gpsUncheckedNoDistance
-        ? 'gps_unchecked'
-        : tooUncertain
-          ? 'too_uncertain'
-          : null,
+    // `geometry_unknown` is tested FIRST because it is the only one of the four
+    // that is about not knowing how big the world is, rather than about how
+    // well this particular shot was measured inside a known world. The others
+    // would all be reasoning on a scale that was never established.
+    geometryUnknown || pitchAssumed
+      ? 'geometry_unknown'
+      : axisDegenerate
+        ? 'axis_degenerate'
+        : gpsUncheckedNoDistance
+          ? 'gps_unchecked'
+          : tooUncertain
+            ? 'too_uncertain'
+            : null,
     unverifiedSigmaM ?? undefined
   );
   const built = buildSpec(usedFit, input, knobs, arcEnd, labelText, labelSubText);
