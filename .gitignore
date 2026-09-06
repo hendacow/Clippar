@@ -124,3 +124,17 @@ clippar.db-wal
 *.sqlite3
 # Office lock/owner files
 ~$*
+
+# Not part of the app, and not ours to ship. These sit untracked in this
+# checkout and were being swept into every EAS upload, because .easignore /
+# .gitignore is what bounds the project archive: the 6 Sep dev build produced a
+# 533 MB archive and died mid-upload on it.
+#   clippar_mount/    the kit-mount CAD project — its own git repo, 679 MB .venv
+#   migration/        waitlist CSVs. CUSTOMER EMAIL ADDRESSES. These must never
+#                     leave this machine in a build archive.
+#   logo_transparent/ brand art, used by nothing at build time
+#   .vercel/          local Vercel link state
+clippar_mount/
+migration/
+logo_transparent/
+.vercel/

@@ -60,6 +60,8 @@ node_modules/
 dist/
 golfcam/
 store-assets/
+# Expo's local cache — regenerated on the build server (24 MB measured 6 Sep).
+.expo/
 
 # Retired onboarding assets - kept in the repo, never bundled, never uploaded.
 assets/onboarding-archive/
