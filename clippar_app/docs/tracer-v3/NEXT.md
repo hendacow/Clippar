@@ -139,9 +139,32 @@ Harness: `bench/mainRenderV3.swift` + `bench/specDump.ts`.
 **The defect it exposed**, on IMG_0552_2, one of Henry's own imports: the arc was drawn on
 to the FITTED landing, which under `geometry_unknown` rests on an assumed pitch and an f_px
 prior. The trace turned round and plunged back towards the tee, reading as a vertical red
-stick beside the golfer. Fixed in `a4f145e` — `decideArcEnd` takes `scaleUnverified` and
-stops half a frame after the last detection. 32/72 and 0/49 unchanged; all 32 drawn arcs
-move `arc_end:fitted` -> `arc_end:seen`.
+stick beside the golfer.
+
+**The fix for it was wrong and is reverted (`395d520`). Read this before trying it again.**
+`a4f145e` stopped the arc at the last detection whenever the scale was a guess. Measured
+afterwards on four more of Henry's clips, with the rung on and off:
+
+| clip | arc with the rung OFF | with it ON |
+|---|---|---|
+| IMG_0530 | 4.56 s, ends y 0.584 | 0.45 s, ends 0.557 |
+| IMG_0588 | 4.92 s, ends y 0.605 | 0.68 s, ends 0.714 |
+| IMG_0544 | 4.48 s, ends y 0.626 | 0.99 s, ends 0.698 |
+| IMG_0564 | 5.65 s, ends y 0.593 | 1.05 s, ends 0.750 |
+
+The detector loses the ball long before it lands, so "stop where the ball was seen" means
+"stop climbing": four full arcs became half-second stubs ending at their own apex, and
+rendered they are red sticks beside the golfer. One pathological clip fixed, four good ones
+ruined.
+
+**So the defect is not that the arc is extrapolated — it is WHERE it ends.** Those four end
+at y 0.58-0.63 bottom-left; IMG_0552_2 ends at 0.463, much lower in the frame. The right
+tool is the one already in the file and currently switched off under `geometry_unknown`:
+`landingHorizonCheck` / `cam.horizonRow(x)`, which is exactly Henry's "it needs to land on
+the horizon in relation to how far the ball was hit". **Next round: clamp the drawn arc's
+end to the horizon row rather than refusing to draw it, and check the sign — on a first
+reading the four long arcs may be ending ABOVE the horizon, which the lab's own check calls
+a bug, while IMG_0552_2's ends below it. That needs measuring before anything is changed.**
 
 ### Three attempts at recall, all measured, none shippable
 
