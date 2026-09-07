@@ -120,3 +120,63 @@ Worst-case refusal time 410 s -> 83 s after the wall-clock budget.
 3. IMG_0601 truncates to 4 detections under the scan where the offset ladder got 44 — not
    systematic (IMG_3652 still gets 45) but it is a quality loss worth understanding.
 4. `IMG_0596_2`, a putt, is one pitch-ladder quorum rung from drawing. Do not lower that quorum.
+
+
+## Round 3 — the renderer finally ran (7 Sep)
+
+Henry field-tested build `e02d6018` with five imports and got nothing on any of them, and
+asked for it fixed so all or most work. **It is not fixed. Recall is unchanged at 32/72.**
+What was fixed is what the trace does when it *does* draw, and the reason that mattered is
+that the renderer had never been run.
+
+**How to run the renderer** (it had never been done, which is why the defect survived six
+review passes): it imports UIKit, so no macOS build; and under `xcrun simctl spawn` it
+SIGTRAPs inside Core Animation's offline GLES renderer trying to make an IOSurface with no
+window server. **Build it for Mac Catalyst** (`-target arm64-apple-ios15.1-macabi` plus the
+SDK's `iOSSupport` include/framework paths) and it runs natively on this Mac in seconds.
+Harness: `bench/mainRenderV3.swift` + `bench/specDump.ts`.
+
+**The defect it exposed**, on IMG_0552_2, one of Henry's own imports: the arc was drawn on
+to the FITTED landing, which under `geometry_unknown` rests on an assumed pitch and an f_px
+prior. The trace turned round and plunged back towards the tee, reading as a vertical red
+stick beside the golfer. Fixed in `a4f145e` — `decideArcEnd` takes `scaleUnverified` and
+stops half a frame after the last detection. 32/72 and 0/49 unchanged; all 32 drawn arcs
+move `arc_end:fitted` -> `arc_end:seen`.
+
+### Three attempts at recall, all measured, none shippable
+
+Use `./bench.sh --detopts '<TracerDetectOptions JSON>'` — it is folded into the cache key,
+so a sweep needs no rebuild and cannot collide with the baseline.
+
+| attempt | result |
+|---|---|
+| persistence `maxMissEarly 8 / maxMissLate 14 / firstDetFrames 10` | **31/72 — a net loss.** +2, -3. All three losses identical: the longer track keeps going after the ball goes sub-pixel and collects junk (IMG_0530: 27 dets @1.16 px -> 84 @21.8 px, refused `track_not_ballistic`) |
+| a rung refitting the longest clean PREFIX, to fix exactly that | **reverted.** Broke five safety tests including *"a divot and a tossed ball are refused"*. Trimming a track until it fits manufactures a flight out of noise |
+| acquisition only, `firstDetFrames 12` | **33/72 but 1/49 false draws** (IMG_3630). +1 clip for the first fabricated arc in 49. Refused |
+
+**Do not re-run these three without a new idea.** The shipped defaults are at a local
+optimum and the binding constraint is upstream of all of them.
+
+### The binding constraint, which nobody had written down
+
+At 1080p a golf ball is **under one pixel across by ~60 m** (f_px ~ 1400, ball 42.7 mm). The
+detector cannot see a full flight — it sees the first stretch and everything after is
+inference. Hence: 4K/60 draws **10/17 (59%)** against 1080p/30's **22/54 (41%)**; and a
+fitted carry on an import is 12-22 m for what may be a 140 m shot (feeding IMG_0552_2 a
+140 m GPS carry is rejected at **9 sigma** against the pixel evidence). The arc's SHAPE is
+defensible; its SCALE is not, which is why the pill says "no distance".
+
+### Next, in priority order
+
+1. **The label pill renders as a blank dark box** through the Catalyst render path. Built in
+   isolation (`bench/pilltest`) the same pill draws its text correctly, so this is most
+   likely the offline Core Animation path on Catalyst rather than a device bug — but it is
+   **unverified on a phone** and it is the first thing to check on the next field test.
+2. **The in-app capture path has never been field-tested.** Everything above is imports:
+   no pitch, no lens, no GPS. A clip RECORDED with the tracer on has all three, and it is
+   the only path that can scale the flight and land the arc on the horizon — which is
+   Henry's stated requirement and is currently unreachable from an import.
+3. Remaining failures over 72 shots: 13 track suppressed at 1-2 detections, 11 no first
+   detection in the window, 6 not ballistic, 3 address refused, 2 pitch unstable, 2 putt,
+   2 no departure, 1 poor fit. The first two are 60% of the loss and both are acquisition,
+   not tracking — but see the table above before touching thresholds.
