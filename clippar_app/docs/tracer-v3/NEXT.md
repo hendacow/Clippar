@@ -157,14 +157,18 @@ The detector loses the ball long before it lands, so "stop where the ball was se
 rendered they are red sticks beside the golfer. One pathological clip fixed, four good ones
 ruined.
 
-**So the defect is not that the arc is extrapolated — it is WHERE it ends.** Those four end
-at y 0.58-0.63 bottom-left; IMG_0552_2 ends at 0.463, much lower in the frame. The right
-tool is the one already in the file and currently switched off under `geometry_unknown`:
-`landingHorizonCheck` / `cam.horizonRow(x)`, which is exactly Henry's "it needs to land on
-the horizon in relation to how far the ball was hit". **Next round: clamp the drawn arc's
-end to the horizon row rather than refusing to draw it, and check the sign — on a first
-reading the four long arcs may be ending ABOVE the horizon, which the lab's own check calls
-a bug, while IMG_0552_2's ends below it. That needs measuring before anything is changed.**
+**MEASURED, and it closes this out: there is no horizon defect.** `meta.landingCheck` has
+been computing exactly Henry's requirement on every drawn clip all along and nobody had read
+it. `bench/horizon.ts` now does, over all 32:
+
+- **0 of 32 arcs end above the horizon.** Every one lands below it, by 3.5 to 172 px at
+  1080p-equivalent, which is what a ball coming down at a finite range must do.
+- The depression tracks the fitted carry: IMG_0588 fitted 160 m against 171 m implied by its
+  depression, IMG_0544 160 vs 168, IMG_0564 170 vs 195.
+
+So **do not build the horizon clamp.** IMG_0552_2's arc sits 72 px below the horizon because
+that clip is fitted at 22 m, and 72 px below is where a 27 m landing belongs. It looks wrong
+only if the 22 m is wrong, which is a question about the FIT, not about the arc's end.
 
 ### Three attempts at recall, all measured, none shippable
 
@@ -184,10 +188,20 @@ optimum and the binding constraint is upstream of all of them.
 
 At 1080p a golf ball is **under one pixel across by ~60 m** (f_px ~ 1400, ball 42.7 mm). The
 detector cannot see a full flight — it sees the first stretch and everything after is
-inference. Hence: 4K/60 draws **10/17 (59%)** against 1080p/30's **22/54 (41%)**; and a
-fitted carry on an import is 12-22 m for what may be a 140 m shot (feeding IMG_0552_2 a
-140 m GPS carry is rejected at **9 sigma** against the pixel evidence). The arc's SHAPE is
-defensible; its SCALE is not, which is why the pill says "no distance".
+inference. Hence 4K/60 draws **10/17 (59%)** against 1080p/30's **22/54 (41%)**.
+
+**CORRECTION, same day — the claim that used to be here was wrong.** It read "a fitted carry
+on an import is 12-22 m for what may be a 140 m shot". That came from two clips, IMG_0552_2
+and IMG_3652, which turn out to be among the ten SHORTEST of the thirty-two. Measured over
+all thirty-two with `bench/horizon.ts`: **median fitted carry 110 m, range 12-237 m, and 19
+of 32 are 90 m or more.** The scale is not systematically collapsed. IMG_0552_2 fitting at
+22 m is an outlier, and the 9-sigma rejection of a 140 m GPS carry on that one clip says only
+that its own pixels disagree with 140 m.
+
+Six clips do fit a carry over 80 m with an apex under 2 m, which is not a possible golf
+flight (IMG_3649: 166 m, 1.8 m, 2.9 s). A consistency gate was the obvious response and it
+would be wrong: rendered, those clips produce the **best-looking traces in the set**
+(IMG_3622 is a clean curved tracer). Left alone deliberately.
 
 ### Next, in priority order
 
