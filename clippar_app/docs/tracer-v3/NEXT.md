@@ -224,3 +224,58 @@ would be wrong: rendered, those clips produce the **best-looking traces in the s
    detection in the window, 6 not ballistic, 3 address refused, 2 pitch unstable, 2 putt,
    2 no departure, 1 poor fit. The first two are 60% of the loss and both are acquisition,
    not tracking — but see the table above before touching thresholds.
+
+
+## Round 4 — the second look (7 Sep, after Henry sent IMG_0601)
+
+Henry: *"i can even see it the entire time"*. He was right, and it was one number.
+
+**What was wrong.** On IMG_0601 the detector found the ball on **4 frames of a ~40-frame
+flight**. Traced by hand off the frame differences the ball runs from (834,879) up to an
+apex at (862,362) and back down past (844,445) — about 35 frames it never saw. The cause is
+`acceptScore`, the score a candidate must reach to stay in a running track: at 0.12 rather
+than 0.22 the clip goes **4 detections -> 41** and mean confidence RISES, 0.78 -> 0.89. The
+ball was being rejected, not junk accepted.
+
+**What shipped** (`4f81ef2`), measured on the 121-clip corpus under imported-clip conditions:
+
+| | shots drawing | false draws |
+|---|---|---|
+| before | 32/72 (44%) | 0/49 |
+| + consensus refit | 34/72 (47%) | 0/49 |
+| + second look | **36/72 (50%)** | **0/49** |
+
+- **The second look** is a RETRY, never the default: `acceptScore: 0.12` on its own is a net
+  LOSS (28/72). Triggered when nothing drew, or when it drew off fewer than `retryMinK`
+  points (IMG_0601 "worked" on 4 and rendered a stub). Kept only if it draws AND more than
+  doubles the points. Cost: a failing clip runs the detector twice.
+- **The consensus refit** handles the junk the extra reach collects. A track is the ball for
+  N frames then whatever else was in the search region, so least squares has no defence —
+  IMG_0530 went 27 points @1.16 px -> 44 @**528 px**. It refits on the points that agree.
+
+**Two variants were written and rejected, both for the same reason — do not rebuild them.**
+`tail_trim` searched contiguous prefixes down to MIN_FIT = 3 and started drawing arcs over a
+tossed ball. A multi-hypothesis consensus that SEARCHES for the inlier set recovers more
+clips but breaks the pitch-ladder quorum tests, because searching subsets manufactures the
+single-rung agreement the quorum exists to refuse. The shipped rung reads its inliers off the
+failed fit and cannot do either.
+
+### Where the remaining 36 losses are, and the one lever left
+
+    1080p/30   24/54 drawing (44%)
+    2160p/60   12/17 drawing (71%)
+
+**The feature is already at 71% on 4K/60.** The corpus average is dragged down by 1080p, and
+at 1080p a golf ball is under a pixel by ~60 m — the detector cannot see what is not there.
+
+**`app/(tabs)/record.tsx` sets `videoQuality="1080p"` and `config.camera.defaultResolution`
+is `'1080p'`.** Every clip the app records is therefore in the 44% bracket, not the 71% one.
+Raising it is the single biggest available win and it is a product decision, not an
+engineering one — 4K files are ~4x the size, detection takes ~15 s a clip instead of ~4 s,
+and it changes what every customer's phone writes to disk and uploads. **Henry's call; it has
+been put to him.** If he says yes, gate it behind the dev variant first and re-check the
+disk-space guard in `hooks/useCamera.ts` and the upload path before it goes near production.
+
+Remaining failure reasons across the 36: 13 track suppressed at 1-2 detections, 10 no first
+detection in the window, 6 not ballistic, 2 putt, 2 no departure, 2 address refused, 1 pitch
+unstable. Twenty-three of the thirty-six are acquisition or latching, nearly all at 1080p.
