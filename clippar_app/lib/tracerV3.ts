@@ -1058,10 +1058,7 @@ export function decideArcEnd(
   sel: Selection,
   fit: FitResult,
   fps: number,
-  width: number,
-  /** True when the world's SCALE was never established — no lens, no measured
-   *  pitch. See the `scaleUnverified` rung below. */
-  scaleUnverified = false
+  width: number
 ): ArcEnd {
   const dets = [...(det.detections ?? [])].sort((a, b) => a.frame - b.frame);
   const u = width / 1080.0;
@@ -1076,41 +1073,6 @@ export function decideArcEnd(
   const remaining = hang - tLast;
   const landPx = predictTrack(fit, [(t0 + hang) * fps], fps)[0];
   const dLast = Math.hypot(last.x - landPx.x, last.y - landPx.y);
-
-  // ── The scale rung, and it comes before every other one.
-  //
-  // Drawing on to the FITTED landing is only as good as the fitted landing, and
-  // under `geometry_unknown` that rests on an assumed pitch and an f_px prior
-  // rather than on anything measured. Measured 7 Sep on IMG_0552_2, one of
-  // Henry's own imports: the ball is tracked 41 frames through the apex and
-  // part-way down, ending 639 px from the top of a 1920 px frame — high, near
-  // the horizon, where a struck ball should be. The fitted landing puts the
-  // arc's end at 1031 px instead, so the drawn trace turns round and plunges
-  // back towards the tee, and the whole thing reads as a vertical red stick
-  // beside the golfer rather than as a shot. The fit is not lying — it already
-  // carries the flag saying it cannot state a distance — but the ARC was still
-  // being extrapolated on that same unusable scale.
-  //
-  // At 1080p a golf ball is under a pixel across by ~60 m (f_px ~ 1400,
-  // diameter 42.7 mm), so the detector can only ever see the first stretch of a
-  // full flight. Everything past the last detection is inference, and with no
-  // scale it is inference nobody can check. So: stop where the ball was seen.
-  // Same discipline the label already follows — do not draw what you cannot
-  // support. A GPS-scaled flight is unaffected and still draws to its landing.
-  if (scaleUnverified) {
-    const endFrame = kLast + 0.5;
-    const endAtSec = Math.min(Math.max(endFrame / fps - t0, 2.0 / fps), hang);
-    return {
-      mode: 'seen',
-      endAtSec,
-      reason:
-        'the scale was never established (no lens, no measured pitch), so the fitted landing ' +
-        `is not drawable; the trace stops half a frame after the last detection f${kLast} ` +
-        `(${remaining.toFixed(2)} s / ${dLast.toFixed(0)} px short of the fitted landing)`,
-      remainingS: remaining,
-      lastToLandingPx: dLast,
-    };
-  }
 
   if (!sel.throughApex) {
     return {
@@ -2195,7 +2157,7 @@ function traceOnce(input: TraceClipInput, assumedPitchOverrideDeg: number | null
   recordFit(meta, usedFit, carryM, input);
 
   // ── Arc end, landing check, spec.
-  const arcEnd = decideArcEnd(det, sel, usedFit, fps, width, geometryUnknown || pitchAssumed);
+  const arcEnd = decideArcEnd(det, sel, usedFit, fps, width);
   meta.arcEnd = { mode: arcEnd.mode, endAtSec: arcEnd.endAtSec, reason: arcEnd.reason };
   flags.push(`arc_end:${arcEnd.mode}`);
 
