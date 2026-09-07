@@ -191,10 +191,17 @@ defensible; its SCALE is not, which is why the pill says "no distance".
 
 ### Next, in priority order
 
-1. **The label pill renders as a blank dark box** through the Catalyst render path. Built in
-   isolation (`bench/pilltest`) the same pill draws its text correctly, so this is most
-   likely the offline Core Animation path on Catalyst rather than a device bug — but it is
-   **unverified on a phone** and it is the first thing to check on the next field test.
+1. ~~The blank label pill~~ **— settled, it is the harness, not the app. Do not chase it.**
+   The pill renders as an empty dark box through the Catalyst render path. Three things say
+   that is Catalyst and not the phone: (a) built in isolation and drawn with
+   `layer.render(in:)` the same pill draws its text correctly (`bench/pilltest`);
+   (b) carrying the font on an `NSAttributedString` instead of `CATextLayer.font` changes
+   nothing, so it is not the well-known UIFont-on-CATextLayer trap; and (c) **the shipped v1
+   renderer builds its label with the identical four lines** (`ShotTracer.swift`, `text.font
+   = font`), and carries the comment *"Device-verified: CATextLayer glyphs render upright in
+   the animation-tool export"* — v1 is in production. CATextLayer glyphs evidently do not
+   rasterise in the offline Core Animation renderer under Catalyst. **Cost of this being
+   wrong is one look at a phone; do that before writing any code.**
 2. **The in-app capture path has never been field-tested.** Everything above is imports:
    no pitch, no lens, no GPS. A clip RECORDED with the tracer on has all three, and it is
    the only path that can scale the flight and land the arc on the horizon — which is
