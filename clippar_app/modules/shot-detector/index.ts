@@ -888,6 +888,11 @@ export type TracerDetectV3Options = {
   /** Track-level emission: mean confidence floor and minimum detections. */
   confFloor?: number;
   minTrackEmit?: number;
+  /** Score a candidate must reach to be accepted INTO a running track (lab
+   *  `accept_score`, 0.22). Lowering it makes the tracker hold a ball that is
+   *  going sub-pixel; it also picks up junk, which is why it is a retry rather
+   *  than a default. See `config.tracer.v3.retryAcceptScore`. */
+  acceptScore?: number;
   /** Diagnostics: adds a per-frame `trackLog` to `notes`. Large. */
   verbose?: boolean;
 };

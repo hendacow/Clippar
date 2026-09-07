@@ -1556,10 +1556,11 @@ export function useEditorState(roundId: string | undefined) {
           const v3DetectImpactMs = row.original_file_uri
             ? v3ImpactMs
             : v3ImpactMs - (row.auto_trim_start_ms ?? 0);
-          const detection = await detectShotV3(v3DetectUri, v3DetectImpactMs);
+          let detection = await detectShotV3(v3DetectUri, v3DetectImpactMs);
           if (tracerCancelledRef.current) return;
 
-          const result = traceClip({
+          const traceWith = (det: typeof detection) =>
+            traceClip({
             detection,
             pitchDownDeg: row.camera_pitch_deg,
             // f_px from the lens's landscape FOV. A METADATA PRIOR, not a
@@ -1592,6 +1593,50 @@ export function useEditorState(roundId: string | undefined) {
               ? (row.auto_trim_start_ms ?? 0) / 1000
               : 0,
           });
+
+          let result = traceWith(detection);
+
+          // ── The second look. See config.tracer.v3.retrySecondPass for why this
+          //    is a retry and not a default (on its own it loses more than it
+          //    gains; as a second pass it gains and loses nothing).
+          //
+          //    Two triggers: nothing drawn at all, or drawn off almost no points
+          //    — Henry's IMG_0601 "worked" on 4 detections of a ~40-frame flight
+          //    and rendered a stub. The retry is kept only if it draws AND more
+          //    than doubles the points, so a good short track is never traded for
+          //    a longer worse one.
+          const firstK = result.meta.selection?.k ?? 0;
+          if (
+            config.tracer.v3.retrySecondPass &&
+            (result.spec === null || firstK < config.tracer.v3.retryMinK)
+          ) {
+            const retryDetection = await detectShotV3(
+              v3DetectUri,
+              v3DetectImpactMs,
+              JSON.stringify({
+                preFrames: config.tracer.v3.detectPreFrames,
+                postFrames: config.tracer.v3.detectPostFrames,
+                maxFrames: config.tracer.v3.detectMaxFrames,
+                confFloor: config.tracer.v3.detectConfFloor,
+                minTrackEmit: config.tracer.v3.detectMinTrackEmit,
+                acceptScore: config.tracer.v3.retryAcceptScore,
+              })
+            );
+            if (tracerCancelledRef.current) return;
+            const retryResult = traceWith(retryDetection);
+            const retryK = retryResult.meta.selection?.k ?? 0;
+            if (
+              retryResult.spec !== null &&
+              (result.spec === null || retryK > 2 * firstK)
+            ) {
+              console.log(
+                `[TRACER-V3] hole=${row.hole_number} shot=${row.shot_number} second look: ` +
+                  `K=${firstK} -> ${retryK}`
+              );
+              detection = retryDetection;
+              result = retryResult;
+            }
+          }
 
           if (result.spec === null) {
             // Every refusal is a SKIP with the full diagnostic blob attached —

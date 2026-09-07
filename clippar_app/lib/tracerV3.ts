@@ -181,6 +181,33 @@ const MAX_RMS_PX = 8.0;
  * only ever turn a draw into a refusal, which is the safe direction.
  */
 const POOR_FIT_RMS_PX = 4.0;
+
+// ─── The consensus refit (7 Sep) ────────────────────────────────────────────
+//
+// A track does not degrade gracefully. It is the ball for N frames and then, once
+// the ball is under a pixel, it is whatever else was in the search region — so the
+// points are not noisy, they are a clean flight plus a minority of junk. Ordinary
+// least squares has no defence against that: on IMG_0530 a sweep took the same
+// clip from 27 points at 1.16 px to 44 points at **528 px** and a
+// `track_not_ballistic` refusal. Six clips were lost that way in one run.
+//
+// So when the fit fails ONLY on its residuals, refit on the points that do agree
+// with it. This is NOT the reverted `tail_trim` rung, and the difference is why
+// this one is allowed: that searched CONTIGUOUS PREFIXES down to `MIN_FIT` = 3
+// points, and three points fit anything, which is how it began drawing arcs over
+// a tossed ball. This requires a real majority of a real number of points — a
+// divot does not produce 8 points agreeing on one flight to 4 px by accident —
+// and the refit then goes through every gate the full fit just failed, unchanged.
+//
+// A stronger version that SEARCHES for the inlier set (fitting several contiguous
+// windows as hypotheses and keeping whichever the most points agree with) was
+// written and rejected: it recovers more clips but breaks the pitch-ladder quorum
+// tests, because searching subsets manufactures the single-rung agreement the
+// quorum exists to refuse. Reading the inliers off the failed fit cannot do that.
+/** Absolute floor on the consensus set. Well above MIN_FIT, deliberately. */
+const CONSENSUS_MIN_N = 8;
+/** ...and it must be a majority of the track, not a lucky corner of it. */
+const CONSENSUS_MIN_FRAC = 0.5;
 /** @1080p: a track whose image-y never rises this much above the address is not a flight. */
 const MIN_CLIMB_PX = 25.0;
 /** Detections beyond the fitted window needed for the held-out check ... */
@@ -742,6 +769,29 @@ export function finiteDetections(det: TracerDetectResultV3): BallDetection[] {
   );
 }
 
+/**
+ * Through the image apex? Minimum strictly inside, >= 3 detections after it,
+ * image y rises >= 10 px @1080p, and the last is below the first of the tail.
+ *
+ * Shared by `selectDetections` and the consensus refit, which must re-ask it of a
+ * smaller set: dropping junk can take a track back below the apex, and
+ * `throughApex` decides both which model the fit is allowed and whether the arc
+ * may be drawn past the last detection.
+ */
+export function throughApexOf(dets: readonly BallDetection[], u: number): boolean {
+  const ys = dets.map((d) => d.y);
+  if (ys.length === 0) return false;
+  let iMin = 0;
+  for (let i = 1; i < ys.length; i++) if (ys[i] < ys[iMin]) iMin = i;
+  const after = ys.slice(iMin + 1);
+  return (
+    iMin >= 2 &&
+    after.length >= 3 &&
+    after[after.length - 1] - ys[iMin] >= APEX_MIN_DESCENT_PX * u &&
+    after[after.length - 1] > after[0]
+  );
+}
+
 export function selectDetections(det: TracerDetectResultV3): Selection {
   const raw = det.detections ?? [];
   const finite = finiteDetections(det);
@@ -796,17 +846,7 @@ export function selectDetections(det: TracerDetectResultV3): Selection {
   const nEarly = Math.round(EARLY_FRAMES_30FPS * fr);
   const early = dets.filter((d) => d.frame - kImp <= nEarly);
 
-  // Through the image apex? Minimum strictly inside, >= 3 detections after it,
-  // image y rises >= 10 px @1080p, and the last is below the first of the tail.
-  const ys = dets.map((d) => d.y);
-  let iMin = 0;
-  for (let i = 1; i < ys.length; i++) if (ys[i] < ys[iMin]) iMin = i;
-  const after = ys.slice(iMin + 1);
-  const through =
-    iMin >= 2 &&
-    after.length >= 3 &&
-    after[after.length - 1] - ys[iMin] >= APEX_MIN_DESCENT_PX * u &&
-    after[after.length - 1] > after[0];
+  const through = throughApexOf(dets, u);
 
   let used: BallDetection[];
   let mode: Selection['mode'];
@@ -822,7 +862,7 @@ export function selectDetections(det: TracerDetectResultV3): Selection {
   }
 
   const addrY = det.address?.y;
-  const yMin = Math.min(...ys);
+  const yMin = Math.min(...dets.map((d) => d.y));
 
   out.used = used;
   out.kImpFit = kImp;
@@ -1790,7 +1830,7 @@ function traceOnce(input: TraceClipInput, assumedPitchOverrideDeg: number | null
     return skip('putt', flags, meta, startedAt);
   }
 
-  const sel = selectDetections(det);
+  let sel = selectDetections(det);
   meta.selection = {
     mode: sel.mode,
     k: sel.used.length,
@@ -2147,6 +2187,74 @@ function traceOnce(input: TraceClipInput, assumedPitchOverrideDeg: number | null
         'rather than a wrong trace)',
     ];
   }
+  // ── Consensus refit. See CONSENSUS_MIN_N above for why this is allowed and the
+  //    reverted prefix rung was not.
+  if (
+    refusal !== null &&
+    (refusal[0] === 'track_not_ballistic' || refusal[0] === 'poor_fit') &&
+    sel.used.length >= CONSENSUS_MIN_N
+  ) {
+    const ordered = [...sel.used].sort((a, b) => a.frame - b.frame);
+    const pred = predictTrack(usedFit, ordered.map((d) => d.frame), fps);
+    const inlierPx = POOR_FIT_RMS_PX * u;
+    const inliers = ordered.filter((d, i) => {
+      const p = pred[i];
+      return (
+        Number.isFinite(p.x) && Number.isFinite(p.y) &&
+        Math.hypot(p.x - d.x, p.y - d.y) <= inlierPx
+      );
+    });
+    const enough =
+      inliers.length >= CONSENSUS_MIN_N &&
+      inliers.length >= CONSENSUS_MIN_FRAC * ordered.length &&
+      inliers.length < ordered.length;
+    if (enough) {
+      const selC: Selection = {
+        ...sel,
+        used: inliers,
+        frameRange: [Math.round(inliers[0].frame), Math.round(inliers[inliers.length - 1].frame)],
+        throughApex: throughApexOf(inliers, u),
+      };
+      let runC: LadderRun | null = null;
+      try {
+        const modelC = chooseModel(inliers.length, carryM, selC, fps, knobs, isPitchAssumed(input));
+        runC = runFitLadder(
+          trackForFit(inliers), camera, selC, fps, addressPx, carryM, input.bucket, modelC,
+          input, knobs, width
+        );
+      } catch {
+        runC = null;
+      }
+      // Every gate the full track just failed, applied again and unchanged.
+      if (
+        runC &&
+        runC.fit.rmsPx <= POOR_FIT_RMS_PX * u &&
+        runC.fit.params.v0 >= MIN_FLIGHT_V0 &&
+        runC.fit.summary.apexM >= MIN_FLIGHT_APEX_M &&
+        runC.fit.summary.hangS >= MIN_FLIGHT_HANG_S
+      ) {
+        for (const e of runC.log) e.tag = `consensus:${e.tag}`;
+        meta.ladder = [...meta.ladder, ...runC.log];
+        flags.push(
+          `consensus_refit:K${ordered.length}->${inliers.length}` +
+            `(rms ${usedFit.rmsPx.toFixed(1)}->${runC.fit.rmsPx.toFixed(2)} px)`
+        );
+        usedFit = runC.fit;
+        variant = runC.variant;
+        worstV0RelSigma = Math.max(worstV0RelSigma, runC.worstV0RelSigma);
+        pixelOnlyCandidates = runC.pixelOnly;
+        sel = selC;
+        meta.selection = {
+          ...meta.selection,
+          k: inliers.length,
+          throughApex: selC.throughApex,
+          frameRange: selC.frameRange,
+        };
+        refusal = null;
+      }
+    }
+  }
+
   if (refusal !== null && !knobs.forceTrace) {
     flags.push(refusal[0]);
     recordFit(meta, usedFit, carryM, input);

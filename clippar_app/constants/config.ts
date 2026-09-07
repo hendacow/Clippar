@@ -459,6 +459,31 @@ export const config = {
       assumedPitchDownDeg: 4,
       detectConfFloor: 0.4,
       detectMinTrackEmit: 3,
+      // ── The second look (7 Sep). Henry: "i can even see it the entire time".
+      //
+      // He was right. On his IMG_0601 the detector found the ball on 4 frames of
+      // a ~40-frame flight and stopped; the ball is plainly visible throughout.
+      // One number does it — the score a candidate must reach to stay in the
+      // track. At 0.12 instead of 0.22 that clip goes from 4 detections to 41
+      // and the mean confidence RISES, 0.78 -> 0.89: the ball was being rejected,
+      // not junk accepted.
+      //
+      // It is NOT the default, because measured over the 121-clip corpus 0.12 on
+      // its own is a NET LOSS (28/72 against 32/72) — the extra reach also
+      // collects junk on clips that were already fine, and least squares has no
+      // defence against that. As a SECOND PASS on clips the first pass could not
+      // draw, or drew from almost nothing, it is a clear gain: 34/72 -> 36/72,
+      // and still 0 false draws in 49 putts and non-shots.
+      //
+      // The cost is honest: a clip that fails now runs the detector twice.
+      /** false = one pass, exactly the previous behaviour. */
+      retrySecondPass: true,
+      /** `acceptScore` for the second pass. */
+      retryAcceptScore: 0.12,
+      /** ...also retried when the first pass drew from fewer than this many
+       *  points, which is the IMG_0601 case: it "worked" on 4 detections and
+       *  produced a stub. The retry is kept only if it more than doubles them. */
+      retryMinK: 10,
       // Analysis window around impact, in 30 fps-equivalent frames, scaled by
       // the clip's real fps in Swift (lab P['pre_frames'] / P['post_frames']).
       detectPreFrames: 3,
