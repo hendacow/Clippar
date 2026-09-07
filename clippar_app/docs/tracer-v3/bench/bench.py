@@ -59,18 +59,27 @@ def load(name, default=None):
         return json.load(f)
 
 
+DETOPTS = "{}"
+
+
 def run_detector(clip, impact_ms):
-    """Cached. Returns (path_to_detection_json, wall_seconds, error|None)."""
+    """Cached. Returns (path_to_detection_json, wall_seconds, error|None).
+
+    `--detopts` (a TracerDetectOptions JSON string) is part of the cache key, so a
+    parameter sweep neither collides with the baseline nor needs a rebuild. The
+    DEFAULT is "{}" — the shipped defaults — so an unqualified run still measures
+    exactly what ships.
+    """
     key = hashlib.sha256(
-        f"{clip['contentKey']}|{int(impact_ms)}|{DHASH}".encode()).hexdigest()[:24]
+        f"{clip['contentKey']}|{int(impact_ms)}|{DHASH}|{DETOPTS}".encode()).hexdigest()[:24]
     out = os.path.join(CACHE, key + ".json")
     if os.path.exists(out) and os.path.getsize(out) > 2:
         return out, 0.0, None
     os.makedirs(CACHE, exist_ok=True)
     t0 = time.time()
     try:
-        r = subprocess.run([DET, clip.get("stagedPath") or clip["path"], str(int(impact_ms))],
-                           capture_output=True, text=True, timeout=1200)
+        r = subprocess.run([DET, clip.get("stagedPath") or clip["path"], str(int(impact_ms)),
+                            DETOPTS], capture_output=True, text=True, timeout=1200)
     except subprocess.TimeoutExpired:
         return None, time.time() - t0, "detector timeout"
     if r.returncode != 0 or not (r.stdout or "").strip():
@@ -128,7 +137,12 @@ def main():
     ap.add_argument("--jobs", type=int, default=8)
     ap.add_argument("--out", default=None)
     ap.add_argument("--quiet", action="store_true")
+    ap.add_argument("--detopts", default="{}",
+                    help="TracerDetectOptions JSON passed to every detector run and "
+                         "folded into the cache key (default: the shipped defaults)")
     args = ap.parse_args()
+    global DETOPTS
+    DETOPTS = args.detopts
 
     clips = load("manifest.json", {"clips": []})["clips"]
     impacts = load("impacts.json", {})
